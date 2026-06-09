@@ -1,0 +1,7 @@
+; D8-defaults: an expression-shaped default whose declared result
+; matches the key type. `nx` declares `:result number`; `:fps` is a
+; number-typed key. validateDefaults verdict: `.yes` → clean.
+(plugin :name default-test :version "1.0.0"
+  (expr-func :name nx :arity (fixed 0) :result number)
+  (form :name scene
+    (key :name fps :type number :default (nx))))

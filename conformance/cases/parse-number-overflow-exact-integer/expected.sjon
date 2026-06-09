@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code number_overflow_exact_integer :path []))

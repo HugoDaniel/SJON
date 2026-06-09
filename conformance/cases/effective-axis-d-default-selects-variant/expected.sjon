@@ -1,0 +1,3 @@
+; Post-graduation (axis D on): the overlay yields `kind = kick`,
+; variant `kick` is selected, and the form validates silently.
+(diagnostics)

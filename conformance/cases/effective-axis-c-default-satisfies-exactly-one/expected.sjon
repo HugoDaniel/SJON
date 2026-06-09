@@ -1,0 +1,5 @@
+; Post-graduation (axis C on with the group-aware rule): the
+; defaulted alternative `:from` counts as present when no sibling is
+; author-present -> exactly-one satisfied, no diagnostic. See
+; docs/plans/exclusive-group-default-semantics.md.
+(diagnostics)

@@ -1,0 +1,4 @@
+; Two dates with the same (year, month, day) compare equal via
+; `Date.eql` — no cross-variant numeric collapse, even though dates
+; share the wire-tag neighborhood with the integer tags.
+(let [a 2026-05-19 b 2026-05-19] (= a b))

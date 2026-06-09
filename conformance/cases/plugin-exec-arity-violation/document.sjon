@@ -1,0 +1,10 @@
+; §18 stretch — arity-violation. The manifest declares `(double n)`
+; with `:arity (fixed 1)`; the call below passes three positional
+; arguments. The validator catches the mismatch *before* dispatch and
+; surfaces `arity_mismatch` at the call site. The plugin's `double`
+; export is never invoked — proves the arity gate sits ahead of the
+; wasm runtime, not behind it. Skipped on Zig-native + TS-parity
+; (no wasm runtime).
+(use-plugin "double")
+
+(double 1 2 3)

@@ -1,0 +1,13 @@
+; lowering + flag-set, error path. `:bogus` is not a declared flag, so
+; the surface form fails validation; the hook is suppressed (a
+; hook-suppressed form stays in unlowered_roots and is validated
+; normally), and `not_flag_member` surfaces.
+(plugin :name flag-probe :version "1.0.0"
+  (form :name task :open true
+    :positional (flag-set
+      (flag :name done)
+      (flag :name archived))
+    :lowering (lowering :hook test/identity-v1 :produces [task-normal]))
+  (form :name task-normal :open true))
+
+(task :bogus)

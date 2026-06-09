@@ -1,0 +1,20 @@
+; Axis C (exclusive-group presence) — schema-ambiguity case.
+;
+; The `phrase` form requires exactly one of `:loops` or `:events`, but
+; *both* keys carry literal defaults (empty vector). The author writes
+; neither. With the group-aware rule, no alt is author-present and
+; multiple alts are default-only -> the schema is ambiguous (defaults
+; alone admit more than one path). This is *not* a document error —
+; it points the schema author at the conflicting defaults.
+;
+; Diagnostic: `multiple_defaulted_alternatives_in_group` at `[phrase]`.
+; See `docs/plans/exclusive-group-default-semantics.md`.
+(plugin :name probe :version "1.0.0"
+  (form :name phrase
+    (key :name loops :type vector :default [] :optional true)
+    (key :name events :type vector :default [] :optional true)
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [loops])
+      (alt :keys [events]))))
+
+(phrase)

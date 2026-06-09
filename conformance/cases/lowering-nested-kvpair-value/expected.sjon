@@ -1,0 +1,5 @@
+; `inner` is a lowerable form attached as the *value* of `:slot` on a lowerable
+; `outer` — the kvpair-value form of the contradiction. The lint resolves the
+; kvpair value to its form and flags it once, with the bare child head.
+(diagnostics
+  (diagnostic :code lowering_nested_lowerable :path [inner lowering]))

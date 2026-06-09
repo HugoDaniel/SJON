@@ -1,0 +1,5 @@
+; `:done 42` greedily binds as a kvpair (`done` = 42), so on this closed
+; form it is an unknown keyword — not a flag plus a stray positional. The
+; trailing valueless `:done` is a clean positional flag (no diagnostic).
+(diagnostics
+  (diagnostic :code unknown_key :path [task done]))

@@ -1,0 +1,36 @@
+; Binds `(form-arity f)` to `:impl "wasm:form_arity"` and
+; `(forms-arity-sum v)` to `:impl "wasm:forms_arity_sum"` — the
+; sibling double.wasm exports both functions. `form-arity` accepts
+; one form arg and returns `children_count + kvpair_count`;
+; `forms-arity-sum` accepts a vector-of-form arg and returns the sum
+; of each form's arity. Used by §18's form round-trip stretch case
+; to prove `Tag.form` (`0x07`) crosses the plugin boundary intact,
+; both bare and inside `Tag.vector`.
+;
+; `point` and `vec` are registered as forms so the validator
+; recognises the heads — without these schemas the document would
+; fire `unknown_form` before reaching the evaluator. The plugin
+; itself doesn't care about field names (it just reads counts), so
+; the schemas declare the minimum shape the test inputs use.
+(plugin :name double :version "1.0.0"
+
+  (form :name point
+    (key :name x :type number :optional false)
+    (key :name y :type number :optional false)
+    (key :name z :type number :optional false))
+
+  (form :name vec
+    (key :name x :type number :optional false)
+    (key :name y :type number :optional false))
+
+  (expr-func :name form-arity
+    :arity (fixed 1)
+    :params [form]
+    :result number
+    :impl "wasm:form_arity")
+
+  (expr-func :name forms-arity-sum
+    :arity (fixed 1)
+    :params [vector]
+    :result number
+    :impl "wasm:forms_arity_sum"))

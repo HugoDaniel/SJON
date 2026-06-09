@@ -1,0 +1,8 @@
+; Plugin loads, dispatches `(echo-tag :hello)` into `wasm:tag`, plugin
+; frames the same keyword back, host decodes it against the declared
+; `:result keyword`. The `(values …)` block locks the keyword identity
+; — without it a regression that returns `:goodbye` (or worse, a string
+; instead of a keyword) would pass on a clean diagnostic stream.
+(diagnostics)
+(values
+  (value :index 0 :result :hello))

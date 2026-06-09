@@ -1,0 +1,4 @@
+; Neither the scalar (count-value → number) nor the reference (symbol)
+; alternative accepts a string.
+(diagnostics
+  (diagnostic :code union_no_branch_matched :path [use n]))

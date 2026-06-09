@@ -1,0 +1,4 @@
+; `:bogus` is not in the declared flag-set; the hook is suppressed and
+; the diagnostic surfaces on the surface form.
+(diagnostics
+  (diagnostic :code not_flag_member :path [task 0]))

@@ -1,0 +1,4 @@
+; Month 13 is out of range. Lexer still produces a single date token
+; (10-char shape matches); parser emits date_invalid_month and a
+; defaulted 0001-01-01 node so downstream walks remain well-formed.
+2026-13-01

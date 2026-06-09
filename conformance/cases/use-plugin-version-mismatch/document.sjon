@@ -1,0 +1,8 @@
+; Pins `:version "9.9.9"` against a manifest declaring
+; `:version "1.0.0"`. The filesystem resolver compares the strings
+; byte-for-byte and emits plugin_version_mismatch at the (use-plugin
+; …) span. Downstream the data form `(circle :r 4)` cannot validate
+; because the plugin failed to load — but the diagnostic of interest
+; is the resolver-level mismatch; subsequent diagnostics are
+; suppressed from the expected output to keep the case focused.
+(use-plugin "shapes" :version "9.9.9")

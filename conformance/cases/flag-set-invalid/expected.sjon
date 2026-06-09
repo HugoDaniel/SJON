@@ -1,0 +1,3 @@
+; `:bogus` is not in the declared flag-set.
+(diagnostics
+  (diagnostic :code not_flag_member :path [task 0]))

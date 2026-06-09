@@ -1,0 +1,8 @@
+; A plain positional flag-set. This case pins that the duplicate check
+; tracks *declared* membership, not raw keyword text: a repeated
+; undeclared flag is two membership errors, never a duplicate.
+(plugin :name flag-set-repeated-unknown-test :version "1.0.0"
+  (form :name task
+    :positional (flag-set
+      (flag :name done)
+      (flag :name archived))))

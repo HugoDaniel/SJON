@@ -1,0 +1,4 @@
+; Two project entries declare `:name shapes` — the resolver refuses
+; to silently last-wins. The duplicate diagnostic surfaces against the
+; second entry's path span.
+(use-plugin "shapes")

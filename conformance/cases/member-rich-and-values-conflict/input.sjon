@@ -1,0 +1,4 @@
+; Schema load failed (`invalid_manifest`) and the host drops the
+; plugin entirely. Use a no-op literal so input validation produces no
+; downstream `unknown_form` cascade.
+42

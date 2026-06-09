@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code plugin_name_mismatch :path []))

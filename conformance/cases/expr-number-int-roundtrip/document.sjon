@@ -1,0 +1,6 @@
+; Mixed-tag round-trip through a vector — each element keeps its own
+; integer/float variant identity. The vector evaluator builds a
+; Value.vector whose slots preserve the per-element tag, so the
+; expected list compares structurally with the actual evaluated
+; result.
+(let [xs [1 -2 18446744073709551615 0.5]] xs)

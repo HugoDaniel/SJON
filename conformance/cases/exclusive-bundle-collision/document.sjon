@@ -1,0 +1,14 @@
+; Manifest-time error: `:from` appears in two alts of the same
+; exclusive-group. The loader emits `exclusive_bundle_collision`; with
+; no plugin loaded the trailing `(route …)` form then surfaces as
+; `unknown_form`.
+(plugin :name routes :version "1.0.0"
+  (form :name route
+    (key :name from :type symbol :optional true)
+    (key :name to :type symbol :optional true)
+    (key :name at :type symbol :optional true)
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [from to])
+      (alt :keys [from at]))))
+
+(route :from a :to b)

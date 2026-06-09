@@ -1,0 +1,6 @@
+(plugin :name string-format-path-pass :version "1.0.0"
+  (value-kind :name ss
+    :underlying string
+    :string-bounds (string-bounds :format path))
+  (form :name set
+    (key :name v :type ss :optional false)))

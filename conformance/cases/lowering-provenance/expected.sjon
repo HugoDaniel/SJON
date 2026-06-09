@@ -1,0 +1,7 @@
+; The lowered `(sugar-normal :a 1)` fails normal validation because
+; sugar-normal declares `:a` as a string. Re-validation surfaces
+; wrong_underlying on the lowered tree; the provenance side-table
+; lets a downstream consumer trace the lowered form back to the
+; source `(sugar :a 1)`.
+(diagnostics
+  (diagnostic :code wrong_underlying :path [sugar-normal a]))

@@ -1,0 +1,5 @@
+; Plugin loads cleanly (pre-flight pass), then the `(boom 1)` call
+; traps inside the plugin; host re-frames as `_internal_trap` and the
+; Zig invoker surfaces `plugin_func_trapped` at the call span.
+(diagnostics
+  (diagnostic :code plugin_func_trapped :path []))

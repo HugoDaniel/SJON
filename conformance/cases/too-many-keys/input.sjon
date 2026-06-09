@@ -1,0 +1,4 @@
+; Trivial input — the case asserts on the load-phase diagnostic. The
+; truncated 64-key form is still validateable; with no keys present
+; the validator emits no diagnostics.
+(big)

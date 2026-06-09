@@ -1,0 +1,8 @@
+; `task` declares a positional flag-set: only `:done` and `:archived`
+; are allowed positional keyword flags. An undeclared flag trips
+; `not_flag_member`.
+(plugin :name flag-set-test :version "1.0.0"
+  (form :name task
+    :positional (flag-set
+      (flag :name done)
+      (flag :name archived))))

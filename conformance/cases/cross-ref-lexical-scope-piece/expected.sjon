@@ -1,0 +1,9 @@
+; The track's `[p0]` reference is `:scope piece` bound but appears
+; outside any enclosing piece — fires `cross_ref_outside_scope`. The
+; vector match short-circuits at the first failed element, so the
+; phrase declaration sitting at root (also outside any piece) does
+; not contribute extra diagnostics here.
+(diagnostics
+  (diagnostic
+    :code cross_ref_outside_scope
+    :path [track sequence]))

@@ -1,0 +1,7 @@
+; Post-graduation (axis D on): the overlay yields `kind = kick`,
+; so variant `kick` is selected and `:sequence` (a bass-only key)
+; is rejected as `unknown_key`. The author-only baseline would
+; also emit `missing_discriminant_key`; axis-D suppresses that
+; verdict because the discriminant is satisfied via the overlay.
+(diagnostics
+  (diagnostic :code unknown_key :path [track sequence]))

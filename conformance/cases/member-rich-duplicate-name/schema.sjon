@@ -1,0 +1,12 @@
+; Two `(member :name X …)` siblings share `:name X`. The loader emits
+; `invalid_manifest` at the duplicate's span with path
+; `[projection members]`.
+(plugin :name rich-duplicate-name :version "1.0.0"
+  (value-kind :name projection
+    :underlying symbol
+    :members (member-set
+      (member :name ortho       :label "First ortho")
+      (member :name perspective :label "Perspective")
+      (member :name ortho       :label "Second ortho")))
+  (form :name cam
+    (key :name mode :type projection :optional false)))

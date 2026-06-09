@@ -1,0 +1,2 @@
+; Clean — opaque expressions defer to runtime, no validate-time error.
+(diagnostics)

@@ -1,0 +1,22 @@
+.{
+    .name = .sjon,
+    .version = "1.0.0",
+    .fingerprint = 0x55e1a5afcbd94641,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "examples",
+    },
+    .dependencies = .{
+        // lsp-kit is wgslender's submodule today; we point at it via a
+        // sibling-path dep so SJON's LSP can build without a separate
+        // network fetch. Swap to a proper submodule under `external/`
+        // when the LSP graduates beyond the local-dev scratchpad stage.
+        .lsp_kit = .{
+            .path = "../wgslender/external/lsp-kit",
+            .lazy = true,
+        },
+    },
+}

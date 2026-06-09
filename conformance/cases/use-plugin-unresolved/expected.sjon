@@ -1,0 +1,3 @@
+; No resolver, so the reference fails with unresolved_plugin.
+(diagnostics
+  (diagnostic :code unresolved_plugin :path []))

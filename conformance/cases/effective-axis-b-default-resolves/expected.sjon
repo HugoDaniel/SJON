@@ -1,0 +1,3 @@
+; Post-graduation (axis B on): the overlay-driven lookup resolves
+; the defaulted `p0` against the registered phrase -> clean.
+(diagnostics)

@@ -1,0 +1,8 @@
+; Unit-bearing bound + matching `%` value — passes both unit and range.
+(plugin :name numeric-percent-unit-pass :version "1.0.0"
+  (value-kind :name pct
+    :underlying number
+    :unit (unit-shape :required true :allowed [%])
+    :numeric (numeric-bounds :min 0% :max 100%))
+  (form :name set
+    (key :name v :type pct :optional false)))

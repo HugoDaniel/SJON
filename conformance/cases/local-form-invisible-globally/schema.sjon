@@ -1,0 +1,16 @@
+; Slot-local forms: the canvas :shape slot declares its own inline forms
+; (circle / rect / group). A form value there resolves local-first — a local
+; shadows a same-named global, falls back additively to the global catalog,
+; and a head matching neither is `unknown_local_form` at the slot. The local
+; `circle` requires :r and SHADOWS the global `circle` (which requires
+; :radius); `rect` is local-only; `group` nests a local `:child` slot.
+(plugin :name lf-test :version "1.0.0"
+  (form :name canvas
+    (key :name shape :type form
+      (form :name circle (key :name r :type number :optional false))
+      (form :name rect (key :name w :type number :optional false))
+      (form :name group
+        (key :name child :type form
+          (form :name dot)))))
+  (form :name line)
+  (form :name circle (key :name radius :type number :optional false)))

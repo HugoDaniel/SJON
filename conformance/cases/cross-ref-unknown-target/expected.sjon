@@ -1,0 +1,5 @@
+; Schema aggregate phase: the cross-ref `:target phrase` doesn't resolve.
+; Path is `[<plugin-name> <kind-name> cross-ref]` per Schema.aggregatePath.
+(diagnostics
+  (diagnostic :code unknown_cross_ref_target
+              :path [xref-unknown-target phrase-name cross-ref]))

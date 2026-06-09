@@ -1,0 +1,9 @@
+; lowering-runtime corpus: :produces lists `wrong-target` only, but the
+; registered test/identity-v1 hook always emits `<head>-normal`. The
+; host emits `lowering_produced_invalid_head` at the emitted head.
+(plugin :name probe :version "1.0.0"
+  (form :name sugar :open true
+    :lowering (lowering :hook test/identity-v1 :produces [wrong-target]))
+  (form :name wrong-target :open true))
+
+(sugar :a 1)

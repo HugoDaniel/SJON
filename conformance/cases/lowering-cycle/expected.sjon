@@ -1,0 +1,5 @@
+; The produces graph a -> b -> a is cyclic; `lowering_cycle` is emitted
+; once at the entry form's `:lowering` path (`a`, the first lowering form
+; walked). `(plain)` validates cleanly against its :open declaration.
+(diagnostics
+  (diagnostic :code lowering_cycle :path [cyc a lowering]))

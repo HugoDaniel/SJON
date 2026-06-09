@@ -1,0 +1,7 @@
+; Strict-less-than upper bound; value sits below it — must accept.
+(plugin :name numeric-max-exclusive-just-below :version "1.0.0"
+  (value-kind :name nn
+    :underlying number
+    :numeric (numeric-bounds :max 10 :exclusive-max true))
+  (form :name set
+    (key :name v :type nn :optional false)))

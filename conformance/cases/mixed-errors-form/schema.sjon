@@ -1,0 +1,7 @@
+; Demonstrates several form-shape diagnostics co-existing in one input,
+; with stable ordering: validator walks declared keys then leftover
+; entries left-to-right.
+(plugin :name mixed-form-test :version "1.0.0"
+  (form :name scene
+    (key :name title :type string :optional false)
+    (key :name bpm :type number :optional true)))

@@ -1,0 +1,6 @@
+; D7-exec pre-flight failure: the manifest's sibling wasm imports
+; `env.host_helper`. Spec §7.1 requires the plugin import set to be
+; empty; pre-flight rejects with `plugin_import_forbidden` at the
+; `(use-plugin …)` span. Skipped on Zig-native + TS-parity (no wasm
+; runtime).
+(use-plugin "forbidden")

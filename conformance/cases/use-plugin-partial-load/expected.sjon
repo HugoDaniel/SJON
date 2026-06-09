@@ -1,0 +1,6 @@
+; The unresolved reference emits `unresolved_plugin`; `(circle :radius 5)`
+; validates against the loaded `shapes` plugin (no diagnostic). If the
+; host degraded to "any failure → empty schema", the circle form would
+; emit `unknown_form` and this fixture would catch it.
+(diagnostics
+  (diagnostic :code unresolved_plugin :path []))

@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code duplicate_plugin_name :path [project]))

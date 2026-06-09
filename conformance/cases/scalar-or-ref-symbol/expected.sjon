@@ -1,0 +1,2 @@
+; A bare symbol satisfies the `symbol` (reference) alternative — clean.
+(diagnostics)

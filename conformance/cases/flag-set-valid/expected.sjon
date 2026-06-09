@@ -1,0 +1,2 @@
+; `:done` is a declared flag — validates clean.
+(diagnostics)

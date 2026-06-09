@@ -1,0 +1,11 @@
+; Minimal sidecar manifest paired with `double.wasm`. The fixture's
+; wasm is staged by `stage_double_hash_mismatch` in build.zig. Only
+; one expr-func is declared so the host has something concrete to
+; pre-flight; the hash check fires before the wasm runtime ever
+; instantiates the binary, so the export need not actually run.
+(plugin :name double :version "1.0.0"
+  (expr-func :name vec3-length
+    :arity (fixed 1)
+    :params [vector]
+    :result number
+    :impl "wasm:vec3_length"))

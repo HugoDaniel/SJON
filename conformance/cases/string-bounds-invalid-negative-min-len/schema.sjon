@@ -1,0 +1,7 @@
+; Negative :min-len is rejected at manifest-load time.
+(plugin :name string-bounds-invalid-negative-min-len :version "1.0.0"
+  (value-kind :name ss
+    :underlying string
+    :string-bounds (string-bounds :min-len -1))
+  (form :name set
+    (key :name v :type ss :optional false)))

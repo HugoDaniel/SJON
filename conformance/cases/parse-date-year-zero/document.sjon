@@ -1,0 +1,4 @@
+; ISO 8601 excludes year 0 from the basic profile. SJON follows
+; suit: the lexer accepts the 10-char shape, the parser rejects
+; year 0 with date_invalid_year.
+0000-01-01

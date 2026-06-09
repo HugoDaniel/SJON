@@ -1,0 +1,13 @@
+; Synthesized positional atom. `test/synth-positional-v1` lowers a contentless
+; (shader-decl) sugar form into (module shader) — a head plus a lone *positional
+; symbol*, with no kvpair. Before EmittedForm.children became []EmittedValue a
+; hook could emit only kvpairs and nested forms, never a bare atom, so this
+; shape was inexpressible. The `module` terminal is `:open true :positional any`,
+; so the synthesized symbol child validates as an untyped positional; the head
+; is listed in the sugar form's `:produces`.
+(plugin :name gfx :version "1.0.0"
+  (form :name shader-decl :open true
+    :lowering (lowering :hook test/synth-positional-v1 :produces [module]))
+  (form :name module :open true :positional any))
+
+(shader-decl)

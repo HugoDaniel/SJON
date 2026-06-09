@@ -1,0 +1,11 @@
+; lowering-runtime corpus: manifest declares :lowering with a hook id
+; the host registry doesn't carry. The host emits
+; `lowering_hook_missing` and the source form still validates (and
+; surfaces unknown_form because `normal` is referenced in :produces
+; but the sugar form isn't lowered into it).
+(plugin :name probe :version "1.0.0"
+  (form :name sugar :open true
+    :lowering (lowering :hook missing/v1 :produces [normal]))
+  (form :name normal :open true))
+
+(sugar :a 1)

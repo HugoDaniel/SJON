@@ -1,0 +1,12 @@
+; Materialization corpus: an expression default evaluates against an
+; empty Env using closed-vocab special forms — `if` is dispatched by the
+; evaluator before any schema lookup, so `(if true 32 0)` reduces to 32
+; without `core` being loaded. Schema.validateDefaults defers statically
+; (`if` is unresolved at the aggregate phase) and Host.validateDocument
+; surfaces no diagnostic; the overlay records `(circle :radius) → 32`
+; with `expression_default` origin.
+(plugin :name probe :version "1.0.0"
+  (form :name circle
+    (key :name radius :type number :default (if true 32 0))))
+
+(circle)

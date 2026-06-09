@@ -1,0 +1,4 @@
+; `rect` exists only as a local on canvas.:shape. At top level there is no
+; slot context, so it resolves against the global catalog → ordinary unknown_form.
+(diagnostics
+  (diagnostic :code unknown_form :path [rect]))

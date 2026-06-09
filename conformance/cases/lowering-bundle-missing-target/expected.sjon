@@ -1,0 +1,5 @@
+; Lowered link's `:to nowhere` has no resolvable target in either
+; tree → `not_cross_ref` at the lowered link's `:to` slot. Span
+; threading is asserted in Host_tests; conformance is path-only.
+(diagnostics
+  (diagnostic :code not_cross_ref :path [link to]))

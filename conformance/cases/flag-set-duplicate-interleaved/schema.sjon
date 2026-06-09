@@ -1,0 +1,8 @@
+; A plain positional flag-set. The interleaved case checks that an
+; undeclared flag in the middle does not perturb the positional index
+; used by a later duplicate.
+(plugin :name flag-set-interleaved-test :version "1.0.0"
+  (form :name task
+    :positional (flag-set
+      (flag :name done)
+      (flag :name archived))))

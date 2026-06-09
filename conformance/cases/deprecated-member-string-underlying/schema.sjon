@@ -1,0 +1,11 @@
+; A `.string`-underlying member-set with a deprecated entry fires the
+; same warning the `.symbol` underlying does. The wire syntax differs
+; only at the value site (string literal vs bare symbol).
+(plugin :name deprecated-string :version "1.0.0"
+  (value-kind :name colour-space
+    :underlying string
+    :members (member-set
+      (member :name rgb :label "RGB")
+      (member :name yuv :label "YUV" :deprecated true :deprecation-message "Use rgb.")))
+  (form :name pixel
+    (key :name space :type colour-space :optional false)))

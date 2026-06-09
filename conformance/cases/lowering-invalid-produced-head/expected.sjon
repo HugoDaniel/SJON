@@ -1,0 +1,6 @@
+; The hook emits `sugar-normal` but :produces lists only `wrong-target`.
+; The lowering-phase `lowering_produced_invalid_head` fires; the
+; invocation is dropped (no tree built), so no re-validation
+; diagnostics follow.
+(diagnostics
+  (diagnostic :code lowering_produced_invalid_head :path [sugar-normal lowering produces]))

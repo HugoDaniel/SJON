@@ -1,0 +1,6 @@
+; Both slots fail their underlying check. Diagnostics emit in input
+; encounter order — :name comes first, then :alpha — pinning that
+; both hosts walk the keyword list left-to-right.
+(diagnostics
+  (diagnostic :code wrong_underlying :path [paint name])
+  (diagnostic :code wrong_underlying :path [paint alpha]))

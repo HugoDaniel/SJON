@@ -1,0 +1,13 @@
+; Materialization corpus: an expression default whose head declares a
+; matching `:result` but ships no `:impl` clears Schema.validateDefaults
+; (declared number == key number) and clears Validator.validate (the
+; omitted `:radius` is `effectiveOptional`), then fails at runtime when
+; `Expr.evalBinary` reaches `applyFunction` and returns
+; `PluginFuncNotImplemented`. The host emits `default_eval_failed` at
+; the document path of the defaulted key.
+(plugin :name probe :version "1.0.0"
+  (expr-func :name nope :arity (fixed 0) :result number)
+  (form :name circle
+    (key :name radius :type number :default (nope))))
+
+(circle)

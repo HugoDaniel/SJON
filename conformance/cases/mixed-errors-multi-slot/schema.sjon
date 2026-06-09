@@ -1,0 +1,7 @@
+; Two declared slots with different underlyings; both receive the wrong
+; type. Locks left-to-right ordering of slot-level diagnostics for
+; cross-host parity.
+(plugin :name mixed-slots-test :version "1.0.0"
+  (form :name paint
+    (key :name name :type string :optional false)
+    (key :name alpha :type number :optional false)))

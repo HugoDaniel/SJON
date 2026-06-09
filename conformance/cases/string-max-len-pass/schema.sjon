@@ -1,0 +1,7 @@
+; A string value at or below :max-len passes.
+(plugin :name string-max-len-pass :version "1.0.0"
+  (value-kind :name ss
+    :underlying string
+    :string-bounds (string-bounds :max-len 5))
+  (form :name set
+    (key :name v :type ss :optional false)))

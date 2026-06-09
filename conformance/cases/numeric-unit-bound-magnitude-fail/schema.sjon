@@ -1,0 +1,8 @@
+; Unit-bearing bounds where the value's magnitude exceeds :max.
+(plugin :name numeric-unit-bound-magnitude-fail :version "1.0.0"
+  (value-kind :name dur
+    :underlying number
+    :unit (unit-shape :required true :allowed [ms])
+    :numeric (numeric-bounds :min 0ms :max 1000ms))
+  (form :name set
+    (key :name v :type dur :optional false)))

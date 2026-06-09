@@ -1,0 +1,11 @@
+; The cross-ref kind says `:name-key id`, but the target form `phrase`
+; only declares a `name` key. The schema-aggregate phase rejects this:
+; without a symbol-typed `id` slot, the runtime registry has nothing to
+; key references against.
+(plugin :name xref-name-key-unknown :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase :name-key id))
+
+  (form :name phrase
+    (key :name name :type symbol :optional false)))

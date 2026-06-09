@@ -1,0 +1,18 @@
+; Phrases declare names; tracks reference them via :sequence symbols.
+; A clean reference must validate without diagnostics.
+(plugin :name xref-resolved :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :description "Reference to a (phrase :name …) form."
+    :cross-ref (cross-ref :target phrase))
+
+  (value-kind :name phrase-sequence
+    :underlying vector
+    :description "Vector of phrase-name references."
+    :vector (vector-shape :element phrase-name))
+
+  (form :name phrase
+    (key :name name :type symbol :optional false))
+
+  (form :name track
+    (key :name sequence :type phrase-sequence :optional false)))

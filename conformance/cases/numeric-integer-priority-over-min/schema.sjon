@@ -1,0 +1,8 @@
+; When both `:integer true` and `:min 0` fail on the same value, the
+; integer diagnostic wins — pinning the one-fail-per-call priority.
+(plugin :name numeric-integer-priority-over-min :version "1.0.0"
+  (value-kind :name nn
+    :underlying number
+    :numeric (numeric-bounds :min 0 :integer true))
+  (form :name set
+    (key :name v :type nn :optional false)))

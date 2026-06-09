@@ -1,0 +1,7 @@
+; :integer true passes a literal exceeding i64.max (Tag.number_u64).
+(plugin :name numeric-integer-u64-large :version "1.0.0"
+  (value-kind :name nn
+    :underlying number
+    :numeric (numeric-bounds :integer true))
+  (form :name set
+    (key :name v :type nn :optional false)))

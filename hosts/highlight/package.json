@@ -1,0 +1,27 @@
+{
+  "name": "@sjon/highlight",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Reusable .sjon syntax-highlighting grammars — a CodeMirror StreamLanguage and a TextMate grammar for Shiki, seeded from PNGine's sjonToken. Lets every SJON host drop the Clojure approximation.",
+  "license": "SEE ../../LICENSE",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types 'test/*.test.ts'"
+  },
+  "peerDependencies": {
+    "@codemirror/language": "^6.10.6"
+  },
+  "devDependencies": {
+    "@codemirror/language": "^6.10.6",
+    "@types/node": "^22.0.0",
+    "shiki": "^1.29.2",
+    "typescript": "^5.8.0"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

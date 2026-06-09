@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code string_format_mismatch :path [set v]))

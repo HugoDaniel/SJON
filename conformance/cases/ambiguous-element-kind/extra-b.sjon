@@ -1,0 +1,5 @@
+; Sibling plugin — collides with schema.sjon on value-kind `color`.
+(plugin :name ambig-vk-b :version "1.0.0"
+  (value-kind :name color
+    :underlying symbol
+    :members (member-set :values [cyan magenta yellow])))

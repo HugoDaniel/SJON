@@ -1,0 +1,10 @@
+; Plugin loads, dispatches `(form-arity (point …)) → 3` into
+; `wasm:form_arity` and `(forms-arity-sum [(point …) (vec …)]) → 5`
+; into `wasm:forms_arity_sum`. Host decodes each result against the
+; declared `:result number`. The `(values …)` block locks both arity
+; counts so a regression in the §9.1 form payload codec (bare or
+; vector-nested) fails loudly.
+(diagnostics)
+(values
+  (value :index 0 :result 3)
+  (value :index 1 :result 5))

@@ -1,0 +1,8 @@
+; `i64.min` literal lexes as `Tag.number_i64` — trivially integer for
+; the `:integer true` check. Pins the exact-int symmetric corner.
+(plugin :name numeric-i64-min-passes-integer :version "1.0.0"
+  (value-kind :name nn
+    :underlying number
+    :numeric (numeric-bounds :integer true))
+  (form :name set
+    (key :name v :type nn :optional false)))

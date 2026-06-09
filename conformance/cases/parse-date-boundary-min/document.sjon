@@ -1,0 +1,3 @@
+; Smallest accepted year. Parser emits a clean Tag.date node; the
+; printer round-trips the canonical 10-char form.
+0001-01-01

@@ -1,0 +1,8 @@
+; Positive case: the form value's head is an expression whose declared
+; result type matches the slot type. The validator's declared-result
+; check accepts the value without evaluating it. Companion to
+; `expr-result-slot-mismatch`.
+(plugin :name expr-result-test :version "1.0.0"
+  (form :name circle
+    (key :name radius :type number :optional false))
+  (expr-func :name num-result :arity (fixed 0) :result number))

@@ -1,0 +1,5 @@
+; Hour 24 is rejected. Some older ISO 8601 profiles allow it as
+; an "end of day" form; SJON keeps the invariant simple — hour
+; must be 0..23. The lexer accepts the 8-char shape; the parser
+; rejects with time_invalid_hour.
+24:00:00

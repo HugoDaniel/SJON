@@ -1,0 +1,8 @@
+; Inline-manifest fixture: declare a plugin requiring `:name`, then
+; use the form without supplying it. The plugin loads cleanly; the
+; data form fails validation with `missing_required_key`.
+(plugin :name probe :version "1.0.0"
+  (form :name widget
+    (key :name name :type symbol :optional false)))
+
+(widget)

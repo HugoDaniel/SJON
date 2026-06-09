@@ -1,0 +1,7 @@
+; A string value below :min-len fails with `string_too_short`.
+(plugin :name string-min-len-fail :version "1.0.0"
+  (value-kind :name ss
+    :underlying string
+    :string-bounds (string-bounds :min-len 3))
+  (form :name set
+    (key :name v :type ss :optional false)))

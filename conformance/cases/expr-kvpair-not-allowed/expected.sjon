@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code expr_kvpair_not_allowed :path [inc flag]))

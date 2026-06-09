@@ -1,0 +1,7 @@
+; D7-exec pre-flight failure: the sibling `manifests/shapes.wasm` is a
+; tiny v1-shaped plugin that returns ABI version 99 from
+; `sjon_plugin_abi_version()`. Web + Rust hosts instantiate, run pre-
+; flight, surface `plugin_abi_mismatch` at the `(use-plugin …)` span,
+; and refuse to register the plugin. Skipped on Zig-native + TS-parity
+; (declarative-only — no wasm runtime adapter wired).
+(use-plugin "shapes")

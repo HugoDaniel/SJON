@@ -1,0 +1,2 @@
+; Clean inline document — no diagnostics from any phase.
+(diagnostics)

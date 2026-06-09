@@ -1,0 +1,6 @@
+; Plugin loads cleanly (pre-flight pass), then the `(big 1)` call
+; returns a frame with an unreasonable `len`; host's frame-size cap
+; refuses to mirror it and the Zig invoker surfaces
+; `plugin_func_alloc_failed` at the call span.
+(diagnostics
+  (diagnostic :code plugin_func_alloc_failed :path []))

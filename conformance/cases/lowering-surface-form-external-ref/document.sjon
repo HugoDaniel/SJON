@@ -1,0 +1,26 @@
+; D8-v2 shape-only surface validation: a sugar form whose `:ref`
+; points at a target elsewhere in the document.
+;
+; Surface validation in `lowerOneForm` builds a one-form sub-tree
+; containing only `(sugar :ref t0)`. Its cross-ref index sees only
+; that form, so the `:ref` lookup misses with `not_cross_ref`. With
+; v1 `surface.hasErrors()` fires and the hook is silently skipped —
+; the source `(sugar …)` then validates against its sugar schema and
+; the fixture's diagnostic stream depends on whether the cross-ref
+; against `(target :name t0)` resolves *in the source tree*. With v2
+; (commit 3) the cross-ref miss is filtered from the gate decision,
+; the hook runs, `(sugar-normal :ref t0)` lands in the lowered tree,
+; and the forest pass resolves the ref against the source target.
+(plugin :name probe :version "1.0.0"
+  (value-kind :name target-ref :underlying symbol
+    :cross-ref (cross-ref :target target))
+  (form :name target
+    (key :name name :type symbol :optional false))
+  (form :name sugar
+    (key :name ref :type target-ref :optional false)
+    :lowering (lowering :hook test/identity-v1 :produces [sugar-normal]))
+  (form :name sugar-normal
+    (key :name ref :type target-ref :optional false)))
+
+(target :name t0)
+(sugar :ref t0)

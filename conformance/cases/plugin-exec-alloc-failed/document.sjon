@@ -1,0 +1,9 @@
+; D7-exec runtime failure: the manifest binds `(big n)` to
+; `:impl "wasm:huge"`. Plugin returns a frame whose header advertises
+; ~4 GiB of payload that doesn't exist; hosts reject the oversized
+; report (spec §9.3 cap) and the Zig invoker surfaces
+; `plugin_func_alloc_failed` at the call span. Skipped on Zig-native +
+; TS-parity (no wasm runtime).
+(use-plugin "double")
+
+(big 1)

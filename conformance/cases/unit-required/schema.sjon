@@ -1,0 +1,8 @@
+; `duration` requires a unit suffix from `{ms, s}`. A bare number at
+; the `:len` slot trips `unit_required`.
+(plugin :name unit-req-test :version "1.0.0"
+  (value-kind :name duration
+    :underlying number
+    :unit (unit-shape :required true :allowed [ms s]))
+  (form :name tween
+    (key :name len :type duration :optional false)))

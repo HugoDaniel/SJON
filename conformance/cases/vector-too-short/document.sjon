@@ -1,0 +1,11 @@
+; A `:vector` slot with `:min-len 1` rejects an empty vector — the "at least
+; one" arity floor. E.g. a buffer usage list that must carry at least one GPU
+; usage flag rather than silently emitting an empty (zero-usage) buffer.
+(plugin :name arity-test :version "1.0.0"
+  (value-kind :name flags
+    :underlying vector
+    :vector (vector-shape :element symbol :min-len 1))
+  (form :name buffer
+    (key :name usage :type flags :optional false)))
+
+(buffer :usage [])

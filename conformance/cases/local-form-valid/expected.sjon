@@ -1,0 +1,3 @@
+; Local `circle` requires :r; satisfied → clean. A clean result also proves
+; the local shadowed the global circle (which requires :radius, not :r).
+(diagnostics)

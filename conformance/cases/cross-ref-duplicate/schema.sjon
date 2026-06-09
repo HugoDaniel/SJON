@@ -1,0 +1,16 @@
+; Two phrases declaring the same :name should produce a duplicate
+; diagnostic at the second occurrence — the first wins for lookup.
+(plugin :name xref-duplicate :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase))
+
+  (value-kind :name phrase-sequence
+    :underlying vector
+    :vector (vector-shape :element phrase-name))
+
+  (form :name phrase
+    (key :name name :type symbol :optional false))
+
+  (form :name track
+    (key :name sequence :type phrase-sequence :optional false)))

@@ -1,0 +1,4 @@
+; :hash pin set against the wrong digest (all zeros) → resolver
+; emits plugin_hash_mismatch at the (use-plugin …) span.
+(diagnostics
+  (diagnostic :code plugin_hash_mismatch :path []))

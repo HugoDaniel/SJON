@@ -1,0 +1,3 @@
+; Clean — the hook executes, emits a valid normal form, and the
+; lowered tree re-validates without diagnostics.
+(diagnostics)

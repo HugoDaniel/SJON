@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code recursion_depth :path [set k]))

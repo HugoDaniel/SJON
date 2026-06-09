@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code number_at_or_above_exclusive_max :path [set v]))

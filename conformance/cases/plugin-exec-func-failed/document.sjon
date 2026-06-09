@@ -1,0 +1,9 @@
+; D7-exec runtime failure: the manifest binds `(kaboom n)` to
+; `:impl "wasm:fail"`. Plugin returns an `ok=0` frame carrying code
+; `domain` + detail "plugin reported a structured failure"; the host
+; bridge passes the frame through and the Zig invoker surfaces
+; `plugin_func_failed` at the call span. Skipped on Zig-native +
+; TS-parity (no wasm runtime).
+(use-plugin "double")
+
+(kaboom 1)

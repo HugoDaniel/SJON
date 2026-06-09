@@ -1,0 +1,8 @@
+; Higher-order binder form — `map` over a finite vector squares each
+; element. The body `(* x x)` re-evaluates once per element with `x`
+; bound to the next vector entry. Validation passes (core's
+; `map` / `*` declarations are in scope for top-level eval); the
+; eval pass runs the binder and surfaces `[1 4 9 16]` in
+; `HostResult.evaluated_results`. Zig, Web, and Rust hosts all
+; assert the value via the `(values …)` block.
+(map [x] [1 2 3 4] (* x x))

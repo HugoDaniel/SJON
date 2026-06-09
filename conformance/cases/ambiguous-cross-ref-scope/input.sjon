@@ -1,0 +1,4 @@
+; Input is a stub. Bare `track` would also trip `ambiguous_form` on
+; validate, doubling the diagnostic count — keep the input minimal so
+; this case asserts only the schema-aggregate diagnostic.
+nil

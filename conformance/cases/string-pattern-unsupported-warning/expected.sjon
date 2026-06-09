@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code string_pattern_unsupported :severity warning :path [set v]))

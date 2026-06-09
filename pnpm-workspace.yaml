@@ -1,0 +1,5 @@
+packages:
+  - "hosts/schema"
+  - "hosts/highlight"
+  - "hosts/web"
+  - "hosts/typescript-parity"

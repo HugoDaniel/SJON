@@ -1,0 +1,9 @@
+; `task` mixes a declared keyword key (`:title`) with a positional
+; flag-set. The positional index must count only positional children, so
+; the leading `:title "…"` kvpair is skipped when numbering the flags.
+(plugin :name flag-set-mixed-test :version "1.0.0"
+  (form :name task
+    (key :name title :type string :optional true)
+    :positional (flag-set
+      (flag :name done)
+      (flag :name archived))))

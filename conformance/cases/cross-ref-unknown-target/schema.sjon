@@ -1,0 +1,10 @@
+; The cross-ref target is `phrase`, but no `(form :name phrase …)` is
+; declared anywhere in the schema. Resolution at the schema-aggregate
+; phase emits `unknown_cross_ref_target` once per offending value-kind.
+(plugin :name xref-unknown-target :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase))
+
+  (form :name track
+    (key :name name :type symbol :optional false)))

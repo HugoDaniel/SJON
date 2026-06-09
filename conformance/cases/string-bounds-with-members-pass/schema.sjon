@@ -1,0 +1,10 @@
+; :members and :string-bounds may co-exist. The loader cross-checks
+; that every member literal satisfies the bounds; the validator then
+; applies the members check (closed-set) followed by the bounds check.
+(plugin :name string-bounds-with-members-pass :version "1.0.0"
+  (value-kind :name ss
+    :underlying string
+    :members (member-set :values [alpha beta gamma])
+    :string-bounds (string-bounds :min-len 4))
+  (form :name set
+    (key :name v :type ss :optional false)))

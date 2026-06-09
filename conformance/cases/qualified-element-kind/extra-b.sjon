@@ -1,0 +1,7 @@
+; Sibling plugin — declares its own `color` so a bare lookup would be
+; ambiguous. The host plugin in extra-host.sjon escapes the collision by
+; qualifying its `:type paint/color` reference.
+(plugin :name display :version "1.0.0"
+  (value-kind :name color
+    :underlying symbol
+    :members (member-set :values [cyan magenta yellow])))

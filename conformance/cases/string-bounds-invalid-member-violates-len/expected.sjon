@@ -1,0 +1,3 @@
+(diagnostics
+  (diagnostic :code string_bounds_invalid :path [ss string-bounds min-len])
+  (diagnostic :code string_bounds_invalid :path [ss string-bounds min-len]))

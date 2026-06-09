@@ -1,0 +1,4 @@
+; Schema aggregate phase rejects an unresolved cross-ref `:scope`.
+(diagnostics
+  (diagnostic :code unknown_cross_ref_scope
+              :path [xref-unknown-scope phrase-name cross-ref]))

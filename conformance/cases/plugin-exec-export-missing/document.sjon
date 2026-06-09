@@ -1,0 +1,6 @@
+; D7-exec pre-flight failure: the manifest declares `:impl "wasm:halve"`,
+; but the sibling `manifests/double.wasm` only exports `double`, `trap`,
+; and `fail`. Pre-flight enumerates the declared `:impl` names and the
+; missing one fails the load with `plugin_export_missing`. Skipped on
+; Zig-native + TS-parity (declarative-only — they never pre-flight).
+(use-plugin "double")

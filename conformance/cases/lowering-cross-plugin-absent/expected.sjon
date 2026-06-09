@@ -1,0 +1,6 @@
+; The qualified head `storage/table-row` targets a plugin that was never
+; loaded; `lowering_target_plugin_absent` is emitted once at the producing
+; form's `:lowering` path. `(plain)` validates cleanly against its :open
+; declaration.
+(diagnostics
+  (diagnostic :code lowering_target_plugin_absent :path [pngine pass lowering]))

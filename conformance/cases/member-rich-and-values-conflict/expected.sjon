@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code invalid_manifest :path [projection members]))

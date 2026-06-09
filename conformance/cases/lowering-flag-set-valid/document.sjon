@@ -1,0 +1,13 @@
+; lowering + flag-set, happy path. `task` declares a positional
+; flag-set and a lowering hook; `:done` is a valid flag, so the surface
+; form validates, the test/identity-v1 hook emits `task-normal`, and the
+; lowered tree re-validates clean.
+(plugin :name flag-probe :version "1.0.0"
+  (form :name task :open true
+    :positional (flag-set
+      (flag :name done)
+      (flag :name archived))
+    :lowering (lowering :hook test/identity-v1 :produces [task-normal]))
+  (form :name task-normal :open true))
+
+(task :done)

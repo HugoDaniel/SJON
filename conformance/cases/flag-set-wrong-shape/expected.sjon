@@ -1,0 +1,3 @@
+; `42` is not a keyword flag — wrong shape for the flag-set slot.
+(diagnostics
+  (diagnostic :code wrong_underlying :path [task 0]))

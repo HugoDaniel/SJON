@@ -1,0 +1,12 @@
+; `task` declares a positional flag-set whose flags carry optional
+; `:description`/`:link` editor metadata. The validator matches on the
+; flag name alone, so a declared flag still validates clean — the
+; metadata rides along for hovers and schema export.
+(plugin :name flag-set-meta-test :version "1.0.0"
+  (form :name task
+    :positional (flag-set
+      (flag :name done
+        :description "Marks the task as complete."
+        :link "https://example.com/docs/tasks#done")
+      (flag :name archived
+        :description "Hides the task from the active list."))))

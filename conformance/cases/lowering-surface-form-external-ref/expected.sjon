@@ -1,0 +1,5 @@
+; v2 cross-ref filter lets the hook run; the lowered `(refer :ref t0)`
+; resolves against the source `(target :name t0)` in the forest pass.
+; Clean either way (with or without the filter), but the lowered tree
+; *is* built under v2 and is empty under v1.
+(diagnostics)

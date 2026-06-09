@@ -1,0 +1,15 @@
+; lowering-runtime corpus: provenance / diagnostic path. The hook emits
+; `sugar-normal` with the author's `:a` value (a number); `sugar-normal`
+; declares `:a` as a string. Re-validating the lowered tree fires
+; `wrong_underlying` at the lowered form — but the diagnostic span
+; points back at the source `(sugar …)` via the inherited span. The
+; conformance harness asserts on (code, path); span tracing is pinned
+; by the in-source unit test in Host_tests.zig.
+(plugin :name probe :version "1.0.0"
+  (form :name sugar
+    (key :name a :type number)
+    :lowering (lowering :hook test/identity-v1 :produces [sugar-normal]))
+  (form :name sugar-normal
+    (key :name a :type string)))
+
+(sugar :a 1)

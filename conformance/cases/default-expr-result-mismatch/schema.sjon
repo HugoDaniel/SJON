@@ -1,0 +1,8 @@
+; D8-defaults: an expression-shaped default whose declared result does
+; not match the key type. `lbl` declares `:result string`; `:fps` is a
+; number-typed key. validateDefaults verdict: `.no` → wrong_underlying
+; at the schema-aggregate phase, path [plugin, form, key, default].
+(plugin :name default-test :version "1.0.0"
+  (expr-func :name lbl :arity (fixed 0) :result string)
+  (form :name scene
+    (key :name fps :type number :default (lbl))))

@@ -1,0 +1,3 @@
+; Empty `xs` collapses to the kind's identity without scheduling
+; any body iterations. `map` over `[]` returns `[]`.
+(map [x] [] (* x x))

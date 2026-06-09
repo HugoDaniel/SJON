@@ -1,0 +1,8 @@
+; Single-point range rejects any neighbouring value — the closest
+; neighbour above the point produces `number_above_max`.
+(plugin :name numeric-equal-bound-single-point-fail :version "1.0.0"
+  (value-kind :name pin
+    :underlying number
+    :numeric (numeric-bounds :min 5 :max 5))
+  (form :name set
+    (key :name v :type pin :optional false)))

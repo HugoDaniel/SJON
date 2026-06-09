@@ -1,0 +1,4 @@
+; February never has 30 days, in any year. Parser emits
+; date_invalid_day at the lexeme's span; tree carries a defaulted
+; 0001-01-01 node so consumers stay well-formed.
+2026-02-30

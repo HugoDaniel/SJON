@@ -1,0 +1,48 @@
+# Build artifacts
+zig-out/
+.zig-cache/
+
+# Test artifacts
+*.test
+
+# IDE/Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# JS/TS workspace dependencies (pnpm)
+node_modules/
+hosts/typescript-parity/node_modules/
+hosts/web/node_modules/
+
+# Rust host build artifacts
+hosts/rust/target/
+hosts/rust/Cargo.lock
+
+# Local working areas (not part of the release)
+.claude/
+SJON/
+.playwright-mcp/
+/BAUBLE.md
+/rust_mastery_audit_*.md
+
+# Landing page build outputs
+landing-page/node_modules/
+landing-page/dist/
+landing-page/.astro/
+
+# web-todo demo artifacts (staged by `zig build web-todo`)
+examples/web-todo/sjon.wasm
+examples/web-todo/todo-plugin.wasm
+
+# Browser-ESM build of the web host (emitted by `zig build web-host-browser`)
+hosts/web/dist/
+
+# Playground WASM (staged by `zig build landing-page-assets`)
+landing-page/public/sjon-lsp.wasm

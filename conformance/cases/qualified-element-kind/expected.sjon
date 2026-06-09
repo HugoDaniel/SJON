@@ -1,0 +1,4 @@
+; `paint/color` resolves unambiguously even though `display` also defines
+; `color`. The validator accepts `red` because it appears in paint's
+; member set.
+(diagnostics)

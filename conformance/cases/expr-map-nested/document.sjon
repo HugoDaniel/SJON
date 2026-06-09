@@ -1,0 +1,8 @@
+; Nested binder forms: the outer `[x]` iterates `[1 2]`; each
+; iteration of the outer body re-decodes the inner `(map …)`
+; form fresh — including the inner binder vector and inner xs.
+; This is the load-bearing case for "binder loops compose under
+; cursor replay" on the binary path.
+(map [x] [1 2]
+  (map [y] [10 20]
+    (* x y)))

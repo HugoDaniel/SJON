@@ -1,0 +1,1225 @@
+# Writing SJON — author's handbook
+
+A practical guide for people writing SJON by hand. Open this if you
+have a `.sjon` file in front of you and you want to know what to type.
+
+This document covers syntax, common patterns, the built-in
+expression vocabulary, and how to read a plugin's schema. It is
+deliberately silent on what happens after you save the file —
+parsing, the binary wire format, the JSON bridge, structural editing,
+plugin authoring. For any of those, see [`LANGUAGE.md`](LANGUAGE.md)
+(the spec) or [`examples/plugins/README.md`](../examples/plugins/README.md)
+(plugin-side material).
+
+---
+
+## 1. What SJON looks like
+
+A single-form document:
+
+```sjon
+(camera :ortho :zoom 2)
+```
+
+A nested scene:
+
+```sjon
+(scene :bpm 130 :name "intro"
+  (canvas :name "main" :size [1920 1080]
+    (camera :ortho :zoom 2)
+    (stack :mode :overlay
+      (shape :sdf :radius 0.5 :color [0.9 0.4 0.2 1.0])
+      (shape :path :closed true
+        :points [[0 0] [1 0] [1 1] [0 1]]))))
+```
+
+A configuration with a little inline math:
+
+```sjon
+(group :name "fade"
+  (shape :sdf
+    :radius 0.5
+    :alpha (lerp 1 0 (clamp t 0 1))))
+```
+
+Three things are worth naming on a first read:
+
+- `(head ...)` — **a form**. The first token is the constructor
+  name; the rest are children.
+- `:keyword value` — **a kvpair**. Forms hold properties this way.
+  `:ortho` on its own (no value after it) is a positional flag.
+- `[...]` — **a vector**. An ordered list of values, no keys.
+
+The rest of this handbook elaborates those pieces one at a time.
+
+---
+
+## 2. The shape of a document
+
+A SJON document is a flat list of **roots**. Most documents have
+exactly one root — a single top-level form — but multiple roots
+are valid:
+
+```sjon
+; Single-root: the common case.
+(scene :bpm 130 (canvas :name "main"))
+```
+
+```sjon
+; Multi-root: fixtures, batches, palettes.
+(layer :name "background" :z 0)
+(layer :name "midground"  :z 1)
+(layer :name "foreground" :z 2)
+```
+
+```sjon
+; Atomic root: also valid.
+42
+```
+
+One narrowing rule: **a `:key value` pair cannot be a root.** Top
+level holds values (forms, vectors, atoms); kvpairs only live
+inside forms. Whitespace doesn't matter — newlines, tabs, and
+spaces are all just separators.
+
+> If you're shipping SJON across the wire, encoding to JSON, or
+> mutating documents programmatically, those concerns are covered
+> in `LANGUAGE.md` §9–§11. From here on, this document assumes
+> you're typing source.
+
+### No imports in `.sjon` files
+
+A SJON document does not declare which plugins it uses. There is no
+document-level `(import …)`, no `use`, no package stanza, and no
+scene-bundling form that pulls vocabularies into the file.
+
+Vocabulary loading is a **host concern**:
+
+```text
+host loads:      core + shapes + masagin
+host validates:  my-document.sjon
+```
+
+The document itself stays vocabulary-agnostic. It contains forms like
+`(scene …)`, `(circle …)`, `(shape …)`, and `(b 4)`; the host decides
+which plugin set those names are checked against.
+
+This has two practical consequences:
+
+- The same document can validate under different host setups, as long
+  as the loaded plugins provide the heads it uses.
+- A bare head such as `(circle …)` works only when exactly one loaded
+  plugin owns `circle`. If more than one plugin declares it, qualify
+  the head: `(shapes/circle …)`.
+
+Plugin manifests may themselves be written in SJON, but those manifests
+are loaded by the host. They are not imported from ordinary `.sjon`
+documents.
+
+---
+
+## 3. Atoms
+
+The substrate has eleven value kinds. Most are atomic values; vectors
+and forms are the two structural containers. Unit-bearing numbers are
+covered separately because authors need to understand suffix rules.
+
+| Kind | Examples | Notes |
+| --- | --- | --- |
+| `nil` | `nil` | The explicit "absence" value. Falsy. |
+| `boolean` | `true`, `false` | The two booleans. `false` is falsy; `true` is truthy. |
+| `number` | `0`, `-1.25`, `1e9`, `1.5e-10` | IEEE-754 `f64`. Underscores allowed: `1_000_000`. |
+| `date` | `2026-05-19`, `0001-01-01` | Calendar `YYYY-MM-DD` (year 1..9999, no time, no zone). |
+| `time` | `12:34:56`, `23:59:59.999` | Clock `HH:MM:SS[.fff]` (no date, no zone, no leap seconds). |
+| `string` | `"hello"`, `"""raw bytes"""` | UTF-8 bytes. Two surface forms, one value (§9). |
+| `keyword` | `:bpm`, `:ortho`, `:p+s` | A name with a leading `:`. |
+| `symbol` | `bounce`, `parent.transform`, `+` | A name without a leading `:`. |
+
+`nil` and the booleans cannot carry payload — they're atoms by
+identity. `true`, `false`, and `nil` are the only reserved words;
+every other identifier is fair game.
+
+**All identifiers are case-sensitive.** `:bpm`, `:Bpm`, and
+`:BPM` are three distinct keywords; `circle` and `Circle` are
+two distinct heads. Plugin docs are the source of truth for the
+exact spelling — match it byte-for-byte.
+
+### Symbol vs string vs keyword — when to reach for which
+
+Three distinct kinds, intentionally distinct:
+
+- **A keyword** names a slot or a discrete option. Use it for
+  `:mode`, `:loop`, `:enabled`, `:pos` — keys on a form, or
+  flags. A keyword is **self-evaluating**: it stands for itself,
+  never resolved against a binding. Keywords are first-class but
+  they are not stand-ins for short labels.
+- **A symbol** names something the schema knows about: a form
+  head (`scene`, `circle`), a binding inside an expression (`t`,
+  `radius`), or a closed-set enum value (`ortho`, `loop`,
+  `mask`). A symbol is an **identifier**: it gets looked up in a
+  binding scope, or matched against a member-set the plugin
+  declares. Plugins frequently declare member-sets where the
+  expected value is a symbol.
+- **A string** is opaque payload. Reach for it when the value is
+  free-form text — a label, a filename, a color name, embedded
+  shader source.
+
+The trichotomy matters because the parser keeps it. Once you've
+chosen, the value remembers which kind it was, and the validator
+checks against the slot's declared type accordingly.
+
+---
+
+## 4. Numbers and units
+
+A number can carry a **unit suffix**: one or more ASCII letters,
+or a single `%`, glued to the end with no whitespace.
+
+```sjon
+0           1           -3                 ; numbers, no unit
+0.5         -1.25       1.5e-10            ; numbers, no unit
+4b          90deg       50%                ; numbers with unit
+250ms       1.5e2hz                        ; numbers with unit
+```
+
+Units are **opaque** to the substrate. SJON does not interpret
+`b` as beats, `deg` as degrees, or `ms` as milliseconds — it
+just carries the suffix forward as text. The plugin (or your
+host code) decides what each suffix means. A common pattern: a
+domain plugin declares an expression function `(b 4)` that
+converts beats to seconds at evaluation time.
+
+A unit-bearing number is a **distinct value** from a unitless
+one — `4b` and `4` are not interchangeable. A plugin can refine a
+numeric slot to require a unit, or to allow only specific suffixes.
+A plain `number` slot accepts both `4` and `4b`.
+
+### Exponent vs. unit ambiguity
+
+`e` and `E` start an **exponent** only when the very next
+character is a digit or sign. Otherwise, they start a unit:
+
+```sjon
+1e9          ; the number 1,000,000,000 (exponent)
+1e+9         ; same — sign counts as starting an exponent
+1em          ; the number 1, with unit "em" (no digit after `e`)
+1.5e2hz      ; the number 150, with unit "hz" (exponent + unit)
+1e-9ms       ; the number 1e-9, with unit "ms" (signed exponent + unit)
+```
+
+The rule is purely lexical — it doesn't depend on the schema or
+the surrounding context.
+
+### Underscores
+
+Digit grouping is allowed:
+
+```sjon
+1_000_000              ; same as 1000000
+0.000_001              ; same as 0.000001
+60_000ms               ; same as 60000ms
+```
+
+Underscores are stripped before parsing.
+
+---
+
+## 5. Vectors
+
+`[a b c]` is a vector — an ordered list of any values, of any kind.
+
+```sjon
+[]                              ; empty
+[1 2 3]                         ; numbers
+[[0 0] [1 0] [1 1] [0 1]]       ; a polyline (vector of 2-vectors)
+[:loop :ping-pong]              ; vector of keywords
+["red" "green" "blue"]          ; vector of strings
+[(rgb 1 0 0) (rgb 0 1 0)]       ; vector of forms
+```
+
+Vectors do **not** carry kvpairs. A `:keyword` inside `[...]`
+is a value of kind `keyword`, not a key looking for a partner.
+If you find yourself wanting `:k v` pairs in a list, you want a
+sequence of forms (each carrying its own keys), not a vector.
+
+Common shapes plugins ask of you:
+
+- **2-vector of numbers** for points: `[160 120]`.
+- **3-vector** for vec3 / RGB: `[0.9 0.4 0.2]`.
+- **4-vector** for vec4 / RGBA / matrices-by-row:
+  `[0.9 0.4 0.2 1.0]`.
+- **Vector of points** for polylines / outlines:
+  `[[0 0] [1 0] [1 1]]`.
+
+When a plugin pins a slot to a typed vector ("4-vector of
+numbers, RGBA"), the validator checks the length and the element
+kind for you. The error you'll see is covered in §13.
+
+---
+
+## 6. Forms
+
+The workhorse construct. Every domain object — scenes, shapes,
+camera, animations — is a form.
+
+```sjon
+(camera                   ; head: the constructor name
+  :ortho                  ; positional flag (a keyword, no value)
+  :zoom 2                 ; kvpair: zoom = 2
+  :pos [0 1]              ; kvpair: pos = [0 1]
+  (group :name "main"))   ; positional child: a nested form
+```
+
+Forms are made of:
+
+- A **head** — the first token after `(`. A symbol naming the
+  constructor (`scene`, `canvas`, `camera`).
+- Zero or more **children**, in source order, each one of:
+  - A **kvpair**: `:key value`.
+  - A **positional value**: any value, including nested forms.
+  - A **positional flag**: a bare keyword that didn't pair with a
+    value (see §7).
+
+Source order is preserved. Plugins decide what each form
+accepts: required keys, optional keys, whether positional
+children are allowed, and what type each slot expects (§11).
+
+### Bare vs qualified heads
+
+When two plugins both declare `circle`, you disambiguate by
+qualifying the head with a namespace prefix:
+
+```sjon
+(circle :center [0 0] :radius 1)         ; bare — works iff one plugin owns "circle"
+(shapes/circle :center [0 0] :radius 1)  ; qualified — always works for the shapes plugin
+(masagin/circle …)                       ; qualified — picks masagin's circle
+```
+
+The bare form is shorter and almost always what you want. The
+validator only forces you to qualify when there's a real
+collision; it tells you which plugins are competing for the name.
+
+The same rule applies to **value-kind references** inside a manifest.
+A `:type plugin/kind`, a `(vector-shape :element plugin/kind)`, a
+`(positional plugin/kind)`, and a `(union-shape :alternatives
+[plugin/a plugin/b])` all split on the first `/`. When two plugins
+both declare a `color` value-kind, qualifying as `paint/color` picks
+one definition; bare `color` becomes ambiguous and the validator
+emits a diagnostic with the same "qualify with `<plugin>/<name>`"
+recovery hint shown for form heads.
+
+```sjon
+; Form in plugin `host` references the paint plugin's color
+; explicitly, so a sibling `display` plugin declaring `color`
+; cannot collide here.
+(form :name swatch
+  (key :name hue :type paint/color :optional false))
+```
+
+---
+
+## 7. The keyword pairing rule (read this twice)
+
+The single most common gotcha. The parser pairs `:key` with the
+**next non-keyword value**. When two `:keyword` tokens come back
+to back, the first does **not** become the second's value:
+
+```sjon
+(stack :mode :mask)
+; → two positional flags: :mode and :mask
+;   NOT mode = :mask
+```
+
+This is the parser's "greedy" rule: a `:key` in value position
+is impossible. If a `:keyword` ever shows up where a value
+should be, it's promoted to a positional flag and the pending
+`:key` it would have paired with becomes a positional flag too.
+
+The closing `)` is the same kind of break: a `:keyword` left
+dangling at the end of a form has no value to pair with, so it
+becomes a trailing positional flag.
+
+```sjon
+(camera :zoom 2 :ortho)
+; → :zoom pairs with 2; :ortho is a trailing positional flag.
+```
+
+### Do this, not that
+
+The fix depends on what the value is supposed to mean. Three
+options:
+
+```sjon
+; ✗ Doesn't pair — :mode and :mask both end up as positional flags.
+(stack :mode :mask)
+
+; ✓ Use a symbol when the schema expects a closed-set enum.
+(stack :mode mask)
+;        ^^^^ pairs as a kvpair: mode = mask (a symbol).
+
+; ✓ Use a string when the schema expects free-form text.
+(stack :mode "mask")
+;        ^^^^^^ pairs as a kvpair: mode = "mask".
+
+; ✓ Wrap in a vector when you really want a keyword in value position.
+(stack :modes [:mask])
+;        ^^^^^^^ pairs as a kvpair: modes = [:mask].
+```
+
+Most plugins design around this. A slot for "the projection mode"
+takes a symbol (`ortho` / `perspective`) or a member-set on a
+symbol underlying — not a keyword. When you're reading a plugin's
+schema and you see a slot typed `symbol` with a closed-set list,
+write the value bare:
+
+```sjon
+(camera :projection ortho)             ; ✓ symbol value
+(camera :projection :ortho)
+; parses as two positional flags: :projection and :ortho
+; not as projection = :ortho
+```
+
+> **Remember.** A keyword can never be the value of a kvpair.
+> Reach for a symbol or a string instead.
+
+A second consequence: forms with `.positional = .none` (§11)
+reject every flag, which is how this gotcha announces itself —
+you'll see one diagnostic per accidentally-promoted keyword.
+
+---
+
+## 8. Comments
+
+Three syntaxes:
+
+```sjon
+; line comment to end of line
+;; conventionally for section headings
+#| block comment, may span lines |#
+```
+
+Comments attach to the nearest following structural node — they
+ride along through structural edits and are preserved through
+the lossless print mode. Canonical print drops them. Block
+comments do not nest, so don't try to comment out a region that
+already contains `#| … |#`.
+
+Use them. Especially:
+
+- A `;` above a kvpair to explain a non-obvious value.
+- A `;;` heading to break a long form into sections.
+- A `#| … |#` to stash a few lines of in-progress alternative
+  during edits.
+
+```sjon
+(scene :bpm 130
+  ;; main canvas
+  (canvas :name "main" :w 1920 :h 1080
+    ; the radius is driven by the beat clock
+    (shape :sdf :radius (* 2 (b 1)))))
+```
+
+---
+
+## 9. Strings revisited — when to reach for `"""…"""`
+
+Two surface forms, one value:
+
+- `"…"` — escape-quoted. Recognised escapes: `\\`, `\"`, `\n`,
+  `\t`, `\r`, `\u{NNNN}`. The common case.
+- `"""…"""` — triple-quoted raw. Body is taken verbatim. No
+  escape processing, no dedent, no newline stripping.
+
+Reach for `"""…"""` when escape-quoting would clutter the
+payload — embedded shader source, regular expressions, paths
+with backslashes, snippets of HTML / XML.
+
+```sjon
+(shader-module :name "hello-triangle"
+  :source """@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var pos = array<vec2f, 3>(
+    vec2(0.0, 0.5),
+    vec2(-0.5, -0.5),
+    vec2(0.5, -0.5),
+  );
+  return vec4f(pos[i], 0.0, 1.0);
+}
+""")
+```
+
+```sjon
+"""C:\path\to\file"""             ; backslash is literal
+"""she said "hi" today"""         ; single quotes are content
+```
+
+### The "opens with a newline" gotcha
+
+If the opening `"""` is alone on a line, the **first byte of the
+body is `\n`**:
+
+```sjon
+; Body starts with a literal newline.
+:source """
+@vertex …"""
+
+; Body starts with `@vertex` — no leading newline.
+:source """@vertex …"""
+```
+
+Pick the one you want; both are valid.
+
+### What `"""…"""` cannot do
+
+- **Three consecutive `"`** can't appear in a raw body — the
+  closer is greedy. For payloads containing `"""`, fall back to
+  `"…"` with `\"` escapes.
+- **Trailing `"`** before the closer is impossible for the same
+  reason.
+
+There's no hash-padded raw form (no Rust-style `r#"…"#`) and no
+string-concat operator in the substrate, so those edge cases
+route through escape-quoting. A host may add a concat expression
+via a plugin, but the escape-quoted form is the universal answer
+that always works.
+
+A raw string and an escape-quoted string with the same decoded
+bytes are **equal values**: `"""hello"""` equals `"hello"`. Tools
+that re-emit your document may rewrite one into the other. The
+decoded content survives; the choice of delimiter does not.
+
+---
+
+## 10. Expressions — when a form is computation
+
+A form whose head names a built-in or plugin-declared **safe
+expression function** is computed at evaluation time, not
+treated as data:
+
+```sjon
+(camera :ortho :zoom (* 2 (b 1)))
+;                    ^^^^^^^^^^^^
+;                    safe expression: multiply 2 by `(b 1)`,
+;                    where `b` is "beats → seconds" from a plugin.
+```
+
+Expressions can appear **anywhere a value can appear** — kvpair
+values, vector elements, positional children. Whether a given
+form is a constructor or an expression is decided by the head's
+name: if it's in the active schema's expression vocabulary, the
+consumer can evaluate it; otherwise it's data.
+
+Expression arguments are positional by default. A function that
+declares labels also accepts an all-labeled call:
+
+```sjon
+(lerp 0 10 0.5)              ; positional
+(lerp :from 0 :to 10 :t 0.5) ; labeled, same call
+(lerp :t 0.5 :from 0 :to 10) ; labeled, reordered
+```
+
+Do not mix the two call styles in one expression. Functions without
+declared labels keep rejecting `:k v` pairs with
+`expr_kvpair_not_allowed`; labeled calls surface specific diagnostics
+for unknown, duplicate, missing, or mixed labels (§13).
+
+The substrate guarantees expressions are **pure**. No I/O, no
+mutation, no side effects, no recursion. Evaluation always
+terminates: depth and step caps are baked in. The same input
+produces the same output every time.
+
+### The built-in (`core`) vocabulary
+
+Available with no plugins beyond `core`:
+
+#### Arithmetic
+
+| Form | Arity | Meaning |
+| --- | --- | --- |
+| `(+ x …)` | 0+ | Sum. `(+)` is `0`. |
+| `(- x …)` | 1+ | Negation (one arg) or left-fold subtraction (two+). |
+| `(* x …)` | 0+ | Product. `(*)` is `1`. |
+| `(/ x y …)` | 2+ | Left-fold division. Division by zero is an error. |
+| `(mod x y)` | 2 | Floating-point remainder. |
+
+#### Comparison
+
+```sjon
+(<  x y)   (>  x y)              ; both: number, number → boolean
+(<= x y)   (>= x y)              ; both: number, number → boolean
+(=  x y)   (!= x y)              ; polymorphic equality → boolean
+```
+
+All binary, all return a boolean. `=` and `!=` work across kinds
+(numbers, strings, keywords, symbols, vectors, booleans, nil)
+and only return `true` when the kinds match and the payloads
+match.
+
+#### Logical
+
+```sjon
+(not x)              ; arity 1, boolean → boolean
+(and x …)            ; arity 0+, short-circuit, returns first falsy or last value
+(or x …)             ; arity 0+, short-circuit, returns first truthy or `false`
+```
+
+Short-circuit means evaluation stops as soon as the result is
+decided. Both operators are value-returning, but with one
+asymmetry worth pinning down:
+
+- `(and 1 2 3)` is `3` — all truthy, the last value wins.
+- `(and 1 nil 3)` is `nil` — first falsy value, returned as-is.
+- `(or false 5 nil)` is `5` — first truthy value wins.
+- `(or false nil)` is `false` — when nothing is truthy, the
+  result is the literal boolean `false`, **not** the last value
+  seen. (Unlike `and`, `or` does not preserve the trailing
+  falsy value.)
+
+`(and)` with no arguments is `true`; `(or)` with no arguments is
+`false`. These are the identity elements for each operation —
+`true` is the value that doesn't change an `and`, `false` is the
+value that doesn't change an `or`.
+
+Truthiness: `false` and `nil` are falsy; everything else
+(including `0`, `""`, `[]`) is truthy. If you want zero-as-false,
+write `(= n 0)` explicitly.
+
+#### Vectors
+
+```sjon
+(vec2 x y)             ; → 2-vector
+(vec3 x y z)           ; → 3-vector
+(vec4 x y z w)         ; → 4-vector
+```
+
+For variable-length vectors, write the literal `[a b c …]`.
+
+#### Math and aggregation
+
+| Form | Arity | Meaning |
+| --- | --- | --- |
+| `(lerp a b t)` | 3 | Linear interpolation: `a + (b - a) * t`. |
+| `(clamp x lo hi)` | 3 | Clamp `x` into `[lo, hi]`. |
+| `(min x …)` | 1+ | Numeric minimum. |
+| `(max x …)` | 1+ | Numeric maximum. |
+| `(dot a b)` | 2 | Dot product of two same-length vectors. |
+| `(cross a b)` | 2 | Cross product of two 3-vectors. |
+| `(length v)` | 1 | Euclidean length of a vector. |
+| `(abs x)` | 1 | Absolute value. |
+| `(sign x)` | 1 | `-1`, `0`, or `1`; `NaN` passthrough. |
+| `(floor x)` `(ceil x)` `(round x)` | 1 | Round toward `−∞`, `+∞`, away-from-zero. |
+| `(fract x)` | 1 | `x − floor(x)` (WGSL — result may be exactly `1.0`). |
+| `(sqrt x)` | 1 | Principal square root; `(sqrt x<0)` → `NaN`. |
+| `(pow base exp)` | 2 | Exponentiation. |
+| `(sin x)` `(cos x)` `(tan x)` | 1 | Trig with `x` in **radians**. |
+| `(asin x)` `(acos x)` `(atan x)` | 1 | Inverse trig; out-of-domain → `NaN`. |
+| `(atan2 y x)` | 2 | Argument of `(x, y)` in `[−π, π]`. |
+| `(radians deg)` `(degrees rad)` | 1 | Angle conversion. |
+| `(pi)` `(tau)` | 0 | Constants `π`, `2π`. |
+| `(saturate x)` | 1 | `clamp(x, 0, 1)`. |
+| `(step edge x)` | 2 | `0` if `x<edge`, else `1`. |
+| `(smoothstep e0 e1 x)` | 3 | WGSL cubic Hermite; `e0==e1` is indeterminate. |
+| `(normalize v)` | 1 | Unit-length vector; zero or empty → error. |
+| `(distance a b)` | 2 | Euclidean distance; lengths must match. |
+| `(reflect I N)` | 2 | Reflection: `I − 2·dot(N,I)·N`. `N` must be unit-length. |
+| `(nth v i)` | 2 | 0-indexed vector access; OOB or non-integer `i` → error. |
+| `(count v)` | 1 | Vector length as a number. |
+| `(hash seed key)` | 2 | 53-bit deterministic integer in `[0, 2^53)`. |
+| `(rand01 seed key)` | 2 | Deterministic uniform float in `[0, 1)`. |
+| `(rand-range seed key lo hi)` | 4 | Float in `[lo, hi)`. |
+| `(rand-int seed key lo hi)` | 4 | Integer in `[lo, hi]` inclusive. |
+| `(rand-bool seed key p)` | 3 | `true` with probability `clamp(p, 0, 1)`. |
+| `(rand-choice seed key v)` | 3 | Pick one element of `v`; empty → error. |
+
+#### Control flow
+
+```sjon
+(let [name1 expr1 name2 expr2 …] body)
+(if test then-expr [else-expr])
+(cond test1 expr1 test2 expr2 … [else-expr])
+```
+
+`let` binds names sequentially — each `expr` sees every earlier
+binding in the same `let`, and the body sees them all:
+
+```sjon
+(let [a 1
+      b (+ a 2)         ; a is in scope here
+      c (* a b)]        ; a and b are in scope here
+  (+ a b c))            ; → 7
+```
+
+`if` evaluates exactly one of its branches:
+
+```sjon
+(if (> 5 2) "big" "small")    ; → "big"
+```
+
+`cond` is a generalised `if/else-if` chain; pairs are
+test-then-value, evaluated left to right, returning the first
+matching value. Use a literal `true` for the default branch:
+
+```sjon
+(cond
+  (< x 0)  -1
+  (> x 0)   1
+  true      0)            ; default fallthrough
+```
+
+A `cond` with no matching test returns `nil`.
+
+#### Iterating with binder forms
+
+`map`, `filter`, `any`, `all`, and `fold` walk a finite vector while
+binding a name to each element. The first child is a literal binder
+vector — `[x]` for the first four (one symbol), `[acc x]` for fold
+(two distinct symbols):
+
+```sjon
+(map [x] [1 2 3 4] (* x x))             ; → [1 4 9 16]
+(filter [x] [-1 0 1 2] (> x 0))         ; → [1 2]
+(any [x] [1 2 3] (> x 2))               ; → true
+(all [x] [1 2 3] (> x 0))               ; → true
+(fold [acc x] 0 [1 2 3 4 5] (+ acc x))  ; → 15
+```
+
+The body evaluates **once per element** in a fresh environment
+layered over the surrounding scope. The outer scope is unchanged
+after the form completes — there is no mutation, no accumulator
+visible outside the loop, no early return other than the
+short-circuit semantics of `any`/`all`.
+
+`fold` threads the body's result back as `acc` for the next
+iteration; the form's value is the body's last result, or the
+evaluated `init` if `xs` is empty. Like the other binders, fold has
+no closure value — the binding lives only inside the form.
+
+These are not first-class lambdas. You cannot extract "the predicate"
+as a value, store it, or pass it to another form. They exist to let
+you write one expression that touches every element of a vector
+without leaving the config language.
+
+### A worked example using bindings
+
+Domain plugins extend the vocabulary with their own functions
+(time conversions, easing curves, color math). Compose freely:
+
+```sjon
+(group :name "fade"
+  (shape :sdf
+    :radius 0.5
+    :alpha (lerp 1 0 (clamp t 0 1))))
+;          ^^^^^^^^^^^^^^^^^^^^^^^^^^
+;          `t` is a binding the host supplies (e.g. animation time).
+;          The host evaluates :alpha each frame with a fresh `t`.
+```
+
+The expression vocabulary is small on purpose — for "a little
+safe math" inside a config, not for general computation. If you
+need a loop or a closure, lift the work into the host language
+and pass the result through SJON as data.
+
+---
+
+## 11. Reading a plugin's schema
+
+Plugins ship a description of the forms, expression functions,
+and value kinds they declare. The structure is the same whether
+the plugin is documented as a Zig struct, a portable manifest
+(`manifests/meta.sjon`), or a README — for forms, the fields you
+need are always the same few.
+
+### What plugins declare
+
+For each form a plugin owns:
+
+| Field | What it means to you |
+| --- | --- |
+| `name` | The head you write. `(name …)`. |
+| `keys` | The `:k` slots the form accepts. Each key has a name, a value type, an `optional` flag, and optionally a default. |
+| `positional` | Whether positional children are accepted: `none`, `any`, or a typed kind. |
+| `open` | When `true`, the form acts as an extensible bag: unknown keys are accepted and closed-shape sweeps are skipped, while declared key types and duplicate keys still matter. Rare; mostly a prototyping switch. |
+| `description` | A free-text help string editors render on hover. |
+
+A typical declaration table you'd see in a plugin's docs:
+
+```
+(canvas …)
+  :w        length      required          width in canvas units
+  :h        length      required          height in canvas units
+  :bg       string      optional          background color name
+  positional: any (positional children are shapes)
+```
+
+That tells you everything you need: write `:w` and `:h` (and they
+must each be a `length`), `:bg` is optional and takes a string,
+and you can drop shape forms in positionally.
+
+### The type vocabulary
+
+A slot's type is one of the following. Most reference SJON value
+kinds directly; the last row is a reference to a plugin-declared
+**value kind** (covered below).
+
+| Type | Accepts |
+| --- | --- |
+| `any` | Any value. The escape hatch — no checks. |
+| `number` | A number, with or without a unit. |
+| `string` | A string. |
+| `symbol` | A bare symbol. Common for closed-set enum values. |
+| `boolean` | `true` or `false`. |
+| `nil` | Only `nil`. |
+| `vector` | Any vector, untyped elements. |
+| `form` | Any nested form. |
+| `expr` | A safe-expression form. |
+| `<kind-name>` | Reference to a plugin-declared value kind, written as a bare symbol (e.g., `length`, `point`, `projection`). |
+
+There is **no `keyword` slot type**. Because of the pairing
+rule (§7), a kvpair value can't be a keyword, so a plugin
+asking for one wouldn't get a way to receive it. Plugins
+expecting "a discrete option" use `symbol` with a closed
+member-set instead.
+
+### Value kinds — refinements
+
+When a plugin declares a value kind, it picks one concrete
+underlying shape (number, string, vector, form, or symbol) and
+may refine that shape. A kind can also be a flat union of existing
+kinds. As an author, all you need is the plugin's docs telling you
+which constraint applies. The common refinements are:
+
+- **Vector shape** — pinned element kind and (optionally)
+  length. `point` might be "2-vector of numbers"; `rgba` might
+  be "4-vector of numbers."
+- **Unit shape** — required unit presence and an allowed list
+  of unit suffixes. `duration` might require a unit drawn from
+  `s | ms | b`.
+- **Numeric bounds** — range and integrality constraints on
+  number-underlying kinds. `opacity` might be "number in
+  [0, 1]"; `iteration-count` might be "integer ≥ 1".
+- **String bounds** — length and closed format checks on
+  string-underlying kinds. `slug` might require 1–64 codepoints;
+  `email-address` might use the `email` format.
+- **Member set** — a closed list of allowed values for a
+  symbol-underlying or string-underlying kind. `projection`
+  might be `ortho | perspective`.
+- **Head set** — a closed list of allowed form heads for a
+  form-underlying kind. A `:shape` slot might accept only
+  `(circle …)` or `(rect …)`.
+- **Cross-reference** — a symbol-underlying kind whose allowed
+  names come from matching forms in the validated document or
+  scope. A `phrase-name` slot might reference a `(phrase :name …)`.
+- **Union alternatives** — a slot accepts a value that satisfies
+  one of several named kinds. The branches stay flat: unions do
+  not nest.
+
+Worked examples of writing to each:
+
+```sjon
+; Slot typed `length` (number underlying, no unit constraint).
+(circle :radius 0.5)
+(circle :radius 16)
+
+; Slot typed `point` (vector underlying, len 2, element number).
+(circle :center [160 120])
+
+; Slot typed `duration` (number underlying, required unit ∈ {s, ms, b}).
+(delay :wait 250ms)               ; ✓
+(delay :wait 4b)                  ; ✓
+(delay :wait 0.5)                 ; ✗ no unit, validator rejects
+
+; Slot typed `opacity` (number underlying, in [0, 1] inclusive).
+(layer :opacity 0)                ; ✓
+(layer :opacity 0.5)              ; ✓
+(layer :opacity 1)                ; ✓
+(layer :opacity 1.5)              ; ✗ above maximum
+(layer :opacity -0.1)             ; ✗ below minimum
+
+; Slot typed `projection` (symbol underlying, members [ortho, perspective]).
+(camera :projection ortho)        ; ✓
+(camera :projection perspective)  ; ✓
+(camera :projection oblique)      ; ✗ not in member set
+
+; Slot typed `shape-form` (form underlying, head set [circle, rect]).
+(badge :shape (circle :radius 4)) ; ✓
+(badge :shape (rect :w 4 :h 4))   ; ✓
+(badge :shape (triangle :side 4)) ; ✗ head not in set
+
+; Slot typed `slug` (string underlying, length/format constraints).
+(route :slug "intro-scene")       ; ✓
+(route :slug "")                  ; ✗ below minimum length
+
+; Slot typed `phrase-name` (symbol cross-reference to phrase names).
+(phrase :name intro)
+(play :phrase intro)              ; ✓
+(play :phrase missing)            ; ✗ no matching phrase name
+
+; Slot typed `pitch-or-event` (union of named kinds).
+(emit :value c4)                  ; ✓ if `c4` satisfies `pitch`
+(emit :value (note :at 0))        ; ✓ if `(note …)` satisfies `event`
+```
+
+The key insight: a value kind is the plugin's way of saying
+"I want this slot to be more specific than just a number." You
+don't define them as an author — you write values that satisfy
+them.
+
+---
+
+## 12. Common patterns
+
+### Required vs optional keys
+
+The plugin tells you which keys are required. Authors write
+required keys explicitly; optional keys can be omitted. The
+validator emits one diagnostic per missing required key unless the key
+declares a default.
+
+```sjon
+; circle requires :center and :radius; :color is optional.
+(circle :center [0 0] :radius 1)                 ; ✓
+(circle :center [0 0] :radius 1 :color "red")   ; ✓
+(circle :radius 1)                               ; ✗ missing :center
+```
+
+### Defaults and effective values
+
+A default is the plugin's fallback for an omitted key. It makes the key
+effectively optional, but it does not rewrite your source:
+
+```sjon
+; render-target declares :bg default "black".
+(render-target :w 320 :h 240)                    ; effective :bg = "black"
+(render-target :w 320 :h 240 :bg "navy")         ; explicit value wins
+```
+
+Production validation reads effective values in the places where
+presence matters: cross-reference names and references, discriminant
+selection, and exclusive groups. Exclusive groups use an author-first
+rule: if you explicitly write one alternative, a sibling alternative's
+default does not silently conflict with it.
+
+Multi-key alternatives (`(alt :keys [from to])`) are all-or-nothing
+bundles: set every key in the bundle, or none. A partial bundle
+surfaces as `exclusive_bundle_partial` — see `docs/LANGUAGE.md` §6.2.1
+for the full diagnostic table.
+
+Expression defaults can still fail when the host materializes them. If
+you omit a key and see `default_eval_failed`, the schema's default was
+declared but could not be evaluated by the active host.
+
+### Typed vector slot
+
+```sjon
+; point is a 2-vector of numbers.
+(circle :center [160 120])                       ; ✓
+(circle :center [160 120 0])                     ; ✗ wrong length
+(circle :center [160 "left"])                    ; ✗ wrong element kind
+```
+
+### Member-set enum
+
+```sjon
+; projection is a symbol from [ortho, perspective].
+(camera :projection ortho)                       ; ✓
+(camera :projection :ortho)                      ; ✗ keyword can't pair (§7)
+(camera :projection "ortho")                     ; ✗ string, not symbol
+```
+
+### Form-as-slot (head-set) pin
+
+```sjon
+; :shape accepts only (circle …) or (rect …).
+(badge :shape (circle :radius 4))                ; ✓
+(badge :shape (rect :w 4 :h 4))                  ; ✓
+(badge :shape (triangle :side 4))                ; ✗ head not allowed in this slot
+```
+
+### Embedding multi-line code
+
+Use `"""…"""` for shader source, regex, path strings, anything
+where backslashes or quotes would clutter:
+
+```sjon
+(shader-module :name "hello"
+  :source """@fragment
+fn fs() -> @location(0) vec4f {
+  return vec4f(1.0, 0.0, 0.0, 1.0);
+}
+""")
+```
+
+### Driving a parameter from an expression
+
+Any value position can hold a safe expression. The host evaluates
+it when it pulls the value out:
+
+```sjon
+(group :name "pulse"
+  (shape :sdf
+    :radius (* 0.5 (lerp 0.8 1.2 t))
+    :alpha  (clamp (- 1 t) 0 1)))
+;            ^^^^^^^^^^^^^^^^^^
+;            t is a host-supplied binding (e.g. normalized time).
+```
+
+When the expression's `:result` is declared in the manifest, the
+validator type-checks it against the slot before evaluation. A
+`(vec3 …)` in a `:radius` slot expecting a number surfaces
+`wrong_underlying` at validate time — no runtime trip required.
+Opaque expressions (`let`, `if`, host-bound symbols, expressions
+whose declared result is too coarse to prove a refined named kind)
+still defer to evaluation, so authoring with `let`-bound numbers in
+a vec3 slot stays clean.
+
+### Host-lowered forms
+
+Some schemas declare a form as surface syntax that a host lowers into
+ordinary forms before final validation. The manifest names a lowering
+hook contract; the `.sjon` document does not contain rewrite code and
+does not choose the implementation.
+
+For authors, this has three practical effects:
+
+- The document is fully usable only under a host that implements the
+  declared hook.
+- The hook reads effective values, so omitted defaulted keys are visible
+  to lowering code.
+- Diagnostics from lowered output should trace back to the source form
+  through provenance, even when the final error belongs to a generated
+  form.
+
+### Mixing kvpairs and positional children
+
+A form may carry both, freely intermixed in source order:
+
+```sjon
+(canvas :name "main" :w 1920 :h 1080
+  (camera :ortho :zoom 2)             ; positional child
+  (shape :sdf :radius 0.5)            ; positional child
+  :bg "#202028"                       ; kvpair after children — still valid
+  (placeholder :note "TODO"))         ; positional child
+```
+
+Plugins decide whether positional children are allowed at all
+(`positional none / any / kind`); see §11.
+
+**Convention:** even though intermixing is legal, most authors
+write **keys first, children last**. It scans better, makes diffs
+quieter when children move around, and matches the shape of every
+example earlier in this handbook. Reach for the trailing-kvpair
+form (like `:bg "#202028"` above) only when the value is a
+trailing-flag-style afterthought.
+
+### Qualifying heads for portability
+
+Bare heads are the default and almost always fine (§6). But for
+documents that need to validate cleanly across **multiple host
+setups** — a scene shared between a renderer that loads `shapes`
+and one that loads `shapes` + a third-party `art-shapes` — a
+bare `(circle …)` is one collision away from `ambiguous_form`.
+
+A defensive convention for portable documents:
+
+- **Domain-specific plugin heads** — qualify them
+  (`shapes/circle`, `audio/sample`). The cost is a few extra
+  characters; the payoff is one less way for an unfamiliar host
+  to reject the document.
+- **Core / built-in heads** — leave bare. There's no second
+  plugin that could shadow `let`, `if`, `+`, `lerp`, etc., so
+  the qualification would only add noise.
+
+For documents authored against one known host (the common case),
+bare everywhere is still the right default. This pattern is for
+the "ship across many hosts" scenario.
+
+---
+
+## 13. Diagnostics gallery
+
+When something is wrong, the validator emits diagnostics with
+spans (so editors can underline) and stable codes (so tools can
+match without depending on prose). Here are the eight you'll
+see most while writing.
+
+| Code | Message looks like | What's wrong | Fix |
+| --- | --- | --- | --- |
+| `unknown_form` | unknown form `wibble` | The head doesn't match any plugin. | Typo? Missing plugin? Check `(qualified/head)` if there's a namespace. |
+| `unknown_key` | unknown keyword `:width` in form `canvas` | The key isn't declared on this form. | Typo, or use a sibling key. Try `:w` instead of `:width`. |
+| `duplicate_key` | duplicate keyword `:bpm` in form `scene` | Same `:k` appears twice. | Remove or rename the duplicate. |
+| `missing_required_key` | form `circle` is missing required keyword `:radius` | A required key isn't present. | Add it. |
+| `positional_not_allowed` | form `circle` does not accept positional children | Form is declared `positional = none`. | Wrap the child in the right key, or move it under a parent that allows children. |
+| `wrong_underlying` | form `scene` keyword `:bpm` expects number, got string | Slot's value type doesn't match. | Look at the slot's declared type; convert the value. |
+| `arity_mismatch` | expression `lerp` expects exactly 3 argument(s), got 2 | Wrong argument count to an expression. | Add or remove arguments. |
+| `ambiguous_form` | form `verb` is ambiguous — defined by [a, b]; qualify with `<ns>/verb` | Two plugins both own the bare head. | Use `a/verb` or `b/verb`. |
+
+A few more that show up around the keyword-pairing rule (§7):
+
+- `expr_kvpair_not_allowed` — you wrote `:k v` inside an
+  expression function that does not declare labeled parameters.
+- `expr_unknown_label` / `expr_duplicate_label` /
+  `expr_missing_label` / `expr_mixed_args` — a labeled expression
+  call has the wrong labels or mixes positional and labeled
+  arguments.
+- `not_member` — a symbol or string isn't in the slot's
+  closed-set list. Re-check the plugin's enum.
+- `not_head_member` — a form's head isn't in the slot's
+  allowed list (HeadSet). Use one of the pinned heads.
+- `unit_required` / `unit_not_allowed` — the slot's `UnitShape`
+  either requires a suffix you omitted (bare `90` when the slot
+  wants `90deg`) or rejects the suffix you supplied (`90%` when
+  only `[deg, rad]` are allowed). Unit-suffix mismatches go
+  here, not `wrong_underlying` — the latter is reserved for the
+  case where the underlying kind is wrong (e.g., string instead
+  of number).
+- `default_eval_failed` — an omitted key has an expression default,
+  but the active host could not evaluate it.
+- `lowering_hook_missing` / `lowering_hook_failed` — the schema says a
+  form must be lowered by a host hook, but the host cannot run that
+  hook successfully.
+
+The full list of diagnostic codes is in
+[`LANGUAGE.md` §7.6](LANGUAGE.md). Codes are stable across host
+implementations; messages are not — match on the code if you're
+building tooling.
+
+---
+
+## 14. Quick reference
+
+### Tokens
+
+```
+(  )                    ; form
+[  ]                    ; vector
+:keyword                ; keyword (a name with a leading `:`)
+symbol                  ; symbol (a name without a leading `:`)
+123  -1.25  1e9         ; numbers
+4b  90deg  50%          ; numbers with unit
+2026-05-22              ; date
+12:34:56.789            ; time
+"…"   """…"""           ; strings (escape / raw)
+true  false  nil        ; reserved literals
+;       …               ; line comment
+#|      …      |#       ; block comment
+```
+
+All identifiers (keywords, symbols, heads) are **case-sensitive**:
+`:bpm` ≠ `:BPM`, `circle` ≠ `Circle`.
+
+### Value kinds (the closed eleven)
+
+```
+nil   boolean   number   number_with_unit   date   time
+string   keyword   symbol   vector   form
+```
+
+### Built-in expression vocabulary (`core`)
+
+```
+arithmetic     + - * / mod
+comparison     < <= > >= = !=
+logical        and or not                  ; and/or short-circuit
+vectors        vec2 vec3 vec4
+math (basic)   lerp clamp min max dot cross length
+math (ext.)    abs sign floor ceil round fract
+               sqrt pow
+               sin cos tan asin acos atan atan2
+               radians degrees
+constants      pi tau                      ; 0-arity: (pi) (tau)
+smoothing      saturate step smoothstep    ; WGSL conventions
+vector ops     normalize distance reflect
+list ops       nth count
+random         hash rand01 rand-range rand-int rand-bool rand-choice
+                                           ; seeded SplitMix64; pure & deterministic
+control        let if cond
+binders        map filter any all fold
+```
+
+Domain errors (e.g. `(sqrt -1)`, `(asin 2)`) propagate IEEE 754
+`NaN`. No `MathDomain` error code; expressions stay total over `f64`.
+
+### Bare vs qualified head
+
+```
+(circle …)              ; bare — works iff one plugin owns "circle"
+(shapes/circle …)       ; qualified — never ambiguous
+```
+
+### The keyword pairing rule
+
+```
+:k v          ; v is a value of any kind except keyword → kvpair
+:k :other     ; `:k` is a positional flag, `:other` becomes the new pending
+:k            ; (frame closes) → :k is a positional flag
+```
+
+A keyword can never be the value of a kvpair. Use a symbol or a
+string instead.
+
+### Symbol vs string vs keyword in a slot
+
+```
+(camera :projection ortho)    ; symbol value
+(camera :projection "ortho")  ; string value
+(camera :projection :ortho)   ; keyword flag, not a kvpair value
+```
+
+### Where to look next
+
+- [`LANGUAGE.md`](LANGUAGE.md) — the formal spec. Every claim in
+  this document is paraphrased from there; reach for it when you
+  want exhaustive detail (encodings, lifetimes, edit operations,
+  extensibility).
+- [`examples/`](../examples/) — runnable scenes:
+  `basic.sjon`, `with-expressions.sjon`, `wgsl-shader.sjon`,
+  `webgpu-render-pipeline.sjon`, `plugins/shapes-scene.sjon`.
+  Each is meant to parse and validate cleanly under its documented
+  schema.
+- [`examples/plugins/README.md`](../examples/plugins/README.md) —
+  if you've crossed over into wanting to **define** your own
+  forms, expression functions, or value kinds, start there.
+- [`manifests/meta.sjon`](../manifests/meta.sjon) — the meta-schema
+  for portable plugin manifests, written in SJON. Hosts can load
+  these manifests to provide validation and tooling vocabulary;
+  ordinary `.sjon` documents do not import them.
+
+### Exporting your plugin's schema
+
+Once you have a working plugin (whether a static `.zig` literal or a
+manifest like `examples/plugins/double/plugin.sjon`), you can hand
+its schema off to downstream tools — TypeScript projects, codegen
+pipelines, JSON Schema validators in other ecosystems — without
+making them re-implement the SJON parser. Run:
+
+```
+sjon export-schema mydoc.sjon --target=both --output=./gen
+```
+
+This writes `./gen/schema.json` (JSON Schema 2020-12) and
+`./gen/types.d.ts` (TypeScript declarations) describing the canonical
+JSON shape of `sjon to-json --canonical` output. The schema is
+**lossy on semantics JSON Schema can't enforce** — cross-references,
+expression evaluation, source-order rules — and embeds an
+`x-sjon-export-warnings` block listing where it falls short. See
+[`SCHEMA_EXPORT.md`](SCHEMA_EXPORT.md) for the full mapping table,
+the lossiness budget, and worked examples.
+
+### Calling the exporter from your application
+
+If your tooling pipeline already runs in Node, Rust, or TypeScript,
+you can skip the CLI and call the exporter directly:
+
+- **Node** — `import { SjonHost } from "./hosts/web/SjonHost.ts"` →
+  `host.exportSchema(source, { target, layout })` returns the same
+  envelope the CLI prints, JSON-decoded.
+- **Rust** — `sjon_host::SjonHost::export_schema(source, &options)`
+  returns a serde-deserialized `ExportSchemaResult` with typed
+  `aggregated` / `per_plugin` artifact slots.
+- **TypeScript-parity** —
+  `exportSchema(source, hostOpts, exportOpts)` from
+  `hosts/typescript-parity/src/Host.ts` is the native port (no WASM
+  needed).
+
+See [`SCHEMA_EXPORT.md` § Calling the exporter](SCHEMA_EXPORT.md#calling-the-exporter)
+for full code samples per host.

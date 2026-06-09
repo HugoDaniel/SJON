@@ -1,0 +1,3 @@
+; Plugin loads cleanly; data form is missing the required `:name` key.
+(diagnostics
+  (diagnostic :code missing_required_key :path [widget]))

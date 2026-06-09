@@ -1,0 +1,3 @@
+; The lower range boundary. All-zero components must lex and
+; parse cleanly.
+00:00:00

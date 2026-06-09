@@ -1,0 +1,2 @@
+; `line` is not a local but resolves additively against the global catalog → clean.
+(diagnostics)

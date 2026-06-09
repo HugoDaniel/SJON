@@ -1,0 +1,32 @@
+; Axis D (variant discriminant) — negative direction.
+;
+; The author writes a `bass`-only key (`:sequence`) but omits the
+; discriminant `:kind` (typed as `kind-tag`, a closed-enum
+; value-kind, which defaults to `kick`). With axis D off the
+; discriminant is absent -> `missing_discriminant_key` at
+; `[track]` plus `unknown_key` at `[track, sequence]` (no variant
+; active means `:sequence` is unknown to the base form). With
+; axis D on the overlay yields `kind = kick` -> variant `kick`
+; active -> `:sequence` is a `bass` key and is still unknown ->
+; `unknown_key` remains, but `missing_discriminant_key` is
+; suppressed.
+;
+; The user-visible shift: axis-on tells you "you're in the kick
+; variant; :sequence doesn't belong here" instead of axis-off's
+; "the discriminant is missing." Both surface the same author
+; mistake; axis-on names the active variant explicitly.
+;
+; `expected.sjon` matches the axis-off baseline (both diagnostics).
+(plugin :name probe :version "1.0.0"
+  (value-kind :name kind-tag
+    :underlying symbol
+    :members (member-set :values [kick bass]))
+  (form :name track
+    :discriminant kind
+    (key :name kind :type kind-tag :default kick :optional true)
+    (variant :when kick
+      (key :name step :type number :optional true))
+    (variant :when bass
+      (key :name sequence :type any :optional true))))
+
+(track :sequence [a b])

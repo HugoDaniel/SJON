@@ -1,0 +1,4 @@
+; The emitted (module shader) validates as the declared :open :positional any
+; form; the source (shader-decl) lowered away. The bare positional symbol is a
+; clean untyped positional, so nothing surfaces.
+(diagnostics)

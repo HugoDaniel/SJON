@@ -1,0 +1,6 @@
+; The produces graph up/task -> down/row -> up/task is cyclic across two
+; plugins; `lowering_cycle` is emitted once at the entry form's path
+; (`up/task`, the first lowering form walked). `(plain)` validates cleanly
+; against its :open declaration.
+(diagnostics
+  (diagnostic :code lowering_cycle :path [up task lowering]))

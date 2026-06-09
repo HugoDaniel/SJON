@@ -1,0 +1,10 @@
+; `task` declares `:done` and `:archived` as positional flags. A
+; document that repeats a declared flag trips `duplicate_positional_flag`
+; on the second occurrence — distinct from `not_flag_member` (an
+; undeclared flag) and from the loader's `invalid_manifest` for a
+; duplicate `(flag …)` declaration.
+(plugin :name flag-set-test :version "1.0.0"
+  (form :name task
+    :positional (flag-set
+      (flag :name done)
+      (flag :name archived))))

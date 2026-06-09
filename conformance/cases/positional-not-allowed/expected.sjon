@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code positional_not_allowed :path [scene 0]))

@@ -1,0 +1,3 @@
+; Clean — `:done` is a declared flag, the hook runs, and the lowered
+; `task-normal` re-validates without diagnostics.
+(diagnostics)

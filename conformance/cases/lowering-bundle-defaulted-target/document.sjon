@@ -1,0 +1,25 @@
+; The only fixture exercising the default-arm read path through a
+; non-identity hook. Author omits `:target`; the source-tree
+; materializer fills it with `hero` (as `Expr.Value.keyword`).
+; `test/bundle-v1` reads `:target` via `input.symbol`, which
+; normalizes keyword→symbol at the read layer before writing into
+; the lowered link's cross-ref `:to` slot — without that
+; normalization the validator's author-path would reject with
+; `not_cross_ref` and this fixture would regress.
+(plugin :name probe :version "1.0.0"
+  (value-kind :name target-ref :underlying symbol
+    :cross-ref (cross-ref :target target))
+  (form :name bundle
+    (key :name name :type symbol :optional false)
+    (key :name target :type symbol :optional true :default hero)
+    :lowering (lowering :hook test/bundle-v1 :produces [asset link]))
+  (form :name asset
+    (key :name name :type symbol :optional false))
+  (form :name link
+    (key :name from :type symbol :optional false)
+    (key :name to :type target-ref :optional false))
+  (form :name target
+    (key :name name :type symbol :optional false)))
+
+(target :name hero)
+(bundle :name main)

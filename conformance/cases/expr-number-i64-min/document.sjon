@@ -1,0 +1,5 @@
+; i64.min (-2^63) round-trips exactly. The lexeme parses as a single
+; signed integer token; parseInt(i64) accepts -9223372036854775808, so
+; the AST carries Tag.number_i64 with bit-faithful payload and eval
+; threads it through the let-binding without precision loss.
+(let [x -9223372036854775808] x)

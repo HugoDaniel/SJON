@@ -1,0 +1,3 @@
+; The 12-char `HH:MM:SS.fff` form. Fractional must be exactly 3
+; digits; parser emits one Tag.time node with no diagnostics.
+12:34:56.789

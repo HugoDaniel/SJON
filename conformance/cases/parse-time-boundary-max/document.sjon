@@ -1,0 +1,3 @@
+; The upper range boundary. 23:59:59.999 is the largest valid
+; time; 24:00:00 is rejected (see parse-time-invalid-hour-24).
+23:59:59.999

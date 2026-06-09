@@ -1,0 +1,11 @@
+; Binds `(big n)` to `:impl "wasm:huge"` — the sibling double.wasm
+; exports `huge` as a function that returns a frame header claiming
+; a ~4 GiB payload that doesn't exist. Hosts MUST cap the reported
+; length before allocating mirror buffers (spec §9.3); the rejection
+; surfaces as `plugin_func_alloc_failed` at the call span.
+(plugin :name double :version "1.0.0"
+  (expr-func :name big
+    :arity (fixed 1)
+    :params [number]
+    :result number
+    :impl "wasm:huge"))

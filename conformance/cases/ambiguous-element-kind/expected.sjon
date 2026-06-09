@@ -1,0 +1,4 @@
+; Bare `color` resolves to two value-kinds — emit at the kvpair value's
+; slot path.
+(diagnostics
+  (diagnostic :code ambiguous_element_kind :path [swatch hue]))

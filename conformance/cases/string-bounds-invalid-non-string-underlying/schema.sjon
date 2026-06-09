@@ -1,0 +1,8 @@
+; :string-bounds is only meaningful when :underlying is string; the
+; loader rejects it on any other underlying with `string_bounds_invalid`.
+(plugin :name string-bounds-invalid-non-string-underlying :version "1.0.0"
+  (value-kind :name ss
+    :underlying number
+    :string-bounds (string-bounds :min-len 1))
+  (form :name set
+    (key :name v :type ss :optional false)))

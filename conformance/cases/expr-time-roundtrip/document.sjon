@@ -1,0 +1,4 @@
+; Time round-trip through `let`: the binder preserves the .time
+; variant (identity-shaped op), and the body returns the bound
+; value unchanged.
+(let [t 12:34:56.789] t)

@@ -1,0 +1,3 @@
+; v2 lowered overlay yields `kind = kick`, variant `kick` is selected
+; on the emitted `(target)`. Clean.
+(diagnostics)

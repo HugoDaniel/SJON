@@ -1,0 +1,7 @@
+; `tan` is host-independent: routed through `src/trig.zig` (musl/
+; compiler_rt software impl), not the platform-libm `@tan` builtin, so the
+; native build and both WASM artifacts agree bit-for-bit. Pinned decimals
+; are the canonical `{d}` rendering. Form 1 (x = 100) exercises the
+; Payne-Hanek large-argument reduction.
+(tan 1.0)
+(tan 100.0)

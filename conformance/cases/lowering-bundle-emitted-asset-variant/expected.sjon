@@ -1,0 +1,3 @@
+; Lowered-tree overlay materializes `:kind = static` on the emitted
+; asset; axis D selects variant `static`; no diagnostics.
+(diagnostics)

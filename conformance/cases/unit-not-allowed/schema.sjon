@@ -1,0 +1,8 @@
+; Same `duration` kind as unit-required, but here the input carries a
+; suffix not in the allow-list. Hits `unit_not_allowed`.
+(plugin :name unit-bad-test :version "1.0.0"
+  (value-kind :name duration
+    :underlying number
+    :unit (unit-shape :required true :allowed [ms s]))
+  (form :name tween
+    (key :name len :type duration :optional false)))

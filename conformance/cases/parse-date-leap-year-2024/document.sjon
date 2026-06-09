@@ -1,0 +1,3 @@
+; 2024 is divisible by 4 and not by 100 — a leap year. Feb 29 is
+; valid; parser emits the date with no diagnostics.
+2024-02-29

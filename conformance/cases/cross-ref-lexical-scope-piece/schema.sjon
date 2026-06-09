@@ -1,0 +1,21 @@
+; `phrase-name` is `:scope piece` bound. References outside any
+; enclosing `(piece …)` emit `cross_ref_outside_scope`.
+(plugin :name xref-lexical :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :description "Reference to a (phrase :name …) form, scoped to the enclosing piece."
+    :cross-ref (cross-ref :target phrase :scope piece))
+
+  (value-kind :name phrase-sequence
+    :underlying vector
+    :description "Vector of phrase-name references."
+    :vector (vector-shape :element phrase-name))
+
+  (form :name phrase
+    (key :name name :type symbol :optional false))
+
+  (form :name track
+    (key :name sequence :type phrase-sequence :optional false))
+
+  (form :name piece
+    :positional any))

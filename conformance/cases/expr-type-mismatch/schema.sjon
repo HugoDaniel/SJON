@@ -1,0 +1,4 @@
+; Typed unary `negate` expects a number. Passing a string trips
+; `expr_type_mismatch` on the expression argument slot.
+(plugin :name expr-type-test :version "1.0.0"
+  (expr-func :name negate :arity (fixed 1) :params [number] :result number))

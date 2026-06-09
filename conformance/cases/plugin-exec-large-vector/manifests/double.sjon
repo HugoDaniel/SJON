@@ -1,0 +1,11 @@
+; Binds `(vector-sum v)` to `:impl "wasm:vector_sum"` — the sibling
+; double.wasm exports `vector_sum` summing all numeric elements of an
+; arbitrarily-sized vector. Used by §18's large-vector stretch case
+; to stress-test the codec allocator path and the host's mirror-buffer
+; cap at length boundaries (10k elements; encoded args ~90 KB).
+(plugin :name double :version "1.0.0"
+  (expr-func :name vector-sum
+    :arity (fixed 1)
+    :params [vector]
+    :result number
+    :impl "wasm:vector_sum"))

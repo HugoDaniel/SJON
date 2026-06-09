@@ -1,0 +1,4 @@
+; Post-graduation (axis A on): the pre-pass consults the overlay,
+; registers the defaulted `origin` symbol, and the author's
+; `[origin]` ref resolves silently.
+(diagnostics)

@@ -1,0 +1,3 @@
+; Bare `myfn` resolves to two expr-funcs; emit at the head span.
+(diagnostics
+  (diagnostic :code ambiguous_expr :path [myfn]))

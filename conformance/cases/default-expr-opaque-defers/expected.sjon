@@ -1,0 +1,2 @@
+; Clean — opaque-result expression defaults defer to runtime.
+(diagnostics)

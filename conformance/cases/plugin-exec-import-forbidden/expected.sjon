@@ -1,0 +1,4 @@
+; Plugin pre-flight rejects the non-empty import set at the
+; `(use-plugin …)` span.
+(diagnostics
+  (diagnostic :code plugin_import_forbidden :path []))

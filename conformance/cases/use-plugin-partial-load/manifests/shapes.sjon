@@ -1,0 +1,3 @@
+(plugin :name shapes :version "1.0.0"
+  (form :name circle
+    (key :name radius :type number :optional false)))

@@ -1,0 +1,4 @@
+; Pre-flight detects the missing export and collapses the resolution
+; into a manifest-phase diagnostic at the `(use-plugin "double")` span.
+(diagnostics
+  (diagnostic :code plugin_export_missing :path []))

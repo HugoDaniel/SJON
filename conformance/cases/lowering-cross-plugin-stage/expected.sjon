@@ -1,0 +1,6 @@
+; `(seed)` (plugin front) lowers to a bare `row`, which resolves to the
+; `back` plugin's `row`. The terminal `row` is missing the required `:v`
+; — a diagnostic reachable only after the cross-plugin stage emitted and
+; materialized the `back/row` form.
+(diagnostics
+  (diagnostic :code missing_required_key :path [row]))

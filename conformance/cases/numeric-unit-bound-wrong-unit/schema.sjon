@@ -1,0 +1,8 @@
+; Unit-bearing bound vs unit-bearing value with a different suffix
+; fires `numeric_bound_unit_mismatch` (independent of any :unit-shape).
+(plugin :name numeric-unit-bound-wrong-unit :version "1.0.0"
+  (value-kind :name dur
+    :underlying number
+    :numeric (numeric-bounds :min 0ms))
+  (form :name set
+    (key :name v :type dur :optional false)))

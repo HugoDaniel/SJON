@@ -1,0 +1,42 @@
+; Inline-manifest fixture mirroring the shape used by
+; examples/web-todo/. Exercises the todo-app/todo forms + their
+; value-kind narrowing (todo-form, todo-list, filter-kw) against a
+; representative seed state. expr-funcs are declared in the standalone
+; manifest under examples/web-todo/todo-app.sjon — this fixture pins
+; the forms-only validation surface so the structural schema can't
+; regress in cross-host diff.
+(plugin :name todo-app :version "0.1.0"
+
+  (form :name todo
+    (key :name id   :type number  :optional false)
+    (key :name text :type string  :optional false)
+    (key :name done :type boolean :optional false))
+
+  (value-kind :name todo-form
+    :underlying form
+    :description "A single (todo …) form."
+    :heads (head-set :names [todo]))
+
+  (value-kind :name todo-list
+    :underlying vector
+    :description "Vector of (todo …) forms."
+    :vector (vector-shape :element todo-form))
+
+  (value-kind :name filter-kw
+    :underlying symbol
+    :description "Display filter: all, active, or done."
+    :members (member-set :values [all active done]))
+
+  (form :name todo-app
+    (key :name filter   :type filter-kw  :optional false)
+    (key :name next-id  :type number     :optional false)
+    (key :name items    :type todo-list  :optional false)))
+
+(todo-app
+  :filter all
+  :next-id 4
+  :items [
+    (todo :id 1 :text "Buy milk"      :done false)
+    (todo :id 2 :text "Write tests"   :done true)
+    (todo :id 3 :text "Ship the demo" :done false)
+  ])

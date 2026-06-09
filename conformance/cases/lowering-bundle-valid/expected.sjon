@@ -1,0 +1,3 @@
+; Hook emits a valid asset + link; the link's `:to hero` resolves
+; against the source `(target :name hero)` via the forest pass.
+(diagnostics)

@@ -1,0 +1,3 @@
+; 70000 > u16 max (65535) → out-of-range under the GPU representation tag.
+(diagnostics
+  (diagnostic :code repr_out_of_range :path [set v]))

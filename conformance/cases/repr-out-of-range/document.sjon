@@ -1,0 +1,11 @@
+; A `:repr u16` slot rejects a value outside the GPU type's range — 70000
+; exceeds u16's max of 65535. The validator catches it before a downstream
+; emitter would silently wrap the bits, emitting `repr_out_of_range`.
+(plugin :name gpu :version "1.0.0"
+  (value-kind :name u16-channel
+    :underlying number
+    :repr (repr-shape :type u16))
+  (form :name set
+    (key :name v :type u16-channel :optional false)))
+
+(set :v 70000)

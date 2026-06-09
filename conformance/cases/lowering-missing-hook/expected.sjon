@@ -1,0 +1,5 @@
+; The lowering registry has no `missing/v1` hook → lowering_hook_missing
+; at the source form's `:lowering` path. The source form itself still
+; validates cleanly against its :open declaration.
+(diagnostics
+  (diagnostic :code lowering_hook_missing :path [sugar lowering]))

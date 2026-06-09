@@ -1,0 +1,7 @@
+; Both `:loops` and `:events` are default-only with no author
+; resolution -> schema ambiguity, not document overpresence. The
+; `multiple_defaulted_alternatives_in_group` code surfaces this to
+; the schema author. See
+; docs/plans/exclusive-group-default-semantics.md.
+(diagnostics
+  (diagnostic :code multiple_defaulted_alternatives_in_group :path [phrase]))

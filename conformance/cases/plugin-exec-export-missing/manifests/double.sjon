@@ -1,0 +1,8 @@
+; Declares `:impl "wasm:halve"` against the `double.wasm` sidecar — the
+; binary has no `halve` export, so pre-flight fails.
+(plugin :name double :version "1.0.0"
+  (expr-func :name halve
+    :arity (fixed 1)
+    :params [number]
+    :result number
+    :impl "wasm:halve"))

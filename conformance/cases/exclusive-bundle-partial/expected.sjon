@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code exclusive_bundle_partial :path [route]))

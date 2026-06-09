@@ -1,0 +1,7 @@
+; The fractional `.fff` tail is all-or-nothing — exactly 3 digits.
+; `.1` is not 3 digits, so the lexer emits a `time` token for the
+; 8-char prefix and leaves `.1` for the next pass (which produces
+; a `.1` number token). The parser walks both tokens cleanly with
+; no diagnostics; downstream consumers see two roots — one time,
+; one number.
+12:34:56.1

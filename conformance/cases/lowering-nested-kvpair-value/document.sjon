@@ -1,0 +1,17 @@
+; Nested-lowerable via a kvpair *value* rather than a positional child:
+; `:slot (inner)`. Both `outer` and `inner` declare `:lowering`, so the
+; child-that-also-lowers contradiction is identical to the positional case —
+; only the attachment differs. `outer` is `:open` so the `:slot` key is
+; accepted at surface validation. The lint fires once, at `inner`; emit-only,
+; so the `<head>-normal` identity terminals still emit and validate clean.
+(plugin :name nestkv :version "1.0.0"
+  (form :name outer :open true
+    :lowering (lowering :hook test/identity-v1 :produces [outer-normal]))
+  (form :name inner :open true
+    :lowering (lowering :hook test/identity-v1 :produces [inner-normal]))
+
+  ; Identity-hook terminals.
+  (form :name outer-normal :open true)
+  (form :name inner-normal :open true))
+
+(outer :slot (inner))

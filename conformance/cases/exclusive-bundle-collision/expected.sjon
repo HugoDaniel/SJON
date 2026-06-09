@@ -1,0 +1,3 @@
+(diagnostics
+  (diagnostic :code exclusive_bundle_collision :path [route exclusive-group])
+  (diagnostic :code unknown_form :path [route]))

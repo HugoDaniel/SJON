@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code unknown_form :path [scene]))

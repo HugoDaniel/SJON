@@ -1,0 +1,7 @@
+; Pins :hash to the all-zeros SHA-256 digest. The resolved wasm
+; bytes hash to something else (the staged double.wasm), so the
+; host's enforceHashPin in src/Host.zig emits plugin_hash_mismatch
+; at the (use-plugin …) span. Proves SHA-256 integrity enforcement
+; on sidecar wasm bytes. The 64-zero pin is intentional sentinel
+; nonsense — no real wasm hashes to it (probability 2^-256).
+(use-plugin "double" :hash "sha256-0000000000000000000000000000000000000000000000000000000000000000")

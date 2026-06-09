@@ -1,0 +1,4 @@
+; The second :name p0 collides; index pass emits duplicate.
+; Path is empty — the index pass walks outside path tracking.
+(diagnostics
+  (diagnostic :code duplicate_cross_ref_target :path []))

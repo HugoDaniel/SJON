@@ -1,0 +1,12 @@
+; Materialization corpus: an explicit author kvpair suppresses overlay
+; population for that key. The schema declares `:default 32` but the
+; document writes `:radius 7`; `materializeDefaults` sees the explicit
+; kvpair via `authorWroteKey`, skips the overlay entry, and emits no
+; diagnostic. The author tree stays the source of truth — a consumer
+; that asks the overlay for `(circle, radius)` gets `null` and falls
+; back to the explicit kvpair carrying 7.
+(plugin :name probe :version "1.0.0"
+  (form :name circle
+    (key :name radius :type number :default 32)))
+
+(circle :radius 7)

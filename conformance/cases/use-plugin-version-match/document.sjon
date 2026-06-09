@@ -1,0 +1,7 @@
+; Pins `:version "1.0.0"` against a manifest that also declares
+; `:version "1.0.0"`. The filesystem resolver compares the strings
+; byte-for-byte and resolves cleanly. Proves the happy path of the
+; (use-plugin … :version …) enforcement added in D3.
+(use-plugin "shapes" :version "1.0.0")
+
+(circle :r 4)

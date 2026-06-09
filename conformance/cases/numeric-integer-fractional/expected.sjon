@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code number_not_integer :path [set v]))

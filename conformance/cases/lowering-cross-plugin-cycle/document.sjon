@@ -1,0 +1,19 @@
+; Cross-plugin lowering cycle. Plugin `up` form `task` produces into
+; plugin `down` (`down/row`), and `down/row` produces back into `up`
+; (`up/task`). The aggregate produces-graph spans both plugins — a cross-
+; plugin edge is just an ordinary aggregate edge (same `lookupForm`
+; resolution, same 3-colour DFS) — so the cycle `up/task -> down/row ->
+; up/task` is rejected statically with `lowering_cycle` before any hook
+; runs. Proof that cross-plugin lowering "falls out of" the aggregate
+; model rather than needing bespoke machinery. `(plain)` is non-lowering,
+; so the runtime lowering pass stays a no-op.
+(plugin :name up :version "1.0.0"
+  (form :name task :open true
+    :lowering (lowering :hook up/task-v1 :produces [down/row]))
+  (form :name plain :open true))
+
+(plugin :name down :version "1.0.0"
+  (form :name row :open true
+    :lowering (lowering :hook down/row-v1 :produces [up/task])))
+
+(plain)

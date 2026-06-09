@@ -1,0 +1,20 @@
+; D8-v2 lowered-tree materialization: the emitted form's expression
+; default fails to evaluate.
+;
+; `sugar` lowers via test/identity-v1, which emits `sugar-normal` by
+; convention. The hook copies declared kvpairs from the source —
+; sugar declares no keys, so the emitted form has no kvpairs.
+; sugar-normal.x has `:default (nope)`, where `nope` is a declared
+; expr-func with no `:impl`. The lowered-tree materializer runs the
+; default for the omitted `:x` slot, the eval fails, and
+; `default_eval_failed at [sugar-normal x default]` lands under
+; `phase = .validation`. Without v2 the materialization never runs
+; over the lowered tree and the diagnostic is missed entirely.
+(plugin :name probe :version "1.0.0"
+  (expr-func :name nope :arity (fixed 0) :result number)
+  (form :name sugar :open true
+    :lowering (lowering :hook test/identity-v1 :produces [sugar-normal]))
+  (form :name sugar-normal
+    (key :name x :type number :optional true :default (nope))))
+
+(sugar)

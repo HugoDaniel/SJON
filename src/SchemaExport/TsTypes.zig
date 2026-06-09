@@ -1,0 +1,884 @@
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+
+const Model = @import("Model.zig");
+const Warnings = @import("Warnings.zig");
+
+fn reprTsAlias(r: Plugin.ValueKind.Repr) []const u8 {
+    return switch (r) {
+        .f32 => "F32",
+        .u32 => "U32",
+        .i32 => "I32",
+        .u16 => "U16",
+        .f16 => "F16",
+    };
+}
+
+pub const Error = error{OutOfMemory};
+
+pub fn emit(
+    a: Allocator,
+    model: Model.Model,
+    warnings: []const Warnings.Warning,
+) Error![]const u8 {
+    var aw: std.Io.Writer.Allocating = .init(a);
+    errdefer aw.deinit();
+    writeAll(&aw.writer, model, warnings, null) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+    };
+    return aw.toOwnedSlice();
+}
+
+pub fn emitForPlugin(
+    a: Allocator,
+    model: Model.Model,
+    plugin: Model.Plugin_,
+    warnings: []const Warnings.Warning,
+) Error![]const u8 {
+    var aw: std.Io.Writer.Allocating = .init(a);
+    errdefer aw.deinit();
+    writeAll(&aw.writer, model, warnings, plugin.name) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+    };
+    return aw.toOwnedSlice();
+}
+
+threadlocal var current_filter: ?[]const u8 = null;
+
+fn writeAll(
+    w: *std.Io.Writer,
+    model: Model.Model,
+    warnings: []const Warnings.Warning,
+    filter_plugin: ?[]const u8,
+) std.Io.Writer.Error!void {
+    current_filter = filter_plugin;
+    defer current_filter = null;
+
+    try writeHeader(w, model.version, warnings);
+    try writePrelude(w);
+    if (filter_plugin) |only| {
+        try writeCrossPluginImports(w, model, only);
+    }
+    for (model.plugins) |p| {
+        if (filter_plugin) |only| {
+            if (!std.mem.eql(u8, p.name, only)) continue;
+        }
+        try w.writeAll("\n// ----- plugin: ");
+        try w.writeAll(p.name);
+        try w.writeAll(" -----\n\n");
+        for (p.forms) |f| try writeForm(w, p, f);
+        try writeBarrel(w, p);
+    }
+}
+
+fn writeCrossPluginImports(
+    w: *std.Io.Writer,
+    model: Model.Model,
+    this_plugin: []const u8,
+) std.Io.Writer.Error!void {
+    var seen_buf: [128]ImportEntry = undefined;
+    var seen_len: usize = 0;
+    for (model.plugins) |p| {
+        if (!std.mem.eql(u8, p.name, this_plugin)) continue;
+        for (p.forms) |f| {
+            try collectCrossPluginImports(w, f, this_plugin, &seen_buf, &seen_len);
+        }
+    }
+    if (seen_len > 0) try w.writeByte('\n');
+}
+
+const ImportEntry = struct { plugin: []const u8, name: []const u8 };
+
+fn collectCrossPluginImports(
+    w: *std.Io.Writer,
+    f: Model.Form,
+    this_plugin: []const u8,
+    seen_buf: []ImportEntry,
+    seen_len: *usize,
+) std.Io.Writer.Error!void {
+    for (f.keys) |k| try emitCrossPluginRefsForShape(w, k.value, this_plugin, seen_buf, seen_len);
+    if (f.discriminator) |d| {
+        for (d.variants) |v| {
+            for (v.keys) |k| try emitCrossPluginRefsForShape(w, k.value, this_plugin, seen_buf, seen_len);
+        }
+    }
+    switch (f.positional) {
+        .none, .any => {},
+        .kind => |shape| try emitCrossPluginRefsForShape(w, shape, this_plugin, seen_buf, seen_len),
+    }
+}
+
+fn emitCrossPluginRefsForShape(
+    w: *std.Io.Writer,
+    shape: Model.ValueShape,
+    this_plugin: []const u8,
+    seen_buf: []ImportEntry,
+    seen_len: *usize,
+) std.Io.Writer.Error!void {
+    switch (shape) {
+        .form_heads => |refs| {
+            for (refs) |ref| {
+                if (ref.plugin.len == 0) continue;
+                if (std.mem.eql(u8, ref.plugin, this_plugin)) continue;
+                var already = false;
+                var i: usize = 0;
+                while (i < seen_len.*) : (i += 1) {
+                    if (std.mem.eql(u8, seen_buf[i].plugin, ref.plugin) and
+                        std.mem.eql(u8, seen_buf[i].name, ref.name))
+                    {
+                        already = true;
+                        break;
+                    }
+                }
+                if (already) continue;
+                if (seen_len.* < seen_buf.len) {
+                    seen_buf[seen_len.*] = .{ .plugin = ref.plugin, .name = ref.name };
+                    seen_len.* += 1;
+                }
+                try w.writeAll("import type { ");
+                try writeFormTypeName(w, ref.plugin, ref.name);
+                try w.writeAll(" } from \"./");
+                try w.writeAll(ref.plugin);
+                try w.writeAll("\";\n");
+            }
+        },
+        .vector => |vs| try emitCrossPluginRefsForShape(w, vs.element.*, this_plugin, seen_buf, seen_len),
+        .union_of => |alts| {
+            for (alts) |alt| try emitCrossPluginRefsForShape(w, alt.shape, this_plugin, seen_buf, seen_len);
+        },
+        else => {},
+    }
+}
+
+fn writeHeader(
+    w: *std.Io.Writer,
+    version: u32,
+    warnings: []const Warnings.Warning,
+) std.Io.Writer.Error!void {
+    try w.writeAll("// sjon-export-version: ");
+    try printDecimal(w, version);
+    try w.writeAll("\n// Generated by sjon — do not edit by hand.\n");
+    try w.writeAll("// Describes the canonical JSON shape of `sjon to-json`.\n");
+    if (warnings.len > 0) {
+        try w.writeAll("//\n// Export warnings:\n");
+        for (warnings) |wn| {
+            try w.writeAll("//   [");
+            try w.writeAll(@tagName(wn.severity));
+            try w.writeAll(" ");
+            try w.writeAll(@tagName(wn.code));
+            try w.writeAll("] ");
+            try w.writeAll(wn.message);
+            try w.writeByte('\n');
+        }
+    }
+    try w.writeByte('\n');
+}
+
+fn writePrelude(w: *std.Io.Writer) std.Io.Writer.Error!void {
+    try w.writeAll(
+        \\export type Keyword<S extends string = string> = { readonly $kw: S };
+        \\export type Symbol_<S extends string = string> = { readonly $sym: S };
+        \\export type SjonDate = { readonly $date: string };
+        \\export type SjonTime = { readonly $time: string };
+        \\export type SjonExpr<TResult = unknown> = { readonly $expr: unknown[] } & { readonly __sjonResult?: TResult };
+        \\export type CrossRef<TargetForm extends string = string, S extends string = string> = Symbol_<S> & { readonly __sjonRef?: TargetForm };
+        \\export type F32 = number & { readonly __sjonRepr?: "f32" };
+        \\export type U32 = number & { readonly __sjonRepr?: "u32" };
+        \\export type I32 = number & { readonly __sjonRepr?: "i32" };
+        \\export type U16 = number & { readonly __sjonRepr?: "u16" };
+        \\export type F16 = number & { readonly __sjonRepr?: "f16" };
+        \\
+        \\
+    );
+}
+
+fn writeForm(
+    w: *std.Io.Writer,
+    p: Model.Plugin_,
+    f: Model.Form,
+) std.Io.Writer.Error!void {
+    try writeFormDoc(w, f);
+    if (f.discriminator) |d| {
+        try writeDiscriminatedFormType(w, p, f, d);
+    } else {
+        try writeFormInterface(w, p, f);
+    }
+}
+
+fn writeFormDoc(w: *std.Io.Writer, f: Model.Form) std.Io.Writer.Error!void {
+    const has_desc = f.description.len > 0;
+    const has_groups = f.exclusive_groups.len > 0;
+    if (!has_desc and !has_groups) return;
+    if (has_desc and !has_groups) {
+        try w.writeAll("/** ");
+        try w.writeAll(f.description);
+        try w.writeAll(" */\n");
+        return;
+    }
+    try w.writeAll("/**\n");
+    if (has_desc) {
+        try w.writeAll(" * ");
+        try w.writeAll(f.description);
+        try w.writeByte('\n');
+        if (has_groups) try w.writeAll(" *\n");
+    }
+    for (f.exclusive_groups) |g| {
+        try w.writeAll(" * @sjon-exclusive-group ");
+        try w.writeAll(switch (g.cardinality) {
+            .exactly_one => "exactly-one",
+            .at_most_one => "at-most-one",
+        });
+        try w.writeAll(" [");
+        for (g.alternatives, 0..) |alt, i| {
+            if (i > 0) try w.writeAll(", ");
+            for (alt, 0..) |kn, j| {
+                if (j > 0) try w.writeAll(" + ");
+                try w.writeAll(kn);
+            }
+        }
+        try w.writeAll("]\n");
+    }
+    try w.writeAll(" */\n");
+}
+
+fn writeFormInterface(w: *std.Io.Writer, p: Model.Plugin_, f: Model.Form) std.Io.Writer.Error!void {
+    try w.writeAll("export interface ");
+    try writeFormTypeName(w, p.name, f.name);
+    try w.writeAll(" {\n");
+    try w.writeAll("  $form: \"");
+    try w.writeAll(f.name);
+    try w.writeAll("\";\n");
+    try w.writeAll("  $ns: \"");
+    try w.writeAll(p.name);
+    try w.writeAll("\";\n");
+    var indices: [64]u16 = undefined;
+    const n_keys = @min(f.keys.len, indices.len);
+    for (0..n_keys) |i| indices[i] = @intCast(i);
+    sortKeysAlphabetically(f.keys, indices[0..n_keys]);
+    for (indices[0..n_keys]) |idx| {
+        try writeKey(w, f.keys[idx], "  ");
+    }
+    switch (f.positional) {
+        .none => {},
+        .any => try w.writeAll("  $children?: unknown[];\n"),
+        .kind => |shape| {
+            try w.writeAll("  $children?: Array<");
+            try writeShape(w, shape);
+            try w.writeAll(">;\n");
+        },
+    }
+    if (f.open) {
+        try w.writeAll("  [key: string]: unknown;\n");
+    }
+    try w.writeAll("}\n\n");
+}
+
+fn writeDiscriminatedFormType(
+    w: *std.Io.Writer,
+    p: Model.Plugin_,
+    f: Model.Form,
+    d: Model.Discriminator,
+) std.Io.Writer.Error!void {
+    try w.writeAll("export type ");
+    try writeFormTypeName(w, p.name, f.name);
+    try w.writeAll(" =");
+    for (d.variants) |v| {
+        try w.writeAll("\n  | {\n");
+        try w.writeAll("      $form: \"");
+        try w.writeAll(f.name);
+        try w.writeAll("\";\n");
+        try w.writeAll("      $ns: \"");
+        try w.writeAll(p.name);
+        try w.writeAll("\";\n");
+        var indices: [64]u16 = undefined;
+        const n_keys = @min(f.keys.len, indices.len);
+        for (0..n_keys) |i| indices[i] = @intCast(i);
+        sortKeysAlphabetically(f.keys, indices[0..n_keys]);
+        for (indices[0..n_keys]) |idx| {
+            const k = f.keys[idx];
+            if (std.mem.eql(u8, k.name, d.key_name)) {
+                try writeDiscriminantKey(w, k, v.when, "      ");
+            } else {
+                try writeKey(w, k, "      ");
+            }
+        }
+        var v_indices: [64]u16 = undefined;
+        const n_v = @min(v.keys.len, v_indices.len);
+        for (0..n_v) |i| v_indices[i] = @intCast(i);
+        sortKeysAlphabetically(v.keys, v_indices[0..n_v]);
+        for (v_indices[0..n_v]) |idx| {
+            try writeKey(w, v.keys[idx], "      ");
+        }
+        switch (f.positional) {
+            .none => {},
+            .any => try w.writeAll("      $children?: unknown[];\n"),
+            .kind => |shape| {
+                try w.writeAll("      $children?: Array<");
+                try writeShape(w, shape);
+                try w.writeAll(">;\n");
+            },
+        }
+        if (f.open) try w.writeAll("      [key: string]: unknown;\n");
+        try w.writeAll("    }");
+    }
+    try w.writeAll(";\n\n");
+}
+
+fn writeKey(w: *std.Io.Writer, k: Model.Key, indent: []const u8) std.Io.Writer.Error!void {
+    const rich_members = richMembersOf(k.value);
+    const has_expr_default = if (k.default) |d| d == .expression else false;
+    const bounds_anno = numericBoundsOf(k.value);
+    const string_anno = stringBoundsOf(k.value);
+    const cross_ref_anno = crossRefOf(k.value);
+    const unit_anno = unitOf(k.value);
+
+    const has_axis_jsdoc = bounds_anno != null or string_anno != null or
+        cross_ref_anno != null or unit_anno != null;
+    const needs_doc = k.description.len > 0 or has_expr_default or
+        rich_members != null or has_axis_jsdoc;
+
+    if (needs_doc) {
+        const use_block = rich_members != null or has_axis_jsdoc;
+        if (use_block) {
+            try w.writeAll(indent);
+            try w.writeAll("/**\n");
+            if (k.description.len > 0) {
+                try w.writeAll(indent);
+                try w.writeAll(" * ");
+                try w.writeAll(k.description);
+                try w.writeByte('\n');
+            }
+            if (has_expr_default) {
+                try w.writeAll(indent);
+                try w.writeAll(" * @default computed via `");
+                try w.writeAll(k.default.?.expression.head);
+                try w.writeAll("`\n");
+            }
+            if (rich_members) |members| {
+                for (members) |m| try writeMemberDocLine(w, m, indent);
+            }
+            if (bounds_anno) |b| try writeNumericBoundsDoc(w, b, indent);
+            if (string_anno) |sb| try writeStringBoundsDoc(w, sb, indent);
+            if (cross_ref_anno) |cr| try writeCrossRefDoc(w, cr, indent);
+            if (unit_anno) |u| try writeUnitDoc(w, u, indent);
+            try w.writeAll(indent);
+            try w.writeAll(" */\n");
+        } else {
+            try w.writeAll(indent);
+            try w.writeAll("/** ");
+            if (k.description.len > 0) try w.writeAll(k.description);
+            if (has_expr_default) {
+                if (k.description.len > 0) try w.writeByte(' ');
+                try w.writeAll("@default computed via `");
+                try w.writeAll(k.default.?.expression.head);
+                try w.writeByte('`');
+            }
+            try w.writeAll(" */\n");
+        }
+    }
+
+    try w.writeAll(indent);
+    try writeKeyName(w, k.name);
+    if (k.optional) try w.writeByte('?');
+    try w.writeAll(": ");
+    try writeShape(w, k.value);
+    try w.writeAll(";\n");
+}
+
+fn writeNumericBoundsDoc(
+    w: *std.Io.Writer,
+    b: Model.NumericBounds,
+    indent: []const u8,
+) std.Io.Writer.Error!void {
+    if (b.min) |min| {
+        try w.writeAll(indent);
+        try w.writeAll(if (b.exclusive_min) " * @exclusiveMinimum " else " * @minimum ");
+        try printF64(w, min.value);
+        if (min.unit) |u| {
+            try w.writeAll(" (");
+            try w.writeAll(u);
+            try w.writeByte(')');
+        }
+        if (min.exact_int and @abs(min.value) > 9007199254740992.0) {
+            try w.writeAll(" [exact-int >2^53]");
+        }
+        try w.writeByte('\n');
+    }
+    if (b.max) |max| {
+        try w.writeAll(indent);
+        try w.writeAll(if (b.exclusive_max) " * @exclusiveMaximum " else " * @maximum ");
+        try printF64(w, max.value);
+        if (max.unit) |u| {
+            try w.writeAll(" (");
+            try w.writeAll(u);
+            try w.writeByte(')');
+        }
+        if (max.exact_int and @abs(max.value) > 9007199254740992.0) {
+            try w.writeAll(" [exact-int >2^53]");
+        }
+        try w.writeByte('\n');
+    }
+    if (b.integer) {
+        try w.writeAll(indent);
+        try w.writeAll(" * @sjon-integer true\n");
+    }
+}
+
+fn writeStringBoundsDoc(
+    w: *std.Io.Writer,
+    sb: Model.StringBounds,
+    indent: []const u8,
+) std.Io.Writer.Error!void {
+    if (sb.min_len) |n| {
+        try w.writeAll(indent);
+        try w.writeAll(" * @minLength ");
+        try printDecimal(w, n);
+        try w.writeByte('\n');
+    }
+    if (sb.max_len) |n| {
+        try w.writeAll(indent);
+        try w.writeAll(" * @maxLength ");
+        try printDecimal(w, n);
+        try w.writeByte('\n');
+    }
+    if (sb.pattern) |p| {
+        try w.writeAll(indent);
+        try w.writeAll(" * @pattern ");
+        try w.writeAll(p);
+        try w.writeByte('\n');
+    }
+    if (sb.format) |f| {
+        try w.writeAll(indent);
+        try w.writeAll(" * @format ");
+        try w.writeAll(@tagName(f));
+        try w.writeByte('\n');
+    }
+}
+
+fn writeCrossRefDoc(
+    w: *std.Io.Writer,
+    cr: Model.CrossRef,
+    indent: []const u8,
+) std.Io.Writer.Error!void {
+    try w.writeAll(indent);
+    try w.writeAll(" * @sjon-cross-ref target=`");
+    try w.writeAll(cr.target_form);
+    try w.writeAll("` name-key=`");
+    try w.writeAll(cr.name_key);
+    try w.writeAll("` acyclic=");
+    try w.writeAll(if (cr.acyclic) "true" else "false");
+    if (cr.scope_form) |sf| {
+        try w.writeAll(" scope-form=`");
+        try w.writeAll(sf);
+        try w.writeByte('`');
+    }
+    try w.writeByte('\n');
+}
+
+fn writeUnitDoc(
+    w: *std.Io.Writer,
+    u: Model.UnitShape,
+    indent: []const u8,
+) std.Io.Writer.Error!void {
+    try w.writeAll(indent);
+    try w.writeAll(" * @sjon-unit required=");
+    try w.writeAll(if (u.required) "true" else "false");
+    if (u.allowed.len > 0) {
+        try w.writeAll(" allowed=[");
+        for (u.allowed, 0..) |s, i| {
+            if (i > 0) try w.writeAll(", ");
+            try w.writeAll(s);
+        }
+        try w.writeByte(']');
+    }
+    try w.writeByte('\n');
+    if (u.bounds) |b| try writeNumericBoundsDoc(w, b, indent);
+}
+
+fn numericBoundsOf(shape: Model.ValueShape) ?Model.NumericBounds {
+    return switch (shape) {
+        .number_bounded => |b| b,
+        else => null,
+    };
+}
+
+fn stringBoundsOf(shape: Model.ValueShape) ?Model.StringBounds {
+    return switch (shape) {
+        .string_with_bounds => |sb| sb,
+        else => null,
+    };
+}
+
+fn crossRefOf(shape: Model.ValueShape) ?Model.CrossRef {
+    return switch (shape) {
+        .cross_ref => |cr| cr,
+        else => null,
+    };
+}
+
+fn unitOf(shape: Model.ValueShape) ?Model.UnitShape {
+    return switch (shape) {
+        .number_with_unit => |u| u,
+        else => null,
+    };
+}
+
+fn printF64(w: *std.Io.Writer, v: f64) std.Io.Writer.Error!void {
+    var buf: [64]u8 = undefined;
+    const trunc: f64 = @trunc(v);
+    const is_integer = trunc == v and @abs(v) < 1e18;
+    const s = if (is_integer)
+        std.fmt.bufPrint(&buf, "{d:.0}", .{v}) catch return error.WriteFailed
+    else
+        std.fmt.bufPrint(&buf, "{d}", .{v}) catch return error.WriteFailed;
+    try w.writeAll(s);
+}
+
+fn writeMemberDocLine(w: *std.Io.Writer, m: Model.Member, indent: []const u8) std.Io.Writer.Error!void {
+    try w.writeAll(indent);
+    try w.writeAll(" * @member ");
+    try w.writeAll(m.name);
+    if (m.label.len > 0) {
+        try w.writeAll(" — ");
+        try w.writeAll(m.label);
+    }
+    if (m.description.len > 0) {
+        try w.writeAll(": ");
+        try w.writeAll(m.description);
+    }
+    if (m.deprecated) {
+        try w.writeAll(" @deprecated");
+        if (m.deprecation_message.len > 0) {
+            try w.writeByte(' ');
+            try w.writeAll(m.deprecation_message);
+        }
+    }
+    try w.writeByte('\n');
+}
+
+fn writeDiscriminantKey(
+    w: *std.Io.Writer,
+    k: Model.Key,
+    when: []const u8,
+    indent: []const u8,
+) std.Io.Writer.Error!void {
+    if (k.description.len > 0) {
+        try w.writeAll(indent);
+        try w.writeAll("/** ");
+        try w.writeAll(k.description);
+        try w.writeAll(" */\n");
+    }
+    try w.writeAll(indent);
+    try writeKeyName(w, k.name);
+    try w.writeAll(": Symbol_<\"");
+    try w.writeAll(when);
+    try w.writeAll("\">;\n");
+}
+
+fn writeKeyName(w: *std.Io.Writer, name: []const u8) std.Io.Writer.Error!void {
+    if (needsQuotedKey(name)) {
+        try w.writeByte('"');
+        try writeDollarEscaped(w, name);
+        try w.writeByte('"');
+    } else {
+        try w.writeAll(name);
+    }
+}
+
+fn needsQuotedKey(name: []const u8) bool {
+    if (name.len == 0) return true;
+    if (!isIdentStart(name[0])) return true;
+    for (name[1..]) |c| if (!isIdentCont(c)) return true;
+    return false;
+}
+
+fn isIdentStart(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_';
+}
+
+fn isIdentCont(c: u8) bool {
+    return isIdentStart(c) or (c >= '0' and c <= '9');
+}
+
+fn writeDollarEscaped(w: *std.Io.Writer, name: []const u8) std.Io.Writer.Error!void {
+    if (name.len > 0 and name[0] == '$') {
+        try w.writeByte('$');
+    }
+    try w.writeAll(name);
+}
+
+fn writeShape(w: *std.Io.Writer, shape: Model.ValueShape) std.Io.Writer.Error!void {
+    switch (shape) {
+        .any => try w.writeAll("unknown"),
+        .nil => try w.writeAll("null"),
+        .boolean => try w.writeAll("boolean"),
+        .number => try w.writeAll("number"),
+        .number_bounded => |b| try w.writeAll(if (b.repr) |r| reprTsAlias(r) else "number"),
+        .number_i64, .number_u64 => try w.writeAll("bigint"),
+        .string => try w.writeAll("string"),
+        .string_with_bounds => try w.writeAll("string"),
+        .symbol => try w.writeAll("Symbol_"),
+        .keyword => try w.writeAll("Keyword"),
+        .date => try w.writeAll("SjonDate"),
+        .time => try w.writeAll("SjonTime"),
+        .expr => try w.writeAll("SjonExpr"),
+        .symbol_members => |names| try writeBrandedUnion(w, "Symbol_", names),
+        .symbol_members_rich => |members| try writeRichBrandedUnion(w, "Symbol_", members),
+        .string_members => |names| try writeStringLiteralUnion(w, names),
+        .string_members_rich => |members| try writeRichStringLiteralUnion(w, members),
+        .vector => |vs| {
+            if (vs.len) |n| {
+                try w.writeAll("readonly [");
+                var i: u16 = 0;
+                while (i < n) : (i += 1) {
+                    if (i > 0) try w.writeAll(", ");
+                    try writeShape(w, vs.element.*);
+                }
+                try w.writeAll("]");
+            } else {
+                try w.writeAll("Array<");
+                try writeShape(w, vs.element.*);
+                try w.writeAll(">");
+            }
+        },
+        .form_any => try w.writeAll("{ readonly $form: string; readonly $ns?: string }"),
+        .form_heads => |refs| {
+            for (refs, 0..) |ref, i| {
+                if (i > 0) try w.writeAll(" | ");
+                const use_imported = if (current_filter) |this|
+                    ref.plugin.len > 0 and !std.mem.eql(u8, ref.plugin, this)
+                else
+                    false;
+                if (use_imported) {
+                    try writeFormTypeName(w, ref.plugin, ref.name);
+                } else {
+                    try w.writeAll("{ readonly $form: \"");
+                    try w.writeAll(ref.name);
+                    try w.writeAll("\" }");
+                }
+            }
+        },
+        .form_locals => |forms| {
+            for (forms) |lf| {
+                try writeInlineLocalForm(w, lf);
+                try w.writeAll(" | ");
+            }
+            try w.writeAll("{ readonly $form: string; readonly $ns?: string }");
+        },
+        .cross_ref => |cr| {
+            try w.writeAll("CrossRef<\"");
+            try w.writeAll(cr.target_form);
+            try w.writeAll("\">");
+        },
+        .union_of => |alts| {
+            for (alts, 0..) |alt, i| {
+                if (i > 0) try w.writeAll(" | ");
+                try writeShape(w, alt.shape);
+            }
+        },
+        .number_with_unit => |u| {
+            if (u.allowed.len == 0) {
+                try w.writeAll("readonly [number, string]");
+            } else {
+                for (u.allowed, 0..) |unit, i| {
+                    if (i > 0) try w.writeAll(" | ");
+                    try w.writeAll("readonly [number, \"");
+                    try w.writeAll(unit);
+                    try w.writeAll("\"]");
+                }
+            }
+        },
+        .unresolved_named => try w.writeAll("unknown"),
+    }
+}
+
+fn writeInlineLocalForm(w: *std.Io.Writer, f: Model.Form) std.Io.Writer.Error!void {
+    if (f.discriminator) |d| {
+        try w.writeByte('(');
+        for (d.variants, 0..) |v, vi| {
+            if (vi > 0) try w.writeAll(" | ");
+            try w.writeAll("{ $form: \"");
+            try w.writeAll(f.name);
+            try w.writeAll("\"; $ns?: string;");
+            var indices: [64]u16 = undefined;
+            const n_keys = @min(f.keys.len, indices.len);
+            for (0..n_keys) |i| indices[i] = @intCast(i);
+            sortKeysAlphabetically(f.keys, indices[0..n_keys]);
+            for (indices[0..n_keys]) |idx| {
+                const k = f.keys[idx];
+                try w.writeByte(' ');
+                if (std.mem.eql(u8, k.name, d.key_name)) {
+                    try writeInlineDiscriminantKey(w, k, v.when);
+                } else {
+                    try writeInlineKey(w, k);
+                }
+            }
+            var v_indices: [64]u16 = undefined;
+            const n_v = @min(v.keys.len, v_indices.len);
+            for (0..n_v) |i| v_indices[i] = @intCast(i);
+            sortKeysAlphabetically(v.keys, v_indices[0..n_v]);
+            for (v_indices[0..n_v]) |idx| {
+                try w.writeByte(' ');
+                try writeInlineKey(w, v.keys[idx]);
+            }
+            if (f.open) try w.writeAll(" [key: string]: unknown;");
+            try w.writeAll(" }");
+        }
+        try w.writeByte(')');
+        return;
+    }
+    try w.writeAll("{ $form: \"");
+    try w.writeAll(f.name);
+    try w.writeAll("\"; $ns?: string;");
+    var indices: [64]u16 = undefined;
+    const n_keys = @min(f.keys.len, indices.len);
+    for (0..n_keys) |i| indices[i] = @intCast(i);
+    sortKeysAlphabetically(f.keys, indices[0..n_keys]);
+    for (indices[0..n_keys]) |idx| {
+        try w.writeByte(' ');
+        try writeInlineKey(w, f.keys[idx]);
+    }
+    switch (f.positional) {
+        .none => {},
+        .any => try w.writeAll(" $children?: unknown[];"),
+        .kind => |shape| {
+            try w.writeAll(" $children?: Array<");
+            try writeShape(w, shape);
+            try w.writeAll(">;");
+        },
+    }
+    if (f.open) try w.writeAll(" [key: string]: unknown;");
+    try w.writeAll(" }");
+}
+
+fn writeInlineKey(w: *std.Io.Writer, k: Model.Key) std.Io.Writer.Error!void {
+    try writeKeyName(w, k.name);
+    if (k.optional) try w.writeByte('?');
+    try w.writeAll(": ");
+    try writeShape(w, k.value);
+    try w.writeByte(';');
+}
+
+fn writeInlineDiscriminantKey(w: *std.Io.Writer, k: Model.Key, when: []const u8) std.Io.Writer.Error!void {
+    try writeKeyName(w, k.name);
+    try w.writeAll(": Symbol_<\"");
+    try w.writeAll(when);
+    try w.writeAll("\">;");
+}
+
+fn writeBrandedUnion(w: *std.Io.Writer, brand: []const u8, names: []const []const u8) std.Io.Writer.Error!void {
+    if (names.len == 0) {
+        try w.writeAll(brand);
+        return;
+    }
+    for (names, 0..) |n, i| {
+        if (i > 0) try w.writeAll(" | ");
+        try w.writeAll(brand);
+        try w.writeAll("<\"");
+        try w.writeAll(n);
+        try w.writeAll("\">");
+    }
+}
+
+fn writeStringLiteralUnion(w: *std.Io.Writer, names: []const []const u8) std.Io.Writer.Error!void {
+    if (names.len == 0) {
+        try w.writeAll("string");
+        return;
+    }
+    for (names, 0..) |n, i| {
+        if (i > 0) try w.writeAll(" | ");
+        try w.writeByte('"');
+        try w.writeAll(n);
+        try w.writeByte('"');
+    }
+}
+
+fn writeRichBrandedUnion(w: *std.Io.Writer, brand: []const u8, members: []const Model.Member) std.Io.Writer.Error!void {
+    if (members.len == 0) {
+        try w.writeAll(brand);
+        return;
+    }
+    for (members, 0..) |m, i| {
+        if (i > 0) try w.writeAll(" | ");
+        try w.writeAll(brand);
+        try w.writeAll("<\"");
+        try w.writeAll(m.name);
+        try w.writeAll("\">");
+    }
+}
+
+fn writeRichStringLiteralUnion(w: *std.Io.Writer, members: []const Model.Member) std.Io.Writer.Error!void {
+    if (members.len == 0) {
+        try w.writeAll("string");
+        return;
+    }
+    for (members, 0..) |m, i| {
+        if (i > 0) try w.writeAll(" | ");
+        try w.writeByte('"');
+        try w.writeAll(m.name);
+        try w.writeByte('"');
+    }
+}
+
+fn richMembersOf(shape: Model.ValueShape) ?[]const Model.Member {
+    return switch (shape) {
+        .symbol_members_rich => |m| m,
+        .string_members_rich => |m| m,
+        else => null,
+    };
+}
+
+fn writeBarrel(w: *std.Io.Writer, p: Model.Plugin_) std.Io.Writer.Error!void {
+    if (p.forms.len == 0) return;
+    try w.writeAll("export type Sjon");
+    try writePascalCase(w, p.name);
+    try w.writeAll(" =");
+    for (p.forms, 0..) |f, i| {
+        try w.writeAll("\n  | ");
+        try writeFormTypeName(w, p.name, f.name);
+        _ = i;
+    }
+    try w.writeAll(";\n\n");
+}
+
+fn writeFormTypeName(w: *std.Io.Writer, plugin_name: []const u8, form_name: []const u8) std.Io.Writer.Error!void {
+    try writePascalCase(w, plugin_name);
+    try w.writeByte('_');
+    try writePascalCase(w, form_name);
+}
+
+fn writePascalCase(w: *std.Io.Writer, name: []const u8) std.Io.Writer.Error!void {
+    var upper_next = true;
+    for (name) |c| {
+        switch (c) {
+            '-', '_', ' ', '/' => upper_next = true,
+            else => {
+                if (upper_next) {
+                    try w.writeByte(std.ascii.toUpper(c));
+                    upper_next = false;
+                } else {
+                    try w.writeByte(c);
+                }
+            },
+        }
+    }
+}
+
+fn sortKeysAlphabetically(keys: []const Model.Key, indices: []u16) void {
+    std.mem.sort(u16, indices, keys, struct {
+        fn lt(ks: []const Model.Key, a: u16, b: u16) bool {
+            return std.mem.order(u8, ks[a].name, ks[b].name) == .lt;
+        }
+    }.lt);
+}
+
+fn printDecimal(w: *std.Io.Writer, n: u32) std.Io.Writer.Error!void {
+    var buf: [16]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return error.WriteFailed;
+    try w.writeAll(s);
+}
+
+const testing = std.testing;
+const SchemaExport = @import("SchemaExport.zig");
+const Schema = @import("../Schema.zig");
+const Plugin = @import("../Plugin.zig");

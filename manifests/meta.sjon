@@ -1,0 +1,438 @@
+; manifests/meta.sjon — the bootstrap meta-plugin.
+;
+; A SJON manifest that describes the structure of v1 portable plugin
+; manifests (this very file's own structure). Every conforming
+; implementation embeds this as its baseline so user manifests can be
+; validated with the same diagnostic surface user documents see.
+;
+; The format is documented in docs/portable-manifest-v1.md.
+;
+; Self-validation contract: validating manifests/meta.sjon against the
+; meta-plugin produces zero diagnostics. Any change here that breaks
+; self-validation is a v1 spec break.
+
+(plugin :name meta :version "1.0.0"
+  :description "Describes the structure of v1 portable plugin manifests."
+
+  ; ---- helper value kinds -------------------------------------------
+
+  ; The closed set of underlying scalar kinds a value-kind may refine.
+  ; Mirrors Plugin.ValueKind.Underlying in src/Plugin.zig.
+  (value-kind :name underlying-tag
+    :underlying symbol
+    :description "Closed set of valid :underlying values."
+    :members (member-set :values [number string vector form symbol union scalar-or-ref]))
+
+  ; The closed set of cardinality tags an (exclusive-group …) accepts.
+  ; Mirrors Plugin.Cardinality in src/Plugin.zig.
+  (value-kind :name cardinality-tag
+    :underlying symbol
+    :description "Closed set of valid :cardinality values on (exclusive-group …)."
+    :members (member-set :values [exactly-one at-most-one]))
+
+  ; A primitive type name (see docs/portable-manifest-v1.md §8) or a
+  ; plugin-declared kind name. Resolved at load time against the
+  ; aggregated kind catalog.
+  (value-kind :name type-ref
+    :underlying symbol
+    :description "Primitive type name or value-kind reference.")
+
+  ; A symbolic binding reference like "host:deg".
+  (value-kind :name binding-ref
+    :underlying string
+    :description "Symbolic :impl reference of the form \"<scheme>:<name>\".")
+
+  ; A vector of bare symbols (used for member sets, allowed-units,
+  ; head-set names, signature parameters).
+  (value-kind :name symbol-list
+    :underlying vector
+    :description "Vector of bare symbols."
+    :vector (vector-shape :element symbol))
+
+  ; sha256 binary stamp — `sha256-<64 lowercase hex>`. Used by both
+  ; `:wasm-sha256` (authors stamping their published binary) and
+  ; `(use-plugin … :hash …)` (consumers pinning).
+  (value-kind :name sha256-hash
+    :underlying string
+    :description "Hex digest of the shape `sha256-<64 lowercase hex chars>`.")
+
+  ; SPDX license identifier. Loader emits an advisory
+  ; `license_unrecognized` for strings outside the canonical set; the
+  ; type itself just demands a string.
+  (value-kind :name spdx-id
+    :underlying string
+    :description "SPDX license identifier (e.g. CC0-1.0, Apache-2.0). Free-form strings accepted with a warning.")
+
+  ; A vector of type references (for expr-func :params).
+  (value-kind :name type-list
+    :underlying vector
+    :description "Vector of type references (primitive names or value-kind names)."
+    :vector (vector-shape :element type-ref))
+
+  ; ---- form-as-slot pinning (HeadSet) -------------------------------
+  ;
+  ; These value kinds use :heads to pin a form-typed slot to a closed
+  ; set of allowed head names. Without HeadSet the meta-plugin would
+  ; under-validate at four sites; with HeadSet, typos like
+  ; (value-knd :name foo) get a precise diagnostic at load time.
+
+  ; Top-level (plugin …) positional children.
+  (value-kind :name plugin-decl
+    :underlying form
+    :description "A declaration sub-form inside (plugin …)."
+    :heads (head-set :names [value-kind form expr-func]))
+
+  ; (form …) positional children — `(key …)` sub-forms, plus
+  ; `(variant …)` sub-forms on discriminated forms, plus
+  ; `(exclusive-group …)` sub-forms for cross-key cardinality rules.
+  (value-kind :name key-decl
+    :underlying form
+    :description "A (key …) | (variant …) | (exclusive-group …) sub-form."
+    :heads (head-set :names [key variant exclusive-group]))
+
+  ; (key …) positional children — inline slot-local `(form …)` definitions
+  ; (KeySpec.local_forms). Pins the slot to the (form …) head so each inline
+  ; local is meta-validated against the (form …) meta-form, recursing
+  ; form->key->form (bounded by MAX_VALIDATE_FRAMES). The loader enforces the
+  ; remaining rules (:type form only, depth, dup names).
+  (value-kind :name key-local-decl
+    :underlying form
+    :description "An inline slot-local (form …) sub-form inside (key …)."
+    :heads (head-set :names [form]))
+
+  ; (exclusive-group …) positional children — `(alt …)` sub-forms.
+  (value-kind :name alt-decl
+    :underlying form
+    :description "An (alt …) sub-form inside (exclusive-group …)."
+    :heads (head-set :names [alt]))
+
+  ; (expr-func …) multi-signature positional children.
+  (value-kind :name signature-spec
+    :underlying form
+    :description "A (signature …) sub-form for multi-signature expr-func."
+    :heads (head-set :names [signature]))
+
+  ; (arity-spec) — one of (fixed N) | (at-least N) | (range :min M :max N).
+  (value-kind :name arity-spec
+    :underlying form
+    :description "Arity declaration: (fixed N) | (at-least N) | (range :min M :max N)."
+    :heads (head-set :names [fixed at-least range]))
+
+  ; Single-head wrappers — pin each refinement key's slot to the one
+  ; form it accepts. Without these, `:type vector-shape` etc. would
+  ; resolve as "unknown value-kind" because the names below are forms,
+  ; not value-kinds. Wrapping is the documented pattern (cf. shape-form
+  ; in examples/plugins/shapes.zig).
+  (value-kind :name vector-shape-ref
+    :underlying form
+    :description "Slot pinned to a (vector-shape …) form."
+    :heads (head-set :names [vector-shape]))
+  (value-kind :name unit-shape-ref
+    :underlying form
+    :description "Slot pinned to a (unit-shape …) form."
+    :heads (head-set :names [unit-shape]))
+  (value-kind :name numeric-bounds-ref
+    :underlying form
+    :description "Slot pinned to a (numeric-bounds …) form."
+    :heads (head-set :names [numeric-bounds]))
+  (value-kind :name string-bounds-ref
+    :underlying form
+    :description "Slot pinned to a (string-bounds …) form."
+    :heads (head-set :names [string-bounds]))
+  (value-kind :name string-format-tag
+    :underlying symbol
+    :description "Closed set of valid :format values on (string-bounds …)."
+    :members (member-set :values [email uri path uuid semver]))
+  (value-kind :name repr-shape-ref
+    :underlying form
+    :description "Slot pinned to a (repr-shape …) form."
+    :heads (head-set :names [repr-shape]))
+  (value-kind :name repr-type-tag
+    :underlying symbol
+    :description "Closed set of valid :type values on (repr-shape …)."
+    :members (member-set :values [f32 u32 i32 u16 f16]))
+  (value-kind :name scalar-or-ref-shape-ref
+    :underlying form
+    :description "Slot pinned to a (scalar-or-ref-shape …) form."
+    :heads (head-set :names [scalar-or-ref-shape]))
+  (value-kind :name member-set-ref
+    :underlying form
+    :description "Slot pinned to a (member-set …) form."
+    :heads (head-set :names [member-set]))
+  (value-kind :name member-decl
+    :underlying form
+    :description "A (member …) sub-form inside (member-set …)."
+    :heads (head-set :names [member]))
+  (value-kind :name head-set-ref
+    :underlying form
+    :description "Slot pinned to a (head-set …) form."
+    :heads (head-set :names [head-set]))
+  (value-kind :name cross-ref-shape-ref
+    :underlying form
+    :description "Slot pinned to a (cross-ref …) form."
+    :heads (head-set :names [cross-ref]))
+  (value-kind :name union-shape-ref
+    :underlying form
+    :description "Slot pinned to a (union-shape …) form."
+    :heads (head-set :names [union-shape]))
+  (value-kind :name lowering-ref
+    :underlying form
+    :description "Slot pinned to a (lowering …) form."
+    :heads (head-set :names [lowering]))
+
+  ; ---- positional flag-sets -----------------------------------------
+  ;
+  ; A form's `:positional` may be `(flag-set (flag :name …) …)` — a closed
+  ; set of allowed positional keyword flags. `positional-ref` widens the
+  ; `:positional` slot to accept either a bare type-ref or that form.
+  (value-kind :name flag-decl
+    :underlying form
+    :description "A (flag …) sub-form inside (flag-set …)."
+    :heads (head-set :names [flag]))
+  (value-kind :name flag-set-ref
+    :underlying form
+    :description "Slot pinned to a (flag-set …) form."
+    :heads (head-set :names [flag-set]))
+  (value-kind :name positional-ref
+    :underlying union
+    :description "A form's :positional — a type-ref symbol or a (flag-set …) form."
+    :union (union-shape :alternatives [type-ref flag-set-ref]))
+
+  ; ---- top-level: the (plugin …) form -------------------------------
+
+  (form :name plugin
+    :description "Top-level manifest form — wraps a plugin's declarations."
+    :open false
+    :positional plugin-decl
+    (key :name name        :type symbol      :optional false)
+    (key :name version     :type string      :optional false)
+    (key :name description :type string      :optional true)
+    ; v1.1 packaging fields. Additive — every v1.0 manifest still
+    ; validates with these omitted.
+    (key :name wasm-file   :type string      :optional true)
+    (key :name wasm-sha256 :type sha256-hash :optional true)
+    (key :name authors     :type vector      :optional true)
+    (key :name license     :type spdx-id     :optional true)
+    (key :name homepage    :type string      :optional true)
+    (key :name repository  :type string      :optional true)
+    (key :name keywords    :type symbol-list :optional true)
+    (key :name sjon        :type string      :optional true))
+
+  ; ---- value-kind declarations --------------------------------------
+
+  (form :name value-kind
+    :description "Declares a named refinement of one underlying primitive."
+    :open false
+    (key :name name        :type symbol               :optional false)
+    (key :name underlying  :type underlying-tag       :optional false)
+    (key :name description :type string               :optional true)
+    (key :name vector      :type vector-shape-ref     :optional true)
+    (key :name unit        :type unit-shape-ref       :optional true)
+    (key :name numeric       :type numeric-bounds-ref :optional true)
+    (key :name string-bounds :type string-bounds-ref  :optional true)
+    (key :name repr          :type repr-shape-ref     :optional true)
+    (key :name scalar-or-ref :type scalar-or-ref-shape-ref :optional true)
+    (key :name members     :type member-set-ref       :optional true)
+    (key :name heads       :type head-set-ref         :optional true)
+    (key :name cross-ref   :type cross-ref-shape-ref  :optional true)
+    (key :name union       :type union-shape-ref      :optional true))
+
+  ; ---- refinement sub-forms -----------------------------------------
+
+  (form :name vector-shape
+    :description "Pins element kind and (optional) length on a :vector underlying."
+    :open false
+    (key :name len     :type number   :optional true)
+    (key :name min-len :type number   :optional true)
+    (key :name max-len :type number   :optional true)
+    (key :name element :type type-ref :optional false))
+
+  (form :name unit-shape
+    :description "Pins unit-suffix requirements on a :number underlying."
+    :open false
+    (key :name required :type boolean     :optional true)
+    (key :name reject   :type boolean     :optional true)
+    (key :name allowed  :type symbol-list :optional true))
+
+  (form :name numeric-bounds
+    :description "Range / integrality constraints on a :number underlying."
+    :open false
+    (key :name min           :type number  :optional true)
+    (key :name max           :type number  :optional true)
+    (key :name exclusive-min :type boolean :optional true)
+    (key :name exclusive-max :type boolean :optional true)
+    (key :name integer       :type boolean :optional true))
+
+  (form :name string-bounds
+    :description "Length / pattern / format constraints on a :string underlying."
+    :open false
+    (key :name min-len :type number             :optional true)
+    (key :name max-len :type number             :optional true)
+    (key :name pattern :type string             :optional true)
+    (key :name format  :type string-format-tag  :optional true))
+
+  (form :name repr-shape
+    :description "GPU representation tag (f32|u32|i32|u16|f16) for a :number underlying."
+    :open false
+    (key :name type :type repr-type-tag :optional false))
+
+  (form :name scalar-or-ref-shape
+    :description "Shorthand for `union [<base> symbol]` — a scalar kind or a symbolic reference. Desugars at load time."
+    :open false
+    (key :name base :type type-ref :optional false))
+
+  (form :name member-set
+    :description "Closed-set membership for :symbol or :string underlyings."
+    :open false
+    :positional member-decl
+    ; `:values` is optional because an author may declare members via
+    ; `(member …)` positional children instead. The loader rejects
+    ; mixing both shapes in one `(member-set …)`.
+    (key :name values :type symbol-list :optional true))
+
+  (form :name member
+    :description "One entry in a (member-set …). Carries optional editor metadata."
+    :open false
+    (key :name name                 :type symbol  :optional false)
+    (key :name label                :type string  :optional true)
+    (key :name description          :type string  :optional true)
+    (key :name deprecated           :type boolean :optional true)
+    (key :name deprecation-message  :type string  :optional true))
+
+  (form :name flag
+    :description "One positional keyword flag inside (flag-set …). Carries optional editor metadata."
+    :open false
+    (key :name name        :type symbol :optional false)
+    (key :name description :type string :optional true)
+    (key :name link        :type string :optional true))
+
+  (form :name flag-set
+    :description "Closed set of positional keyword flags for a form's :positional."
+    :open false
+    :positional flag-decl)
+
+  (form :name head-set
+    :description "Closed-set head-name pinning for :form underlyings."
+    :open false
+    (key :name names :type symbol-list :optional false))
+
+  (form :name cross-ref
+    :description "Document-spanning name-reference constraint for :symbol underlyings."
+    :open false
+    (key :name target   :type symbol  :optional false)
+    (key :name name-key :type symbol  :optional true)
+    (key :name acyclic  :type boolean :optional true)
+    (key :name scope    :type symbol  :optional true))
+
+  (form :name union-shape
+    :description "Pins alternative kind names on a :union underlying."
+    :open false
+    (key :name alternatives :type type-list :optional false))
+
+  ; ---- form declarations --------------------------------------------
+
+  (form :name form
+    :description "Declares a data-form constructor (e.g. (scene …))."
+    :open false
+    :positional key-decl
+    (key :name name          :type symbol       :optional false)
+    (key :name description   :type string       :optional true)
+    (key :name positional    :type positional-ref :optional true)
+    (key :name open          :type boolean      :optional true)
+    (key :name discriminant  :type symbol       :optional true)
+    (key :name lowering      :type lowering-ref :optional true))
+
+  (form :name variant
+    :description "Per-discriminant-value extra key set on a discriminated form."
+    :open false
+    :positional key-decl
+    (key :name when :type symbol :optional false))
+
+  (form :name key
+    :description "One declared :keyword value slot on a form."
+    :open false
+    :positional key-local-decl
+    (key :name name        :type symbol   :optional false)
+    (key :name type        :type type-ref :optional false)
+    (key :name optional    :type boolean  :optional true)
+    ; `:walk-opaque true` lets a default carry an expression-shaped value
+    ; (e.g. `:default (pi)`) without the validator descending into it.
+    (key :name default     :type any      :optional true :walk-opaque true)
+    (key :name walk-opaque :type boolean  :optional true)
+    (key :name description :type string   :optional true))
+
+  ; ---- expression function declarations -----------------------------
+  ;
+  ; Two encodings:
+  ;   * mono — :arity / :params / :rest / :result on the form itself.
+  ;   * multi — one or more (signature …) positional children with no
+  ;     top-level mono fields.
+  ; Loaders reject mixing both encodings on the same expr-func.
+
+  (form :name expr-func
+    :description "Declares a safe-expression function."
+    :open false
+    :positional signature-spec
+    (key :name name        :type symbol      :optional false)
+    (key :name arity       :type arity-spec  :optional true)
+    (key :name params      :type type-list   :optional true)
+    (key :name param-names :type symbol-list :optional true)
+    (key :name rest        :type type-ref    :optional true)
+    (key :name result      :type type-ref    :optional true)
+    (key :name description :type string      :optional true)
+    (key :name impl        :type binding-ref :optional true))
+
+  (form :name signature
+    :description "One overload of a multi-signature expr-func."
+    :open false
+    (key :name arity       :type arity-spec  :optional false)
+    (key :name params      :type type-list   :optional true)
+    (key :name param-names :type symbol-list :optional true)
+    (key :name rest        :type type-ref    :optional true)
+    (key :name result      :type type-ref    :optional true))
+
+  ; ---- arity variants -----------------------------------------------
+  ;
+  ; (fixed N) and (at-least N) accept one positional number; (range)
+  ; uses kvpairs. Treating the single-positional cases as :positional any
+  ; for now — the loader does its own integer-check on the value.
+
+  (form :name fixed
+    :description "Exact-arity declaration: (fixed N)."
+    :open false
+    :positional any)
+
+  (form :name at-least
+    :description "Lower-bound arity declaration: (at-least N)."
+    :open false
+    :positional any)
+
+  (form :name range
+    :description "Inclusive-range arity declaration: (range :min M :max N)."
+    :open false
+    (key :name min :type number :optional false)
+    (key :name max :type number :optional false))
+
+  ; ---- exclusive-group declaration ----------------------------------
+  ;
+  ; An (exclusive-group …) attaches to (form …) or (variant …) and
+  ; declares mutually exclusive key bundles. With :cardinality
+  ; exactly-one the form must carry exactly one alternative; with
+  ; at-most-one zero or one. Each (alt :keys [k1 k2]) is one bundle.
+
+  (form :name exclusive-group
+    :description "Cross-key cardinality constraint on (form …) or (variant …)."
+    :open false
+    :positional alt-decl
+    (key :name cardinality :type cardinality-tag :optional true))
+
+  (form :name alt
+    :description "One alternative key bundle inside (exclusive-group …)."
+    :open false
+    (key :name keys :type symbol-list :optional false))
+
+  (form :name lowering
+    :description "Host-owned lowering contract attached to a (form …). The hook is symbolic and versioned (e.g. pngine/pass-v1); :produces is a closed list of form heads the contract may emit."
+    :open false
+    (key :name hook     :type symbol      :optional false)
+    (key :name produces :type symbol-list :optional false)))

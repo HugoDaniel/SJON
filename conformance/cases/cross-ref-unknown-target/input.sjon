@@ -1,0 +1,4 @@
+; Trivial well-formed input — the case asserts on the schema-phase
+; diagnostic, not on input validation. The harness still runs validate
+; so we keep the input minimal but valid.
+(track :name solo)

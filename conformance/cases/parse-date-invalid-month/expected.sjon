@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code date_invalid_month :path []))

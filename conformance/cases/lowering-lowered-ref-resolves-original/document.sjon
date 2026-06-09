@@ -1,0 +1,24 @@
+; D8-v2 final-document forest: a *lowered* form references a target
+; that only exists in the *source* tree.
+;
+; `sugar` carries `:ref` (typed as origin-ref → cross-ref into target).
+; test/identity-v1 copies declared kvpairs into the emitted form,
+; named `sugar-normal` by convention, so the lowered tree gets
+; `(sugar-normal :ref source-one)`. The forest-wide cross-ref index
+; sees `(target :name source-one)` in the source tree and resolves
+; the lowered reference cleanly. With v1 the lowered-tree-only pass
+; built its index over the lowered tree alone and emitted
+; `not_cross_ref at [sugar-normal ref]`.
+(plugin :name probe :version "1.0.0"
+  (value-kind :name origin-ref :underlying symbol
+    :cross-ref (cross-ref :target target))
+  (form :name target
+    (key :name name :type symbol :optional false))
+  (form :name sugar
+    (key :name ref :type origin-ref :optional false)
+    :lowering (lowering :hook test/identity-v1 :produces [sugar-normal]))
+  (form :name sugar-normal
+    (key :name ref :type origin-ref :optional false)))
+
+(target :name source-one)
+(sugar :ref source-one)

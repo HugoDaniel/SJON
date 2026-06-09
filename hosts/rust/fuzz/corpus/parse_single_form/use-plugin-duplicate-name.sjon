@@ -1,0 +1,2 @@
+(project :plugins ["./manifests/a.sjon"
+                   "./manifests/b.sjon"])

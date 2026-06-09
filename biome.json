@@ -1,0 +1,74 @@
+{
+  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "include": [
+      "hosts/schema/**",
+      "hosts/highlight/**",
+      "hosts/web/**",
+      "hosts/typescript-parity/**",
+      "landing-page/src/**",
+      "landing-page/*.{js,ts,mjs,cjs,json}",
+      "*.{js,ts,mjs,cjs,json}",
+      "package.json",
+      "biome.json"
+    ],
+    "ignore": [
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/.astro/**",
+      "**/zig-out/**",
+      "**/.zig-cache/**",
+      "**/target/**",
+      "**/*.wasm",
+      "**/*.astro",
+      "**/*.css",
+      "pnpm-lock.yaml",
+      "package-lock.json",
+      "landing-page/public/**",
+      "landing-page/.astro/**",
+      "conformance/cases/**",
+      "examples/**",
+      "SJON/**",
+      "hosts/typescript-parity/test/golden/**",
+      "hosts/schema/src/expr.gen.ts"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100,
+    "lineEnding": "lf"
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "jsxQuoteStyle": "double",
+      "semicolons": "always",
+      "trailingCommas": "all",
+      "arrowParentheses": "always"
+    }
+  },
+  "json": {
+    "formatter": {
+      "trailingCommas": "none"
+    }
+  },
+  "linter": {
+    "enabled": false
+  },
+  "organizeImports": {
+    "enabled": false
+  },
+  "overrides": [
+    {
+      "include": ["**/tsconfig*.json"],
+      "json": { "parser": { "allowComments": true, "allowTrailingCommas": true } }
+    }
+  ]
+}

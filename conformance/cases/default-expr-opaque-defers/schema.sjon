@@ -1,0 +1,7 @@
+; D8-defaults: an expression-shaped default whose head declares no
+; `:result` (opaque). validateDefaults policy: opaque results defer at
+; validate-time — clean. Matches D8-types' nested-expression policy.
+(plugin :name default-test :version "1.0.0"
+  (expr-func :name op :arity (fixed 1))
+  (form :name scene
+    (key :name fps :type number :default (op 1))))

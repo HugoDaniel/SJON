@@ -1,0 +1,12 @@
+; A string matches neither alternative of `union [count-value symbol]` —
+; count-value wants a number and the symbol alternative wants a bare symbol —
+; so the desugared union rejects it with `union_no_branch_matched`.
+(plugin :name refs :version "1.0.0"
+  (value-kind :name count-value :underlying number)
+  (value-kind :name count
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base count-value))
+  (form :name use
+    (key :name n :type count :optional false)))
+
+(use :n "not-a-ref")

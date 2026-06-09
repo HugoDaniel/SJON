@@ -1,0 +1,4 @@
+; Manifest-load phase: too_many_keys at the form-name path. (See
+; ManifestLoader.emitTooManyKeys — buildPath(&.{form_name}).)
+(diagnostics
+  (diagnostic :code too_many_keys :path [big]))

@@ -1,0 +1,7 @@
+; Two plugins both define `color` — bare references would be ambiguous.
+; The host plugin's form qualifies its `:type` with `paint/color`, so the
+; validator resolves to the paint plugin's definition unambiguously.
+(plugin :name paint :version "1.0.0"
+  (value-kind :name color
+    :underlying symbol
+    :members (member-set :values [red green blue])))

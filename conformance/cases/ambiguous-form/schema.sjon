@@ -1,0 +1,6 @@
+; Both plugins (this one + extra-b.sjon) declare a `(form :name foo)`.
+; A bare `(foo …)` at validate time produces `ambiguous_form` because
+; the lookup walks every plugin and finds two claimants.
+(plugin :name ambig-form-a :version "1.0.0"
+  (form :name foo
+    (key :name name :type symbol :optional false)))

@@ -1,0 +1,8 @@
+; :exclusive-min true without :min is internally inconsistent; the
+; loader emits `numeric_bounds_invalid` at manifest-load time.
+(plugin :name numeric-bounds-invalid-no-min :version "1.0.0"
+  (value-kind :name nn
+    :underlying number
+    :numeric (numeric-bounds :exclusive-min true))
+  (form :name set
+    (key :name v :type nn :optional false)))

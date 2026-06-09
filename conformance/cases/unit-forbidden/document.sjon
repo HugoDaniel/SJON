@@ -1,0 +1,14 @@
+; A `:underlying number` slot whose `:unit (unit-shape :reject true)` forbids
+; any unit suffix — bare numbers only. The lexer reads the trailing `f` in
+; `1.0f` as a unit, so the value lands as number_with_unit{1.0,"f"} and trips
+; `unit_forbidden` (distinct from `unit_not_allowed`, which names an allowed
+; set). This is the silent `1.0f -> 0` GPU-backfill defect, caught at validate
+; time.
+(plugin :name unitless-test :version "1.0.0"
+  (value-kind :name bare
+    :underlying number
+    :unit (unit-shape :reject true))
+  (form :name px
+    (key :name x :type bare :optional false)))
+
+(px :x 1.0f)

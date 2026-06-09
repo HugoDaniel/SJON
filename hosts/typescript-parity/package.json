@@ -1,0 +1,19 @@
+{
+  "name": "sjon-host-ts",
+  "version": "1.0.0",
+  "description": "Reference second-host implementation of the SJON validator (TypeScript).",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types test/*.test.ts"
+  },
+  "dependencies": {
+    "@sjon/schema": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0"
+  }
+}

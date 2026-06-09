@@ -1,0 +1,12 @@
+; `:underlying scalar-or-ref` desugars to `union [count-value symbol]`. A
+; plain number satisfies the `count-value` (scalar) alternative, so the slot
+; accepts it.
+(plugin :name refs :version "1.0.0"
+  (value-kind :name count-value :underlying number)
+  (value-kind :name count
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base count-value))
+  (form :name use
+    (key :name n :type count :optional false)))
+
+(use :n 42)

@@ -1,0 +1,21 @@
+; Two lowerable siblings under one lowerable parent — the document-order pin
+; for the lint's forward sweep. `(inner)` then `(inner2)` must surface in that
+; order, not reversed: the sweep walks children left-to-right while the worklist
+; pushes them right-to-left, and an earlier implementation leaked that reverse
+; order into the diagnostics. Both siblings declare `:lowering` alongside
+; `outer`, so each is flagged; emit-only `<head>-normal` terminals keep the
+; lowered forest clean.
+(plugin :name nestsib :version "1.0.0"
+  (form :name outer :open true
+    :lowering (lowering :hook test/identity-v1 :produces [outer-normal]))
+  (form :name inner :open true
+    :lowering (lowering :hook test/identity-v1 :produces [inner-normal]))
+  (form :name inner2 :open true
+    :lowering (lowering :hook test/identity-v1 :produces [inner2-normal]))
+
+  ; Identity-hook terminals.
+  (form :name outer-normal :open true)
+  (form :name inner-normal :open true)
+  (form :name inner2-normal :open true))
+
+(outer (inner) (inner2))

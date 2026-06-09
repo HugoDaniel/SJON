@@ -1,0 +1,48 @@
+; JSON round-trip property fixtures.
+;
+; Each top-level form below is parsed, encoded with `Json.toJson(canonical)`,
+; decoded with `Json.fromJson(canonical)`, then canonical-printed; the
+; result must equal the canonical print of the original. Forms here exist
+; to pin specific encoding paths against regressions.
+
+; Atoms — non-keyword scalars at top level are safe; bare top-level
+; keywords are not, because the parser greedy-pairs `:kw value` and
+; would expand top-level keyword pairs into degenerate split-roots.
+; Keyword atom encoding is exercised by the dedicated tests above.
+nil
+true
+false
+42
+3.5
+"hello"
+
+; Vectors with mixed element kinds. (Vectors hold only positional values;
+; bare keyword tokens like `:a` parse as positional keyword "flags". A
+; `:kw v` pair inside a vector is promoted to two positional elements,
+; preserving source order.)
+[1 2 3]
+[:a :b :c]
+[1 "bar" true nil 3.5]
+[1 :foo "bar" true nil]
+
+; Forms with keyword pairs and positional children.
+(scene :bpm 130 (canvas :name "main" [1 2 3]))
+(masagin/verb :ops 1 :gain 0.5)
+
+; Symbol values inside a safe-expression form (binds inside `let`).
+(let [r 0.5] (vec3 r r r))
+
+; Reserved-prefix head: head literally `$form`. Sigil escape must keep
+; this from colliding with the discriminator slot.
+($form a b)
+
+; Reserved-prefix keyword keys: `:$form` and `:$kw` as user data.
+(thing :$form "x" :$kw "y" "tail")
+
+; Unit-suffixed numbers — round-trip via {"$num": [value, "unit"]}.
+90deg
+0.5em
+-50%
+[4b 90deg 50% 250ms]
+(thing :angle 90deg :delay 250ms :scale 0.5em)
+(deep -50% 1.5e2hz)

@@ -1,0 +1,8 @@
+; Higher-order binder form — `fold` walks a finite vector while
+; threading a running accumulator through each iteration. The body
+; `(+ acc x)` re-evaluates once per element with `acc` bound to the
+; previous body result and `x` bound to the current element. The
+; iteration-0 `acc` is the evaluated `init` (here, `0`). After the
+; last element, the form's value is that iteration's body — the
+; running sum.
+(fold [acc x] 0 [1 2 3 4] (+ acc x))

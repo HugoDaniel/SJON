@@ -1,0 +1,12 @@
+; Phrases form a parent chain via :parent <phrase-name>. The kind
+; declares :acyclic true, so the validator runs forest-wide cycle
+; detection over those edges.
+(plugin :name xref-cycle :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :description "Reference to a (phrase :name …) form."
+    :cross-ref (cross-ref :target phrase :acyclic true))
+
+  (form :name phrase
+    (key :name name   :type phrase-name :optional false)
+    (key :name parent :type phrase-name :optional true)))

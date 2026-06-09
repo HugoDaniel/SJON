@@ -1,0 +1,8 @@
+; The smallest positive integer literal sits unambiguously above the
+; exclusive lower bound — the cross-host parity gate for "ok above 0".
+(plugin :name numeric-min-exclusive-just-above :version "1.0.0"
+  (value-kind :name nn
+    :underlying number
+    :numeric (numeric-bounds :min 0 :exclusive-min true))
+  (form :name set
+    (key :name v :type nn :optional false)))

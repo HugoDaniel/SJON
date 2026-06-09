@@ -1,0 +1,5 @@
+; Runtime materialization failure: `(nope)` has no `:impl`, so
+; `Expr.evalBinary` returns `PluginFuncNotImplemented` and the host
+; surfaces `default_eval_failed` at the omitted key's path.
+(diagnostics
+  (diagnostic :code default_eval_failed :path [circle radius default]))

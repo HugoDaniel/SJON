@@ -1,0 +1,8 @@
+; Units are opaque — byte-equal comparison, no case folding. `Ms` and
+; `ms` are distinct units; the bound's `ms` doesn't match `Ms`.
+(plugin :name numeric-unit-case-sensitive-mismatch :version "1.0.0"
+  (value-kind :name dur
+    :underlying number
+    :numeric (numeric-bounds :min 0ms))
+  (form :name set
+    (key :name v :type dur :optional false)))

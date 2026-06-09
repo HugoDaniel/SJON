@@ -1,0 +1,8 @@
+; The `rgb` value-kind pins length 3; a 2-element vector at the
+; `:color` slot trips `vector_length_mismatch`.
+(plugin :name veclen-test :version "1.0.0"
+  (value-kind :name rgb
+    :underlying vector
+    :vector (vector-shape :len 3 :element number))
+  (form :name paint
+    (key :name color :type rgb :optional false)))

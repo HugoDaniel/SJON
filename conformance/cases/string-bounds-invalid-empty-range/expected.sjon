@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code string_bounds_invalid :path [ss string-bounds]))

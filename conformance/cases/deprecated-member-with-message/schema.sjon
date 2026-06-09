@@ -1,0 +1,15 @@
+; The deprecated member carries `:deprecation-message`. The warning's
+; message body should include that hint verbatim. The corpus walker
+; only asserts on code/severity/path, so message-prose assertions live
+; in inline tests — this fixture pins the path+severity+code while
+; humans can inspect the rendered prose alongside the input.
+(plugin :name deprecated-with-message :version "1.0.0"
+  (value-kind :name status
+    :underlying symbol
+    :members (member-set
+      (member :name draft)
+      (member :name archived
+        :deprecated true
+        :deprecation-message "Use :status hidden instead.")))
+  (form :name post
+    (key :name status :type status :optional false)))

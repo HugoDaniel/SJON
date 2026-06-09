@@ -1,0 +1,3 @@
+; `:done` is a declared flag — the `:description`/`:link` metadata does
+; not change membership, so validation is clean.
+(diagnostics)

@@ -1,0 +1,2 @@
+; Clean — declared result `:number` matches the slot's expected type.
+(diagnostics)

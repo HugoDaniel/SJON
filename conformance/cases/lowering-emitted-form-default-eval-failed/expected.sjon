@@ -1,0 +1,4 @@
+; v2 lowered-tree materializer evaluates the broken default and emits
+; `default_eval_failed` against the emitted sugar-normal's `:x` slot.
+(diagnostics
+  (diagnostic :code default_eval_failed :path [sugar-normal x default]))

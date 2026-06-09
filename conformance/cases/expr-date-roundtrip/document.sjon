@@ -1,0 +1,4 @@
+; Date round-trip through `let`: the binder preserves the .date
+; variant (identity-shaped op), and the body returns the bound
+; value unchanged.
+(let [d 2026-05-19] d)

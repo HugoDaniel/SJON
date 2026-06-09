@@ -1,0 +1,6 @@
+; Plugin loads cleanly (pre-flight pass), then the `(twice 21)` call
+; returns a number frame which the invoker rejects against the
+; declared `:result symbol`, surfacing `plugin_func_result_type` at
+; the call span.
+(diagnostics
+  (diagnostic :code plugin_func_result_type :path []))

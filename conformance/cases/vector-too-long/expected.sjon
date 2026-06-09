@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code vector_too_long :path [poly pts]))

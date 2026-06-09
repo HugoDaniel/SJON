@@ -1,0 +1,3 @@
+; Component-exact equality. `12:34:56` and `12:34:56.000` pack
+; to the same bits and compare equal.
+(= 12:34:56 12:34:56.000)

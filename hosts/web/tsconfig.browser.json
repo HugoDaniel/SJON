@@ -1,0 +1,21 @@
+{
+  // Browser-ESM emit of the web host. Strips types and rewrites
+  // `./foo.ts` import specifiers to `./foo.js` (TS 5.7+
+  // `rewriteRelativeImportExtensions`) so the output runs unbundled in
+  // a browser. Only the browser-reachable graph is included:
+  // `createNodeFsResolver.ts` (static `node:fs`) and `demo.ts`/tests
+  // are excluded. The `node:fs` use inside `SjonEncoder`/`SjonHost`
+  // is a *lazy* `await import('node:fs')` on the `load`/`_instantiate`
+  // path, never reached by the `loadFromBytes` flow the demos use.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "./dist",
+    "rewriteRelativeImportExtensions": true,
+    "declaration": false,
+    "sourceMap": false,
+    "removeComments": false
+  },
+  "include": ["sjon-reader.ts", "SjonHost.ts", "parseJsonWithBigInt.ts", "types.ts"],
+  "exclude": ["node_modules", "dist", "test", "demo.ts", "createNodeFsResolver.ts", "*.test.ts"]
+}

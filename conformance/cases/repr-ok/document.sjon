@@ -1,0 +1,11 @@
+; A value that fits its `:repr f32` slot validates clean. 1.5 is finite and
+; well within f32's magnitude range, and floats carry no integrality
+; constraint — so neither the range nor the integer check fires.
+(plugin :name gpu :version "1.0.0"
+  (value-kind :name f32-scalar
+    :underlying number
+    :repr (repr-shape :type f32))
+  (form :name set
+    (key :name v :type f32-scalar :optional false)))
+
+(set :v 1.5)

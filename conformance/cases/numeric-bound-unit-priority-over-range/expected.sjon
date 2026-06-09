@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code numeric_bound_unit_mismatch :path [set v]))

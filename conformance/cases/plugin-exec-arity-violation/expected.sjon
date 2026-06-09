@@ -1,0 +1,5 @@
+; Validator emits a single `arity_mismatch err` at the expression head
+; (path = `[double]`). No dispatch happens — no
+; `plugin_func_*` follow-on diagnostics.
+(diagnostics
+  (diagnostic :code arity_mismatch :path [double]))

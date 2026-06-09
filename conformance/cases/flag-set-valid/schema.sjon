@@ -1,0 +1,8 @@
+; `task` declares a positional flag-set: only `:done` and `:archived`
+; are allowed positional keyword flags. The greedy rule promotes a
+; trailing valueless `:keyword` to a positional flag (LANGUAGE.md §5.4).
+(plugin :name flag-set-test :version "1.0.0"
+  (form :name task
+    :positional (flag-set
+      (flag :name done)
+      (flag :name archived))))

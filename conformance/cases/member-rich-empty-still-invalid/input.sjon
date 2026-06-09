@@ -1,0 +1,3 @@
+; Schema load failed (`invalid_manifest`); plugin dropped. Use a
+; no-op literal so no cascading `unknown_form` arrives.
+42

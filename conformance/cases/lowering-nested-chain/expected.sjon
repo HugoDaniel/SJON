@@ -1,0 +1,6 @@
+; `b` is a lowerable child of lowerable `a`; `c` is a lowerable child of
+; lowerable `b`. Two diagnostics, document order: `b` then `c`. (`a` is a forest
+; root, never a nested child, so it is not flagged.)
+(diagnostics
+  (diagnostic :code lowering_nested_lowerable :path [b lowering])
+  (diagnostic :code lowering_nested_lowerable :path [c lowering]))

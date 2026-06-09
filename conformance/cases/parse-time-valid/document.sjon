@@ -1,0 +1,4 @@
+; The canonical 8-char clock-time lexeme. Parser emits a single
+; Tag.time node with no diagnostics; the printer round-trips it
+; back to byte-identical HH:MM:SS.
+12:34:56

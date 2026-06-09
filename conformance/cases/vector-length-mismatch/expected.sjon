@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code vector_length_mismatch :path [paint color]))

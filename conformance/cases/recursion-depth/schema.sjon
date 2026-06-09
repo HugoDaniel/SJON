@@ -1,0 +1,10 @@
+; Self-cyclic kind `A` whose vector element loops back to `A`. Each
+; data nesting level chains the resolver one hop deeper; the 8th hop
+; trips `MAX_KIND_DEPTH=8` and emits `recursion_depth` before the
+; innermost number can be checked against the cycle.
+(plugin :name rec-depth-test :version "1.0.0"
+  (value-kind :name A
+    :underlying vector
+    :vector (vector-shape :element A))
+  (form :name set
+    (key :name k :type A :optional false)))

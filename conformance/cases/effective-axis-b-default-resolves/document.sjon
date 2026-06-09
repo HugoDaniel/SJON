@@ -1,0 +1,24 @@
+; Axis B (cross-ref symbol-slot lookup) — positive direction.
+;
+; A real `(phrase :name p0)` populates the registry. The `track`
+; form omits `:anchor`, which defaults to `p0`. With axis B off,
+; the omitted kvpair triggers no lookup at all — clean. With axis
+; B on, the overlay-driven lookup resolves `p0` against the
+; registered phrase — still clean. Both modes silent.
+;
+; This fixture documents the axis-on happy path symmetric to
+; `effective-axis-b-default-miss`. It produces no harness delta
+; today, but serves as a regression guard: a future change that
+; makes axis-on spuriously emit on resolved defaults would suddenly
+; produce a delta where none exists.
+(plugin :name probe :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase))
+  (form :name phrase
+    (key :name name :type symbol :optional false))
+  (form :name track
+    (key :name anchor :type phrase-name :default p0 :optional true)))
+
+(phrase :name p0)
+(track)

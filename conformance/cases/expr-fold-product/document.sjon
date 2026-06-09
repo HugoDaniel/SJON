@@ -1,0 +1,8 @@
+; Product fold — same accumulator-threading shape as expr-fold-sum
+; but the body multiplies rather than adds, and the init is `1`
+; (the multiplicative identity) rather than `0`. The pair of
+; fixtures pins fold's "init must be applied as iteration-0 acc"
+; semantics: a buggy implementation that started the accumulator
+; at the wrong identity would produce wildly different results
+; under multiplication vs addition.
+(fold [acc x] 1 [1 2 3 4] (* acc x))

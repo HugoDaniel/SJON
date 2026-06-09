@@ -1,0 +1,10 @@
+; HeadSet pinning: the :shape slot accepts only (circle …) or (rect …).
+(plugin :name nhm-test :version "1.0.0"
+  (value-kind :name shape-form :underlying form
+    :heads (head-set :names [circle rect]))
+  (form :name circle
+    (key :name radius :type number :optional false))
+  (form :name rect
+    (key :name w :type number :optional false))
+  (form :name canvas
+    (key :name shape :type shape-form :optional false)))

@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code missing_required_key :path [scene]))

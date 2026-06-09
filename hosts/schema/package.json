@@ -1,0 +1,22 @@
+{
+  "name": "@sjon/schema",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Fluent, host-independent schema authoring + Zod-style inference for SJON. Pure TS, zero runtime deps.",
+  "license": "SEE ../../LICENSE",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types 'test/*.test.ts'"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

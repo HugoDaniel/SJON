@@ -1,0 +1,8 @@
+; Two diagnostics in document order:
+;   1. wrong_underlying on (phrase :name 42) — the validator's
+;      regular form-keys check rejects the number-typed name.
+;   2. not_cross_ref on `p0` — the index pass skipped the malformed
+;      phrase, so its name never registered.
+(diagnostics
+  (diagnostic :code wrong_underlying :path [phrase name])
+  (diagnostic :code not_cross_ref    :path [track sequence]))

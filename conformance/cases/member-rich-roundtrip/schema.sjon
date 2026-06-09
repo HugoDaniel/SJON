@@ -1,0 +1,11 @@
+; Rich `(member …)` children populate `Member.name` exactly like the
+; compact shape — an `ortho` value validates against this rich set the
+; same way it validates against the compact peer.
+(plugin :name rich-roundtrip :version "1.0.0"
+  (value-kind :name projection
+    :underlying symbol
+    :members (member-set
+      (member :name ortho       :label "Orthographic")
+      (member :name perspective :label "Perspective" :description "Standard 3D projection.")))
+  (form :name cam
+    (key :name mode :type projection :optional false)))

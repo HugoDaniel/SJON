@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code wrong_underlying :path [default-test scene fps default]))

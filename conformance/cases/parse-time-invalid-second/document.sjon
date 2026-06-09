@@ -1,0 +1,2 @@
+; Second 60 is rejected. Parser emits time_invalid_second.
+12:34:60

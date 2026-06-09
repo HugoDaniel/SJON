@@ -1,0 +1,6 @@
+; index 0 `:done` is accepted; index 1 `:bogus` is undeclared; index 2
+; `:done` repeats the accepted flag. The undeclared flag still advances
+; the positional counter, so the duplicate lands at index 2.
+(diagnostics
+  (diagnostic :code not_flag_member :path [task 1])
+  (diagnostic :code duplicate_positional_flag :path [task 2]))

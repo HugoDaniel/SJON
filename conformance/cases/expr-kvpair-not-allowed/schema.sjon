@@ -1,0 +1,5 @@
+; A bespoke expression `inc` (not a form) is invoked with a keyword
+; argument; expressions reject kvpairs in their argument list and
+; emit `expr_kvpair_not_allowed`.
+(plugin :name expr-kv-test :version "1.0.0"
+  (expr-func :name inc :arity (fixed 1) :params [number] :result number))

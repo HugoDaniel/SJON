@@ -1,0 +1,5 @@
+; `scene` is a closed form (no `:positional` declaration). Adding a
+; bare positional value trips `positional_not_allowed`.
+(plugin :name pos-test :version "1.0.0"
+  (form :name scene
+    (key :name title :type string :optional true)))

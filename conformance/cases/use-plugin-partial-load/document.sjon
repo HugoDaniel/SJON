@@ -1,0 +1,8 @@
+; Partial-load fixture: one reference resolves cleanly, one fails.
+; Proves the host doesn't sink the schema on a single resolver miss —
+; the data form against `shapes` still validates while `missing` emits
+; `unresolved_plugin`.
+(use-plugin "shapes")
+(use-plugin "missing")
+
+(circle :radius 5)

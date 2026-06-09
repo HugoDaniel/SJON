@@ -1,0 +1,38 @@
+; Container / group lowering. `webgpu/render-graph-v1` reads every (pass …)
+; child of the (render-graph …) container in ONE invocation — the whole-
+; document EffectiveView lets the hook see all siblings at once — and assigns
+; each pass a global texture id by document position. Per pass it emits a
+; gpu-texture named by that id and a gpu-render-pass whose `:reads` points at
+; the *previous* pass's texture; the multisampled pass also gets a synthesized
+; gpu-auto-blit.
+;
+; Coherence is observable through the cross-ref: `:reads` is typed `texture-ref`
+; (a cross-ref into gpu-texture by name). The ids resolve cleanly ONLY because
+; the hook saw the whole graph and numbered tex-0/1/2 globally. A per-pass hook
+; would restart at tex-0 for every pass, so the textures would collide
+; (duplicate_cross_ref_target) and `main`/`post` would read a tex-1 that was
+; never emitted (not_cross_ref). The clean expected.sjon is the proof.
+(plugin :name webgpu :version "1.0.0"
+  (value-kind :name texture-ref :underlying symbol
+    :cross-ref (cross-ref :target gpu-texture))
+
+  (form :name render-graph :open true
+    :lowering (lowering :hook webgpu/render-graph-v1
+      :produces [gpu-render-pass gpu-texture gpu-auto-blit]))
+
+  (form :name pass
+    (key :name name :type symbol :optional false)
+    (key :name multisample :type boolean :optional true))
+
+  ; Terminal resources the hook materializes — none authored by hand.
+  (form :name gpu-texture
+    (key :name name :type symbol :optional false))
+  (form :name gpu-render-pass
+    (key :name name :type symbol :optional false)
+    (key :name reads :type texture-ref :optional true))
+  (form :name gpu-auto-blit :open true))
+
+(render-graph
+  (pass :name shadow)
+  (pass :name main :multisample true)
+  (pass :name post))

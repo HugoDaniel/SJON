@@ -1,0 +1,9 @@
+; Regression: the compact `(member-set :values […])` authoring shape
+; that existed before rich `(member …)` children is still accepted and
+; validates exactly as it always did.
+(plugin :name compact-still-works :version "1.0.0"
+  (value-kind :name projection
+    :underlying symbol
+    :members (member-set :values [ortho perspective]))
+  (form :name cam
+    (key :name mode :type projection :optional false)))

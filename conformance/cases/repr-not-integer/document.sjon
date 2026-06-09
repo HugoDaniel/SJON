@@ -1,0 +1,12 @@
+; An integer GPU type (`:repr u32`) rejects a fractional literal — 1.5 is in
+; range but not a whole number, so it can't be encoded as a u32. The same
+; `repr_out_of_range` code fires; the message disambiguates "not an integer"
+; from "out of range".
+(plugin :name gpu :version "1.0.0"
+  (value-kind :name u32-count
+    :underlying number
+    :repr (repr-shape :type u32))
+  (form :name set
+    (key :name v :type u32-count :optional false)))
+
+(set :v 1.5)

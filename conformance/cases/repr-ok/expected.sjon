@@ -1,0 +1,2 @@
+; In-range, finite f32 value — no GPU-representation diagnostic.
+(diagnostics)

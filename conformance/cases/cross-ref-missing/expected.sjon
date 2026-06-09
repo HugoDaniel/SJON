@@ -1,0 +1,6 @@
+; `typoed` is not a declared phrase; the validator emits not_cross_ref
+; at the kvpair slot. The element index is embedded in the diagnostic
+; message via the `element_at` MatchFail wrapping; the path stays at
+; the slot (Tree validator convention for typed-vector elements).
+(diagnostics
+  (diagnostic :code not_cross_ref :path [track sequence]))

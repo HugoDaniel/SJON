@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code numeric_bounds_invalid :path [nn numeric exclusive-min]))

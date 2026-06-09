@@ -1,0 +1,4 @@
+; Bare `foo` is claimed by both plugins; the validator emits at the
+; head-span path with `ambiguous_form` and bails before checking keys.
+(diagnostics
+  (diagnostic :code ambiguous_form :path [foo]))

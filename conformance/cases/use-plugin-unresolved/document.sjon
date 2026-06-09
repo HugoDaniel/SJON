@@ -1,0 +1,4 @@
+; No `sjon-project.sjon` sibling — Host has no project root, so the
+; default resolver isn't even constructed. `(use-plugin "missing")`
+; falls through to the "no resolver configured" path.
+(use-plugin "missing")

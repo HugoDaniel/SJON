@@ -1,0 +1,7 @@
+; Expression-argument result-typing: `sum`'s positional 0 expects a
+; number, but the value is a form whose head's declared result is
+; `:vector`. The validator surfaces `expr_type_mismatch` on the arg
+; path — distinct from slot mismatches, which use `wrong_underlying`.
+(plugin :name expr-result-test :version "1.0.0"
+  (expr-func :name sum  :arity (fixed 2) :params [number number] :result number)
+  (expr-func :name vec-result :arity (fixed 0) :result vector))

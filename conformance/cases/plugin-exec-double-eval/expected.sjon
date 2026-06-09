@@ -1,0 +1,7 @@
+; Plugin loads cleanly; `(double 21)` evaluates to 42 over the wasm
+; runtime. Web + Rust hosts assert both the clean diagnostic stream and
+; the returned value via the `(values …)` block; Zig-native + TS-parity
+; skip plugin-exec cases entirely.
+(diagnostics)
+(values
+  (value :index 0 :result 42))

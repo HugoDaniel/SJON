@@ -1,0 +1,27 @@
+; D8-v2 lowered-tree materialization: the emitted form's discriminant
+; defaults via the *lowered* overlay.
+;
+; `sugar` lowers via test/identity-v1, which emits `sugar-normal` by
+; convention. sugar declares no keys, so the hook emits `(sugar-
+; normal)` with no kvpairs. sugar-normal is `:discriminant kind` with
+; `:kind :default kick`. Without v2 the source overlay has no entry
+; for the lowered `(sugar-normal)` node (its source NodeIndex is in
+; the source-tree index space), so axis D fails to resolve the
+; discriminant and emits `missing_discriminant_key at [sugar-normal]`.
+; With v2 the lowered-tree overlay yields `kind = kick`, variant
+; `kick` is selected, and the form validates silently.
+(plugin :name probe :version "1.0.0"
+  (value-kind :name kind-tag
+    :underlying symbol
+    :members (member-set :values [kick bass]))
+  (form :name sugar :open true
+    :lowering (lowering :hook test/identity-v1 :produces [sugar-normal]))
+  (form :name sugar-normal
+    :discriminant kind
+    (key :name kind :type kind-tag :default kick :optional true)
+    (variant :when kick
+      (key :name step :type number :optional true))
+    (variant :when bass
+      (key :name sequence :type any :optional true))))
+
+(sugar)

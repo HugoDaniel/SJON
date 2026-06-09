@@ -1,0 +1,20 @@
+; Axis C (exclusive-group presence) — group-aware rule, masking case.
+;
+; The author writes `:at`; `:from` has a literal default of 0. With
+; the group-aware rule (production), `:at` is author-present, so the
+; sibling defaulted `:from` is dropped from the presence count ->
+; exactly-one satisfied, clean.
+;
+; This is the fixture that motivated the rule: with unconditional
+; default-presence (the held-off behavior) `:from`'s overlay default
+; would have triggered `mutually_exclusive_keys_present` here. The
+; group-aware rule treats author choices as authoritative.
+(plugin :name probe :version "1.0.0"
+  (form :name track
+    (key :name at :type number :optional true)
+    (key :name from :type number :default 0 :optional true)
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [at])
+      (alt :keys [from]))))
+
+(track :at 12)

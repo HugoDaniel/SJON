@@ -1,0 +1,6 @@
+; Two layers lower (a -> a-normal -> a-normal-normal). The terminal form
+; is missing the required `:y` — a diagnostic only reachable after BOTH
+; layers run, proving staging executed (single-pass v1 would have stopped
+; at `a-normal` with lowering_produced_lowerable_head).
+(diagnostics
+  (diagnostic :code missing_required_key :path [a-normal-normal]))

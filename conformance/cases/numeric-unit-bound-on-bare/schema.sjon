@@ -1,0 +1,8 @@
+; A unit-bearing bound against a bare-number value fires
+; `numeric_bound_unit_mismatch`.
+(plugin :name numeric-unit-bound-on-bare :version "1.0.0"
+  (value-kind :name dur
+    :underlying number
+    :numeric (numeric-bounds :min 0ms))
+  (form :name set
+    (key :name v :type dur :optional false)))

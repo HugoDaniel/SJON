@@ -1,0 +1,3 @@
+; Local `circle` is missing its required :r — reported at the value path.
+(diagnostics
+  (diagnostic :code missing_required_key :path [canvas shape circle]))

@@ -1,0 +1,24 @@
+; Axis A (cross-ref name indexing) — negative direction.
+;
+; Both `(phrase)` instances omit `:name`, so both materialize the
+; same `origin` default. The unused `phrase-name` value-kind only
+; exists to mark `phrase` as a cross-ref target (without it,
+; `collectCrossRefTargets` returns empty and the registration
+; path never runs for `phrase` instances at all). With axis A off
+; the pre-pass does not see the defaulted names; the registry
+; stays empty and nothing collides. With axis A on, two-time
+; registration of `origin` collides at the synthetic default
+; path -> `duplicate_cross_ref_target`. The diagnostic carries an
+; empty path (`emitDuplicateCrossRef` surfaces on the span only),
+; so the harness reports it as `duplicate_cross_ref_target` at `[]`.
+;
+; `expected.sjon` matches the axis-off baseline (clean).
+(plugin :name probe :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase))
+  (form :name phrase
+    (key :name name :type symbol :default origin :optional false)))
+
+(phrase)
+(phrase)

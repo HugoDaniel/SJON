@@ -1,0 +1,24 @@
+; Axis D (variant discriminant) — positive direction.
+;
+; The `track` form is discriminated on `:kind` (typed as
+; `kind-tag`, a closed-enum value-kind), which defaults to the
+; symbol `kick`. The author writes `(track)` — no `:kind`, no
+; other keys. With axis D off the discriminant lookup sees no
+; author kvpair -> `missing_discriminant_key` at `[track]`. With
+; axis D on the overlay yields `kind = kick` -> variant `kick`
+; selected and silent.
+;
+; `expected.sjon` matches the axis-off baseline.
+(plugin :name probe :version "1.0.0"
+  (value-kind :name kind-tag
+    :underlying symbol
+    :members (member-set :values [kick bass]))
+  (form :name track
+    :discriminant kind
+    (key :name kind :type kind-tag :default kick :optional true)
+    (variant :when kick
+      (key :name step :type number :optional true))
+    (variant :when bass
+      (key :name sequence :type any :optional true))))
+
+(track)

@@ -1,0 +1,4 @@
+; Plugin-declared `myfn` is fixed-arity 3. Calling with 2 args trips
+; `arity_mismatch` on the expression head.
+(plugin :name arity-test :version "1.0.0"
+  (expr-func :name myfn :arity (fixed 3) :params [number number number] :result number))

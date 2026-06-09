@@ -1,0 +1,14 @@
+; Multi-key `at-most-one`: zero keys present is valid. The `(tag)` form
+; below has no kvpairs, exercising the "no bundle present, no sibling
+; either, cardinality permits zero" path without triggering the
+; required_one_of_missing branch.
+(plugin :name routes :version "1.0.0"
+  (form :name tag
+    (key :name prefix :type symbol :optional true)
+    (key :name suffix :type symbol :optional true)
+    (key :name literal :type symbol :optional true)
+    (exclusive-group :cardinality at-most-one
+      (alt :keys [prefix suffix])
+      (alt :keys [literal]))))
+
+(tag)

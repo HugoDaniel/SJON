@@ -1,0 +1,9 @@
+; v1 builds carry no regex engine: declaring :pattern triggers a
+; `string_pattern_unsupported` warning at every validated value site.
+; The constraint is informational only — length / format still enforce.
+(plugin :name string-pattern-unsupported-warning :version "1.0.0"
+  (value-kind :name ss
+    :underlying string
+    :string-bounds (string-bounds :pattern "^[a-z]+$"))
+  (form :name set
+    (key :name v :type ss :optional false)))

@@ -1,0 +1,15 @@
+; Plugin a's cross-ref says `:scope track`. Both this plugin and
+; extra-b.sjon define a form named `track`, so the bare `:scope track`
+; lookup is ambiguous. The `:target phrase` resolves uniquely (only
+; this plugin defines it), so this case isolates the scope-side
+; diagnostic.
+(plugin :name ambig-xref-scope-a :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase :scope track))
+
+  (form :name phrase
+    (key :name name :type symbol :optional false))
+
+  (form :name track
+    (key :name name :type symbol :optional false)))

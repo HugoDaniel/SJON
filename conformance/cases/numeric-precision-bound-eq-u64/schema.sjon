@@ -1,0 +1,10 @@
+; 2^53 fits f64 exactly; 2^53 + 1 does not (rounds to 2^53). Naive f64
+; comparison would silently accept 2^53 + 1 under :max (= 2^53,
+; :exclusive-max true). The exact-int branch keeps the comparison in
+; u64-space and catches the off-by-one.
+(plugin :name numeric-precision-bound-eq-u64 :version "1.0.0"
+  (value-kind :name nn
+    :underlying number
+    :numeric (numeric-bounds :max 9007199254740992 :exclusive-max true))
+  (form :name set
+    (key :name v :type nn :optional false)))

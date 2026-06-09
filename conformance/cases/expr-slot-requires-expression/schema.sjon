@@ -1,0 +1,8 @@
+; `:pred` is typed `.expr` — it requires a form whose head is an
+; expression function, not a data form. Passing `(label)` (a data form)
+; surfaces `wrong_underlying` at the slot path. Expression heads still
+; flow cleanly into `.expr` slots (covered by core expression tests).
+(plugin :name expr-result-test :version "1.0.0"
+  (form :name cond
+    (key :name pred :type expr :optional false))
+  (form :name label))

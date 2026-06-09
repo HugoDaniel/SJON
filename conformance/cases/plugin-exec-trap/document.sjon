@@ -1,0 +1,9 @@
+; D7-exec runtime failure: the manifest binds `(boom n)` to
+; `:impl "wasm:trap"`, an export that calls `unreachable`. Web + Rust
+; hosts catch the wasmtime / WebAssembly RuntimeError, frame an
+; `_internal_trap` synthetic error, and the Zig invoker surfaces
+; `plugin_func_trapped` at the call span. Skipped on Zig-native +
+; TS-parity (no wasm runtime).
+(use-plugin "double")
+
+(boom 1)

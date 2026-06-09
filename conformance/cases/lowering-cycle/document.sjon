@@ -1,0 +1,14 @@
+; lowering-aggregate corpus: two forms whose `:lowering :produces` edges
+; form a cycle (a -> b -> a). `Schema.validateLowering` rejects the
+; manifest statically with `lowering_cycle` before any hook runs — no
+; registry needed. The `(plain)` data form is non-lowering, so the
+; runtime lowering pass stays a no-op and only the aggregate cycle
+; diagnostic surfaces.
+(plugin :name cyc :version "1.0.0"
+  (form :name a :open true
+    :lowering (lowering :hook cyc/a-v1 :produces [b]))
+  (form :name b :open true
+    :lowering (lowering :hook cyc/b-v1 :produces [a]))
+  (form :name plain :open true))
+
+(plain)

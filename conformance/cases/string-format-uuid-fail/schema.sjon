@@ -1,0 +1,6 @@
+(plugin :name string-format-uuid-fail :version "1.0.0"
+  (value-kind :name ss
+    :underlying string
+    :string-bounds (string-bounds :format uuid))
+  (form :name set
+    (key :name v :type ss :optional false)))

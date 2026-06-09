@@ -1,0 +1,4 @@
+; `triangle` is neither a local nor a global form → unknown_local_form at the
+; SLOT path [canvas shape]; the generic unknown_form is suppressed.
+(diagnostics
+  (diagnostic :code unknown_local_form :path [canvas shape]))

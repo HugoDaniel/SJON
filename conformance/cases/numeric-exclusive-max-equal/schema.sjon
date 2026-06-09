@@ -1,0 +1,7 @@
+; :exclusive-max true rejects a value equal to :max.
+(plugin :name numeric-exclusive-max-equal :version "1.0.0"
+  (value-kind :name nn
+    :underlying number
+    :numeric (numeric-bounds :max 1 :exclusive-max true))
+  (form :name set
+    (key :name v :type nn :optional false)))

@@ -1,0 +1,8 @@
+; Empty xs is fold's identity case: no body iteration runs, and the
+; form's value is the evaluated `init`. This is the left-fold
+; identity and the load-bearing case for "init is always evaluated,
+; even when xs is empty." On the binary path it also exercises the
+; `fold_capture_init` bridge's early-return: setup pops init from
+; the captured field, sees xs.len == 0, and pushes init as the
+; final value without scheduling any iter frames.
+(fold [acc x] 42 [] (+ acc x))

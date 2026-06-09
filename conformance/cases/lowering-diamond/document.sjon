@@ -1,0 +1,18 @@
+; Diamond multiplicity. `task` fans out to `left` + `right`
+; (test/fanout-v1), and BOTH lower to `row` (test/to-row-v1). The worklist
+; treats each emitted form as a distinct node, so one `(task)` yields TWO
+; `row` instances — one per source × `:produces` edge, no implicit merge.
+; `row` requires `:v`, which neither branch supplies, so each `row`
+; surfaces missing_required_key: the two diagnostics prove the
+; multiplicity (a merge would yield one).
+(plugin :name dia :version "1.0.0"
+  (form :name task :open true
+    :lowering (lowering :hook test/fanout-v1 :produces [left right]))
+  (form :name left :open true
+    :lowering (lowering :hook test/to-row-v1 :produces [row]))
+  (form :name right :open true
+    :lowering (lowering :hook test/to-row-v1 :produces [row]))
+  (form :name row
+    (key :name v :type number :optional false)))
+
+(task)

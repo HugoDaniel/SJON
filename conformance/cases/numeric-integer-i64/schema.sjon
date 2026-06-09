@@ -1,0 +1,7 @@
+; :integer true passes the i64.max literal (Tag.number_i64 is trivially integer).
+(plugin :name numeric-integer-i64 :version "1.0.0"
+  (value-kind :name nn
+    :underlying number
+    :numeric (numeric-bounds :integer true))
+  (form :name set
+    (key :name v :type nn :optional false)))

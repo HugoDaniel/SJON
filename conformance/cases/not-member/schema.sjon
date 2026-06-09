@@ -1,0 +1,9 @@
+; `projection` is a closed-set symbol kind; only `ortho` and
+; `perspective` are members. A different symbol on the `:mode` slot
+; trips `not_member`.
+(plugin :name not-member-test :version "1.0.0"
+  (value-kind :name projection
+    :underlying symbol
+    :members (member-set :values [ortho perspective]))
+  (form :name cam
+    (key :name mode :type projection :optional false)))

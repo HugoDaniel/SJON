@@ -1,0 +1,7 @@
+; A string value above :max-len fails with `string_too_long`.
+(plugin :name string-max-len-fail :version "1.0.0"
+  (value-kind :name ss
+    :underlying string
+    :string-bounds (string-bounds :max-len 3))
+  (form :name set
+    (key :name v :type ss :optional false)))

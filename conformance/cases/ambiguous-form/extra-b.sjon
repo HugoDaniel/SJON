@@ -1,0 +1,4 @@
+; Sibling plugin — collides with schema.sjon on form `foo`.
+(plugin :name ambig-form-b :version "1.0.0"
+  (form :name foo
+    (key :name name :type symbol :optional false)))

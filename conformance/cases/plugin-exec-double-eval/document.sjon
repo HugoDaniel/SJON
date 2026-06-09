@@ -1,0 +1,8 @@
+; D7-exec happy path: filesystem resolver pairs `manifests/double.sjon`
+; with the sidecar `manifests/double.wasm`. Web + Rust hosts instantiate
+; the plugin, pre-flight passes, and `(double 21)` evaluates to 42 with
+; zero diagnostics. Zig-native + TS-parity skip this case (declarative-
+; only — no wasm runtime adapter wired).
+(use-plugin "double")
+
+(double 21)

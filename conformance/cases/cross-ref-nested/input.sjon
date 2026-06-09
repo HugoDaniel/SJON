@@ -1,0 +1,4 @@
+(piece
+  (phrase :name p0)
+  (phrase :name p1)
+  (track :sequence [p0 p1]))

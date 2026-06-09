@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code not_member :path [cam mode]))

@@ -1,0 +1,2 @@
+; Same `p0` lives in both pieces' scopes — no collision, no diagnostics.
+(diagnostics)

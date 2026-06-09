@@ -1,0 +1,4 @@
+; 1.5 is within u32's range but not integral — integer GPU types reject
+; fractional values (checked before range, so the reason is "not an integer").
+(diagnostics
+  (diagnostic :code repr_out_of_range :path [set v]))

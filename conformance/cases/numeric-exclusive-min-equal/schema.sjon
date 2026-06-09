@@ -1,0 +1,7 @@
+; :exclusive-min true rejects a value equal to :min.
+(plugin :name numeric-exclusive-min-equal :version "1.0.0"
+  (value-kind :name nn
+    :underlying number
+    :numeric (numeric-bounds :min 0 :exclusive-min true))
+  (form :name set
+    (key :name v :type nn :optional false)))

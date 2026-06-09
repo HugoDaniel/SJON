@@ -1,0 +1,6 @@
+; Sibling plugin — collides with schema.sjon on expr-func `myfn`.
+(plugin :name ambig-expr-b :version "1.0.0"
+  (expr-func :name myfn
+    :arity (fixed 1)
+    :params [number]
+    :result number))

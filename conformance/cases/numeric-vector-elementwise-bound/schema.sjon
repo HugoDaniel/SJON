@@ -1,0 +1,11 @@
+; Vector-of-opacity catches a bad element via the element_at descent;
+; element [1] = 1.5 fails the inner `number_above_max`.
+(plugin :name numeric-vector-elementwise-bound :version "1.0.0"
+  (value-kind :name opacity
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 1))
+  (value-kind :name opacities
+    :underlying vector
+    :vector (vector-shape :element opacity))
+  (form :name set
+    (key :name v :type opacities :optional false)))

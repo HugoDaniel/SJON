@@ -1,0 +1,9 @@
+; Vector kind `bag` declares its element as `missing` — a name no
+; value-kind in this schema declares. Validating an actual element
+; trips `unknown_element_kind` at the element traversal.
+(plugin :name unk-elem-test :version "1.0.0"
+  (value-kind :name bag
+    :underlying vector
+    :vector (vector-shape :element missing))
+  (form :name set
+    (key :name k :type bag :optional false)))

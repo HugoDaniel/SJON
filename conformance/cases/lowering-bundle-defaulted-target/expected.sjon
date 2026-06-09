@@ -1,0 +1,4 @@
+; Default `:target = hero` flows into the lowered `(link :to hero)`
+; via `input.symbol`'s keyword→symbol normalization; forest-wide
+; cross-ref resolves cleanly against `(target :name hero)`.
+(diagnostics)

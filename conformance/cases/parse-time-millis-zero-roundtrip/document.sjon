@@ -1,0 +1,4 @@
+; Shortest-form canonical: `.000` collapses to 8-char form on
+; print. `12:34:56.000` and `12:34:56` produce identical packed
+; Time values; the printer chooses the shorter render.
+12:34:56.000

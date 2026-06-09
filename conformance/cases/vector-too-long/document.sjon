@@ -1,0 +1,11 @@
+; A `:vector` slot with `:max-len 4` rejects a 5-element vector — the
+; variable-arity ceiling. The `:min-len 1` floor passes (5 ≥ 1), so only the
+; ceiling fires.
+(plugin :name arity-test :version "1.0.0"
+  (value-kind :name quad
+    :underlying vector
+    :vector (vector-shape :element number :min-len 1 :max-len 4))
+  (form :name poly
+    (key :name pts :type quad :optional false)))
+
+(poly :pts [1 2 3 4 5])

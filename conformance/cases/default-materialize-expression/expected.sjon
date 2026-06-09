@@ -1,0 +1,3 @@
+; Clean — special-form expression default evaluates and lands on the
+; overlay without emitting diagnostics.
+(diagnostics)

@@ -1,0 +1,6 @@
+; Post-graduation (axis C on with the group-aware rule): the author
+; wrote `:at`, so the defaulted `:from` is masked out of the presence
+; count -> exactly-one satisfied, no diagnostic. The fixture that
+; motivated holding C now reads cleanly under the new rule. See
+; docs/plans/exclusive-group-default-semantics.md.
+(diagnostics)

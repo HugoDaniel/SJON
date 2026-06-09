@@ -1,0 +1,11 @@
+; Binds `(vec3-length v)` to `:impl "wasm:vec3_length"` — the sibling
+; double.wasm exports `vec3_length` returning the L2 norm of a 3-element
+; number vector. Used by §18's vector round-trip stretch case to prove
+; nested-value (vector-of-number) round-trip through the codec; the
+; happy-path `double` only crosses bare numbers.
+(plugin :name double :version "1.0.0"
+  (expr-func :name vec3-length
+    :arity (fixed 1)
+    :params [vector]
+    :result number
+    :impl "wasm:vec3_length"))

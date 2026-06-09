@@ -1,0 +1,4 @@
+; A 2-cycle: p0's parent is p1, p1's parent is p0. Each member of
+; the cycle gets its own cyclic_cross_ref diagnostic on its :name span.
+(phrase :name p0 :parent p1)
+(phrase :name p1 :parent p0)

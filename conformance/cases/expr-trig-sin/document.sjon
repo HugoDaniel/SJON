@@ -1,0 +1,9 @@
+; `sin` is host-independent: the evaluator routes it through the vendored
+; `src/trig.zig` software implementation (musl/compiler_rt lineage), NOT
+; the platform-libm `@sin` builtin. So the native build and both WASM
+; artifacts produce bit-identical results. The pinned `:result` decimals
+; are the canonical `{d}` rendering of those bits. Form 0 stays in the
+; kernel (|x| < pi/4 after reduction is trivial); form 1 (x = 100) forces
+; the Payne-Hanek large-argument reduction path.
+(sin 1.0)
+(sin 100.0)

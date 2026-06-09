@@ -1,0 +1,6 @@
+; Two cyclic_cross_ref diagnostics — one per cycle member's :name
+; value span. Path is empty (the cycle pass walks outside path
+; tracking, mirroring duplicate_cross_ref_target).
+(diagnostics
+  (diagnostic :code cyclic_cross_ref :path [])
+  (diagnostic :code cyclic_cross_ref :path []))

@@ -1,0 +1,20 @@
+; Axis B (cross-ref symbol-slot lookup) — negative direction.
+;
+; No `(phrase)` instance exists, so the cross-ref registry for
+; `phrase` is empty. The `track` form has `:anchor` defaulting to
+; the symbol `ghost`. With axis B off, the omitted kvpair triggers
+; no slot check — clean. With axis B on, the overlay-driven lookup
+; searches for `ghost` in an empty registry and fails ->
+; `not_cross_ref` at `[track, anchor, default]`.
+;
+; `expected.sjon` matches the axis-off baseline (clean).
+(plugin :name probe :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase))
+  (form :name phrase
+    (key :name name :type symbol :optional false))
+  (form :name track
+    (key :name anchor :type phrase-name :default ghost :optional true)))
+
+(track)

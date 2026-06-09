@@ -1,0 +1,14 @@
+; §18 stretch — form round-trip. `(form-arity (point :x 1 :y 2 :z 3))`
+; encodes a form (tag `0x07`, head="point", empty ns, 0 children, 3
+; number-valued kvpairs) into the plugin args, dispatches
+; `wasm:form_arity`, and decodes the returned arity (3) back as a
+; number frame. `(forms-arity-sum [(point …) (vec …)])` extends the
+; proof to `Tag.form` nested inside `Tag.vector` — vec_count=2, each
+; element is a form, summed arity is 5 (3 + 2). A clean diagnostic
+; stream proves the §9.1 form payload crosses the boundary intact,
+; both bare and inside a vector. Skipped on Zig-native + TS-parity
+; (no wasm runtime).
+(use-plugin "double")
+
+(form-arity (point :x 1 :y 2 :z 3))
+(forms-arity-sum [(point :x 1 :y 2 :z 3) (vec :x 0 :y 0)])

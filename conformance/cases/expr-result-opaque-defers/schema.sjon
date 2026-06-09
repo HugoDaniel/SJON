@@ -1,0 +1,8 @@
+; Opaque expression — `opaque` declares an arity but no `:result`,
+; modelling forms like `(let …)` and `(if …)` whose result type is
+; only knowable at evaluation. The validator must defer typing such
+; values, not invent a mismatch. Slot stays clean.
+(plugin :name expr-result-test :version "1.0.0"
+  (form :name circle
+    (key :name radius :type number :optional false))
+  (expr-func :name opaque :arity (fixed 0)))

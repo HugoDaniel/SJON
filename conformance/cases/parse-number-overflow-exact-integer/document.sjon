@@ -1,0 +1,6 @@
+; A literal beyond u64.max trips `number_overflow_exact_integer` at
+; parse time. The parser falls back to f64 storage so the tree stays
+; well-formed (no parse abort) and downstream phases see a `Tag.number`
+; with an approximate value. The diagnostic is the contract that
+; consumers needing exact bits have to check.
+99999999999999999999999999

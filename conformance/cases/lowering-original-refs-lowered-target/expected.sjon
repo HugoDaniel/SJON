@@ -1,0 +1,4 @@
+; v2 forest pass sees both trees — the source-tree reference to
+; `lowered-one` resolves against the lowered tree's `(target :name
+; lowered-one)`. Clean.
+(diagnostics)

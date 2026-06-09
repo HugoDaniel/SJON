@@ -1,0 +1,11 @@
+; A rich member with only `:label` (no description/deprecated) — all the
+; other Member fields are optional. The validator still accepts a
+; matching value with no extra diagnostics.
+(plugin :name rich-label-only :version "1.0.0"
+  (value-kind :name projection
+    :underlying symbol
+    :members (member-set
+      (member :name ortho       :label "Orthographic")
+      (member :name perspective :label "Perspective")))
+  (form :name cam
+    (key :name mode :type projection :optional false)))

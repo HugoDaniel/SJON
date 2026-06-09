@@ -1,0 +1,6 @@
+; Neither `:bogus` is a declared flag, so each is an independent
+; not_flag_member at its own positional index. duplicate_positional_flag
+; never fires — only repeats of an accepted flag are duplicates.
+(diagnostics
+  (diagnostic :code not_flag_member :path [task 0])
+  (diagnostic :code not_flag_member :path [task 1]))

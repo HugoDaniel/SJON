@@ -1,0 +1,4 @@
+; 1900 is divisible by 100 but not by 400 — NOT a leap year under
+; the Gregorian rule. Feb 29 fails day-of-month validation; parser
+; emits date_invalid_day.
+1900-02-29

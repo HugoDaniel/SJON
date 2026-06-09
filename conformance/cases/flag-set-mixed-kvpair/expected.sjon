@@ -1,0 +1,5 @@
+; `:title "ship it"` is a kvpair and is not counted as a positional, so
+; the two `:done` flags occupy positional indices 0 and 1. The repeat is
+; flagged at index 1 — not 2 — proving the kvpair is excluded.
+(diagnostics
+  (diagnostic :code duplicate_positional_flag :path [task 1]))

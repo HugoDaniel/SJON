@@ -1,0 +1,3 @@
+; `filter` keeps original elements where the predicate is truthy.
+; Negative numbers and zero drop; `[1 2 4]` survive.
+(filter [x] [-1 0 1 2 -3 4] (> x 0))

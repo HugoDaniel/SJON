@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code duplicate_key :path [scene title]))

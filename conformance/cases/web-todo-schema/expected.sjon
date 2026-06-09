@@ -1,0 +1,2 @@
+; Manifest + seed state both validate cleanly — no diagnostics.
+(diagnostics)

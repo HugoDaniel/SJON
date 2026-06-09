@@ -1,0 +1,7 @@
+; The triangle form fails at the canvas :shape slot because its head is
+; not in shape-form's HeadSet. The walker also descends into (triangle …)
+; and emits unknown_form because triangle is not a declared form. Both
+; diagnostics are expected, in order.
+(diagnostics
+  (diagnostic :code not_head_member :path [canvas shape])
+  (diagnostic :code unknown_form :path [canvas shape triangle]))

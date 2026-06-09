@@ -1,0 +1,6 @@
+; Sibling lowerable children flagged in document order: `inner` before
+; `inner2`. This is the end-to-end guard for the forward-sweep fix — a reversed
+; emission would surface `inner2` first and fail the positional comparison here.
+(diagnostics
+  (diagnostic :code lowering_nested_lowerable :path [inner lowering])
+  (diagnostic :code lowering_nested_lowerable :path [inner2 lowering]))

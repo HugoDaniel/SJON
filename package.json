@@ -1,0 +1,21 @@
+{
+  "name": "sjon-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SJON repo workspace root — hosts/web (Node WASM consumer), hosts/typescript-parity (TS port), landing-page (Astro).",
+  "packageManager": "pnpm@10.31.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "format": "pnpm exec biome format --write .",
+    "format:check": "pnpm exec biome format .",
+    "lint": "pnpm exec biome lint .",
+    "check": "pnpm exec biome check ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4"
+  }
+}

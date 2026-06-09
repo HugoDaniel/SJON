@@ -1,0 +1,8 @@
+; Both plugins declare an `(expr-func :name myfn …)`. Form lookup
+; misses (no plugin defines `myfn` as a form), then expr-func lookup
+; returns ambiguous because two plugins claim the bare name.
+(plugin :name ambig-expr-a :version "1.0.0"
+  (expr-func :name myfn
+    :arity (fixed 1)
+    :params [number]
+    :result number))

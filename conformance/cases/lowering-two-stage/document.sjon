@@ -1,0 +1,22 @@
+; Staged lowering: `a` lowers to `a-normal`, which is ITSELF lowerable
+; and lowers to `a-normal-normal` (terminal). The `test/identity-v1` hook
+; emits `<head>-normal` carrying the declared keys, so it chains across
+; two layers. Single-pass v1 rejected this as
+; `lowering_produced_lowerable_head`; staging lowers it layer by layer.
+;
+; The terminal `a-normal-normal` requires `:y`, which the identity hook
+; never carries — so a `missing_required_key` on `[a-normal-normal y]`
+; can ONLY appear if BOTH layers ran. That is the proof staging executed:
+; without it `(a :x 1)` validates cleanly and emits nothing.
+(plugin :name stage :version "1.0.0"
+  (form :name a
+    (key :name x :type number :optional false)
+    :lowering (lowering :hook test/identity-v1 :produces [a-normal]))
+  (form :name a-normal
+    (key :name x :type number :optional false)
+    :lowering (lowering :hook test/identity-v1 :produces [a-normal-normal]))
+  (form :name a-normal-normal
+    (key :name x :type number :optional false)
+    (key :name y :type number :optional false)))
+
+(a :x 1)

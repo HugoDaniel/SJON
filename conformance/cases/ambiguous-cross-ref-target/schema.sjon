@@ -1,0 +1,11 @@
+; Plugin a declares the cross-ref kind plus a form `phrase`. Plugin b
+; (extra-b.sjon) ALSO declares a form named `phrase`, so the bare
+; `:target phrase` lookup finds two claimants. Schema-aggregate phase
+; emits `ambiguous_cross_ref_target`.
+(plugin :name ambig-xref-tgt-a :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase))
+
+  (form :name phrase
+    (key :name name :type symbol :optional false)))

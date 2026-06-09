@@ -1,0 +1,9 @@
+; Plugin loads, the validator's arity / param-type checks accept the
+; 10k-element `(vector-sum [...])` call, and the document parses without
+; err diagnostics. The actual evaluation never lands a value because
+; pushing 10k positional eval frames trips `MAX_FRAMES` (256 × 4) inside
+; `Expr.eval` — the `(values …)` block is intentionally absent for that
+; reason. The fixture's purpose is the codec / args-encoder stress at
+; ~90 KB payload, not the runtime sum; conformance locks that the path
+; emits zero err diagnostics on a 10k vector.
+(diagnostics)

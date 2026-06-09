@@ -1,0 +1,12 @@
+; Binds `(double n)` to `:impl "wasm:double"` exactly as the happy-
+; path eval fixture does — `:arity (fixed 1)`. The document calls
+; `(double 1 2 3)` so the validator's pre-dispatch arity check fires
+; and surfaces `arity_mismatch` against this manifest entry. Used by
+; §18's arity-violation stretch case to prove the validator catches
+; arity errors before any wasm dispatch.
+(plugin :name double :version "1.0.0"
+  (expr-func :name double
+    :arity (fixed 1)
+    :params [number]
+    :result number
+    :impl "wasm:double"))

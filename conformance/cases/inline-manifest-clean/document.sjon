@@ -1,0 +1,9 @@
+; Inline-manifest fixture: declare a small plugin and use it cleanly.
+; Drives Host.validateDocument's three-phase pipeline; expected: zero
+; diagnostics across manifest, aggregate, and validation phases.
+(plugin :name probe :version "1.0.0"
+  (form :name widget
+    (key :name name :type symbol :optional false)
+    (key :name size :type number :optional true)))
+
+(widget :name w0 :size 4)

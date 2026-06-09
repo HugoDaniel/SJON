@@ -1,0 +1,6 @@
+(plugin :name double :version "1.0.0"
+  (expr-func :name double
+    :arity (fixed 1)
+    :params [number]
+    :result number
+    :impl "wasm:double"))

@@ -1,0 +1,19 @@
+; Nested case: phrases live inside a (piece …) container, not at the
+; top level. The index pass walks descendants, so nested libraries
+; resolve like top-level ones.
+(plugin :name xref-nested :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase))
+
+  (value-kind :name phrase-sequence
+    :underlying vector
+    :vector (vector-shape :element phrase-name))
+
+  (form :name phrase
+    (key :name name :type symbol :optional false))
+
+  (form :name track
+    (key :name sequence :type phrase-sequence :optional false))
+
+  (form :name piece :open true))

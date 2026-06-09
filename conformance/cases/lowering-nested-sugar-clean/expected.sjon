@@ -1,0 +1,4 @@
+; Plain parent + lowerable child is the supported nested-sugar shape, not a
+; contradiction. No nested-lowerable lint fires, and the lowered `inner-normal`
+; terminal validates clean — zero diagnostics.
+(diagnostics)

@@ -1,0 +1,12 @@
+; A `:vector` slot with `:min-len 4 :max-len 6` accepts any length in that
+; inclusive range — here 5 elements. Variable arity is the whole point:
+; neither the floor nor the ceiling fires, so the document is clean. (A fixed
+; `:len` could not express "4 to 6".)
+(plugin :name arity-test :version "1.0.0"
+  (value-kind :name viewport
+    :underlying vector
+    :vector (vector-shape :element number :min-len 4 :max-len 6))
+  (form :name view
+    (key :name box :type viewport :optional false)))
+
+(view :box [0 0 320 240 1])

@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code arity_mismatch :path [myfn]))

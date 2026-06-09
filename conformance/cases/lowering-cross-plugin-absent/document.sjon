@@ -1,0 +1,13 @@
+; lowering-aggregate corpus: a form's `:lowering :produces` names a head
+; qualified to the `storage` plugin, which is never loaded. The namespace
+; is spelled explicitly, so `Schema.validateLowering` reports the dangling
+; edge as `lowering_target_plugin_absent` (not the generic `unknown_form`
+; a bare or same-plugin miss gets) — an aggregate-time check, before any
+; hook runs. The `(plain)` data form is non-lowering, so the runtime
+; lowering pass stays a no-op and only the aggregate diagnostic surfaces.
+(plugin :name pngine :version "1.0.0"
+  (form :name pass :open true
+    :lowering (lowering :hook pngine/pass-v1 :produces [storage/table-row]))
+  (form :name plain :open true))
+
+(plain)

@@ -1,0 +1,7 @@
+; :integer true rejects a fractional f64.
+(plugin :name numeric-integer-fractional :version "1.0.0"
+  (value-kind :name nn
+    :underlying number
+    :numeric (numeric-bounds :integer true))
+  (form :name set
+    (key :name v :type nn :optional false)))

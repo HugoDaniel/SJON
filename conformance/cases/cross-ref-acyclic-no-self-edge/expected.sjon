@@ -1,0 +1,4 @@
+; Schema aggregate phase rejects an acyclic flag with no self-edges.
+(diagnostics
+  (diagnostic :code acyclic_without_self_edge
+              :path [xref-acyclic-no-self-edge phrase-name cross-ref]))

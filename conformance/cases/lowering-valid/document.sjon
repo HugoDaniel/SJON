@@ -1,0 +1,9 @@
+; lowering-runtime corpus: happy path. The test/identity-v1 hook emits
+; `sugar-normal` from `sugar`; :produces lists it; both forms are
+; declared. No diagnostics expected.
+(plugin :name probe :version "1.0.0"
+  (form :name sugar :open true
+    :lowering (lowering :hook test/identity-v1 :produces [sugar-normal]))
+  (form :name sugar-normal :open true))
+
+(sugar :a 1)

@@ -1,0 +1,9 @@
+; Inline-manifest fixture: the plugin declaration is missing `:name`,
+; so meta-validation rejects it before it can contribute to the
+; schema. The downstream `(widget)` data form then surfaces as
+; `unknown_form` because no plugin ever loaded.
+(plugin :version "1.0.0"
+  (form :name widget
+    (key :name name :type symbol :optional false)))
+
+(widget :name w0)

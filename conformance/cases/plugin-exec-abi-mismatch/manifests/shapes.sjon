@@ -1,0 +1,8 @@
+; Declarative-only manifest — the sibling `shapes.wasm` is the v1 stub
+; that reports ABI 99, which is what triggers the pre-flight failure.
+; No `:impl "wasm:..."` declarations are needed for the host to attempt
+; pre-flight: the resolver attaches the wasm bytes whenever it finds a
+; sibling, and the host always checks ABI version when wasm is present.
+(plugin :name shapes :version "1.0.0"
+  (form :name circle
+    (key :name r :type number :optional false)))

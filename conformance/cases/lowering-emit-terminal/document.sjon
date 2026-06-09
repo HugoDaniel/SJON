@@ -1,0 +1,13 @@
+; Synthesized terminal. `test/synth-terminal-v1` lowers a contentless
+; (needs-sampler) sugar form into a (gpu-sampler :name default-sampler) the
+; author never wrote — a resource that exists nowhere in the source document.
+; The terminal head is declared (`:open true`) and listed in the sugar form's
+; `:produces`; emitting an instance with no authored counterpart is exactly
+; what hooks are allowed to do. One `(form … :open true)` per resource kind is
+; all it costs to legalize a synthesized head.
+(plugin :name gfx :version "1.0.0"
+  (form :name needs-sampler :open true
+    :lowering (lowering :hook test/synth-terminal-v1 :produces [gpu-sampler]))
+  (form :name gpu-sampler :open true))
+
+(needs-sampler)

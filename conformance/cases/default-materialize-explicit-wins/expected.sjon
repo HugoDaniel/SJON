@@ -1,0 +1,2 @@
+; Clean — explicit author value wins; the overlay is left untouched.
+(diagnostics)

@@ -1,0 +1,8 @@
+; `task` declares a positional flag-set. A non-keyword positional in
+; the flag slot trips `wrong_underlying` (the slot accepts only keyword
+; flags, not values).
+(plugin :name flag-set-test :version "1.0.0"
+  (form :name task
+    :positional (flag-set
+      (flag :name done)
+      (flag :name archived))))

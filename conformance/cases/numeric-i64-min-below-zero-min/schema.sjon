@@ -1,0 +1,7 @@
+; `i64.min` against `:min 0` is far below — emits `number_below_min`.
+(plugin :name numeric-i64-min-below-zero-min :version "1.0.0"
+  (value-kind :name nn
+    :underlying number
+    :numeric (numeric-bounds :min 0))
+  (form :name set
+    (key :name v :type nn :optional false)))

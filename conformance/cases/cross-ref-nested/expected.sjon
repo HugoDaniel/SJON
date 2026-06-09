@@ -1,0 +1,2 @@
+; Phrases nested inside (piece …) still register; the track resolves.
+(diagnostics)

@@ -1,0 +1,9 @@
+; A value that fails both :max-len AND :format reports the length
+; failure first — length is the cheaper, more deterministic check
+; and the validator emits at most one diagnostic per slot.
+(plugin :name string-bounds-priority-length-before-format :version "1.0.0"
+  (value-kind :name ss
+    :underlying string
+    :string-bounds (string-bounds :max-len 3 :format email))
+  (form :name set
+    (key :name v :type ss :optional false)))

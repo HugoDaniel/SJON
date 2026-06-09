@@ -1,0 +1,13 @@
+; The cross-ref declares its lexical scope is the `section` form, but
+; the schema only declares `phrase` and `track`. The schema-aggregate
+; phase rejects the unresolved `:scope`.
+(plugin :name xref-unknown-scope :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase :scope section))
+
+  (form :name phrase
+    (key :name name :type symbol :optional false))
+
+  (form :name track
+    (key :name name :type symbol :optional false)))

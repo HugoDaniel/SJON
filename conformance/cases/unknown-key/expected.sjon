@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code unknown_key :path [scene wat]))

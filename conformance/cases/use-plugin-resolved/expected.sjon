@@ -1,0 +1,2 @@
+; All references resolve, all data forms validate cleanly.
+(diagnostics)

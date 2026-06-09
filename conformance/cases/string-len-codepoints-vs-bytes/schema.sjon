@@ -1,0 +1,8 @@
+; Length is measured in UTF-8 codepoints, not bytes. `héllo` is 5
+; codepoints (6 UTF-8 bytes); :max-len 5 accepts it.
+(plugin :name string-len-codepoints-vs-bytes :version "1.0.0"
+  (value-kind :name ss
+    :underlying string
+    :string-bounds (string-bounds :min-len 5 :max-len 5))
+  (form :name set
+    (key :name v :type ss :optional false)))

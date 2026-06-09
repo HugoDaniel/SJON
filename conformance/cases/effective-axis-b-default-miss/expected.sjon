@@ -1,0 +1,5 @@
+; Post-graduation (axis B on): the overlay-driven lookup searches
+; for the defaulted `ghost` in an empty registry and fails ->
+; `not_cross_ref` on the synthetic default path.
+(diagnostics
+  (diagnostic :code not_cross_ref :path [track anchor default]))

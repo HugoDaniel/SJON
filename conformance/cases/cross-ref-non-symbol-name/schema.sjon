@@ -1,0 +1,18 @@
+; Defensive case: when a phrase's :name is non-symbol (e.g. a number),
+; the index pass silently skips it (the wrong-typed :name surfaces
+; via the standard wrong_underlying diagnostic). Any reference to that
+; phrase still fails as not_cross_ref.
+(plugin :name xref-non-symbol :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase))
+
+  (value-kind :name phrase-sequence
+    :underlying vector
+    :vector (vector-shape :element phrase-name))
+
+  (form :name phrase
+    (key :name name :type symbol :optional false))
+
+  (form :name track
+    (key :name sequence :type phrase-sequence :optional false)))

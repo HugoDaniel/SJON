@@ -1,0 +1,25 @@
+; Axis A (cross-ref name indexing) — positive direction.
+;
+; The `(phrase)` instance omits `:name`, so its defaulted symbol
+; `origin` never appears as an author kvpair. With axis A off the
+; pre-pass `buildCrossRefIndexForest` skips that instance entirely;
+; the registry stays empty, and the author-written `[origin]` ref
+; fails registry lookup -> `not_cross_ref` at the typed-vector slot.
+; With axis A on the pre-pass consults the overlay, registers
+; `origin`, and the author's ref resolves silently.
+;
+; `expected.sjon` matches the axis-off baseline (one `not_cross_ref`).
+(plugin :name probe :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase))
+  (value-kind :name phrase-name-list
+    :underlying vector
+    :vector (vector-shape :element phrase-name))
+  (form :name phrase
+    (key :name name :type symbol :default origin :optional false))
+  (form :name track
+    (key :name sequence :type phrase-name-list :optional false)))
+
+(phrase)
+(track :sequence [origin])

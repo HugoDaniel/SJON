@@ -1,0 +1,10 @@
+; Expected diagnostics, in order:
+;   1. :bpm — input encounter walks declared keys; bpm's value is the
+;      wrong underlying type.
+;   2. :wat — extra keyword surfaces during the same pass.
+;   3. :title — missing required key emitted at the post-pass step;
+;      the key name is part of the message, not the path.
+(diagnostics
+  (diagnostic :code wrong_underlying :path [scene bpm])
+  (diagnostic :code unknown_key :path [scene wat])
+  (diagnostic :code missing_required_key :path [scene]))

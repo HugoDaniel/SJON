@@ -1,0 +1,8 @@
+; A wrong-unit value with magnitude also outside the bound emits the
+; structural unit-mismatch first (range comparison is downstream).
+(plugin :name numeric-bound-unit-priority-over-range :version "1.0.0"
+  (value-kind :name dur
+    :underlying number
+    :numeric (numeric-bounds :min 0ms :max 10ms))
+  (form :name set
+    (key :name v :type dur :optional false)))

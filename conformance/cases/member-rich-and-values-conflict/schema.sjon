@@ -1,0 +1,12 @@
+; A `(member-set …)` may use the compact `:values [...]` or rich
+; `(member …)` shape — but not both. The loader emits
+; `invalid_manifest` at the `(member-set …)` head with path
+; `[projection members]`.
+(plugin :name rich-and-values-conflict :version "1.0.0"
+  (value-kind :name projection
+    :underlying symbol
+    :members (member-set
+      :values [ortho]
+      (member :name perspective)))
+  (form :name cam
+    (key :name mode :type projection :optional false)))

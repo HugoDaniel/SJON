@@ -1,0 +1,2 @@
+; Version pin matches the manifest declaration → no diagnostics.
+(diagnostics)

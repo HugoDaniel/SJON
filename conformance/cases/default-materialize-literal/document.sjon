@@ -1,0 +1,11 @@
+; Materialization corpus: a literal default lands on the overlay for an
+; omitted key. Host.validateDocument runs ManifestLoader → aggregate
+; validators → Validator.validate → materializeDefaults; the omitted
+; `:radius` on `(circle)` becomes a `literal_default` overlay entry
+; carrying 32. Conformance asserts on the diagnostic stream only — the
+; overlay itself is host-private state. Zero diagnostics expected.
+(plugin :name probe :version "1.0.0"
+  (form :name circle
+    (key :name radius :type number :default 32)))
+
+(circle)

@@ -1,0 +1,8 @@
+; :min-len > :max-len is an empty range; the loader emits
+; `string_bounds_invalid` at manifest-load time.
+(plugin :name string-bounds-invalid-empty-range :version "1.0.0"
+  (value-kind :name ss
+    :underlying string
+    :string-bounds (string-bounds :min-len 5 :max-len 3))
+  (form :name set
+    (key :name v :type ss :optional false)))

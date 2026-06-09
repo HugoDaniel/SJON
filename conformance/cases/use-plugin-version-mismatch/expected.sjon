@@ -1,0 +1,4 @@
+; Pinned `:version "9.9.9"` differs from manifest's `:version "1.0.0"`
+; → resolver-level diagnostic at the (use-plugin …) span.
+(diagnostics
+  (diagnostic :code plugin_version_mismatch :path []))

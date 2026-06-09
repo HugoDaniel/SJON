@@ -1,0 +1,13 @@
+; The cross-ref kind declares `:acyclic true`, but the target form
+; `phrase` has no key whose type loops back to `phrase-name` — the
+; cycle check would have no edges to follow. The schema-aggregate
+; phase rejects this configuration.
+(plugin :name xref-acyclic-no-self-edge :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase :acyclic true))
+
+  ; `:name :type symbol` (not `phrase-name`) — no key on the target form
+  ; loops back to `phrase-name`, so the acyclic flag has nothing to walk.
+  (form :name phrase
+    (key :name name :type symbol :optional false)))

@@ -1,0 +1,21 @@
+; Axis C (exclusive-group presence) — group-aware rule, single-default
+; case.
+;
+; The `track` form requires exactly one of `:at` or `:from`. The author
+; writes neither; `:from` has a literal default of 0. With the
+; group-aware rule (production), no alt is author-present so the
+; defaulted `:from` participates in the presence count -> exactly-one
+; satisfied, clean.
+;
+; With axis C off (harness/debug), `seen` is empty -> required_one_of
+; _missing. See `docs/plans/exclusive-group-default-semantics.md` for
+; the rule derivation.
+(plugin :name probe :version "1.0.0"
+  (form :name track
+    (key :name at :type number :optional true)
+    (key :name from :type number :default 0 :optional true)
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [at])
+      (alt :keys [from]))))
+
+(track)

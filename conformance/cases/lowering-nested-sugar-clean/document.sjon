@@ -1,0 +1,15 @@
+; The by-design nested-sugar shape: a *plain-data* parent `(plain …)` with NO
+; `:lowering`, holding a lowerable `(inner)`. The container consumes the child
+; as data; the child lowers on its own. Because the parent is not lowerable, the
+; nested-lowerable lint never fires — this is the supported pattern, the
+; negative-space regression guard at the pipeline level. The only emitted form
+; is `inner-normal`, an `:open` terminal, so the whole document is clean.
+(plugin :name nestclean :version "1.0.0"
+  (form :name plain :open true)
+  (form :name inner :open true
+    :lowering (lowering :hook test/identity-v1 :produces [inner-normal]))
+
+  ; Identity-hook terminal.
+  (form :name inner-normal :open true))
+
+(plain (inner))

@@ -1,0 +1,8 @@
+; A bare-number bound against a unit-bearing value compares magnitude
+; only; the unit's correctness is :unit's job, not :numeric's.
+(plugin :name numeric-bareful-bound-on-united :version "1.0.0"
+  (value-kind :name dur
+    :underlying number
+    :numeric (numeric-bounds :max 100))
+  (form :name set
+    (key :name v :type dur :optional false)))

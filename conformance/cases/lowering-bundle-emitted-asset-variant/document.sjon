@@ -1,0 +1,30 @@
+; Multi-form emit interacts with the v2 lowered-tree overlay. The
+; bundle declares no `:kind`, so the hook emits `(asset :name
+; main-asset)` without `:kind`. The lowered-tree overlay
+; (Host.zig:592-600) materializes `:kind = static` on the emitted
+; asset; axis D consults the per-tree overlay, the discriminant
+; resolves, variant `static` is selected. Clean — proves the
+; multi-form emission path interacts correctly with v2's lowered
+; overlay routing. The `link :open true` form is a placeholder so
+; the hook's second emission doesn't drag in cross-ref machinery
+; that fixtures 1/2/3 already cover.
+(plugin :name probe :version "1.0.0"
+  (value-kind :name asset-kind :underlying symbol
+    :members (member-set :values [static dynamic]))
+  (form :name bundle
+    (key :name name :type symbol :optional false)
+    (key :name target :type symbol :optional false)
+    :lowering (lowering :hook test/bundle-v1 :produces [asset link]))
+  (form :name asset :discriminant kind
+    (key :name name :type symbol :optional false)
+    (key :name kind :type asset-kind :default static :optional true)
+    (variant :when static
+      (key :name lod :type number :optional true))
+    (variant :when dynamic
+      (key :name refresh :type number :optional true)))
+  (form :name link :open true)
+  (form :name target
+    (key :name name :type symbol :optional false)))
+
+(target :name hero)
+(bundle :name main :target hero)

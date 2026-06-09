@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code deprecated_member :severity warning :path [pixel space]))

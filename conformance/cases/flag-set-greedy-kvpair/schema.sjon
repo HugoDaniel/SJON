@@ -1,0 +1,9 @@
+; A plain positional flag-set on a closed form. This case pins the
+; parser's greedy rule at the flag boundary: a keyword *followed by a
+; value* binds as a kvpair, only a *valueless* keyword is a positional
+; flag.
+(plugin :name flag-set-greedy-test :version "1.0.0"
+  (form :name task
+    :positional (flag-set
+      (flag :name done)
+      (flag :name archived))))

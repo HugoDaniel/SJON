@@ -1,0 +1,7 @@
+; Both `(group …)` and its child `(item …)` declare `:lowering` — the self-
+; contradictory container setup. The lowering pass surfaces it once at the
+; child, `lowering_nested_lowerable` with path [item lowering]. Emit-only, so
+; both hooks still fire: `group-normal` and `item-normal` emit and validate
+; clean as :open terminals, leaving this single diagnostic as the only output.
+(diagnostics
+  (diagnostic :code lowering_nested_lowerable :path [item lowering]))

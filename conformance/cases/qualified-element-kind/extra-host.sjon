@@ -1,0 +1,7 @@
+; Host plugin — defines a form `swatch` whose `:hue` key qualifies its
+; value-kind reference as `paint/color`. The qualification means even
+; though `display` also declares `color`, the validator picks paint's
+; member set and accepts `red`.
+(plugin :name host :version "1.0.0"
+  (form :name swatch
+    (key :name hue :type paint/color :optional false)))

@@ -1,0 +1,40 @@
+[package]
+name = "sjon-host-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.95"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+sjon-host = { path = ".." }
+
+[[bin]]
+name = "parse_single_form"
+path = "fuzz_targets/parse_single_form.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_invoke_request"
+path = "fuzz_targets/parse_invoke_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_single_form_typed"
+path = "fuzz_targets/parse_single_form_typed.rs"
+test = false
+doc = false
+bench = false
+
+# Suppress the workspace-resolver warning when this nested manifest is
+# discovered by `cargo` from the parent directory — the fuzz crate is
+# intentionally outside the parent's logical workspace.
+[workspace]

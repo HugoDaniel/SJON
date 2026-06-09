@@ -1,0 +1,17 @@
+; Binds `(echo-tag s)` to `:impl "wasm:tag"` — the sibling double.wasm
+; exports `tag` as identity on a keyword-tagged value. The arg slot is
+; declared `any` because the validator distinguishes `keyword` AST
+; nodes (`:foo`) from `symbol` AST nodes (bare names), and `:params`
+; only knows the latter — there is no `keyword` ValueType
+; (`src/Plugin.zig:260-276`). The result slot is `symbol`: the codec
+; carries the value as tag `0x05` (`Value.keyword`), which the
+; type-comparison layer labels `"symbol"`
+; (`src/wasm_plugin_invoker.zig:230`). Together they pin the §18 §18
+; codec round-trip — keyword/string (`0x05` vs `0x04`) distinction
+; crosses the boundary intact, no JSON-style `$kw` hack.
+(plugin :name double :version "1.0.0"
+  (expr-func :name echo-tag
+    :arity (fixed 1)
+    :params [any]
+    :result symbol
+    :impl "wasm:tag"))

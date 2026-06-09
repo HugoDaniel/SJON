@@ -1,0 +1,7 @@
+; Value strictly above inclusive :max trips `number_above_max`.
+(plugin :name numeric-max-fail :version "1.0.0"
+  (value-kind :name nn
+    :underlying number
+    :numeric (numeric-bounds :max 100))
+  (form :name set
+    (key :name v :type nn :optional false)))

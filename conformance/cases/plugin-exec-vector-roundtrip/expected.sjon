@@ -1,0 +1,8 @@
+; Plugin loads, dispatches `(vec3-length [3.0 4.0 0.0])` into
+; `wasm:vec3_length`, plugin frames the L2 norm (`5.0`) back as a
+; number, host decodes against the declared `:result number`. The
+; `(values …)` block locks the round-trip value in addition to the
+; clean diagnostic stream.
+(diagnostics)
+(values
+  (value :index 0 :result 5.0))

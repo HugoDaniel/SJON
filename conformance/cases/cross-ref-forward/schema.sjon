@@ -1,0 +1,17 @@
+; The track appears in source before the phrases it references —
+; the index pass collects all names before validation, so forward
+; references resolve cleanly.
+(plugin :name xref-forward :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase))
+
+  (value-kind :name phrase-sequence
+    :underlying vector
+    :vector (vector-shape :element phrase-name))
+
+  (form :name phrase
+    (key :name name :type symbol :optional false))
+
+  (form :name track
+    (key :name sequence :type phrase-sequence :optional false)))

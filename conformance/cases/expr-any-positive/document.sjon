@@ -1,0 +1,3 @@
+; `any` short-circuits on first truthy element. Element `5` triggers
+; the short-circuit; remaining elements are skipped.
+(any [x] [-1 0 5 -3 4] (> x 0))

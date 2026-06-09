@@ -1,0 +1,12 @@
+; Binds `(twice n)` to `:impl "wasm:double"` BUT declares `:result
+; symbol` — the plugin's `double` export actually returns a number.
+; The Zig invoker decodes the value, type-checks it against the
+; declared result, and surfaces `plugin_func_result_type` at the call
+; span. Exercises the runtime result-type check distinct from
+; static validation.
+(plugin :name double :version "1.0.0"
+  (expr-func :name twice
+    :arity (fixed 1)
+    :params [number]
+    :result symbol
+    :impl "wasm:double"))

@@ -1,0 +1,6 @@
+; The local `circle` (keys: :r) shadows the global `circle` (keys: :radius).
+; Validating against the local: :radius is unknown_key and :r is missing — a
+; global circle would have accepted :radius cleanly, so this proves the shadow.
+(diagnostics
+  (diagnostic :code unknown_key :path [canvas shape circle radius])
+  (diagnostic :code missing_required_key :path [canvas shape circle]))

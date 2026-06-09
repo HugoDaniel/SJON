@@ -1,0 +1,1 @@
+(project :name "résumé→demo" :plugins ["café.sjon" "naïve.sjon"])

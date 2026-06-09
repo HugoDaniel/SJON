@@ -1,0 +1,5 @@
+; task -> {left, right} -> {row, row}. Two `row` instances (one per
+; branch, no merge), each missing the required `:v`.
+(diagnostics
+  (diagnostic :code missing_required_key :path [row])
+  (diagnostic :code missing_required_key :path [row]))

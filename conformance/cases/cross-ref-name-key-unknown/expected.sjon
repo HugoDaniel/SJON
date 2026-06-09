@@ -1,0 +1,4 @@
+; Schema-aggregate phase rejects an unresolvable :name-key.
+(diagnostics
+  (diagnostic :code cross_ref_name_key_unknown
+              :path [xref-name-key-unknown phrase-name cross-ref]))

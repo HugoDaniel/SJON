@@ -1,0 +1,11 @@
+; §18 stretch — vector round-trip. `(vec3-length [3.0 4.0 0.0])`
+; encodes a vector of three numbers (tag `0x06`, count=3, three tag
+; `0x01` numbers) into the plugin args, dispatches `wasm:vec3_length`,
+; and decodes the returned `sqrt(x²+y²+z²)` back as a number frame.
+; A clean diagnostic stream proves nested values cross the boundary
+; intact — the host encoder/decoder pair and the plugin-side decoder
+; agree on the §9.1 vector layout. Skipped on Zig-native + TS-parity
+; (no wasm runtime).
+(use-plugin "double")
+
+(vec3-length [3.0 4.0 0.0])

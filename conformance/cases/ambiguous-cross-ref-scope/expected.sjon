@@ -1,0 +1,4 @@
+; Schema-aggregate phase reports the offending plugin/kind/cross-ref.
+(diagnostics
+  (diagnostic :code ambiguous_cross_ref_scope
+              :path [ambig-xref-scope-a phrase-name cross-ref]))

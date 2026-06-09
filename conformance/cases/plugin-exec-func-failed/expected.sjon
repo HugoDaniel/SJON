@@ -1,0 +1,5 @@
+; Plugin loads cleanly (pre-flight pass), then the `(kaboom 1)` call
+; returns an `ok=0` structured-error frame; host re-frames and the Zig
+; invoker surfaces `plugin_func_failed` at the call span.
+(diagnostics
+  (diagnostic :code plugin_func_failed :path []))

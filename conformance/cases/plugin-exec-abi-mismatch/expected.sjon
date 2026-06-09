@@ -1,0 +1,4 @@
+; Pre-flight detects the ABI mismatch and collapses the resolution into
+; a manifest-phase diagnostic at the `(use-plugin "shapes")` span.
+(diagnostics
+  (diagnostic :code plugin_abi_mismatch :path []))

@@ -1,0 +1,21 @@
+; Contradictory container lowering — the one setup `docs/plugin-model-v1.md`
+; says to avoid. `:lowering` is declared on BOTH the container `(group …)` and
+; its positional child `(item …)`. Container lowering means the container
+; consumes its children as data; a child that *also* declares `:lowering` fires
+; its own hook in the same layer, so both emit and the child's output orphans
+; (`group` → `group-normal` childless, `item` → `item-normal` as a stray root).
+; The lowering pass flags it at the child with `lowering_nested_lowerable`.
+; Emit-only (collection over abort): lowering still runs, so the fix is to drop
+; `:lowering` from `(item …)` and let the container consume it as plain data.
+(plugin :name nest :version "1.0.0"
+  (form :name group :open true
+    :lowering (lowering :hook test/identity-v1 :produces [group-normal]))
+  (form :name item :open true
+    :lowering (lowering :hook test/identity-v1 :produces [item-normal]))
+
+  ; Identity-hook terminals — `<head>-normal`, declared :open so the lowered
+  ; forest validates clean and the only surfaced diagnostic is the lint.
+  (form :name group-normal :open true)
+  (form :name item-normal :open true))
+
+(group (item))

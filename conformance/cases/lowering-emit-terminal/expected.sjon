@@ -1,0 +1,3 @@
+; The emitted (gpu-sampler :name default-sampler) validates as the declared
+; :open terminal; the source (needs-sampler) lowered away. Nothing surfaces.
+(diagnostics)

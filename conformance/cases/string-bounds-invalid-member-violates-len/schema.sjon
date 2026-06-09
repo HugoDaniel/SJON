@@ -1,0 +1,9 @@
+; A member literal whose codepoint length is below :min-len is
+; rejected at manifest-load time as `string_bounds_invalid`.
+(plugin :name string-bounds-invalid-member-violates-len :version "1.0.0"
+  (value-kind :name ss
+    :underlying string
+    :members (member-set :values [ab cd])
+    :string-bounds (string-bounds :min-len 3))
+  (form :name set
+    (key :name v :type ss :optional false)))

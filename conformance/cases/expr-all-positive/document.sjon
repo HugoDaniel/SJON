@@ -1,0 +1,4 @@
+; `all` walks every element when none are falsy. Here every entry
+; is positive, so the binder reaches the end of `xs` and returns
+; the default-truthy answer.
+(all [x] [1 2 3 4 5] (> x 0))

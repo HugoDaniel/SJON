@@ -1,0 +1,7 @@
+; The plugin declaration omits required `:name`; meta-validation
+; rejects it (missing_required_key on the (plugin …) form). With no
+; loaded plugin the schema is empty, so `(widget …)` resolves to
+; nothing and the validator emits `unknown_form`.
+(diagnostics
+  (diagnostic :code missing_required_key :path [plugin])
+  (diagnostic :code unknown_form :path [widget]))

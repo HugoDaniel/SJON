@@ -1,0 +1,19 @@
+; Cross-plugin runtime staging. Plugin `front` form `seed` lowers via
+; test/to-row-v1, which emits a bare `row` form. The only `row` declared
+; in the aggregate lives in plugin `back`, so the bare `:produces` head
+; and the emitted form both resolve cross-plugin (lookupForm spans every
+; loaded plugin). `back/row` requires `:v`, which the hook never supplies
+; — so the `missing_required_key` on `[row]` can ONLY appear if the
+; emitted form was materialized and validated against plugin `back`'s
+; schema. That is the proof a cross-plugin lowering stage executed: the
+; producing form and its target live in different plugins, and lowering
+; bridges them with no bespoke cross-plugin machinery.
+(plugin :name front :version "1.0.0"
+  (form :name seed :open true
+    :lowering (lowering :hook test/to-row-v1 :produces [row])))
+
+(plugin :name back :version "1.0.0"
+  (form :name row
+    (key :name v :type number :optional false)))
+
+(seed)

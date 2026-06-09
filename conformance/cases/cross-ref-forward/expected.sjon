@@ -1,0 +1,2 @@
+; Forward references resolve — zero diagnostics expected.
+(diagnostics)

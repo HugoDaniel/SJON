@@ -1,0 +1,7 @@
+; Multi-file fixture: document references `shapes` by name; the
+; sibling `sjon-project.sjon` lists the manifest path; the host's
+; default filesystem resolver indexes the manifest by `:name shapes`
+; and serves it. The data form validates cleanly.
+(use-plugin "shapes")
+
+(circle :r 4)

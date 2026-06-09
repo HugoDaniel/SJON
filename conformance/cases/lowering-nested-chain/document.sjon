@@ -1,0 +1,20 @@
+; A three-deep lowerable chain — `a` ⊃ `b` ⊃ `c`, all declaring `:lowering`.
+; The lint fires at each lowerable child of a lowerable parent: `b` (child of
+; `a`) and `c` (child of `b`), in document order. `a` is a forest root, never a
+; nested child, so it is not flagged. Emit-only: every form lowers to its
+; `:open` `<head>-normal` terminal, so the lowered forest validates clean and
+; the two nested-lowerable diagnostics are the only output.
+(plugin :name nestchain :version "1.0.0"
+  (form :name a :open true
+    :lowering (lowering :hook test/identity-v1 :produces [a-normal]))
+  (form :name b :open true
+    :lowering (lowering :hook test/identity-v1 :produces [b-normal]))
+  (form :name c :open true
+    :lowering (lowering :hook test/identity-v1 :produces [c-normal]))
+
+  ; Identity-hook terminals.
+  (form :name a-normal :open true)
+  (form :name b-normal :open true)
+  (form :name c-normal :open true))
+
+(a (b (c)))

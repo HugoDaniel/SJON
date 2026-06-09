@@ -1,0 +1,5 @@
+; Reference asks for `shapes` and pins :path to a manifest that
+; declares `:name circles`. The host parses the resolved bytes,
+; sees the mismatch, and rejects the load with plugin_name_mismatch.
+; No project file needed because :path bypasses the index.
+(use-plugin "shapes" :path "./manifests/circles.sjon")

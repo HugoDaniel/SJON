@@ -1,0 +1,8 @@
+; Binds `(boom n)` to `:impl "wasm:trap"` — the sibling double.wasm
+; exports `trap` as a function that calls `unreachable`.
+(plugin :name double :version "1.0.0"
+  (expr-func :name boom
+    :arity (fixed 1)
+    :params [number]
+    :result number
+    :impl "wasm:trap"))

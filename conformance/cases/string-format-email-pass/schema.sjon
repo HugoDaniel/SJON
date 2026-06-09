@@ -1,0 +1,7 @@
+; A string that satisfies :format email validates clean.
+(plugin :name string-format-email-pass :version "1.0.0"
+  (value-kind :name ss
+    :underlying string
+    :string-bounds (string-bounds :format email))
+  (form :name set
+    (key :name v :type ss :optional false)))

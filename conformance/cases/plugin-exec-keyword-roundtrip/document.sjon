@@ -1,0 +1,11 @@
+; §18 stretch — keyword round-trip. The manifest binds `(echo-tag s)`
+; to `:impl "wasm:tag"`, double.wasm's identity export. The evaluator
+; turns the literal `:hello` into a `Value.keyword`, the codec ships
+; it as tag `0x05` + length-prefixed bytes, and the plugin echoes it
+; back as the same tag. A clean diagnostics stream proves the
+; keyword/string codec distinction (`0x04` vs `0x05`) crosses the
+; boundary intact — no JSON-style `$kw` discriminator hack. Skipped on
+; Zig-native + TS-parity (no wasm runtime).
+(use-plugin "double")
+
+(echo-tag :hello)

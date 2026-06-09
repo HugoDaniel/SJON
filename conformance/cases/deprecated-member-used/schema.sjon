@@ -1,0 +1,12 @@
+; A document uses a `(member :deprecated true)` value. Validation
+; still succeeds; the emit is a `deprecated_member` warning anchored on
+; the value span with path `[post status]`.
+(plugin :name deprecated-used :version "1.0.0"
+  (value-kind :name status
+    :underlying symbol
+    :members (member-set
+      (member :name draft     :label "Draft")
+      (member :name published :label "Published")
+      (member :name archived  :deprecated true)))
+  (form :name post
+    (key :name status :type status :optional false)))

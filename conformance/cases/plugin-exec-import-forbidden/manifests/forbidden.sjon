@@ -1,0 +1,5 @@
+; Pairs with the sibling forbidden.wasm — a v1-shaped plugin binary
+; that declares an `env.host_helper` import. Spec §7.1 requires the
+; plugin import set to be empty; pre-flight rejects the non-empty
+; section with `plugin_import_forbidden` at the `(use-plugin …)` span.
+(plugin :name forbidden :version "1.0.0")

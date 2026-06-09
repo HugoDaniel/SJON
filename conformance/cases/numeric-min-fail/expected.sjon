@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code number_below_min :path [set v]))

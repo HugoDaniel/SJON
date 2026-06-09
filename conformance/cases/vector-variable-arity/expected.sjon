@@ -1,0 +1,3 @@
+; In-range vector (length 5 ∈ [4, 6]) — neither the floor nor the ceiling
+; fires, so validation is clean.
+(diagnostics)

@@ -1,0 +1,286 @@
+const std = @import("std");
+const sjon = @import("sjon");
+const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const Plugin = sjon.Plugin;
+const ValueType = Plugin.ValueType;
+const ExprFunc = Plugin.ExprFunc;
+const Writer = std.Io.Writer;
+
+const GENERATED_PATH = "hosts/schema/src/expr.gen.ts";
+
+const aliases = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "+", "add" },
+    .{ "-", "sub" },
+    .{ "*", "mul" },
+    .{ "/", "div" },
+    .{ "<", "lt" },
+    .{ ">", "gt" },
+    .{ "<=", "le" },
+    .{ ">=", "ge" },
+    .{ "=", "eq" },
+    .{ "!=", "neq" },
+    .{ "if", "iff" },
+    .{ "let", "let_" },
+});
+
+const overrides = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "let", "<T>(bindings: readonly SjonValue[], body: ExprLike<T>): SjonExpr<T> =>\n  make('let', [bindings, body])" },
+    .{ "if", "<T>(test: BoolLike, then: ExprLike<T>, otherwise?: ExprLike<T>): SjonExpr<T> =>\n  make('if', otherwise === undefined ? [test, then] : [test, then, otherwise])" },
+    .{ "map", "(binder: Binder, xs: VecLike, body: SjonValue): SjonExpr<readonly unknown[]> =>\n  make('map', [binder, xs, body])" },
+    .{ "filter", "(binder: Binder, xs: VecLike, pred: SjonValue): SjonExpr<readonly unknown[]> =>\n  make('filter', [binder, xs, pred])" },
+    .{ "any", "(binder: Binder, xs: VecLike, pred: SjonValue): SjonExpr<boolean> =>\n  make('any', [binder, xs, pred])" },
+    .{ "all", "(binder: Binder, xs: VecLike, pred: SjonValue): SjonExpr<boolean> =>\n  make('all', [binder, xs, pred])" },
+    .{ "fold", "(binder: Binder, init: SjonValue, xs: VecLike, body: SjonValue): SjonExpr<unknown> =>\n  make('fold', [binder, init, xs, body])" },
+    .{ "vec2", "(x: NumLike, y: NumLike): SjonExpr<readonly [number, number]> =>\n  make('vec2', [x, y])" },
+    .{ "vec3", "(x: NumLike, y: NumLike, z: NumLike): SjonExpr<readonly [number, number, number]> =>\n  make('vec3', [x, y, z])" },
+    .{ "vec4", "(x: NumLike, y: NumLike, z: NumLike, w: NumLike): SjonExpr<readonly [number, number, number, number]> =>\n  make('vec4', [x, y, z, w])" },
+    .{ "lerp", "(from: NumLike, to: NumLike, t: NumLike): SjonExpr<number> =>\n  make('lerp', [from, to, t])" },
+    .{ "clamp", "(x: NumLike, lo: NumLike, hi: NumLike): SjonExpr<number> =>\n  make('clamp', [x, lo, hi])" },
+    .{ "min", "(x: NumLike, ...xs: NumLike[]): SjonExpr<number> => make('min', [x, ...xs])" },
+    .{ "max", "(x: NumLike, ...xs: NumLike[]): SjonExpr<number> => make('max', [x, ...xs])" },
+    .{ "dot", "(a: VecLike, b: VecLike): SjonExpr<number> => make('dot', [a, b])" },
+    .{ "cross", "(a: VecLike, b: VecLike): SjonExpr<readonly number[]> => make('cross', [a, b])" },
+    .{ "length", "(v: VecLike): SjonExpr<number> => make('length', [v])" },
+});
+
+pub fn main(init: std.process.Init) !u8 {
+    const gpa = init.gpa;
+    const io = init.io;
+    const arena = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(arena);
+
+    var regen = false;
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--regen")) regen = true;
+    }
+
+    var stderr_buf: [4096]u8 = undefined;
+    var stderr_file = Io.File.stderr();
+    var stderr_writer = stderr_file.writer(io, &stderr_buf);
+    defer stderr_writer.interface.flush() catch {};
+    const stderr = &stderr_writer.interface;
+
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    emitFile(&out.writer, &sjon.plugins.core.expr_funcs) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+    };
+    const bytes = out.written();
+
+    if (regen) {
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = GENERATED_PATH, .data = bytes });
+        try stderr.print("wrote {s} ({d} bytes)\n", .{ GENERATED_PATH, bytes.len });
+        return 0;
+    }
+
+    const existing = Io.Dir.cwd().readFileAlloc(io, GENERATED_PATH, gpa, .unlimited) catch |err| {
+        try stderr.print(
+            "gen-expr-ops: cannot read {s}: {s} — run `zig build gen-expr-ops -- --regen`\n",
+            .{ GENERATED_PATH, @errorName(err) },
+        );
+        return 1;
+    };
+    defer gpa.free(existing);
+
+    if (std.mem.eql(u8, existing, bytes)) return 0;
+
+    try stderr.print(
+        "gen-expr-ops: {s} is stale (have {d} bytes, want {d}) — " ++
+            "run `zig build gen-expr-ops -- --regen` and commit\n",
+        .{ GENERATED_PATH, existing.len, bytes.len },
+    );
+    return 1;
+}
+
+fn emitFile(w: *Writer, funcs: []const ExprFunc) Writer.Error!void {
+    try w.writeAll(
+        \\// GENERATED FILE — do not edit by hand.
+        \\//
+        \\// Source of truth: src/plugins/core.zig (`expr_funcs`). Regenerate with:
+        \\//     zig build gen-expr-ops -- --regen
+        \\//
+        \\// `zig build test` byte-compares this file against a fresh generation, so
+        \\// adding/editing an op in core.zig without regenerating — or hand-editing
+        \\// this file — fails CI. Op set, arities, names, and JSDoc mirror the Zig
+        \\// table; a curated override map in tools/gen_expr_ops.zig supplies the finer
+        \\// types the table can't express (vector tuples, binder forms, generics, and
+        \\// the deliberately-opaque polymorphic ops). See tools/gen_expr_ops.zig.
+        \\//
+        \\// biome ignores this file (biome.json) so its bytes stay authoritative for
+        \\// the drift check.
+        \\
+        \\import type { SjonExpr, Symbol_ } from './infer.ts';
+        \\import type { SjonValue } from './value.ts';
+        \\
+        \\/** A `T`, or an expr that evaluates to `T`. The composition glue. */
+        \\export type ExprLike<T> = T | SjonExpr<T>;
+        \\/** A symbol reference to a binding/value — dynamically typed, so it widens any slot. */
+        \\export type Ref = Symbol_;
+        \\/** Accepted where the core wants a number: literal, numeric expr, or a reference. */
+        \\export type NumLike = number | SjonExpr<number> | Ref;
+        \\/** Accepted where the core wants a boolean. */
+        \\export type BoolLike = boolean | SjonExpr<boolean> | Ref;
+        \\/** Accepted where the core wants a vector. */
+        \\export type VecLike = readonly number[] | SjonExpr<readonly number[]> | Ref;
+        \\/** A binder vector — `[v.sym("x")]` for the higher-order forms. */
+        \\export type Binder = readonly Symbol_[];
+        \\
+        \\/** Build `{$expr:[op, ...args]}` with a phantom result type `T`. */
+        \\function make<T>(op: string, args: readonly unknown[]): SjonExpr<T> {
+        \\  return { $expr: [op, ...args] } as SjonExpr<T>;
+        \\}
+        \\
+    );
+
+    for (funcs) |func| try emitOp(w, func);
+
+    try w.writeAll(
+        \\
+        \\/**
+        \\ * Build an arbitrary `(head …args)` expr — for a plugin op outside the curated
+        \\ * core set. Untyped (`SjonExpr<unknown>`, no arity check): prefer a named `e.*`
+        \\ * when one exists.
+        \\ */
+        \\export const call = (head: string, ...args: unknown[]): SjonExpr<unknown> => make(head, args);
+        \\
+    );
+}
+
+fn emitOp(w: *Writer, func: ExprFunc) Writer.Error!void {
+    try w.writeByte('\n');
+    if (func.description.len != 0) {
+        try w.writeAll("/** ");
+        try w.writeAll(func.description);
+        try w.writeAll(" */\n");
+    }
+    try w.writeAll("export const ");
+    try emitIdent(w, func.name);
+    try w.writeAll(" = ");
+    if (overrides.get(func.name)) |rhs| {
+        try w.writeAll(rhs);
+    } else {
+        try emitDerivedRhs(w, func);
+    }
+    try w.writeAll(";\n");
+}
+
+fn emitIdent(w: *Writer, name: []const u8) Writer.Error!void {
+    if (aliases.get(name)) |a| {
+        try w.writeAll(a);
+        return;
+    }
+    var upper = false;
+    for (name) |c| {
+        if (c == '-') {
+            upper = true;
+            continue;
+        }
+        try w.writeByte(if (upper) std.ascii.toUpper(c) else c);
+        upper = false;
+    }
+}
+
+fn emitDerivedRhs(w: *Writer, func: ExprFunc) Writer.Error!void {
+    var required: usize = 0;
+    var has_rest = false;
+    switch (func.arity) {
+        .fixed => |n| required = n,
+        .at_least => |k| {
+            const params_len = if (func.params) |ps| ps.len else 0;
+            required = @max(k, params_len);
+            has_rest = true;
+        },
+        .range => std.debug.panic(
+            "gen-expr-ops: range-arity op '{s}' has no override; add one to `overrides`",
+            .{func.name},
+        ),
+    }
+
+    try w.writeByte('(');
+    var first = true;
+    for (0..required) |i| {
+        if (!first) try w.writeAll(", ");
+        first = false;
+        try emitParamName(w, func, i, required);
+        try w.writeAll(": ");
+        try w.writeAll(argTypeOpt(paramTypeAt(func, i)));
+    }
+    if (has_rest) {
+        if (!first) try w.writeAll(", ");
+        try w.writeAll("...xs: ");
+        try w.writeAll(if (func.rest) |rt| argTypeStr(rt) else "SjonValue");
+        try w.writeAll("[]");
+    }
+    try w.writeByte(')');
+
+    try w.writeAll(": SjonExpr<");
+    try w.writeAll(resultTypeStr(func.result));
+    try w.writeAll("> => make('");
+    try w.writeAll(func.name);
+    try w.writeAll("', ");
+    if (required == 0 and has_rest) {
+        try w.writeAll("xs");
+    } else {
+        try w.writeByte('[');
+        first = true;
+        for (0..required) |i| {
+            if (!first) try w.writeAll(", ");
+            first = false;
+            try emitParamName(w, func, i, required);
+        }
+        if (has_rest) {
+            if (!first) try w.writeAll(", ");
+            try w.writeAll("...xs");
+        }
+        try w.writeByte(']');
+    }
+    try w.writeByte(')');
+}
+
+fn emitParamName(w: *Writer, func: ExprFunc, i: usize, required: usize) Writer.Error!void {
+    if (func.param_names) |ns| {
+        if (i < ns.len) {
+            try w.writeAll(ns[i]);
+            return;
+        }
+    }
+    if (required == 1) {
+        try w.writeByte('x');
+        return;
+    }
+    try w.writeByte('a' + @as(u8, @intCast(i)));
+}
+
+fn paramTypeAt(func: ExprFunc, i: usize) ?ValueType {
+    if (func.params) |ps| {
+        if (i < ps.len) return ps[i];
+    }
+    return func.rest;
+}
+
+fn argTypeOpt(vt: ?ValueType) []const u8 {
+    return if (vt) |v| argTypeStr(v) else "SjonValue";
+}
+
+fn argTypeStr(vt: ValueType) []const u8 {
+    return switch (vt) {
+        .number => "NumLike",
+        .boolean => "BoolLike",
+        .vector => "VecLike",
+        .string => "string",
+        .symbol => "Ref",
+        else => "SjonValue",
+    };
+}
+
+fn resultTypeStr(vt: ?ValueType) []const u8 {
+    const v = vt orelse return "unknown";
+    return switch (v) {
+        .number => "number",
+        .boolean => "boolean",
+        .vector => "readonly number[]",
+        .string => "string",
+        else => "unknown",
+    };
+}

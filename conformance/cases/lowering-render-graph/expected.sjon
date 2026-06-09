@@ -1,0 +1,5 @@
+; Global ids tex-0/1/2 are distinct (no duplicate_cross_ref_target) and every
+; emitted `:reads` (tex-0 on `main`, tex-1 on `post`) resolves against an
+; emitted gpu-texture in the forest pass (no not_cross_ref). The cross-pass
+; sequencing is coherent, so nothing surfaces.
+(diagnostics)

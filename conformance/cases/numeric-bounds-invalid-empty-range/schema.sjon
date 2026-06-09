@@ -1,0 +1,8 @@
+; :min > :max with compatible units is an empty range; the loader
+; emits `numeric_bounds_invalid` at manifest-load time.
+(plugin :name numeric-bounds-invalid-empty-range :version "1.0.0"
+  (value-kind :name nn
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 0))
+  (form :name set
+    (key :name v :type nn :optional false)))

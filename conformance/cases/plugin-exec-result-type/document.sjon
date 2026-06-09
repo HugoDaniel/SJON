@@ -1,0 +1,8 @@
+; D7-exec runtime failure: the manifest declares `:result symbol`
+; but the plugin's `double` export returns a number frame. The Zig
+; invoker decodes the result, type-checks against the declared type,
+; and surfaces `plugin_func_result_type` at the call span. Skipped
+; on Zig-native + TS-parity (no wasm runtime).
+(use-plugin "double")
+
+(twice 21)

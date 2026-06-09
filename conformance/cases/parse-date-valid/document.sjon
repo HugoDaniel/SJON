@@ -1,0 +1,4 @@
+; The canonical date lexeme. Parser emits a single Tag.date node with
+; no diagnostics; the printer round-trips it back to byte-identical
+; YYYY-MM-DD.
+2026-05-19

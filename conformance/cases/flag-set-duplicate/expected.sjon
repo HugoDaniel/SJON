@@ -1,0 +1,4 @@
+; The first `:done` is the declared flag; the second repeats it and is
+; flagged at positional index 1.
+(diagnostics
+  (diagnostic :code duplicate_positional_flag :path [task 1]))

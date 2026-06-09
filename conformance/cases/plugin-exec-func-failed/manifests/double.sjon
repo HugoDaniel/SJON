@@ -1,0 +1,10 @@
+; Binds `(kaboom n)` to `:impl "wasm:fail"` — the sibling double.wasm
+; exports `fail` as a function that returns an `ok=0` structured-error
+; frame with code `domain` + a deterministic detail string. Hosts
+; surface this as `plugin_func_failed` at the call span.
+(plugin :name double :version "1.0.0"
+  (expr-func :name kaboom
+    :arity (fixed 1)
+    :params [number]
+    :result number
+    :impl "wasm:fail"))

@@ -1,0 +1,9 @@
+; Validator-time result-typing: `:radius` expects a number, but the
+; value is a form whose head resolves to an expression with a declared
+; `:result vector`. The validator compares declared results against
+; slot types and emits `wrong_underlying` at the slot path — no runtime
+; evaluation required. See docs/plans/enforce-expression-result-types.md.
+(plugin :name expr-result-test :version "1.0.0"
+  (form :name circle
+    (key :name radius :type number :optional false))
+  (expr-func :name vec-result :arity (fixed 0) :result vector))

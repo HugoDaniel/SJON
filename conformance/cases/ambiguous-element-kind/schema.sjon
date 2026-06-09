@@ -1,0 +1,10 @@
+; Plugin a defines a `swatch` form with key `:hue :type color`. Plugin b
+; (extra-b.sjon) also defines a value-kind named `color`, so the bare
+; lookup `color` during type resolution returns ambiguous.
+(plugin :name ambig-vk-a :version "1.0.0"
+  (value-kind :name color
+    :underlying symbol
+    :members (member-set :values [red green blue]))
+
+  (form :name swatch
+    (key :name hue :type color :optional false)))
