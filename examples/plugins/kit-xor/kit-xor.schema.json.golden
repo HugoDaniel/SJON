@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 1,
+  "x-sjon-export-warnings": [
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `phrase` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin": "kit-xor",
+      "form": "phrase"
+    },
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `tag` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin": "kit-xor",
+      "form": "tag"
+    }
+  ],
+  "$defs": {
+    "form.kit-xor.phrase": {
+      "type": "object",
+      "description": "A single phrase rendered either as notes or as events — never both, never neither.",
+      "properties": {
+        "$form": {
+          "const": "phrase"
+        },
+        "$ns": {
+          "const": "kit-xor"
+        },
+        "events": {
+          "description": "Time-stamped event list.",
+          "type": "array",
+          "items": {}
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "notes": {
+          "description": "Pitch-class sequence.",
+          "type": "array",
+          "items": {}
+        }
+      },
+      "required": [
+        "$form",
+        "name"
+      ],
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "notes"
+              ]
+            },
+            {
+              "required": [
+                "events"
+              ]
+            }
+          ]
+        }
+      ],
+      "unevaluatedProperties": false,
+      "x-sjon-exclusive-groups": [
+        {
+          "cardinality": "exactly_one",
+          "alternatives": [
+            [
+              "notes"
+            ],
+            [
+              "events"
+            ]
+          ]
+        }
+      ]
+    },
+    "form.kit-xor.tag": {
+      "type": "object",
+      "description": "Optional decoration on a phrase. Colour and shape are mutually exclusive but both omittable.",
+      "properties": {
+        "$form": {
+          "const": "tag"
+        },
+        "$ns": {
+          "const": "kit-xor"
+        },
+        "color": {
+          "type": "string"
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "shape": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "$form",
+        "name"
+      ],
+      "allOf": [
+        {
+          "not": {
+            "allOf": [
+              {
+                "required": [
+                  "color"
+                ]
+              },
+              {
+                "required": [
+                  "shape"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "unevaluatedProperties": false,
+      "x-sjon-exclusive-groups": [
+        {
+          "cardinality": "at_most_one",
+          "alternatives": [
+            [
+              "color"
+            ],
+            [
+              "shape"
+            ]
+          ]
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.kit-xor.phrase"
+    },
+    {
+      "$ref": "#/$defs/form.kit-xor.tag"
+    }
+  ]
+}

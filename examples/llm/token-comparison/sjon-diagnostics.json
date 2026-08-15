@@ -1,0 +1,31 @@
+{
+  "file": "examples/llm/token-comparison/contract-broken.sjon",
+  "project_file": null,
+  "diagnostics": [
+    {
+      "phase": "validation",
+      "code": "unknown_key",
+      "severity": "error",
+      "message": "unknown keyword `:zom` in form `camera`",
+      "span": {
+        "start": 256,
+        "end": 260,
+        "line": 7,
+        "column": 21
+      },
+      "path": [
+        "camera",
+        "zom"
+      ],
+      "declaration_span": null,
+      "docs": "https://hugodaniel.com/pages/sjon/errors/unknown_key",
+      "hints": [
+        {
+          "kind": "note",
+          "text": "Did you mean `:zoom`?",
+          "replacement": ":zoom"
+        }
+      ]
+    }
+  ]
+}

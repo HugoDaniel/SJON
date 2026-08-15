@@ -1,0 +1,6 @@
+; Empty path, matching the identity route's `cross-ref-duplicate`: the
+; index pass walks outside path tracking and anchors on span alone. The
+; span is the second source literal — every name from one source shares
+; it, because the name exists inside content SJON cannot address.
+(diagnostics
+  (diagnostic :code duplicate_cross_ref_target :path []))

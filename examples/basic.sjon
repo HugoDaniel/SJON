@@ -1,0 +1,15 @@
+; SJON — basic data example.
+;
+; A pure-data tree: forms, keyword properties, vector literals, and the
+; primitive value types. No expressions, no plugin lookups required.
+
+(scene :bpm 130 :name "intro"
+  ; A canvas holds positioned children.
+  (canvas :name "main" :size [1920 1080]
+    (camera :ortho :zoom 2)
+    (stack :mode :overlay
+      (shape :sdf :radius 0.5 :color [0.9 0.4 0.2 1.0])
+      (shape :path :closed true
+        :points [[0 0] [1 0] [1 1] [0 1]]))
+    ; A stand-in for a layer that hasn't been authored yet.
+    (placeholder :note "TODO" :enabled false :data nil)))

@@ -1,0 +1,10 @@
+; `(slow N …)` is `fast`'s inverse: the child is stretched to N cycles.
+; `[bd sn]` normally fits both events into one cycle at 360360 ticks
+; each; under `slow 2` each event grows to a full 720720-tick cycle, so
+; bd owns cycle 0 outright and sn owns cycle 1.
+;
+; That is the property worth a fixture rather than a unit test: a hap
+; here is *longer than the cycle it started in*, so the query has to
+; carry a part across the cycle boundary rather than clipping it. The
+; window is exactly the two cycles the pattern needs to complete once.
+(slow 2 [bd sn])

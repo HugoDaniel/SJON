@@ -1,0 +1,6 @@
+; Schema-aggregate diagnostics are pathed by plugin, not by document
+; position: `[<plugin> <kind> cross-ref]`, span `{0,0}`. Exactly one —
+; the unresolved provider is the whole story.
+(diagnostics
+  (diagnostic :code unknown_cross_ref_provider
+              :path [probe uniform-name cross-ref]))

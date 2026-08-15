@@ -1,0 +1,22 @@
+; Schema-compile family, 3 of 4. `:step` is declared both as a common key of
+; `track` and as a key of the `kick` variant. One name is one slot, so the
+; two declarations would be indistinguishable at validation time — which
+; type applies, and does the variant's requiredness override the common
+; one? The schema is rejected instead of picking a rule.
+;
+; The emitter checks two collisions: variant-vs-common (this one) and
+; variant-vs-earlier-variant. Only the first is exercised here — a document
+; can carry the second only by declaring three variants, which would make
+; the case about arithmetic rather than about the rule.
+(plugin :name probe :version "1.0.0"
+  (value-kind :name kind-tag
+    :underlying symbol
+    :members (member-set :values [kick bass]))
+  (form :name track
+    :discriminant kind
+    (key :name kind :type kind-tag :optional true)
+    (key :name step :type number :optional true)
+    (variant :when kick
+      (key :name step :type number :optional true))))
+
+(track :kind kick)

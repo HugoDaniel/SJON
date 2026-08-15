@@ -1,0 +1,21 @@
+; Provider-route executable family, 7 of 7 — the per-source name
+; ceiling, tripped end-to-end.
+;
+; `ProviderExtraction.MAX_EXTRACTED_NAMES` is 4096, and unlike most of
+; SJON's ceilings it is trivially reachable: a provider is a program, and
+; a program can return 4097 names as easily as two. So it takes a direct
+; trip case rather than a runtime seam, and 4097 is spelled here because
+; a corpus fixture cannot import a Zig constant.
+;
+; Over the cap the whole extraction is a failure — not a truncation. A
+; silently truncated member set would make `not_cross_ref` depend on
+; where a name happened to sit in the provider's output, which is the
+; kind of answer that differs between hosts for no reason a user could
+; ever discover. So it takes the same poisoned-bucket path a refusal
+; does: one diagnostic, and `n0` below goes unchecked despite being a
+; name the provider would certainly have emitted.
+(use-plugin "lines")
+
+(counter :name c :src "4097")
+
+(use :n n0)

@@ -1,0 +1,7 @@
+; Example usage of the `pair-a` plugin. The `:primary` and `:accent`
+; slots reach into `pair-b` via the head-set on `swatch-form`. Loading
+; this document needs both plugins resolved.
+
+(palette :name brand
+  :primary (color :hex "#1f2937")
+  :accent  (gradient :from "#9333ea" :to "#06b6d4" :angle 45))

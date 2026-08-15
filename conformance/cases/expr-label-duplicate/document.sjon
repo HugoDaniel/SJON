@@ -1,0 +1,4 @@
+; Labeled-call family, 3 of 4. `:from` is supplied twice. Repeating a label
+; is not last-wins: the second binding is an error, because a labeled call
+; is a set of named arguments and a set cannot hold a key twice.
+(lerp :from 0 :from 1 :t 0.5)

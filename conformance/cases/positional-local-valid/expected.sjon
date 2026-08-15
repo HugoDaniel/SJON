@@ -1,0 +1,4 @@
+; Local `entry` requires :binding; satisfied → clean. A clean result also
+; proves the positional local shadowed the global `entry` (which requires
+; :at, not :binding).
+(diagnostics)

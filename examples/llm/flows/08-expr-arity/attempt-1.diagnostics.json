@@ -1,0 +1,31 @@
+{
+  "file": "examples/llm/flows/08-expr-arity/attempt-1.sjon",
+  "project_file": null,
+  "diagnostics": [
+    {
+      "phase": "validation",
+      "code": "arity_mismatch",
+      "severity": "error",
+      "message": "expression `lerp` expects exactly 3 argument(s), got 2",
+      "span": {
+        "start": 126,
+        "end": 130,
+        "line": 5,
+        "column": 17
+      },
+      "path": [
+        "shape",
+        "radius",
+        "lerp"
+      ],
+      "declaration_span": null,
+      "docs": "https://hugodaniel.com/pages/sjon/errors/arity_mismatch",
+      "hints": [
+        {
+          "kind": "help",
+          "text": "Function arity declarations come in three shapes — `(fixed N)`, `(at-least N)`, and `(range :min M :max N)`. See `sjon explain arity_mismatch`."
+        }
+      ]
+    }
+  ]
+}

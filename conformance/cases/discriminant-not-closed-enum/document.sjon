@@ -1,0 +1,19 @@
+; Schema-compile family, 1 of 4 — these four are rejections of the *schema*,
+; raised before any document is looked at. `(track :kind kick)` below is
+; well-formed against what the author meant; it is there only so the case
+; reads as a document rather than a bare manifest.
+;
+; `:kind` is typed as the builtin `symbol`, which admits any symbol at all.
+; A discriminant has to enumerate its variants, so the manifest is rejected
+; at load: with an open type there is no set of `(variant :when …)` values to
+; check against, and every later discriminant diagnostic would be noise on
+; top of this one. That is why the compile stops here — the emitter returns
+; straight after this diagnostic rather than going on to check the variants.
+(plugin :name probe :version "1.0.0"
+  (form :name track
+    :discriminant kind
+    (key :name kind :type symbol :optional true)
+    (variant :when kick
+      (key :name step :type number :optional true))))
+
+(track :kind kick)

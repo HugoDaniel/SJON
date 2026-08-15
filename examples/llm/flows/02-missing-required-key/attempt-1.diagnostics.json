@@ -1,0 +1,23 @@
+{
+  "file": "examples/llm/flows/02-missing-required-key/attempt-1.sjon",
+  "project_file": null,
+  "diagnostics": [
+    {
+      "phase": "validation",
+      "code": "missing_required_key",
+      "severity": "error",
+      "message": "form `circle` is missing required keyword `:radius`",
+      "span": {
+        "start": 209,
+        "end": 215,
+        "line": 7,
+        "column": 2
+      },
+      "path": [
+        "circle"
+      ],
+      "declaration_span": null,
+      "docs": "https://hugodaniel.com/pages/sjon/errors/missing_required_key"
+    }
+  ]
+}

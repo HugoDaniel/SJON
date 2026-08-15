@@ -1,0 +1,10 @@
+; Exactly one diagnostic. Empty path is the index pass's convention —
+; it walks outside path tracking, and its two older diagnostics
+; (`duplicate_cross_ref_target`, `cyclic_cross_ref`) anchor on span
+; alone for the same reason.
+;
+; The absence of `not_cross_ref` here is the assertion, not an omission:
+; `u_time` would have resolved and `u_res` would not, and neither is
+; reported, because a poisoned bucket has no answer to give.
+(diagnostics
+  (diagnostic :code cross_ref_extraction_failed :path []))

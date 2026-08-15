@@ -1,0 +1,34 @@
+; scalar-or-ref fixture. A slot that accepts EITHER a literal scalar OR a
+; bare symbol that names a constant defined elsewhere — the `#define`-style
+; reference pattern (e.g. a compute dispatch sized either on a literal count
+; or on a host-supplied `WORKGROUP_SIZE`).
+;
+; `:underlying scalar-or-ref` + `:scalar-or-ref (scalar-or-ref-shape :base
+; <kind>)` is a loader shorthand: at load time it desugars to
+; `:underlying union` over the two alternatives `[<base> symbol]`. A value
+; matching `<base>` takes the scalar alternative; a bare symbol takes the
+; `symbol` (reference) alternative; anything else trips
+; `union_no_branch_matched`. Misuse — `:scalar-or-ref` on another
+; underlying, or a missing `:scalar-or-ref` slot — is an `invalid_manifest`
+; at load. It needs no validator change: the loader rewrites it to an
+; ordinary union, so it exports through the union path as an `anyOf` of the
+; resolved alternatives plus an `x-sjon-union-alternatives` annotation, and
+; the TS surface renders the matching `<base-type> | Symbol_` union.
+
+(plugin :name scalar-or-ref :version "1.0.0"
+  ; The scalar alternative — a plain workgroup-dimension count.
+  (value-kind :name dim-value
+    :description "A literal workgroup dimension."
+    :underlying number)
+
+  ; The shorthand: a literal dim-value OR a symbol naming a constant.
+  (value-kind :name dim
+    :description "A workgroup dimension: a literal count, or a symbol referencing a named constant."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base dim-value))
+
+  (form :name dispatch
+    :description "A compute dispatch sized on three axes; each axis is a literal or a named reference."
+    (key :name x :type dim :optional false)
+    (key :name y :type dim :optional false)
+    (key :name z :type dim :optional true)))

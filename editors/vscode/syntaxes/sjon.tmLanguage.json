@@ -1,0 +1,82 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "sjon",
+  "scopeName": "source.sjon",
+  "patterns": [{ "include": "#expression" }],
+  "repository": {
+    "expression": {
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#raw-string" },
+        { "include": "#string" },
+        { "include": "#keyword-key" },
+        { "include": "#constants" },
+        { "include": "#number" },
+        { "include": "#symbol" },
+        { "include": "#form" },
+        { "include": "#brackets" }
+      ]
+    },
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.semicolon.sjon",
+          "match": ";.*"
+        },
+        {
+          "name": "comment.block.sjon",
+          "begin": "#\\|",
+          "end": "\\|#"
+        }
+      ]
+    },
+    "raw-string": {
+      "name": "string.quoted.triple.sjon",
+      "begin": "\"\"\"",
+      "end": "\"\"\""
+    },
+    "string": {
+      "name": "string.quoted.double.sjon",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.sjon",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "keyword-key": {
+      "name": "entity.name.tag.sjon",
+      "match": ":[^\\s()\\[\\]\";]+"
+    },
+    "constants": {
+      "name": "constant.language.sjon",
+      "match": "(?<![^\\s()\\[\\]\";:])(?:true|false|nil)(?![^\\s()\\[\\]\";:])"
+    },
+    "number": {
+      "name": "constant.numeric.sjon",
+      "match": "-?\\d[\\d_]*(?:\\.\\d+)?(?:[eE][+-]?\\d+)?(?:[a-zA-Z]+|%)?"
+    },
+    "symbol": {
+      "comment": "A bare identifier (non-head). Matched after #number so digit-leading tokens like 90deg stay numeric, but identifier-leading tokens with embedded digits (f32, vec4f, C#4) are consumed whole here instead of leaking their digit-run to #number. Intentionally unscoped — bare symbols render as default foreground, matching the CodeMirror grammar.",
+      "match": "[A-Za-z_+*/<>=!?.%&|^~$@#-][A-Za-z0-9_+*/<>=!?.%&|^~$@#-]*"
+    },
+    "form": {
+      "begin": "(\\()\\s*([^\\s()\\[\\]\";:]+)?",
+      "beginCaptures": {
+        "1": { "name": "punctuation.section.parens.begin.sjon" },
+        "2": { "name": "entity.name.function.sjon" }
+      },
+      "end": "(\\))",
+      "endCaptures": {
+        "1": { "name": "punctuation.section.parens.end.sjon" }
+      },
+      "patterns": [{ "include": "#expression" }]
+    },
+    "brackets": {
+      "name": "punctuation.section.brackets.sjon",
+      "match": "[\\[\\]]"
+    }
+  }
+}

@@ -1,0 +1,4 @@
+; Pathed at the offending value-kind's union declaration, not at the
+; alternative that happens to be a union.
+(diagnostics
+  (diagnostic :code nested_union :path [probe outer union]))

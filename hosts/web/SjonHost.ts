@@ -49,7 +49,8 @@
 // imported directly in a browser (see the sibling note in
 // `sjon-reader.ts`).
 
-import { SjonEncoder, SjonWasmError } from './sjon-reader.ts';
+import { errMsg } from './errMsg.ts';
+import { SjonEncoder, SjonWasm } from './sjon-reader.ts';
 import { parseJsonWithBigInt } from './parseJsonWithBigInt.ts';
 import type {
   ExportSchemaDraft,
@@ -72,16 +73,6 @@ const PLUGIN_ABI_VERSION = 2;
 // a matching mirror buffer. 16 MiB comfortably exceeds any realistic
 // codec-encoded value while keeping the per-call memory ceiling small.
 const MAX_PLUGIN_RESULT_FRAME = 16 * 1024 * 1024;
-const PLUGIN_IMPL_REGEX = /:impl\s+"wasm:([^"]+)"/g;
-// Anchor on the first `(plugin ...)` form's `:name`. `[^)]*?` is the
-// lazy "anything except a closing paren" run that lets `:name` appear
-// after `(plugin` whether it sits before or after other `(plugin …)`
-// kvpairs (e.g. `:version`, `:requires`). Avoid wrapping `[^)]*?` in an
-// optional non-capturing group (`(?:…)?`); the JavaScript regex engine
-// will gladly skip the entire outer form and match a nested `:name` —
-// e.g. an inner `(expr-func :name boom …)` — instead of the plugin's
-// own `:name`.
-const PLUGIN_NAME_REGEX = /\(\s*plugin\s+[^)]*?:name\s+([A-Za-z_][\w-]*)/;
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
 
@@ -239,6 +230,17 @@ export class SjonHost {
   }
 
   /**
+   * Query a pattern document (`PatternQuery` over WASM) on the half-open
+   * tick window `[begin, end)` with RNG `seed`. Returns the framed SJON
+   * text: `(haps …)` on success, `(diagnostics …)` when the query
+   * collected any. No resolver / plugin schema needed — the pattern
+   * vocabulary is built into the artifact.
+   */
+  queryPattern(source: string, begin: number, end: number, seed: number): string {
+    return this.encoder.queryPattern(source, begin, end, seed);
+  }
+
+  /**
    * Export a JSON Schema 2020-12 + TypeScript `.d.ts` (+ optional
    * intermediate IR) for the plugin schema declared in `source`.
    * Mirrors `Host.exportSchemaFromSource` over WASM: parses,
@@ -297,42 +299,18 @@ export class SjonHost {
 
   /**
    * Two-buffer export call shared by `validateDocument` and
-   * `hostEvalExpr`. Marshals `source` + `wasmOptions` into wasm
-   * memory, calls the named export, copies the framed payload out,
-   * and frees all three allocations. Throws `SjonWasmError` on a
-   * `ok=0` frame.
+   * `hostEvalExpr`. Marshals `source` + `wasmOptions` and delegates to
+   * the encoder's one two-buffer marshaller (`_callBytesTwo`, which owns
+   * the empty-source reservation + framed read/free). Throws
+   * `SjonWasmError` on an `ok=0` frame.
    */
   _invokeHostExport(fnName: string, source: string, wasmOptions: object): string {
-    const srcBytes = encoder.encode(source);
-    const optsBytes = encoder.encode(JSON.stringify(wasmOptions));
-
-    // `sjon_alloc(0)` returns null; reserve 1 byte for empty source so
-    // the buffer pointer stays well-formed across the call.
-    const srcAllocLen = srcBytes.length || 1;
-    const wasm = this.encoder;
-    const alloc = wasm.exports['sjon_alloc'] as (n: number) => number;
-    const srcPtr = alloc(srcAllocLen);
-    if (srcPtr === 0) throw new Error('sjon_alloc returned null (OOM in WASM)');
-
-    let optsPtr = 0;
-    try {
-      if (srcBytes.length > 0) {
-        new Uint8Array(wasm.memory.buffer, srcPtr, srcBytes.length).set(srcBytes);
-      }
-      optsPtr = alloc(optsBytes.length);
-      if (optsPtr === 0) throw new Error('sjon_alloc returned null (OOM in WASM)');
-      new Uint8Array(wasm.memory.buffer, optsPtr, optsBytes.length).set(optsBytes);
-
-      const fn = wasm.exports[fnName] as (p1: number, n1: number, p2: number, n2: number) => number;
-      const ptr = fn(srcPtr, srcBytes.length, optsPtr, optsBytes.length);
-      const { ok, payload } = wasm._readFramed(ptr);
-      const text = decoder.decode(payload);
-      if (!ok) throw new SjonWasmError(fnName, text);
-      return text;
-    } finally {
-      wasm._free(srcPtr, srcAllocLen);
-      if (optsPtr !== 0) wasm._free(optsPtr, optsBytes.length);
-    }
+    const payload = this.encoder._callBytesTwo(
+      fnName,
+      encoder.encode(source),
+      encoder.encode(JSON.stringify(wasmOptions)),
+    );
+    return decoder.decode(payload);
   }
 }
 
@@ -380,6 +358,7 @@ function handleResolve(ref: HostRef, refPtr: number, refLen: number): number {
   if (resolution && resolution.kind === 'manifest' && resolution.wasm) {
     const preflight = instantiateAndPreflight(
       ref,
+      instance,
       resolution.source,
       resolution.wasm as BufferSource,
     );
@@ -412,14 +391,21 @@ function handleResolve(ref: HostRef, refPtr: number, refLen: number): number {
  *   3. `Instance(module, {})` — links against the empty import set.
  *   4. `sjon_plugin_abi_version() === 2` → else `plugin_abi_mismatch`.
  *   5. Required standard exports + every `:impl "wasm:<name>"` named
- *      in the manifest source → else `plugin_export_missing`.
+ *      in the manifest source, expr-funcs and cross-ref providers alike
+ *      → else `plugin_export_missing`.
+ *
+ * `mainInstance` is the host's own `sjon.wasm` instance — its
+ * `sjon_manifest_meta` export supplies the manifest's `:name` + wasm
+ * impls (see `readManifestMeta`), replacing the earlier source scrape.
  */
 function instantiateAndPreflight(
   ref: HostRef,
+  mainInstance: WebAssembly.Instance,
   source: string,
   wasmBytes: BufferSource,
 ): PreflightResult {
-  const pluginName = extractPluginName(source);
+  const meta = readManifestMeta(mainInstance, source);
+  const pluginName = meta.name;
   if (pluginName === null) {
     // Without a `:name` keyword the manifest itself is malformed.
     // Let the loader's parser emit the canonical invalid_manifest
@@ -524,7 +510,12 @@ function instantiateAndPreflight(
   // (iii) Declared `:impl "wasm:<name>"` exports. Every one is
   // contractually `(i32, i32) -> i32`, so the JS-side `.length` must
   // be 2. Same missing-vs-wrong-sig split as the standard exports.
-  for (const exportName of extractWasmImplNames(source)) {
+  //
+  // Both catalogs that can declare one arrive here in a single
+  // undiscriminated list — expr-funcs and cross-ref providers — because
+  // pre-flight asks them the same question. A provider call is an
+  // ordinary plugin call, right down to the signature.
+  for (const exportName of meta.wasmImpls) {
     const fn = exports[exportName];
     if (typeof fn !== 'function') {
       return {
@@ -559,31 +550,34 @@ function instantiateAndPreflight(
   return { ok: true };
 }
 
-/**
- * Pull the manifest's plugin `:name` out of `source` with a regex.
- * Light JS-side parsing — the canonical loader runs Zig-side; we just
- * need enough of the name to key the plugin pool and label diagnostics.
- * Returns `null` if no `:name` is present (the loader will then emit
- * `invalid_manifest`).
- */
-function extractPluginName(source: string): string | null {
-  const m = source.match(PLUGIN_NAME_REGEX);
-  return m && m[1] ? m[1] : null;
+interface ManifestMeta {
+  /** The plugin's own `:name`, or null when `source` is not a
+   *  well-formed `(plugin …)` manifest (nothing to key the pool on). */
+  readonly name: string | null;
+  /** Every declared `:impl "wasm:<export>"` name, in declaration order. */
+  readonly wasmImpls: readonly string[];
 }
 
 /**
- * Collect every `:impl "wasm:<name>"` export name declared by `source`.
- * Used by pre-flight to verify the plugin binary actually defines each
- * referenced export.
+ * Read a manifest's `:name` + declared `:impl "wasm:<export>"` names via
+ * the host's `sjon_manifest_meta` export — a structural walk (parse →
+ * load → plugin fields). Unlike the retired regex it can't be fooled by
+ * source order: a leading nested `(expr-func :name …)` no longer shadows
+ * the plugin's own `:name`, so the pool is keyed correctly.
+ *
+ * Runs re-entrantly on the main instance during resolver-bridge
+ * pre-flight (`handleResolve` is itself a callback out of a running
+ * `sjon_host_validate_document`). This is safe: `sjon_manifest_meta`
+ * neither resolves plugins nor calls back into JS, and its
+ * `sjon_alloc`/`sjon_free` pair is balanced before it returns — the same
+ * re-entrant marshalling the resolver bridge already performs.
  */
-function extractWasmImplNames(source: string): string[] {
-  const names: string[] = [];
-  PLUGIN_IMPL_REGEX.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = PLUGIN_IMPL_REGEX.exec(source)) !== null) {
-    if (m[1]) names.push(m[1]);
-  }
-  return names;
+function readManifestMeta(instance: WebAssembly.Instance, source: string): ManifestMeta {
+  const raw = new SjonWasm(instance)._callJson('sjon_manifest_meta', encoder.encode(source)) as {
+    name: string | null;
+    wasm_impls: string[];
+  };
+  return { name: raw.name, wasmImpls: raw.wasm_impls };
 }
 
 type RequiredExport =
@@ -676,6 +670,34 @@ function handleInvoke(ref: HostRef, reqPtr: number, reqLen: number): number {
       `plugin "${parsed.pluginName}" sjon_plugin_alloc(${argsLen}) returned null`,
     );
   }
+
+  // The args buffer is plugin-owned and must be released exactly once,
+  // on every exit path — and three paths reach the release: the
+  // oversized-frame refusal, the success path, and the catch below.
+  //
+  // The success path used to free and *then* call `reframeIntoSjon`,
+  // which allocates in sjon memory and can trap. That lands in the
+  // catch, which freed the same pointer again. A double
+  // `sjon_plugin_free` corrupts the plugin's allocator and says nothing
+  // — no diagnostic, no trap, just a plugin that misbehaves later.
+  //
+  // `argsLive` closes the window. It is cleared *before* the call, so a
+  // `sjon_plugin_free` that traps on its own also counts as consumed:
+  // retrying it from the catch would be the same double free.
+  let argsLive = argsLen > 0;
+  const releaseArgs = (): void => {
+    if (!argsLive) return;
+    argsLive = false;
+    pluginFree(argsPtr, argsLen);
+  };
+  const releaseArgsBestEffort = (): void => {
+    try {
+      releaseArgs();
+    } catch {
+      /* best-effort: we are already on a failure path */
+    }
+  };
+
   try {
     if (argsLen > 0) {
       new Uint8Array(plugin.memory.buffer, argsPtr, argsLen).set(parsed.argsBytes);
@@ -705,16 +727,9 @@ function handleInvoke(ref: HostRef, reqPtr: number, reqLen: number): number {
       // Refuse to honor the reported length — allocating a JS
       // mirror buffer of this size would be a host-side memory
       // attack. Don't call `sjon_plugin_free` on the bogus frame
-      // (we don't trust the size); the args buffer is plugin-
-      // owned and gets released in the outer `finally`-style
-      // path below.
-      if (argsLen > 0) {
-        try {
-          pluginFree(argsPtr, argsLen);
-        } catch {
-          /* best-effort */
-        }
-      }
+      // (we don't trust the size); the args buffer is ours to
+      // release and this is its only chance.
+      releaseArgsBestEffort();
       return frameInvokeError(
         instance,
         '_alloc',
@@ -729,21 +744,17 @@ function handleInvoke(ref: HostRef, reqPtr: number, reqLen: number): number {
     // same `sjon_plugin_free` we'd use; spec §11.
     pluginFree(resultPtr, total);
     // Args buffer is plugin-owned too — release while we have the
-    // handle.
-    if (argsLen > 0) pluginFree(argsPtr, argsLen);
+    // handle. `releaseArgs` (not the best-effort form): a failure here
+    // is still worth reporting as `_internal_trap`, and it is now safe
+    // to fall into the catch, which will not re-free.
+    releaseArgs();
 
     // Re-frame into sjon memory. The header we copied out already has
     // the right ok/len fields — splice straight through.
     void resultOk;
     return reframeIntoSjon(instance, frameCopy);
   } catch (err) {
-    if (argsLen > 0) {
-      try {
-        pluginFree(argsPtr, argsLen);
-      } catch {
-        /* best-effort */
-      }
-    }
+    releaseArgsBestEffort();
     return frameInvokeError(instance, '_internal_trap', errMsg(err));
   }
 }
@@ -799,21 +810,17 @@ function reframeIntoSjon(instance: WebAssembly.Instance, framed: Uint8Array): nu
 function frameInvokeError(instance: WebAssembly.Instance, code: string, detail: string): number {
   const codeBytes = encoder.encode(code);
   const detailBytes = encoder.encode(detail);
-  const payloadLen = 4 + codeBytes.length + 4 + detailBytes.length;
-  const total = HEADER_BYTES + payloadLen;
-  const alloc = instance.exports['sjon_alloc'] as (n: number) => number;
-  const ptr = alloc(total);
-  if (ptr === 0) return 0;
-  const memory = instance.exports['memory'] as WebAssembly.Memory;
-  const view = new DataView(memory.buffer, ptr, total);
-  view.setUint32(0, 0, true); // ok = 0
-  view.setUint32(4, payloadLen, true);
-  view.setUint32(8, codeBytes.length, true);
-  new Uint8Array(memory.buffer, ptr + 12, codeBytes.length).set(codeBytes);
-  const detailOff = 12 + codeBytes.length;
+  // Build the nested `[u32 code_len][code][u32 detail_len][detail]`
+  // payload, then hand it to the one framer for the `[ok][len][…]`
+  // envelope — `ok=0` selects the Zig invoker's structured-error path.
+  const payload = new Uint8Array(4 + codeBytes.length + 4 + detailBytes.length);
+  const view = new DataView(payload.buffer);
+  view.setUint32(0, codeBytes.length, true);
+  payload.set(codeBytes, 4);
+  const detailOff = 4 + codeBytes.length;
   view.setUint32(detailOff, detailBytes.length, true);
-  new Uint8Array(memory.buffer, ptr + detailOff + 4, detailBytes.length).set(detailBytes);
-  return ptr;
+  payload.set(detailBytes, detailOff + 4);
+  return frame(instance, false, payload);
 }
 
 // ---------------------------------------------------------------------------
@@ -866,9 +873,19 @@ function frame(instance: WebAssembly.Instance, ok: boolean, payload: Uint8Array)
   return ptr;
 }
 
-function errMsg(err: unknown): string {
-  if (err && typeof err === 'object' && 'message' in err) {
-    return (err as { message: string }).message;
-  }
-  return String(err);
-}
+// ---------------------------------------------------------------------------
+// Test-only surface
+// ---------------------------------------------------------------------------
+
+/**
+ * Handles that exist so `test/host.test.ts` can drive the plugin-invoke
+ * bridge directly. Not part of the package's API.
+ *
+ * `handleInvoke` is otherwise reachable only through a real WASM
+ * instantiation with a real plugin, which makes its failure paths — an
+ * `sjon_alloc` that traps *after* the plugin has already been called, a
+ * `sjon_plugin_free` that throws — unreachable from a test. Those paths
+ * are exactly where the args buffer's ownership is decided, so they are
+ * the ones worth pinning.
+ */
+export const __testing = { handleInvoke } as const;

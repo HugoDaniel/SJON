@@ -1,0 +1,26 @@
+; The `lowering-*` family had 29 cases and none for its central failure
+; mode: a hook that refuses. Every other case in the family covers what the
+; pass does when lowering *works* (or when the schema declaring it is
+; wrong); this one covers the runtime saying no.
+;
+; `test/probe-wrong-call-v1` reads `:n` — declared `:type number` — through
+; `input.symbol`, so the typed-read helper rejects the call and the hook
+; returns `error.HookFailed`. Which refusal it is does not matter here; what
+; matters is what the driver does with one. A hook failure is a *diagnostic*
+; against the author's document: exactly one, at the source form, and the
+; invocation is dropped so nothing partially-lowered reaches validation.
+; Nothing crashes, and nothing is silently skipped.
+;
+; The corpus compares code, severity and path — not messages — so this case
+; cannot pin the hook-supplied explanation that `LoweringOutput.fail` added.
+; It pins the frame that carries it.
+;
+; Zig-runner-only, like every `lowering-*` case: the Web and Rust hosts
+; drive `sjon.wasm`, which has no Zig-side hook registry.
+(plugin :name probe :version "1.0.0"
+  (form :name sugar :open true
+    :lowering (lowering :hook test/probe-wrong-call-v1 :produces [target])
+    (key :name n :type number))
+  (form :name target :open true))
+
+(sugar :n 1)

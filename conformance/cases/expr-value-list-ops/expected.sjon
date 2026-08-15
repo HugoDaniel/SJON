@@ -1,0 +1,12 @@
+; Form 2's out-of-range index is a reported runtime domain failure: one
+; diagnostic, no `:index 2` entry, and the three neighbours unaffected.
+; The path is empty because the eval pass anchors at the form's head span
+; — the arguments type-check; it is the computed index that is out of
+; range.
+(diagnostics
+  (diagnostic :code expr_type_mismatch :path []))
+(values
+  (value :index 0 :result 10)
+  (value :index 1 :result 30)
+  (value :index 3 :result 4)
+  (value :index 4 :result 0))

@@ -1,0 +1,4 @@
+; Attributed to the call — the missing label has no source position of its
+; own to point at.
+(diagnostics
+  (diagnostic :code expr_missing_label :path [lerp]))

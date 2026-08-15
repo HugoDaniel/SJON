@@ -1,0 +1,5 @@
+; `other` matches neither the `note-or-rest` symbol alternative nor the
+; `event` head-set, so the union rejects it at the `:ev` slot. Emitted
+; identically on the tree and binary validation paths.
+(diagnostics
+  (diagnostic :code union_no_branch_matched :path [track ev]))

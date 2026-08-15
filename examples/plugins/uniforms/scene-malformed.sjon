@@ -1,0 +1,20 @@
+; The poisoned bucket: the second declaration lost its name in a bad
+; merge, and the scanner refuses the whole source rather than register
+; the two names it *could* read (a truncated member set would mis-blame
+; every reference that follows). The result is exactly one diagnostic —
+; `cross_ref_extraction_failed` at the shader — and silence at both
+; binds below: `u_time` would have resolved and `u_missing` would not,
+; and neither is reported, because a member set nobody could compute has
+; no answer to give. Unchecked is neither accepted nor rejected.
+;
+; `cross_ref_provider_unavailable` (a host that cannot run the provider
+; at all) reaches the same silence by the other door.
+(use-plugin "uniforms")
+
+(shader :name sky :src """@group(0) @binding(0) var<uniform> u_time: f32;
+@group(0) @binding(1) var<uniform> : f32;
+@group(0) @binding(2) var<uniform> u_tint: vec4f;
+""")
+
+(bind :uniform u_time :group 0 :binding 0)
+(bind :uniform u_missing :group 0 :binding 9)

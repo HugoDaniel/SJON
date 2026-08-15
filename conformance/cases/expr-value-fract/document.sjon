@@ -1,0 +1,16 @@
+; `fract` is defined as x − floor(x), the WGSL spelling, and its
+; description in `src/plugins/core.zig` carries the warning "result may be
+; exactly 1.0". That warning was documented and then never tested. Form 2
+; is the input that makes it true: floor(-1e-30) is -1, and -1e-30 − (-1)
+; is 1 − 1e-30, which has no f64 representation distinct from 1.0 and
+; rounds to exactly 1.0. So `fract` does NOT return a value in [0, 1) —
+; the half-open interval a reader assumes from the name — and any consumer
+; using it to index a wrapped table has an off-by-one at tiny negatives.
+;
+; Forms 0/1/3 pin the ordinary readings either side of that: a positive
+; fraction, a negative one (which wraps up, not toward zero — `fract` is
+; not `x - trunc(x)`), and an exact integer.
+(fract 1.5)
+(fract -0.25)
+(fract -1e-30)
+(fract 2.0)

@@ -1,0 +1,13 @@
+; Manifest-phase family, 1 of 6 — and one of the two that are *advisory*.
+;
+; `:license` is not checked against any registry beyond the canonical SPDX
+; identifier list, and a miss is a warning: the manifest still loads, the
+; plugin still joins the schema, and `(pt :x 1)` below still validates. That
+; is the whole point of pairing this case with the four error-severity ones
+; in the same batch — severity here is not a label on the message, it
+; decides whether the plugin survives. The error cases each carry a trailing
+; `unknown_form` for exactly that reason; this one does not.
+(plugin :name probe :version "1.0.0" :license "Squiggle-2.0"
+  (form :name pt (key :name x :type number)))
+
+(pt :x 1)

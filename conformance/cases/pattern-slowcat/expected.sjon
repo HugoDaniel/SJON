@@ -1,0 +1,3 @@
+(haps
+  (hap :part [0 720720] bd)
+  (hap :part [720720 1441440] sn))

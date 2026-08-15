@@ -1,0 +1,5 @@
+(plugin :name calc :version "1.0.0"
+  (form :name shape
+    (key :name radius :type number :optional true)))
+
+(shape :radius (lerp 0 10 0.5))

@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code required_one_of_missing :path [route]))

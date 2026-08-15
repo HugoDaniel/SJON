@@ -1,0 +1,11 @@
+; Labeled-call family, 1 of 4. `lerp` declares `:param-names [from to t]`,
+; so it can be called positionally OR by label — never both. Mixing the two
+; makes the mapping ambiguous (is `0.5` the third positional, or the value
+; for the one label not yet given?), so the call is rejected before either
+; reading is attempted.
+;
+; The four `expr_*_label` / `expr_mixed_args` codes are validator-emitted and
+; therefore dual-path — the tree and binary walkers both have to produce
+; them. They had four Zig tests and no corpus case, which left the binary
+; leg and the host boundary unpinned.
+(lerp 0 :to 10 0.5)

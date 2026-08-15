@@ -1,0 +1,26 @@
+; Provider-route aggregate family, 1 of 3 — rejections of the *schema*,
+; raised before any document is looked at, so every host that can load a
+; manifest replays them whether or not it can run an extractor.
+;
+; `(cross-ref :provider …)` draws a cross-ref's member set from a declared
+; `(cross-ref-provider …)` instead of from each target instance's
+; `:name-key` symbol. Here the manifest declares no provider at all, so
+; `:provider glsl-uniforms` resolves to nothing — the provider-route twin
+; of `unknown_cross_ref_target`.
+;
+; The document deliberately instantiates nothing: with the provider
+; unresolved there is no member set to reference, and a reference would
+; only add a second, downstream diagnostic on top of the root cause.
+(plugin :name probe :version "1.0.0" :sjon "1.2"
+  (form :name shader
+    (key :name name :type symbol :optional false)
+    (key :name src :type string :optional false))
+
+  (value-kind :name uniform-name
+    :underlying symbol
+    :cross-ref (cross-ref :target shader :provider glsl-uniforms))
+
+  (form :name bind
+    (key :name uniform :type uniform-name :optional false)))
+
+nil

@@ -1,0 +1,4 @@
+; Labeled-call family, 2 of 4. `:nope` is not one of `lerp`'s declared
+; `:param-names [from to t]`. Unlike a form's `unknown_key`, an expression's
+; labels are closed by the declaration, so there is no open-map fallback.
+(lerp :from 0 :to 10 :nope 0.5)

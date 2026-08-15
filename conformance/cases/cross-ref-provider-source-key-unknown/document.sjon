@@ -1,0 +1,25 @@
+; Provider-route aggregate family, 3 of 3.
+;
+; `:source-key` names the key on the target form whose *string* value is
+; handed to the provider. It defaults to `src`, and `(shader …)` here
+; declares no such key — so no instance could ever supply the provider
+; with anything, and the member set would silently be empty. Diagnosed
+; rather than tolerated, the provider-route twin of
+; `cross_ref_name_key_unknown`.
+;
+; A key of the wrong *type* is the same error for the same reason: this
+; case pins the absent-key half, and `:body` below is present only to
+; make the near-miss legible.
+(plugin :name probe :version "1.0.0" :sjon "1.2"
+  (cross-ref-provider :name lines
+    :description "One name per non-empty line.")
+
+  (form :name shader
+    (key :name name :type symbol :optional false)
+    (key :name body :type string :optional false))
+
+  (value-kind :name uniform-name
+    :underlying symbol
+    :cross-ref (cross-ref :target shader :provider lines)))
+
+nil

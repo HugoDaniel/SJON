@@ -1,0 +1,40 @@
+; NaN and the infinities reach documents — `(sqrt x)` for negative x and
+; `(asin x)` for |x| > 1 are documented to produce NaN, and `pow` overflows
+; to a signed infinity — but the corpus could not say so, because
+; `expected.sjon` has no literal for either and `Expr.Value.equals` is
+; IEEE: NaN never equals itself, so a direct `:result` pin could not pass
+; even if the literal existed. (The *encoding* of both, into the "nan" /
+; "inf" / "-inf" sentinels the wire envelope uses, is unit-tested in
+; `wasm_common.zig` — what was missing is that expressions produce them
+; at all, and what happens next.)
+;
+; So this case pins them through the comparisons that are representable.
+; Forms 1-4 are the whole of NaN's behaviour under the comparison
+; operators: every one is false, including `>` — NaN is not merely
+; unequal, it is unordered, so an author cannot bisect for it with a
+; comparison and must not assume `(not (< a b))` means `(>= a b)`.
+;
+; Forms 5/6 are the payoff: `saturate` and `clamp` both turn a NaN into
+; 1, not 0 and not NaN. That is a consequence of the clamp being
+; @max(lo, @min(hi, v)) and IEEE min/max returning the non-NaN operand,
+; it is the same mechanism as the degenerate `smoothstep` in
+; `expr-value-smoothing`, and it means NaN does *not* propagate through
+; the smoothing functions the way it does through arithmetic. Both agree,
+; which is the part worth locking: `saturate` is documented as
+; clamp(x, 0, 1) and has a separate implementation.
+;
+; Forms 8-11 do the same for the infinities: they compare equal to
+; themselves, they are ordered against finite values, and `pow` carries
+; the sign through an odd exponent.
+(sqrt -1.0)
+(= (sqrt -1.0) (sqrt -1.0))
+(= (sqrt -1.0) 0.0)
+(< (sqrt -1.0) 0.0)
+(> (sqrt -1.0) 0.0)
+(saturate (sqrt -1.0))
+(clamp (sqrt -1.0) 0.0 1.0)
+(pow 10.0 400.0)
+(= (pow 10.0 400.0) (pow 10.0 400.0))
+(> (pow 10.0 400.0) 0.0)
+(pow -10.0 401.0)
+(< (pow -10.0 401.0) 0.0)

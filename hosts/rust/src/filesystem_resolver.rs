@@ -2,7 +2,8 @@
 //! `hosts/web/createNodeFsResolver.ts` and
 //! `hosts/typescript-parity/src/FilesystemResolver.ts`:
 //!
-//!   1. Read `sjon-project.sjon`, walk `(project :plugins […])`.
+//!   1. Read `sjon-project.sjon`, walk `(project :plugins […])`. An
+//!      entry is a path string or a `(plugin-entry :path "…" …)` form.
 //!   2. For each entry, read the manifest, parse top-level
 //!      `(plugin :name <symbol|string> …)` to extract the name, index by name.
 //!   3. Duplicate `:name` → `duplicate_plugin_name` diagnostic.
@@ -170,17 +171,75 @@ fn load_project_file(
     }
 }
 
+/// Reduce one `:plugins` entry to the manifest path it names, or `None`
+/// after pushing a diagnostic. Mirrors `indexOneManifest`'s entry switch
+/// in `src/FilesystemResolver.zig` — a bare path string, or a
+/// `(plugin-entry :path "…" …)` form.
+///
+/// `:version` and `:hash` are *project-level* pins, parsed by the
+/// reference resolver only to cross-check them against the document's
+/// `(use-plugin …)` pins and emit `pin_disagreement`. That check is
+/// `FilesystemResolver`-local by design (a deliberate parity boundary:
+/// the project file is one resolver's config format, not a language
+/// surface), so they are accepted and inert here — as are the
+/// forward-compat `:optional` and the reserved `:as`. Accepting the
+/// *syntax* is not optional: rejecting the form outright, as this did
+/// until now, made a project file the reference accepts fail on three of
+/// the four hosts.
+fn entry_manifest_path<'a>(
+    elem: &'a Node,
+    diagnostics: &mut Vec<HostDiagnostic>,
+) -> Option<&'a str> {
+    match elem {
+        Node::String(rel) => Some(rel.as_str()),
+        Node::Form { head, children } => {
+            if head != "plugin-entry" {
+                diagnostics.push(project_diag(
+                    "invalid_manifest",
+                    format!(
+                        "`:plugins` entries must be a path string or `(plugin-entry …)`; got `({head} …)`"
+                    ),
+                ));
+                return None;
+            }
+            // Last `:path` wins, matching the reference's linear walk
+            // over the entry's children rather than `find_kvpair`'s
+            // first-hit lookup.
+            let mut path = "";
+            for child in children {
+                if let Node::Kvpair { key, value } = child
+                    && key == "path"
+                    && let Node::String(p) = value.as_ref()
+                {
+                    path = p.as_str();
+                }
+            }
+            if path.is_empty() {
+                diagnostics.push(project_diag(
+                    "invalid_manifest",
+                    "`(plugin-entry …)` requires a `:path` string".to_string(),
+                ));
+                return None;
+            }
+            Some(path)
+        }
+        _ => {
+            diagnostics.push(project_diag(
+                "invalid_manifest",
+                "`:plugins` entries must be a path string or `(plugin-entry …)` form".to_string(),
+            ));
+            None
+        }
+    }
+}
+
 fn index_one_manifest(
     project_root: &Path,
     elem: &Node,
     name_index: &mut HashMap<String, ManifestEntry>,
     diagnostics: &mut Vec<HostDiagnostic>,
 ) {
-    let Node::String(rel) = elem else {
-        diagnostics.push(project_diag(
-            "invalid_manifest",
-            "`:plugins` entries must be path strings".to_string(),
-        ));
+    let Some(rel) = entry_manifest_path(elem, diagnostics) else {
         return;
     };
     let manifest_path = resolve_against_root(project_root, rel);

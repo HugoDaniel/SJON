@@ -20,9 +20,7 @@
     "forceConsistentCasingInFileNames": true,
     "lib": ["ES2022", "DOM"],
     "allowImportingTsExtensions": true,
-    "noEmit": true,
-    "allowJs": true,
-    "checkJs": false
+    "noEmit": true
   },
   "include": ["**/*.ts", "**/*.mts", "**/*.mjs"],
   "exclude": ["node_modules", "dist"]

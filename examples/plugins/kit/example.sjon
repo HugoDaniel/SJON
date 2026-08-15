@@ -1,0 +1,6 @@
+; Example usage of the `kit` plugin. Each track exercises a different
+; `:kind` variant of the discriminated `(track …)` form.
+
+(track :name beat-1 :kind kick :step 4 :volume 0.9)
+(track :name bass-line :kind bass :sequence [1 5 8 5])
+(track :name hh :kind hat :pattern open :swing 0.12)

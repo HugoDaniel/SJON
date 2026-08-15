@@ -1,0 +1,5 @@
+(plugin :name doc :version "1.0.0"
+  (form :name scene
+    (key :name title :type string :optional true)))
+
+(scene :title "b")

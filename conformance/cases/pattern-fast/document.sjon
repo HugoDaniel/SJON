@@ -1,0 +1,11 @@
+; `(fast N …)` compresses its child into 1/N of the time and repeats it
+; N times per cycle. `PatternQuery.compileForm` dispatches seven
+; combinators; this and its `slow` sibling were the two that had never
+; crossed the `sjon_query_pattern` boundary on any host.
+;
+; `[bd sn]` alone is one hap each per cycle, at 360360 ticks apiece.
+; Under `fast 2` each becomes 180180 — a quarter cycle — and the pair
+; runs twice per cycle. The window below is two cycles, so eight haps,
+; which is what makes the *repetition* visible: a compression that
+; failed to loop would produce four haps and half a cycle of silence.
+(fast 2 [bd sn])

@@ -1,0 +1,35 @@
+; Drum-kit plugin with a discriminated `(track …)` form. The
+; `:kind` symbol selects between three per-row overlays:
+;
+;   * kick — `:step` (required), `:volume`, `:downbeat-volume`
+;   * bass — `:sequence` (required), `:gain`
+;   * hat  — `:pattern` (required), `:swing`
+;
+; `:name` and `:kind` are common to every variant. Modelled on
+; `piece_track_plugin` (src/Validator_tests.zig:3321-3366); the M2
+; schema-export demo regenerates `kit.schema.json.golden`,
+; `kit.d.ts.golden`, and `kit.export.json.golden` against this
+; manifest to lock in the allOf+if/then encoding.
+
+(plugin :name kit :version "1.0.0"
+  (value-kind :name track-kind
+    :description "Closed set of drum-row roles."
+    :underlying symbol
+    :members (member-set :values [kick bass hat]))
+
+  (form :name track
+    :description "One drum-machine row. `:kind` selects the variant overlay."
+    :discriminant kind
+    (key :name name :type symbol :description "Row identifier, unique within the kit.")
+    (key :name kind :type track-kind :description "Selects the per-row overlay.")
+    (key :name from :type number :optional true :description "Bar offset; defaults to 0.")
+    (variant :when kick
+      (key :name step :type number :description "Subdivision (1/16, 1/8, …).")
+      (key :name volume :type number :optional true)
+      (key :name downbeat-volume :type number :optional true))
+    (variant :when bass
+      (key :name sequence :type vector :description "Note sequence per bar.")
+      (key :name gain :type number :optional true))
+    (variant :when hat
+      (key :name pattern :type symbol :description "Pattern macro (open / closed / half).")
+      (key :name swing :type number :optional true))))

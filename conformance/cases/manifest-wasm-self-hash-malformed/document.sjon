@@ -1,0 +1,16 @@
+; Manifest-phase family, 4 of 6. `:wasm-sha256` pins the plugin's own
+; sidecar `.wasm` by content hash, in the canonical
+; `sha256-<64 lowercase hex>` shape. This one has the prefix and nothing
+; usable after it.
+;
+; The check is on the *shape*, and it runs without touching the filesystem
+; — no `.wasm` need exist for this case. That separation is the point: a
+; malformed pin can never be compared against anything, so it is rejected
+; at load rather than deferred to a hash mismatch that would report the
+; wrong problem. (The mismatch itself — a well-formed pin disagreeing with
+; real bytes — is `plugin_wasm_self_hash_mismatch`, which needs a fixture
+; package and stays on the reserved allowlist.)
+(plugin :name probe :version "1.0.0" :wasm-sha256 "sha256-nothex"
+  (form :name pt (key :name x :type number)))
+
+(pt :x 1)

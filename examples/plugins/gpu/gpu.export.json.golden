@@ -1,0 +1,119 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "gpu",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "vertex",
+          "description": "One mesh vertex: a 2..4-component position plus an optional u16 tint channel.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "position",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "vector",
+                "len": null,
+                "element": {
+                  "kind": "number"
+                }
+              }
+            },
+            {
+              "name": "tint",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "number_bounded",
+                "bounds": {}
+              }
+            }
+          ]
+        },
+        {
+          "name": "draw",
+          "description": "A draw call: f32 line width, u32 base vertex, and a bare LOD bias.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "line-width",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "number_bounded",
+                "bounds": {}
+              }
+            },
+            {
+              "name": "base-vertex",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "number_bounded",
+                "bounds": {}
+              }
+            },
+            {
+              "name": "lod-bias",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "number"
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": [
+        {
+          "name": "channel",
+          "description": "Normalized colour channel encoded as a u16 — integer in [0, 65535].",
+          "shape": {
+            "kind": "number_bounded",
+            "bounds": {}
+          }
+        },
+        {
+          "name": "scalar",
+          "description": "A 32-bit float scalar (line width, bias, …). Floats carry no integrality constraint.",
+          "shape": {
+            "kind": "number_bounded",
+            "bounds": {}
+          }
+        },
+        {
+          "name": "vertex-index",
+          "description": "Index into a vertex buffer — non-negative integer in [0, 2^32).",
+          "shape": {
+            "kind": "number_bounded",
+            "bounds": {}
+          }
+        },
+        {
+          "name": "attribute",
+          "description": "A vertex attribute of 2 to 4 float components (vec2..vec4).",
+          "shape": {
+            "kind": "vector",
+            "len": null,
+            "element": {
+              "kind": "number"
+            }
+          }
+        },
+        {
+          "name": "raw-uniform",
+          "description": "A raw uniform / push-constant value — bare number only, never a unit suffix.",
+          "shape": {
+            "kind": "number"
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": []
+}

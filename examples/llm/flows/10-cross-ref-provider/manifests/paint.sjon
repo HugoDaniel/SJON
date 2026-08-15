@@ -1,0 +1,42 @@
+; The schema for flow 10, shipped the way a real project ships one: a
+; manifest on disk, named by `sjon-project.sjon`, with its executable
+; half (`paint.wasm`) paired beside it by filename.
+;
+; It has to be on disk because `(cross-ref-provider …)` names *code*.
+; The other nine flows inline their `(plugin …)` into the document,
+; which works for every declarative schema; a provider cannot be
+; inlined, because there is nowhere in an inline manifest to put a
+; compiled extractor.
+;
+; `swatches` splits its source on newlines and calls every non-empty
+; line a name. That is the whole extractor — deliberately boring, so
+; what this flow teaches is the *route* (a member set computed from a
+; string in the document) and not colour-list parsing.
+;
+; `:sjon "1.2"` is the manifest format that introduced the provider
+; vocabulary. A host that predates it refuses this manifest outright
+; with `sjon_format_unsupported` rather than ignoring the two keys it
+; does not know.
+(plugin :name paint :version "1.0.0" :sjon "1.2"
+  (cross-ref-provider :name swatches
+    :description "One swatch name per non-empty line of a palette's `:colors`."
+    :impl "wasm:extract_lines")
+
+  (form :name palette
+    :description "A named palette. Its swatch names live inside `:colors`."
+    (key :name name :type symbol :optional false)
+    (key :name colors :type string :optional false))
+
+  ; The provider route: the member set for this kind is not any form's
+  ; `:name`, it is whatever `swatches` extracts from each
+  ; `(palette … :colors "…")` string. `:source-key` names the key it
+  ; reads; `:name-key` is not available here, and the loader rejects it.
+  (value-kind :name swatch-name
+    :description "A swatch declared inside some palette's `:colors` string."
+    :underlying symbol
+    :cross-ref (cross-ref :target palette :provider swatches :source-key colors))
+
+  (form :name fill
+    :description "Paints a region with one swatch."
+    (key :name region :type symbol :optional false)
+    (key :name swatch :type swatch-name :optional false)))

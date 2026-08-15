@@ -1,10 +1,19 @@
 {
   "name": "@sjon/highlight",
-  "version": "1.0.0",
-  "private": true,
+  "version": "1.1.0",
   "type": "module",
-  "description": "Reusable .sjon syntax-highlighting grammars — a CodeMirror StreamLanguage and a TextMate grammar for Shiki, seeded from PNGine's sjonToken. Lets every SJON host drop the Clojure approximation.",
-  "license": "SEE ../../LICENSE",
+  "description": "SJON syntax-highlighting grammars: a CodeMirror StreamLanguage and a Shiki-compatible TextMate grammar for .sjon sources.",
+  "license": "CC0-1.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HugoDaniel/SJON.git",
+    "directory": "hosts/highlight"
+  },
+  "homepage": "https://hugodaniel.com/pages/sjon",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": ["src"],
   "engines": {
     "node": ">=20"
   },

@@ -1,0 +1,11 @@
+(plugin :name refs :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase))
+  (form :name phrase
+    (key :name name :type symbol :optional false))
+  (form :name track
+    (key :name anchor :type phrase-name :optional true)))
+
+(phrase :name intro)
+(track :anchor outro)

@@ -4,7 +4,7 @@
 // directory containing a `sjon-project.sjon` file of the form:
 //
 //     (project :plugins ["./vendor/foo.sjon"
-//                        "./vendor/bar.sjon"])
+//                        (plugin-entry :path "./vendor/bar.sjon")])
 //
 // At `load` time the resolver reads each `:plugins` entry through
 // `loadManifest`, reads its `:name`, and indexes it. At resolve time a
@@ -16,6 +16,13 @@
 //   1. `ref.explicitPath` (resolved relative to `projectRoot`).
 //   2. Project-file index (`ref.name`).
 //   3. Failure → `Resolution.failure { unresolved_plugin, … }`.
+//
+// Both success paths return `wasm: null`. The Zig `FilesystemResolver`
+// pairs a sibling WASM artifact here; this host has no plugin runtime,
+// so pairing one would only produce the "declarative-only" refusal in
+// `Host.handleResolution` and turn a currently-loadable manifest into an
+// unresolved one. The corpus doesn't see the difference — plugin-exec
+// families are skipped in this host.
 //
 // Project-load failures (parse errors, malformed shape, per-entry
 // manifest read/parse failure, duplicate `:name`) are exposed via the
@@ -82,12 +89,12 @@ export class FilesystemResolver {
           detail: `explicit :path \`${absPath}\` unreadable: ${(err as Error).message}`,
         };
       }
-      return { kind: 'manifest_source', bytes };
+      return { kind: 'manifest', source: bytes, wasm: null };
     }
 
     const entry = this.nameIndex.get(ref.name);
     if (entry) {
-      return { kind: 'manifest_source', bytes: entry.manifestSource };
+      return { kind: 'manifest', source: entry.manifestSource, wasm: null };
     }
 
     if (this.projectFilePath === null) {
@@ -125,7 +132,7 @@ function loadProjectFile(
     return;
   }
 
-  let roots;
+  let roots: ReturnType<typeof parse>;
   try {
     roots = parse(projectSource);
   } catch (err) {
@@ -201,24 +208,77 @@ function walkProjectForm(
   }
 }
 
+/**
+ * Reduce one `:plugins` entry to the manifest path it names, or null
+ * after pushing a diagnostic. Mirrors `indexOneManifest`'s entry switch
+ * in `src/FilesystemResolver.zig` — a bare path string, or a
+ * `(plugin-entry :path "…" …)` form.
+ *
+ * `:version` and `:hash` are *project-level* pins, parsed by the
+ * reference resolver only to cross-check them against the document's
+ * `(use-plugin …)` pins and emit `pin_disagreement`. That check is
+ * FilesystemResolver-local by design (a deliberate parity boundary:
+ * the project file is one resolver's config format, not a language
+ * surface), so they are accepted and inert here — as are the
+ * forward-compat `:optional` and the reserved `:as`. Accepting the
+ * *syntax* is not optional: rejecting the form outright, as this did
+ * until now, made a project file the reference accepts fail on three of
+ * the four hosts.
+ */
+function entryManifestPath(
+  elem: import('./ast.ts').Node,
+  diagnostics: Diagnostic[],
+): string | null {
+  if (elem.tag === 'string') return elem.value;
+  if (elem.tag !== 'form') {
+    diagnostics.push({
+      code: 'invalid_manifest',
+      message: '`:plugins` entries must be a path string or `(plugin-entry …)` form',
+      path: ['project'],
+      span: elem.span,
+      severity: 'err',
+    });
+    return null;
+  }
+  if (elem.head !== 'plugin-entry') {
+    diagnostics.push({
+      code: 'invalid_manifest',
+      message:
+        '`:plugins` entries must be a path string or `(plugin-entry …)`; ' +
+        `got \`(${elem.head} …)\``,
+      path: ['project'],
+      span: elem.span,
+      severity: 'err',
+    });
+    return null;
+  }
+  let path = '';
+  for (const child of elem.children) {
+    if (child.tag !== 'kvpair') continue;
+    if (child.key === 'path' && child.value.tag === 'string') path = child.value.value;
+  }
+  if (path === '') {
+    diagnostics.push({
+      code: 'invalid_manifest',
+      message: '`(plugin-entry …)` requires a `:path` string',
+      path: ['project'],
+      span: elem.span,
+      severity: 'err',
+    });
+    return null;
+  }
+  return path;
+}
+
 function indexOneManifest(
   projectRoot: string,
   elem: import('./ast.ts').Node,
   nameIndex: Map<string, IndexEntry>,
   diagnostics: Diagnostic[],
 ): void {
-  if (elem.tag !== 'string') {
-    diagnostics.push({
-      code: 'invalid_manifest',
-      message: '`:plugins` entries must be path strings',
-      path: ['project'],
-      span: elem.span,
-      severity: 'err',
-    });
-    return;
-  }
+  const relPath = entryManifestPath(elem, diagnostics);
+  if (relPath === null) return;
 
-  const relPath = elem.value;
   const pathSpan = elem.span;
   const manifestPath = resolveAgainstRoot(projectRoot, relPath);
 
@@ -236,7 +296,7 @@ function indexOneManifest(
     return;
   }
 
-  let manifestRoots;
+  let manifestRoots: ReturnType<typeof parse>;
   try {
     manifestRoots = parse(manifestSource);
   } catch (err) {

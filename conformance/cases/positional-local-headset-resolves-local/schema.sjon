@@ -1,0 +1,13 @@
+; Positional slot-local forms behind a HeadSet gate — the PNGine `bind-group`
+; shape. `:positional bg-set` closes the positional set to {entry, buffer} by
+; head text (byte-equality, never the global table); the inline positional
+; locals drive per-head content validation. An in-set head resolves its LOCAL
+; spec (local `entry` needs :binding), shadowing the global `entry` (needs
+; :at). An out-of-set head is `not_head_member` (see the not-head-member case).
+(plugin :name plf-test :version "1.0.0"
+  (value-kind :name bg-set :underlying form
+    :heads (head-set :names [entry buffer]))
+  (form :name bind-group :positional bg-set
+    (form :name entry (key :name binding :type number :optional false))
+    (form :name buffer (key :name slot :type number :optional false)))
+  (form :name entry (key :name at :type symbol :optional false)))

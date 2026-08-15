@@ -1,144 +1,179 @@
+//! SJON Binary IR — wire format, encoder, and decoder.
+//!
+//! Hand-rolled, deterministic, little-endian binary representation of an
+//! `Ast.Tree`. Numbers are 8 raw IEEE-754 bytes (no `std.fmt` round-trip),
+//! identifiers and string literals live in a per-tree deduplicated pool
+//! sorted by `(length, bytes)`, and spans / comments are flag-gated. The
+//! same canonical tree always serialises to byte-identical output.
+//!
+//! Two artifacts consume the format:
+//!
+//!   * `sjon.wasm` — kitchen-sink, gains four binary exports.
+//!   * `sjon-binary.wasm` — read-only, no parser / printer / json.
+//!
+//! Wire layout (little-endian throughout, lengths in bytes):
+//!
+//!   [header 16]
+//!     [magic "SJ1\n"          4]
+//!     [wire_version           1]
+//!     [flags                  1]
+//!     [reserved               2]
+//!     [pool_offset (u32 LE)   4]
+//!     [roots_offset (u32 LE)  4]
+//!   [string pool]
+//!   [comment-text pool]            -- only if any with_*_comments flag set
+//!   [roots block]
+//!     [varint root_count]
+//!     [root_count × node]
+//!   [tree trailing comments]       -- only if with_tree_trailing_comments
+//!     [varint count]
+//!     [count × comment]
+//!
+//! Each `node`:
+//!
+//!   [tag 1]
+//!   [span 8]                       -- iff with_spans
+//!   [varint leading_comment_count] -- iff with_node_comments
+//!   [comment entries …]            --   ditto
+//!   [variant payload …]
+//!
+//! Variant payloads:
+//!
+//!   nil               (empty)
+//!   bool false        (empty)
+//!   bool true         (empty)
+//!   number            [f64 LE 8]
+//!   number_with_unit  [f64 LE 8] [varint unit_pool_idx]
+//!   number_i64        [i64 LE 8]                              -- wire >= v2
+//!   number_u64        [u64 LE 8]                              -- wire >= v2
+//!   date              [i16 LE 2] [u8 month] [u8 day]          -- wire >= v3
+//!   time              [u8 hour] [u8 min] [u8 sec] [u16 LE ms] -- wire >= v4
+//!   string            [varint pool_idx]
+//!   keyword           [varint pool_idx]
+//!   symbol            [varint pool_idx]
+//!   vector            [varint count] [count × node]
+//!                     [varint trailing_comment_count iff with_node_comments]
+//!                     [comment entries …]
+//!   form-bare         [head_span 8 iff with_head_spans]
+//!                     [varint head_idx]
+//!                     [varint child_count]
+//!                     [child entries × child_count]
+//!                     [varint trailing_comment_count iff with_node_comments]
+//!                     [comment entries …]
+//!   form-qualified    [head_span 8 iff with_head_spans]
+//!                     [varint ns_idx] [varint head_idx]
+//!                     [varint child_count] [child entries × child_count]
+//!                     [varint trailing_comment_count iff with_node_comments]
+//!                     [comment entries …]
+//!
+//! Child entries:
+//!
+//!   child-positional  [tag 1] [node]
+//!   child-keyword     [tag 1]
+//!                     [key_span 8 iff with_kvpair_key_spans]
+//!                     [varint kp_leading_comment_count iff with_kvpair_comments]
+//!                     [comment entries …]
+//!                     [varint key_idx]
+//!                     [node = value]
+//!
+//! Comment entry:
+//!
+//!   [u8 kind]                  -- 0 = line, 1 = block
+//!   [span 8 iff with_spans]
+//!   [varint text_idx]          -- index into the comment-text pool
+//!
+//! String / comment-text pool layout:
+//!
+//!   [varint entry_count]
+//!   [varint byte_size]         -- sum of (varint_len + bytes) over entries
+//!   [entry_count × entry]
+//!     entry = [varint len] [u8 × len]   -- UTF-8, no terminator
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Ast = @import("Ast.zig");
 const Date = @import("Date.zig");
 const Time = @import("Time.zig");
 
-pub const wire_version: u8 = 0x04;
+// ---------------------------------------------------------------------------
+// Wire-format vocabulary — extracted to the leaf `BinaryFormat.zig` (std +
+// Ast only) so the read-only `sjon-binary.wasm` closure (via BinaryCursor)
+// can reach the wire constants / tags / varint codec without importing this
+// write-side module. Re-exported verbatim so every `Binary.<name>` referencer
+// (root.zig, fuzz.zig, cli/Cli.zig, BinaryCursor, the tests) is untouched;
+// error-set identity `BinaryCursor.Error == Binary.Error == fmt.Error` is
+// preserved by aliasing.
+// ---------------------------------------------------------------------------
+const fmt = @import("BinaryFormat.zig");
 
-pub const wire_magic: [4]u8 = .{ 'S', 'J', '1', '\n' };
+pub const wire_version = fmt.wire_version;
+pub const wire_magic = fmt.wire_magic;
+pub const HEADER_SIZE = fmt.HEADER_SIZE;
+pub const MAX_TREE_DEPTH = fmt.MAX_TREE_DEPTH;
+pub const MAX_NODES = fmt.MAX_NODES;
+pub const MAX_STRING_POOL_ENTRIES = fmt.MAX_STRING_POOL_ENTRIES;
+pub const MAX_STRING_LENGTH = fmt.MAX_STRING_LENGTH;
+pub const MAX_COMMENTS_PER_NODE = fmt.MAX_COMMENTS_PER_NODE;
+pub const MAX_COMMENT_TEXT_LENGTH = fmt.MAX_COMMENT_TEXT_LENGTH;
+pub const MAX_FILE_SIZE = fmt.MAX_FILE_SIZE;
+pub const Tag = fmt.Tag;
+pub const ChildTag = fmt.ChildTag;
+pub const Flag = fmt.Flag;
+pub const Error = fmt.Error;
+pub const FlagSet = fmt.FlagSet;
+pub const writeVarint = fmt.writeVarint;
+pub const readVarint = fmt.readVarint;
+pub const varintLen = fmt.varintLen;
+pub const tagFromByte = fmt.tagFromByte;
+pub const childTagFromByte = fmt.childTagFromByte;
+pub const Header = fmt.Header;
+pub const parseHeader = fmt.parseHeader;
+pub const readSpan = fmt.readSpan;
+pub const readF64 = fmt.readF64;
+pub const readI64 = fmt.readI64;
+pub const readU64 = fmt.readU64;
+pub const readDatePayload = fmt.readDatePayload;
+pub const readTimePayload = fmt.readTimePayload;
 
-pub const HEADER_SIZE: u32 = 16;
-
-pub const MAX_TREE_DEPTH: u32 = 1024;
-
+// `MAX_TREE_DEPTH >= Parser.MAX_PARSE_DEPTH` keeps binaries from decoding
+// trees the parser couldn't produce. The bound lives in the leaf; the
+// cross-check against Parser stays here so BinaryFormat never imports the
+// parser (which would drag it into the read-only closure).
 comptime {
     if (MAX_TREE_DEPTH < @import("Parser.zig").MAX_PARSE_DEPTH)
         @compileError("Binary.MAX_TREE_DEPTH must be >= Parser.MAX_PARSE_DEPTH");
 }
 
-pub const MAX_NODES: u32 = 1 << 20;
+// ---------------------------------------------------------------------------
+// Options
+// ---------------------------------------------------------------------------
 
-pub const MAX_STRING_POOL_ENTRIES: u32 = 1 << 16;
-
-pub const MAX_STRING_LENGTH: u32 = 1 << 20;
-
-pub const MAX_COMMENTS_PER_NODE: u32 = 256;
-
-pub const MAX_COMMENT_TEXT_LENGTH: u32 = 1 << 16;
-
-pub const MAX_FILE_SIZE: u32 = 1 << 28;
-
-pub const Tag = enum(u8) {
-    nil = 0x00,
-    bool_false = 0x01,
-    bool_true = 0x02,
-    number = 0x03,
-    string = 0x04,
-    keyword = 0x05,
-    symbol = 0x06,
-    vector = 0x07,
-    form_bare = 0x08,
-    form_qualified = 0x09,
-    number_with_unit = 0x0A,
-    number_i64 = 0x0B,
-    number_u64 = 0x0C,
-    date = 0x0D,
-    time = 0x0E,
-    _,
-
-    pub fn toValueKind(self: Tag) Ast.ValueKind {
-        return switch (self) {
-            .nil => .nil,
-            .bool_false, .bool_true => .boolean,
-            .number, .number_i64, .number_u64 => .number,
-            .number_with_unit => .number_with_unit,
-            .date => .date,
-            .time => .time,
-            .string => .string,
-            .keyword => .keyword,
-            .symbol => .symbol,
-            .vector => .vector,
-            .form_bare, .form_qualified => .form,
-            _ => unreachable,
-        };
-    }
-
-    pub fn fromAst(ast_tag: Ast.Tag, has_namespace: bool) Tag {
-        return switch (ast_tag) {
-            .nil => .nil,
-            .boolean_true => .bool_true,
-            .boolean_false => .bool_false,
-            .number => .number,
-            .number_i64 => .number_i64,
-            .number_u64 => .number_u64,
-            .number_with_unit => .number_with_unit,
-            .date => .date,
-            .time => .time,
-            .string => .string,
-            .keyword => .keyword,
-            .symbol => .symbol,
-            .vector => .vector,
-            .form => if (has_namespace) .form_qualified else .form_bare,
-            .kvpair => unreachable,
-        };
-    }
-};
-
-pub const ChildTag = enum(u8) {
-    positional = 0x10,
-    keyword = 0x11,
-    _,
-};
-
-pub const Flag = struct {
-    pub const with_spans: u8 = 1 << 0;
-    pub const with_head_spans: u8 = 1 << 1;
-    pub const with_kvpair_key_spans: u8 = 1 << 2;
-    pub const with_node_comments: u8 = 1 << 3;
-    pub const with_kvpair_comments: u8 = 1 << 4;
-    pub const with_tree_trailing_comments: u8 = 1 << 5;
-    pub const reserved_mask: u8 = 0xC0;
-};
-
-comptime {
-    std.debug.assert(HEADER_SIZE == 16);
-    std.debug.assert(wire_magic.len == 4);
-    std.debug.assert(@sizeOf(@TypeOf(wire_version)) == 1);
-
-    std.debug.assert(@sizeOf(Tag) == 1);
-    std.debug.assert(@sizeOf(ChildTag) == 1);
-
-    const known: u8 = Flag.with_spans | Flag.with_head_spans |
-        Flag.with_kvpair_key_spans | Flag.with_node_comments |
-        Flag.with_kvpair_comments | Flag.with_tree_trailing_comments;
-    std.debug.assert((known & Flag.reserved_mask) == 0);
-    std.debug.assert((known | Flag.reserved_mask) == 0xFF);
-}
-
-pub const Error = error{
-    OutOfMemory,
-    InvalidMagic,
-    InvalidVersion,
-    InvalidFlags,
-    InvalidTag,
-    InvalidNamespace,
-    Truncated,
-    DepthExceeded,
-    PoolIndexOutOfRange,
-    NodeCountExceeded,
-    StringTooLong,
-    CommentTooLong,
-};
-
+/// Encoder options. Default (`.{}`) is `forMode(.canonical)`: spans on,
+/// comments off — the compact runtime preset. Use `forMode(.full)` for
+/// every span and every comment site (round-trippable), or
+/// `forMode(.compact)` for the smallest output (no spans, no comments).
+/// Individual booleans can be overridden directly for fine-grained
+/// profiles; `forMode` returns the matching preset.
 pub const ToBinaryOptions = struct {
+    /// Emit `Node.span` inline (8 bytes per node).
     with_spans: bool = true,
+    /// Emit `Form.head_span` inline (8 bytes per form).
     with_head_spans: bool = true,
+    /// Emit `KeywordPair.key_span` inline (8 bytes per pair).
     with_kvpair_key_spans: bool = true,
+    /// Emit `Node.leading_comments` and `Form.trailing_comments`.
     with_node_comments: bool = false,
+    /// Emit `KeywordPair.leading_comments`.
     with_kvpair_comments: bool = false,
+    /// Emit `Tree.trailing_comments` after the roots block.
     with_tree_trailing_comments: bool = false,
 
+    /// Construct the preset matching `mode`:
+    ///   * `.canonical` — spans on, comments off (current runtime default).
+    ///   * `.compact`   — no spans, no comments. Smallest output.
+    ///   * `.full`      — every span and every comment site preserved;
+    ///                    binary round-trips back to a structurally
+    ///                    equivalent tree.
     pub fn forMode(mode: Ast.Mode) ToBinaryOptions {
         return switch (mode) {
             .canonical => .{},
@@ -158,6 +193,7 @@ pub const ToBinaryOptions = struct {
         };
     }
 
+    /// Pack the option set into the 1-byte `flags` header field.
     pub fn flags(self: ToBinaryOptions) u8 {
         var v: u8 = 0;
         if (self.with_spans) v |= Flag.with_spans;
@@ -169,40 +205,26 @@ pub const ToBinaryOptions = struct {
         return v;
     }
 
+    /// True iff any comment-site flag is on; gates the comment-text pool.
     pub fn anyCommentsFlag(self: ToBinaryOptions) bool {
         return self.with_node_comments or self.with_kvpair_comments or self.with_tree_trailing_comments;
     }
 };
 
+/// Decoder options.
 pub const FromBinaryOptions = struct {
+    /// If false (default), reject unknown wire versions. If true, attempt
+    /// best-effort forward-compatible reads (any unknown tag still raises
+    /// `error.InvalidTag`).
     allow_unknown_versions: bool = false,
 };
 
-pub const FlagSet = struct {
-    with_spans: bool,
-    with_head_spans: bool,
-    with_kvpair_key_spans: bool,
-    with_node_comments: bool,
-    with_kvpair_comments: bool,
-    with_tree_trailing_comments: bool,
+// ---------------------------------------------------------------------------
+// Public API — the encoder (toBinary) and the decoder (fromBinary).
+// ---------------------------------------------------------------------------
 
-    pub fn fromByte(b: u8) Error!FlagSet {
-        if ((b & Flag.reserved_mask) != 0) return error.InvalidFlags;
-        return .{
-            .with_spans = (b & Flag.with_spans) != 0,
-            .with_head_spans = (b & Flag.with_head_spans) != 0,
-            .with_kvpair_key_spans = (b & Flag.with_kvpair_key_spans) != 0,
-            .with_node_comments = (b & Flag.with_node_comments) != 0,
-            .with_kvpair_comments = (b & Flag.with_kvpair_comments) != 0,
-            .with_tree_trailing_comments = (b & Flag.with_tree_trailing_comments) != 0,
-        };
-    }
-
-    pub fn anyComments(self: FlagSet) bool {
-        return self.with_node_comments or self.with_kvpair_comments or self.with_tree_trailing_comments;
-    }
-};
-
+/// Encode a `Tree` to a freshly-allocated, caller-owned `Ast.Bytes`.
+/// O(n) emit; output ≤ `MAX_FILE_SIZE` bytes.
 pub fn toBinary(gpa: Allocator, tree2: Ast.Tree, opts: ToBinaryOptions) Error!Ast.Bytes {
     std.debug.assert(tree2.root.len <= MAX_NODES);
     std.debug.assert((opts.flags() & Flag.reserved_mask) == 0);
@@ -248,24 +270,25 @@ pub fn toBinary(gpa: Allocator, tree2: Ast.Tree, opts: ToBinaryOptions) Error!As
     return .{ .gpa = gpa, .data = try out.toOwnedSlice(gpa) };
 }
 
+/// Tree entry point. Builds a SoA `Tree` directly from the wire bytes —
+/// no legacy intermediate. Strings and comment text are duplicated into
+/// the destination arena, so the returned tree is fully self-contained
+/// and the caller does not need to keep `bytes` alive past the call.
+/// O(n) decode.
 pub fn fromBinary(gpa: Allocator, bytes: []const u8, opts: FromBinaryOptions) Error!Ast.Tree {
-    std.debug.assert(bytes.len <= MAX_FILE_SIZE);
-    if (bytes.len < HEADER_SIZE) return error.Truncated;
-    if (!std.mem.eql(u8, bytes[0..4], &wire_magic)) return error.InvalidMagic;
-    const version = bytes[4];
-    if (version != wire_version and !opts.allow_unknown_versions) return error.InvalidVersion;
-    const flags = try FlagSet.fromByte(bytes[5]);
-    if (bytes[6] != 0 or bytes[7] != 0) return error.InvalidFlags;
-    const pool_offset = std.mem.readInt(u32, bytes[8..12], .little);
-    const roots_offset = std.mem.readInt(u32, bytes[12..16], .little);
-    if (pool_offset != HEADER_SIZE) return error.InvalidMagic;
-    if (roots_offset > bytes.len or roots_offset < pool_offset) return error.Truncated;
+    // Oversized input is a diagnosable error, not a programmer bug: these bytes
+    // may arrive unvalidated (wasm boundary, on-disk cache), so reject rather
+    // than assert — mirroring `BinaryCursor.Cursor.init`, which returns the same
+    // `error.NodeCountExceeded` for the same over-limit condition.
+    const header = try parseHeader(bytes, opts.allow_unknown_versions);
+    const flags = header.flags;
+    const roots_offset = header.roots_offset;
 
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
     const a = arena.allocator();
 
-    var pos: u32 = pool_offset;
+    var pos: u32 = header.pool_offset;
     const string_pool = try readPool(a, bytes, &pos);
     const comment_pool: PoolView = if (flags.anyComments())
         try readPool(a, bytes, &pos)
@@ -301,70 +324,18 @@ pub fn fromBinary(gpa: Allocator, bytes: []const u8, opts: FromBinaryOptions) Er
     else
         .empty;
 
-    if (builder.string_index.items.len == 0) {
-        try builder.string_index.append(a, 0);
-    }
-
-    return Ast.Tree{
-        .arena = arena,
-        .source = "",
-        .nodes = builder.nodes.toOwnedSlice(),
-        .extra_data = builder.extra_data.items,
-        .strings = builder.strings.items,
-        .string_index = builder.string_index.items,
-        .root = roots,
-        .leading_comments_index = builder.leading_index.items,
-        .trailing_comments_index = builder.trailing_index.items,
-        .comments = builder.comments.toOwnedSlice(),
-        .tree_trailing_comments = tree_trailing,
-        .diagnostics = &.{},
-    };
+    return builder.finalizeWith(&arena, "", roots, .{ .tree_trailing_comments = tree_trailing });
 }
 
-pub fn writeVarint(gpa: Allocator, out: *std.ArrayList(u8), v: u32) Allocator.Error!void {
-    var x: u32 = v;
-    while (true) {
-        const low: u8 = @intCast(x & 0x7F);
-        x >>= 7;
-        if (x == 0) {
-            try out.append(gpa, low);
-            return;
-        }
-        try out.append(gpa, low | 0x80);
-    }
-}
-
-pub fn readVarint(bytes: []const u8, pos: *u32) Error!u32 {
-    std.debug.assert(pos.* <= bytes.len);
-    var result: u64 = 0;
-    var shift: u6 = 0;
-    var i: u32 = pos.*;
-    var byte_count: u32 = 0;
-    while (i < bytes.len) : (i += 1) {
-        const b = bytes[i];
-        byte_count += 1;
-        result |= @as(u64, b & 0x7F) << shift;
-        if ((b & 0x80) == 0) {
-            if (result > std.math.maxInt(u32)) return error.NodeCountExceeded;
-            pos.* = i + 1;
-            return @intCast(result);
-        }
-        if (byte_count >= 5) return error.NodeCountExceeded;
-        shift += 7;
-    }
-    return error.Truncated;
-}
-
-pub fn varintLen(v: u32) u32 {
-    if (v < (@as(u32, 1) << 7)) return 1;
-    if (v < (@as(u32, 1) << 14)) return 2;
-    if (v < (@as(u32, 1) << 21)) return 3;
-    if (v < (@as(u32, 1) << 28)) return 4;
-    return 5;
-}
+// ---------------------------------------------------------------------------
+// Pool builder — collects unique strings, sorts lex, hands out indices.
+// ---------------------------------------------------------------------------
 
 const PoolBuilder = struct {
+    /// String → index. Pre-finalize this is insertion order; post-finalize
+    /// it's the final sorted index.
     map: std.StringHashMapUnmanaged(u32) = .empty,
+    /// Strings in declaration order; finalize() sorts them in place.
     items: std.ArrayList([]const u8) = .empty,
     finalized: bool = false,
 
@@ -394,6 +365,10 @@ const PoolBuilder = struct {
         return std.mem.order(u8, a, b) == .lt;
     }
 };
+
+// ---------------------------------------------------------------------------
+// String collection — first pass over the tree.
+// ---------------------------------------------------------------------------
 
 fn writePool(
     gpa: Allocator,
@@ -435,8 +410,11 @@ fn collectStrings(
         }
         switch (tree.tagOf(idx)) {
             .nil, .boolean_true, .boolean_false, .number => {},
+            // Exact-integer tags carry a raw 8-byte payload — no string interning.
             .number_i64, .number_u64 => {},
+            // Date payload is 4 raw bytes — no string interning either.
             .date => {},
+            // Time payload is 5 raw bytes — no string interning either.
             .time => {},
             .number_with_unit => {
                 const nu = tree.numberWithUnitOf(idx);
@@ -448,6 +426,9 @@ fn collectStrings(
             },
             .vector => {
                 const elements = tree.vectorElements(idx);
+                if (opts.with_node_comments) {
+                    try collectCommentRange(a, tree, tree.trailing_comments_index[idx.raw()], comment_pool);
+                }
                 var j: usize = elements.len;
                 while (j > 0) : (j -= 1) try stack.append(a, elements[j - 1]);
             },
@@ -465,6 +446,8 @@ fn collectStrings(
                 while (j > 0) : (j -= 1) {
                     const child_idx = hdr.children[j - 1];
                     if (tree.tagOf(child_idx) == .kvpair) {
+                        // Kvpair children are emitted inline as child-keyword
+                        // wire entries — never popped from the stack as nodes.
                         if (opts.with_kvpair_comments) {
                             try collectCommentRange(a, tree, tree.leading_comments_index[child_idx.raw()], comment_pool);
                         }
@@ -586,6 +569,12 @@ fn emitOneNode(
         .vector => {
             const elements = tree.vectorElements(idx);
             try writeVarint(gpa, out, @intCast(elements.len));
+            // Trailing comments follow the elements on the wire (mirroring the
+            // form arm below). Push the task before the element tasks so it pops
+            // last — after the whole sub-tree — landing the count at end-of-body.
+            if (opts.with_node_comments) {
+                try tasks.append(gpa, .{ .trailing_comments = .{ .range = tree.trailing_comments_index[idx.raw()] } });
+            }
             var i: usize = elements.len;
             while (i > 0) : (i -= 1) {
                 try tasks.append(gpa, .{ .node = .{ .idx = elements[i - 1], .depth = depth + 1 } });
@@ -665,6 +654,10 @@ fn emitCommentsByRange(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Low-level byte writers
+// ---------------------------------------------------------------------------
+
 fn writeU32LE(gpa: Allocator, out: *std.ArrayList(u8), v: u32) Error!void {
     var buf: [4]u8 = undefined;
     std.mem.writeInt(u32, &buf, v, .little);
@@ -696,6 +689,10 @@ fn writeSpan(gpa: Allocator, out: *std.ArrayList(u8), span: Ast.Span) Error!void
     try writeU32LE(gpa, out, span.end);
 }
 
+// ---------------------------------------------------------------------------
+// Pool view — decoder-side O(1) index lookup over a parsed pool.
+// ---------------------------------------------------------------------------
+
 const PoolView = struct {
     entries: []const []const u8,
 
@@ -712,7 +709,7 @@ fn readPool(
 ) Error!PoolView {
     const count = try readVarint(bytes, pos);
     if (count > MAX_STRING_POOL_ENTRIES) return error.NodeCountExceeded;
-    _ = try readVarint(bytes, pos);
+    _ = try readVarint(bytes, pos); // byte_size hint, used by the cursor
     if (count == 0) return .{ .entries = &.{} };
     const entries = try arena.alloc([]const u8, count);
     var i: u32 = 0;
@@ -726,34 +723,10 @@ fn readPool(
     return .{ .entries = entries };
 }
 
-pub fn tagFromByte(b: u8) Error!Tag {
-    return switch (b) {
-        0x00 => .nil,
-        0x01 => .bool_false,
-        0x02 => .bool_true,
-        0x03 => .number,
-        0x04 => .string,
-        0x05 => .keyword,
-        0x06 => .symbol,
-        0x07 => .vector,
-        0x08 => .form_bare,
-        0x09 => .form_qualified,
-        0x0A => .number_with_unit,
-        0x0B => .number_i64,
-        0x0C => .number_u64,
-        0x0D => .date,
-        0x0E => .time,
-        else => error.InvalidTag,
-    };
-}
-
-fn childTagFromByte(b: u8) Error!ChildTag {
-    return switch (b) {
-        0x10 => .positional,
-        0x11 => .keyword,
-        else => error.InvalidTag,
-    };
-}
+// ---------------------------------------------------------------------------
+// Tree native decoder — same wire bytes, builds Tree directly via
+// TreeBuilder rather than allocating a legacy pointer tree.
+// ---------------------------------------------------------------------------
 
 const DecodeTask = union(enum) {
     decode_node: u32,
@@ -826,7 +799,7 @@ const Decoder = struct {
         const tag_byte = self.bytes[self.pos];
         self.pos += 1;
 
-        const span: Ast.Span = if (self.flags.with_spans) try self.readSpan() else .{ .start = 0, .end = 0 };
+        const span: Ast.Span = if (self.flags.with_spans) try readSpan(self.bytes, &self.pos) else .{ .start = 0, .end = 0 };
         const leading_range: Ast.CommentRange = if (self.flags.with_node_comments)
             try self.readCommentsListAsRange()
         else
@@ -838,57 +811,35 @@ const Decoder = struct {
             .bool_false => try self.pushAtom(.boolean_false, span, .{ .immediate = 0 }, leading_range),
             .bool_true => try self.pushAtom(.boolean_true, span, .{ .immediate = 0 }, leading_range),
             .number => {
-                const x = try self.readF64();
+                const x = try readF64(self.bytes, &self.pos);
                 try self.pushAtom(.number, span, .{ .immediate = @bitCast(x) }, leading_range);
             },
             .number_i64 => {
-                const x = try self.readI64();
+                const x = try readI64(self.bytes, &self.pos);
                 try self.pushAtom(.number_i64, span, .{ .immediate = @bitCast(x) }, leading_range);
             },
             .number_u64 => {
-                const x = try self.readU64();
+                const x = try readU64(self.bytes, &self.pos);
                 try self.pushAtom(.number_u64, span, .{ .immediate = x }, leading_range);
             },
             .number_with_unit => {
-                const x = try self.readF64();
+                const x = try readF64(self.bytes, &self.pos);
                 const unit_idx = try readVarint(self.bytes, &self.pos);
                 const unit = try self.string_pool.lookup(unit_idx);
-                const unit_si = try self.builder.addString(unit);
-                const bits: u64 = @bitCast(x);
-                const hdr_at: u32 = @intCast(self.builder.extra_data.items.len);
-                try self.builder.extra_data.appendSlice(self.builder.a, &.{
-                    @truncate(bits),
-                    @truncate(bits >> 32),
-                    unit_si.raw(),
-                });
+                const hdr_at = try self.builder.packNumberWithUnit(x, unit);
                 try self.pushAtom(.number_with_unit, span, .{ .single = hdr_at }, leading_range);
             },
             .date => {
-                const d = try self.readDatePayload();
+                const d = try readDatePayload(self.bytes, &self.pos);
                 try self.pushAtom(.date, span, .{ .immediate = d.pack() }, leading_range);
             },
             .time => {
-                const t = try self.readTimePayload();
+                const t = try readTimePayload(self.bytes, &self.pos);
                 try self.pushAtom(.time, span, .{ .immediate = t.pack() }, leading_range);
             },
-            .string => {
-                const idx = try readVarint(self.bytes, &self.pos);
-                const s = try self.string_pool.lookup(idx);
-                const si = try self.builder.addString(s);
-                try self.pushAtom(.string, span, .{ .single = si.raw() }, leading_range);
-            },
-            .keyword => {
-                const idx = try readVarint(self.bytes, &self.pos);
-                const s = try self.string_pool.lookup(idx);
-                const si = try self.builder.addString(s);
-                try self.pushAtom(.keyword, span, .{ .single = si.raw() }, leading_range);
-            },
-            .symbol => {
-                const idx = try readVarint(self.bytes, &self.pos);
-                const s = try self.string_pool.lookup(idx);
-                const si = try self.builder.addString(s);
-                try self.pushAtom(.symbol, span, .{ .single = si.raw() }, leading_range);
-            },
+            .string => try self.pushStringAtom(.string, span, leading_range),
+            .keyword => try self.pushStringAtom(.keyword, span, leading_range),
+            .symbol => try self.pushStringAtom(.symbol, span, leading_range),
             .vector => {
                 const count = try readVarint(self.bytes, &self.pos);
                 if (count > MAX_NODES) return error.NodeCountExceeded;
@@ -904,7 +855,7 @@ const Decoder = struct {
             },
             .form_bare, .form_qualified => {
                 const head_span: Ast.Span = if (self.flags.with_head_spans)
-                    try self.readSpan()
+                    try readSpan(self.bytes, &self.pos)
                 else
                     .{ .start = 0, .end = 0 };
                 const ns_idx: Ast.StringIndex = if (tag == .form_qualified) blk: {
@@ -949,7 +900,7 @@ const Decoder = struct {
             },
             .keyword => {
                 const key_span: Ast.Span = if (self.flags.with_kvpair_key_spans)
-                    try self.readSpan()
+                    try readSpan(self.bytes, &self.pos)
                 else
                     .{ .start = 0, .end = 0 };
                 const kp_leading_range: Ast.CommentRange = if (self.flags.with_kvpair_comments)
@@ -984,7 +935,17 @@ const Decoder = struct {
 
     fn finishVector(self: *Decoder, v: DecodeTask.VectorFin) Error!void {
         if (self.node_stack.items.len < v.count) return error.Truncated;
+        // Trailing comments live AFTER the elements in the byte stream
+        // (mirroring forms). Read before appending the vector node so all
+        // comments end up in source order in builder.comments.
+        const trailing_range: Ast.CommentRange = if (self.flags.with_node_comments)
+            try self.readCommentsListAsRange()
+        else
+            .empty;
+
         const start: u32 = @intCast(self.builder.extra_data.items.len);
+        // Children are on node_stack with the LAST element on top; reserve
+        // the slot in extra_data and then fill from the end backwards.
         try self.builder.extra_data.appendNTimes(self.builder.a, 0, v.count);
         var i: usize = v.count;
         while (i > 0) {
@@ -999,11 +960,15 @@ const Decoder = struct {
             .data = .{ .pair = .{ .a = start, .b = end } },
         });
         self.builder.setLeading(idx, v.leading_range);
+        self.builder.setTrailing(idx, trailing_range);
         try self.node_stack.append(self.gpa, idx);
     }
 
     fn finishForm(self: *Decoder, f: DecodeTask.FormFin) Error!void {
         if (self.child_stack.items.len < f.count) return error.Truncated;
+        // Trailing comments live AFTER children in the byte stream. Read
+        // before we append the form node so all comments end up in source
+        // order in builder.comments.
         const trailing_range: Ast.CommentRange = if (self.flags.with_node_comments)
             try self.readCommentsListAsRange()
         else
@@ -1017,6 +982,7 @@ const Decoder = struct {
             f.head_span.end,
             f.count,
         });
+        // Reserve child slots; child_stack has them with last-pushed on top.
         const child_start: u32 = @intCast(self.builder.extra_data.items.len);
         try self.builder.extra_data.appendNTimes(self.builder.a, 0, f.count);
         var i: usize = f.count;
@@ -1060,57 +1026,14 @@ const Decoder = struct {
         try self.child_stack.append(self.gpa, idx);
     }
 
-    fn readSpan(self: *Decoder) Error!Ast.Span {
-        if (self.bytes.len - self.pos < 8) return error.Truncated;
-        const start = std.mem.readInt(u32, self.bytes[self.pos..][0..4], .little);
-        const end = std.mem.readInt(u32, self.bytes[self.pos + 4 ..][0..4], .little);
-        self.pos += 8;
-        return .{ .start = start, .end = end };
-    }
-
-    fn readF64(self: *Decoder) Error!f64 {
-        if (self.bytes.len - self.pos < 8) return error.Truncated;
-        const bits = std.mem.readInt(u64, self.bytes[self.pos..][0..8], .little);
-        self.pos += 8;
-        return @bitCast(bits);
-    }
-
-    fn readI64(self: *Decoder) Error!i64 {
-        if (self.bytes.len - self.pos < 8) return error.Truncated;
-        const bits = std.mem.readInt(u64, self.bytes[self.pos..][0..8], .little);
-        self.pos += 8;
-        return @bitCast(bits);
-    }
-
-    fn readU64(self: *Decoder) Error!u64 {
-        if (self.bytes.len - self.pos < 8) return error.Truncated;
-        const v = std.mem.readInt(u64, self.bytes[self.pos..][0..8], .little);
-        self.pos += 8;
-        return v;
-    }
-
-    fn readDatePayload(self: *Decoder) Error!Date {
-        if (self.bytes.len - self.pos < 4) return error.Truncated;
-        const y_lo = self.bytes[self.pos + 0];
-        const y_hi = self.bytes[self.pos + 1];
-        const month = self.bytes[self.pos + 2];
-        const day = self.bytes[self.pos + 3];
-        self.pos += 4;
-        const y_bits: u16 = @as(u16, y_lo) | (@as(u16, y_hi) << 8);
-        const year: i16 = @bitCast(y_bits);
-        return Date.init(year, month, day) catch error.InvalidTag;
-    }
-
-    fn readTimePayload(self: *Decoder) Error!Time {
-        if (self.bytes.len - self.pos < 5) return error.Truncated;
-        const hour = self.bytes[self.pos + 0];
-        const minute = self.bytes[self.pos + 1];
-        const second = self.bytes[self.pos + 2];
-        const ms_lo = self.bytes[self.pos + 3];
-        const ms_hi = self.bytes[self.pos + 4];
-        self.pos += 5;
-        const ms: u16 = @as(u16, ms_lo) | (@as(u16, ms_hi) << 8);
-        return Time.init(hour, minute, second, ms) catch error.InvalidTag;
+    /// Decode a pooled-string atom. `string` / `keyword` / `symbol` share the
+    /// wire shape `[varint pool_idx]` and a single `StringIndex` payload —
+    /// they differ only in the AST tag they push.
+    fn pushStringAtom(self: *Decoder, ast_tag: Ast.Tag, span: Ast.Span, leading_range: Ast.CommentRange) Error!void {
+        const idx = try readVarint(self.bytes, &self.pos);
+        const s = try self.string_pool.lookup(idx);
+        const si = try self.builder.addString(s);
+        try self.pushAtom(ast_tag, span, .{ .single = si.raw() }, leading_range);
     }
 
     fn readCommentsListAsRange(self: *Decoder) Error!Ast.CommentRange {
@@ -1128,9 +1051,11 @@ const Decoder = struct {
                 1 => .block,
                 else => return error.InvalidTag,
             };
-            const span: Ast.Span = if (self.flags.with_spans) try self.readSpan() else .{ .start = 0, .end = 0 };
+            const span: Ast.Span = if (self.flags.with_spans) try readSpan(self.bytes, &self.pos) else .{ .start = 0, .end = 0 };
             const text_idx = try readVarint(self.bytes, &self.pos);
             const text = try self.comment_pool.lookup(text_idx);
+            // Dupe text into the destination arena so the Tree owns its
+            // comment content even when the input bytes are deallocated.
             const owned = try self.builder.a.dupe(u8, text);
             try self.builder.comments.append(self.builder.a, .{
                 .span = span,
@@ -1142,3 +1067,7 @@ const Decoder = struct {
         return .{ .start = start, .end = end };
     }
 };
+
+test {
+    _ = @import("Binary_tests.zig");
+}

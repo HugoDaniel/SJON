@@ -1,8 +1,8 @@
 {
   "name": "sjon-workspace",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "SJON repo workspace root — hosts/web (Node WASM consumer), hosts/typescript-parity (TS port), landing-page (Astro).",
+  "description": "SJON repo workspace root — hosts/schema (@sjon/schema builder), hosts/highlight (@sjon/highlight CodeMirror + TextMate), hosts/web (Node WASM consumer), hosts/typescript-parity (TS port), landing-page (Astro).",
   "packageManager": "pnpm@10.31.0",
   "engines": {
     "node": ">=20"
@@ -17,5 +17,8 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
   }
 }

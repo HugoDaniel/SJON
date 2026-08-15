@@ -1,0 +1,96 @@
+# Diagnostic codes exempt from the CORPUS tier of the coverage audit.
+#
+# `tools/audit_diagnostic_coverage.sh` runs two tiers:
+#
+#   Tier 1 — every `Ast.Diagnostic.Code` variant is referenced by a test
+#            or a corpus case, or is listed in
+#            `reserved_diagnostic_codes.txt` (no emitter at all).
+#   Tier 2 — every variant that is NOT listed here has a `:code`
+#            reference in `conformance/cases/*/expected.sjon`.
+#
+# Tier 1 alone accepts a Zig test as sufficient, which means a code can
+# be fully covered on the reference implementation and never checked
+# against the Node, Rust, or TypeScript hosts. The corpus is the only
+# cross-host axis, so tier 2 makes "reachable from a document" imply
+# "replayed on every host", and this file is the explicit, reasoned list
+# of what cannot be.
+#
+# The default for a new code is therefore "needs a corpus case" — being
+# on this list is a decision someone has to write down.
+#
+# Two rules keep it from rotting, matching the reserved list:
+#
+#   1. Every entry carries a reason and what would remove it.
+#   2. The audit FAILS on a stale entry — a code listed here that has
+#      since gained a corpus case must be deleted. The list can only
+#      shrink by accident, never grow by accident.
+#
+# Codes in `reserved_diagnostic_codes.txt` are exempt from both tiers by
+# construction (no emitter can produce them) and are NOT repeated here.
+#
+# Format: one code per line. `#` starts a comment; blank lines ignored.
+
+# --- Needs a filesystem shape the corpus runner does not build --------
+# A corpus case is a directory of sources plus an optional well-formed
+# `sjon-project.sjon`; every runner points its resolver at that directory.
+# These three need something else on disk — a *missing* project file, a
+# package whose `:wasm` path escapes it, a manifest that requires a wasm
+# module with none supplied — which the runner has no way to express.
+# Covered by `Cli_tests.zig` / `Host_tests.zig` against temp directories.
+# Removed from this list by: a corpus case shape that can declare a
+# deliberately-broken package layout.
+project_file_not_found
+plugin_wasm_required
+plugin_wasm_resolved_outside_package
+
+# --- Resolver-local: the project file is not a language surface -------
+# `sjon-project.sjon` is the config format of ONE `Resolver`
+# implementation. `src/Resolver.zig`'s header states the layering: D0
+# defines the contract, D3 ships the filesystem implementation, web
+# hosts wrap a `fetch` callback — "the Zig filesystem resolver is one
+# implementation, not the only one". `docs/LANGUAGE.md` never specifies
+# the file. A fetch-backed host has no project file to have a
+# vocabulary, so asking every host to emit these would be asking it to
+# grow a filesystem-shaped concept it does not have.
+#
+# Both codes fall out of that one resolver: `unknown_project_key` from
+# its nine-key walk, `pin_disagreement` from its cross-check of project
+# pins against the document's `(use-plugin …)` pins. They sit in the
+# wire-stable enum, which is what makes them LOOK like a cross-host
+# obligation to this audit — they are not one.
+#
+# Enforcement does not ride on this. A document's own pins are checked
+# one level up in the host, "for every resolver, not just the
+# filesystem one" (`src/Resolver.zig`), and surface as
+# `plugin_version_mismatch` / `plugin_hash_mismatch` — both of which
+# DO have corpus cases. What is skipped off-Zig is the advisory, not
+# the check.
+#
+# Removed from this list by: `sjon-project.sjon` becoming a specified
+# language surface — i.e. a decision to reverse the layering above, not
+# a host catching up. Until then a host that never emits these is not
+# falling behind. Recorded in CLAUDE.md alongside the two CLI-only
+# surfaces, and in `src/FilesystemResolver.zig`'s header.
+unknown_project_key
+pin_disagreement
+
+# --- Driven end to end, but only from generated input -----------------
+# `lowering_output_too_large` is fired through `Host.validateDocument` by
+# `Host_tests.zig`, which *generates* a MAX_LOWERING_STAGES chain. The
+# corpus equivalent would be a hand-copied 18-form manifest on a family
+# the wasm hosts skip anyway (`lowering-*` needs the Zig-side hook
+# registry), so it would be a transcription of the generator with none of
+# the cross-host value the corpus tier is asking for.
+# Removed from this list by: the wasm hosts gaining a lowering registry.
+lowering_output_too_large
+
+# --- Retired: asserted to be UNreachable -----------------------------
+# Staging made an emitted lowerable head normal, so nothing produces
+# this any more. `Lowering.zig` carries a test named TOMBSTONE whose job
+# is to assert it is never emitted — which is real coverage of the
+# decision, and is the opposite of something a corpus case could show.
+# It is not in `reserved_diagnostic_codes.txt` because it does have a
+# test reference; it just cannot have a corpus one.
+# Removed from this list by: nothing. Retiring the variant itself would
+# be the wire-breaking change the append-only enum exists to avoid.
+lowering_produced_lowerable_head

@@ -1,0 +1,245 @@
+---
+import { highlight } from '../lib/highlight';
+
+const rawExamples = [
+  {
+    id: 'scene',
+    label: 'Scene',
+    file: 'examples/basic.sjon',
+    note: 'A scene file. Each (name ...) describes a thing; the :words are its fields. Numbers can carry units (4b = four beats), and a small expression like (* 2 (b 1)) works wherever a plain value would.',
+    code: `(scene :bpm 130 :name "intro"
+  (canvas :name main
+    (camera :mode ortho :zoom (* 2 (b 1)))
+    (shape :sdf :radius 0.5
+      :color [0.9 0.4 0.2 1]
+      :delay 4b
+      :alpha (smoothstep 0 1 t))))`,
+  },
+  {
+    id: 'schema',
+    label: 'Schema',
+    file: 'examples/plugins/shapes.sjon',
+    note: 'SJON can be extended with plugins. Each one describes the blocks and fields your app accepts, so typos become precise diagnostics instead of vague parse errors.',
+    code: `(plugin :name shapes :version "1.0.0" :license "CC0-1.0"
+  (value-kind :name rgba
+    :underlying vector
+    :vector (vector-shape :element number :length 4))
+
+  (form :name shape
+    (key :name sdf :type symbol)
+    (key :name radius :type number)
+    (key :name color :type rgba)))`,
+  },
+  {
+    id: 'expr',
+    label: 'Expression',
+    file: 'examples/with-expressions.sjon',
+    note: 'Expressions only call the functions you allow. Authors get inline math and helpers without inheriting a whole language to go with them.',
+    code: `(let [beats 4
+      fade  (smoothstep 0 1 t)
+      seed  (hash scene-name beats)]
+  (shape :delay (b beats)
+    :alpha fade
+    :jitter (rand-range seed 0 -0.1 0.1)))`,
+  },
+];
+
+const examples = await Promise.all(
+  rawExamples.map(async (e) => ({ ...e, html: await highlight(e.code) })),
+);
+---
+
+<figure class="example-carousel" aria-labelledby="example-carousel-caption">
+    <figcaption id="example-carousel-caption" class="sr-only">
+        Three SJON examples to flip through: a scene, a plugin schema, and an inline expression.
+    </figcaption>
+    <div class="example-carousel__header">
+        <p class="card__filename" data-example-file>{examples[0]!.file}</p>
+        <div class="example-tabs" role="tablist" aria-label="SJON examples">
+            {examples.map((example, index) => (
+                <button
+                    class="example-tab"
+                    type="button"
+                    role="tab"
+                    id={`example-tab-${example.id}`}
+                    aria-selected={index === 0 ? 'true' : 'false'}
+                    aria-controls={`example-panel-${example.id}`}
+                    tabindex={index === 0 ? '0' : '-1'}
+                    data-example-tab={example.id}
+                >
+                    {example.label}
+                </button>
+            ))}
+        </div>
+    </div>
+    <p class="example-note" data-example-note aria-live="polite">{examples[0]!.note}</p>
+
+    <div class="example-panels">
+        {examples.map((example, index) => (
+            <div
+                id={`example-panel-${example.id}`}
+                class:list={['example-panel', index !== 0 && 'is-hidden']}
+                role="tabpanel"
+                aria-labelledby={`example-tab-${example.id}`}
+                data-example-panel={example.id}
+                data-file={example.file}
+                data-note={example.note}
+                hidden={index !== 0}
+                set:html={example.html}
+            />
+        ))}
+    </div>
+</figure>
+
+<script is:inline>
+    document.querySelectorAll('.example-carousel').forEach((carousel) => {
+        const tabs = Array.from(carousel.querySelectorAll('[data-example-tab]'));
+        const panels = Array.from(carousel.querySelectorAll('[data-example-panel]'));
+        const filename = carousel.querySelector('[data-example-file]');
+        const note = carousel.querySelector('[data-example-note]');
+
+        function activate(id) {
+            tabs.forEach((tab) => {
+                const selected = tab.dataset.exampleTab === id;
+                tab.setAttribute('aria-selected', selected ? 'true' : 'false');
+                tab.tabIndex = selected ? 0 : -1;
+            });
+
+            panels.forEach((panel) => {
+                const selected = panel.dataset.examplePanel === id;
+                panel.hidden = !selected;
+                panel.classList.toggle('is-hidden', !selected);
+                if (selected && filename) filename.textContent = panel.dataset.file || '';
+                if (selected && note) note.textContent = panel.dataset.note || '';
+            });
+        }
+
+        tabs.forEach((tab, index) => {
+            tab.addEventListener('click', () => activate(tab.dataset.exampleTab));
+            tab.addEventListener('keydown', (event) => {
+                let nextIndex = index;
+                if (event.key === 'ArrowRight') nextIndex = (index + 1) % tabs.length;
+                else if (event.key === 'ArrowLeft') nextIndex = (index - 1 + tabs.length) % tabs.length;
+                else if (event.key === 'Home') nextIndex = 0;
+                else if (event.key === 'End') nextIndex = tabs.length - 1;
+                else return;
+
+                event.preventDefault();
+                const next = tabs[nextIndex];
+                next.focus();
+                activate(next.dataset.exampleTab);
+            });
+        });
+    });
+</script>
+
+<style>
+    .example-carousel {
+        margin: var(--space-3) 0 var(--space-2);
+        border: 1px solid var(--ink);
+        border-radius: var(--radius-card);
+        background: var(--surface-mute);
+        overflow: hidden;
+    }
+    .example-carousel__header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--space-3);
+        padding: 10px var(--space-4);
+        background: var(--surface);
+        border-bottom: 1px solid var(--rule-mute);
+    }
+    .example-carousel .card__filename {
+        margin: 0;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .example-tabs {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 6px;
+    }
+    .example-note {
+        margin: 0;
+        padding: 11px var(--space-4);
+        border-bottom: 1px solid var(--rule-mute);
+        background: var(--surface);
+        color: var(--ink-soft);
+        font-family: var(--body);
+        font-size: 14.5px;
+        line-height: 1.5;
+    }
+    .example-tab {
+        appearance: none;
+        border: 1px solid var(--rule-mute);
+        border-radius: 5px;
+        background: var(--surface-mute);
+        color: var(--ink);
+        cursor: pointer;
+        font: 600 13px/1 var(--body);
+        padding: 7px 10px;
+        transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+    }
+    .example-tab:hover,
+    .example-tab:focus-visible {
+        border-color: var(--accent);
+        outline: none;
+    }
+    .example-tab[aria-selected="true"] {
+        background: var(--ink);
+        border-color: var(--ink);
+        color: var(--surface);
+    }
+    .example-panel {
+        min-height: 210px;
+        color: var(--ink);
+        font-family: var(--mono);
+        font-size: 14px;
+        font-weight: 500;
+        font-variant-ligatures: none;
+        line-height: 1.5;
+        -webkit-font-smoothing: antialiased;
+    }
+    .example-panel[hidden] {
+        display: none;
+    }
+    .example-panel :global(pre) {
+        margin: 0;
+        padding: 12px var(--space-4);
+        overflow-x: auto;
+        white-space: pre;
+        background: transparent;
+    }
+    .example-panel :global(code) {
+        font-family: inherit;
+        font-size: inherit;
+        line-height: inherit;
+    }
+
+    @media (max-width: 700px) {
+        .example-carousel__header {
+            align-items: flex-start;
+            flex-direction: column;
+        }
+        .example-tabs {
+            justify-content: flex-start;
+        }
+        .example-panel {
+            min-height: 160px;
+            font-size: 12.5px;
+            line-height: 1.35;
+        }
+        .example-panel :global(pre) {
+            padding: 10px var(--space-3);
+        }
+        .example-note {
+            padding: 10px var(--space-3);
+            font-size: 13.5px;
+            line-height: 1.4;
+        }
+    }
+</style>

@@ -1,0 +1,5 @@
+; Pathed by the plugin that *references* the ambiguous name, not by the
+; plugins that claim it — the collision is a fact about the reference.
+(diagnostics
+  (diagnostic :code ambiguous_cross_ref_provider
+              :path [sql uniform-name cross-ref]))

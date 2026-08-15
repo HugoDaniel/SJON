@@ -129,6 +129,10 @@ blend-mode: string, members "normal" | "multiply"
 
 The contract decides whether the closed values are symbols or strings.
 
+A member set is closed *and* written in the plugin. Chapter 13 covers
+the other way a symbol slot gets a fixed list of legal values: read out
+of the document being validated, or extracted from a string inside it.
+
 ## Head Sets
 
 A head set applies to a form-underlying kind. It says "the slot value

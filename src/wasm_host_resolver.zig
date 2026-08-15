@@ -1,3 +1,22 @@
+//! Bridge a JS-side resolver into a `Resolver.Resolver`.
+//!
+//! Imports `sjon_host_resolve(ref_ptr, ref_len)` from `env`. When the
+//! Zig host needs to resolve a `(use-plugin …)` reference, the adapter:
+//!
+//!   1. Allocates a wasm-side buffer, JSON-encodes the `Reference`,
+//!      hands the (ptr, len) to `sjon_host_resolve`.
+//!   2. JS calls the user-supplied resolver (sync), JSON-encodes the
+//!      `Resolution`, allocates a framed `[u32 ok][u32 len][u8 payload]`
+//!      buffer via `sjon_alloc`, and returns its pointer.
+//!   3. Adapter reads the framed buffer, parses JSON, copies bytes into
+//!      the host's arena, frees both buffers.
+//!
+//! Framing convention matches the rest of the WASM ABI (see
+//! `wasm_common.zig`). `ok=1` → payload is JSON Resolution; `ok=0` →
+//! payload is a JS-side error string (folded into a failure Resolution
+//! with `unresolved_plugin`). Returned ptr `0` → JS resolver entirely
+//! missing or out-of-memory.
+
 const std = @import("std");
 const Ast = @import("Ast.zig");
 const Resolver = @import("Resolver.zig");
@@ -6,10 +25,21 @@ const common = @import("wasm_common.zig");
 const Allocator = std.mem.Allocator;
 const wasm_allocator = std.heap.wasm_allocator;
 
+/// JS-supplied import. Returns a pointer to a framed `[u32 ok][u32 len]
+/// [u8 payload]` buffer allocated via `sjon_alloc`. The Zig caller frees
+/// the buffer with `wasm_allocator.free` after reading. Returns `null`
+/// when JS has no resolver bound or hits OOM.
 extern "env" fn sjon_host_resolve(ref_ptr: u32, ref_len: u32) callconv(.c) ?[*]u8;
 
+/// No state needed — the JS-side resolver is captured at WASM
+/// instantiation time, so only one resolver is ever live per host
+/// instance. The context pointer just needs to be non-null and stable.
 const ctx_marker: u8 = 0;
 
+/// Construct the WASM-host resolver vtable. The returned `Resolver.Resolver`
+/// has no per-instance state — every call routes through the singleton
+/// JS-side `sjon_host_resolve` import. Safe to call repeatedly; identical
+/// vtables are returned each time.
 pub fn build() Resolver.Resolver {
     return .{ .ctx = @ptrCast(@constCast(&ctx_marker)), .resolve = resolveCallback };
 }
@@ -166,6 +196,12 @@ fn failure(
     return .{ .failure = .{ .code = code, .detail = message } };
 }
 
+/// Map a JSON `code` string back onto an `Ast.Diagnostic.Code`. Legal
+/// codes per `Resolver.ResolverFailure`: the three resolution-layer
+/// codes plus the three load-time pre-flight codes the Web/Rust hosts
+/// surface when they instantiate a plugin and the binary fails
+/// `sjon_plugin_abi_version` / export-presence / empty-imports checks.
+/// Anything else collapses to `unresolved_plugin`.
 fn parseFailureCode(s: []const u8) Ast.Diagnostic.Code {
     if (std.mem.eql(u8, s, "plugin_version_mismatch")) return .plugin_version_mismatch;
     if (std.mem.eql(u8, s, "plugin_hash_mismatch")) return .plugin_hash_mismatch;

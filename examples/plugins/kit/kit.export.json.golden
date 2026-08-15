@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "kit",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "track",
+          "description": "One drum-machine row. `:kind` selects the variant overlay.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "name",
+              "optional": false,
+              "description": "Row identifier, unique within the kit.",
+              "value": {
+                "kind": "symbol"
+              }
+            },
+            {
+              "name": "kind",
+              "optional": false,
+              "description": "Selects the per-row overlay.",
+              "value": {
+                "kind": "symbol_members",
+                "names": [
+                  "kick",
+                  "bass",
+                  "hat"
+                ]
+              }
+            },
+            {
+              "name": "from",
+              "optional": true,
+              "description": "Bar offset; defaults to 0.",
+              "value": {
+                "kind": "number"
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": [
+        {
+          "name": "track-kind",
+          "description": "Closed set of drum-row roles.",
+          "shape": {
+            "kind": "symbol_members",
+            "names": [
+              "kick",
+              "bass",
+              "hat"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "code": "variants_emitted_via_if_then",
+      "severity": "info",
+      "message": "discriminated form `track` — variants emitted as allOf+if/then; source-order (variant keys must follow the discriminant) is not enforced by JSON Schema",
+      "plugin_name": "kit",
+      "form_name": "track"
+    }
+  ]
+}

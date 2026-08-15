@@ -18,19 +18,18 @@
 //     indent; key ordering matches because we emit objects in the same
 //     declaration order)
 //
-// What this port does NOT yet reproduce byte-for-byte:
-//
-//   * Variants (discriminator → allOf+if/then) — IR field is null
-//     because the TS-parity loader doesn't parse the construct
-//   * Exclusive groups (oneOf / not:{allOf}) — same reason
-//   * Union-of (anyOf) — same
-//
-// When `loader.ts` learns those constructs, the per-shape helpers
-// below cover the IR cases unconditionally.
+// Variants (discriminator → allOf+if/then), exclusive groups (oneOf /
+// not:{allOf}) and union-of (anyOf) are all emitted here now that
+// `loader.ts` parses them, and `test/schemaExport.test.ts` compares the
+// `allOf` composition and `x-sjon-*` annotations against the Zig goldens.
+// End-to-end byte agreement is still out of reach for reasons below this
+// file: the loader does not read `:description`, and an untyped vector slot
+// omits the `items: {}` the Zig exporter writes.
 
 import type { Member } from '../plugin.ts';
 import type {
   Model,
+  ModelExclusiveGroup,
   ModelForm,
   ModelKey,
   ModelMember,
@@ -39,9 +38,10 @@ import type {
   ModelStringBounds,
   ModelUnitShape,
   ModelValueShape,
+  ModelVariant,
 } from './model.ts';
 import type { Warning } from './warnings.ts';
-import { assertNever } from './internal.ts';
+import { assertNever, isRecord } from '../internal.ts';
 
 interface EmitContext {
   /** When set, only emit `$defs` / `oneOf` for the named plugin. */
@@ -141,12 +141,46 @@ function buildForm(
   for (const k of form.keys) {
     if (!k.optional) required.push(escapeFieldName(k.name));
   }
-  const out: Record<string, unknown> = {
-    type: 'object',
-    properties,
-    required,
-    additionalProperties: form.open,
-  };
+  const out: Record<string, unknown> = { type: 'object', properties, required };
+
+  // Discriminated forms compose per-variant overlays via `allOf` of
+  // `if`/`then`; exclusive groups join the same chain as `oneOf`
+  // (exactly-one) or `not:{allOf}` (at-most-one). Because a `then` branch
+  // introduces properties the base object does not list, the schema closes
+  // with `unevaluatedProperties` instead of `additionalProperties` — the
+  // latter cannot see what a matched `then` evaluated and would reject every
+  // variant key. Mirrors `src/SchemaExport/JsonSchema.zig`.
+  const enforceable = (form.exclusiveGroups ?? []).filter(isEnforceableGroup);
+  if (form.discriminator || enforceable.length > 0) {
+    const allOf: Record<string, unknown>[] = [];
+    for (const v of form.discriminator?.variants ?? []) {
+      allOf.push(buildVariantOverlay(form.discriminator!.keyName, v, formCtx));
+    }
+    for (const g of enforceable) allOf.push(buildExclusiveGroup(g));
+    out['allOf'] = allOf;
+    out['unevaluatedProperties'] = form.open;
+  } else {
+    out['additionalProperties'] = form.open;
+  }
+
+  if (form.discriminator) {
+    out['x-sjon-discriminant'] = {
+      key: form.discriminator.keyName,
+      variants: form.discriminator.variants.map((v) => ({
+        when: v.when,
+        keys: v.keys.map((k) => k.name),
+      })),
+    };
+  }
+  // Every group is annotated, including one too degenerate to enforce: the
+  // annotation is the record of what the source declared, not of what JSON
+  // Schema managed to express.
+  if (form.exclusiveGroups.length > 0) {
+    out['x-sjon-exclusive-groups'] = form.exclusiveGroups.map((g) => ({
+      cardinality: g.cardinality,
+      alternatives: g.alternatives.map((alt) => [...alt]),
+    }));
+  }
   // `:positional (flag-set …)` rides through as annotation-only metadata
   // — the `$children` shape above widened to a plain array, so this is
   // the only place the declared flag names + metadata survive.
@@ -167,6 +201,71 @@ function buildForm(
   return out;
 }
 
+/** A group is structurally encodable when it has at least two alternatives
+ *  and no empty bundle. A degenerate group still rides through as an
+ *  annotation — it just contributes nothing to `allOf`. */
+function isEnforceableGroup(g: ModelExclusiveGroup): boolean {
+  return g.alternatives.length >= 2 && g.alternatives.every((alt) => alt.length > 0);
+}
+
+/** `{required: [<bundle keys…>]}`. JSON Schema's `required` means "all of
+ *  these", which is exactly the bundle-atomicity rule — for a bundle taken on
+ *  its own. What it cannot express is that a *partial* bundle must fail; that
+ *  stays SJON-side as `exclusive_bundle_partial`, and the
+ *  `multi_key_exclusive_emitted` warning says so. */
+function bundleRequired(bundle: readonly string[]): Record<string, unknown> {
+  return { required: [...bundle] };
+}
+
+function buildExclusiveGroup(g: ModelExclusiveGroup): Record<string, unknown> {
+  if (g.cardinality === 'exactly_one') {
+    return { oneOf: g.alternatives.map(bundleRequired) };
+  }
+  // at-most-one. Two alternatives: "not both". More: "no pair of them", since
+  // `not:{allOf:[a,b,c]}` would only forbid all three at once.
+  if (g.alternatives.length === 2) {
+    return { not: { allOf: g.alternatives.map(bundleRequired) } };
+  }
+  const pairs: Record<string, unknown>[] = [];
+  for (let i = 0; i < g.alternatives.length; i++) {
+    for (let j = i + 1; j < g.alternatives.length; j++) {
+      pairs.push({
+        allOf: [bundleRequired(g.alternatives[i]!), bundleRequired(g.alternatives[j]!)],
+      });
+    }
+  }
+  return { not: { anyOf: pairs } };
+}
+
+/** One `{if, then}` entry: when the discriminant equals this variant's
+ *  `:when`, the variant's keys become known properties (and its required ones
+ *  required). The `const` is `{$sym: …}` because a discriminant is
+ *  symbol-underlying by construction — `validateForms` rejects anything else
+ *  before export runs. */
+function buildVariantOverlay(
+  discKey: string,
+  variant: ModelVariant,
+  ctx: EmitContext,
+): Record<string, unknown> {
+  const then: Record<string, unknown> = {};
+  if (variant.keys.length > 0) {
+    const properties: Record<string, unknown> = {};
+    for (const k of [...variant.keys].sort((a, b) => a.name.localeCompare(b.name))) {
+      properties[escapeFieldName(k.name)] = buildKey(k, ctx);
+    }
+    then['properties'] = properties;
+    const required = variant.keys.filter((k) => !k.optional).map((k) => escapeFieldName(k.name));
+    if (required.length > 0) then['required'] = required;
+  }
+  return {
+    if: {
+      properties: { [discKey]: { const: { $sym: variant.when } } },
+      required: [discKey],
+    },
+    then,
+  };
+}
+
 function buildKey(key: ModelKey, ctx: EmitContext): Record<string, unknown> {
   const shape = buildShape(key.value, ctx);
   if (key.default) {
@@ -174,8 +273,8 @@ function buildKey(key: ModelKey, ctx: EmitContext): Record<string, unknown> {
     // the per-key schema. Expression defaults are recorded by the
     // lowering pass as a warning + annotation; no `default:` keyword.
     const def = serializeDefault(key.default);
-    if (def !== undefined && typeof shape === 'object' && shape !== null) {
-      (shape as Record<string, unknown>)['default'] = def;
+    if (def !== undefined && isRecord(shape)) {
+      shape['default'] = def;
     }
   }
   return shape as Record<string, unknown>;
@@ -318,19 +417,27 @@ function buildShape(shape: ModelValueShape, ctx: EmitContext): unknown {
         required: ['$expr'],
         properties: { $expr: { type: 'array' } },
       };
-    case 'cross_ref':
+    case 'cross_ref': {
+      // Optional members are omitted, not spelled `null` — the Zig emitter's
+      // rule (`JsonSchema.zig`), which this port used to break for
+      // `scope-form` alone. `name-key` / `acyclic` stay unconditional on
+      // both routes, so the annotation keeps a stable field set.
+      const anno: Record<string, unknown> = {
+        'target-form': shape.crossRef.targetForm,
+        'name-key': shape.crossRef.nameKey,
+        acyclic: shape.crossRef.acyclic,
+      };
+      if (shape.crossRef.scopeForm !== null) anno['scope-form'] = shape.crossRef.scopeForm;
+      if (shape.crossRef.provider !== null) anno['provider'] = shape.crossRef.provider;
+      if (shape.crossRef.sourceKey !== null) anno['source-key'] = shape.crossRef.sourceKey;
       return {
         type: 'object',
         required: ['$sym'],
         properties: { $sym: { type: 'string' } },
         additionalProperties: false,
-        'x-sjon-cross-ref': {
-          'target-form': shape.crossRef.targetForm,
-          'name-key': shape.crossRef.nameKey,
-          acyclic: shape.crossRef.acyclic,
-          'scope-form': shape.crossRef.scopeForm,
-        },
+        'x-sjon-cross-ref': anno,
       };
+    }
     case 'union_of':
       return {
         anyOf: shape.alternatives.map((alt) => buildShape(alt.shape, ctx)),

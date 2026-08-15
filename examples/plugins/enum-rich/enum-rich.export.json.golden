@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "enum-rich",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "log",
+          "description": "One log record.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "level",
+              "optional": false,
+              "description": "Severity tag.",
+              "value": {
+                "kind": "symbol_members_rich",
+                "members": [
+                  {
+                    "name": "info",
+                    "label": "Info",
+                    "description": "Routine status; safe to ignore in production."
+                  },
+                  {
+                    "name": "warn",
+                    "label": "Warning",
+                    "description": "Caution-worthy; investigate when the budget allows."
+                  },
+                  {
+                    "name": "error",
+                    "label": "Error",
+                    "description": "Failure path; the host couldn't complete the request."
+                  },
+                  {
+                    "name": "fatal",
+                    "label": "Fatal",
+                    "description": "Unrecoverable; the host is about to halt.",
+                    "deprecated": true,
+                    "deprecation_message": "Use `error` instead — fatality is signalled out-of-band by the exit code."
+                  }
+                ]
+              }
+            },
+            {
+              "name": "message",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": [
+        {
+          "name": "severity",
+          "description": "Log level — used to tag every diagnostic the host emits.",
+          "shape": {
+            "kind": "symbol_members_rich",
+            "members": [
+              {
+                "name": "info",
+                "label": "Info",
+                "description": "Routine status; safe to ignore in production."
+              },
+              {
+                "name": "warn",
+                "label": "Warning",
+                "description": "Caution-worthy; investigate when the budget allows."
+              },
+              {
+                "name": "error",
+                "label": "Error",
+                "description": "Failure path; the host couldn't complete the request."
+              },
+              {
+                "name": "fatal",
+                "label": "Fatal",
+                "description": "Unrecoverable; the host is about to halt.",
+                "deprecated": true,
+                "deprecation_message": "Use `error` instead — fatality is signalled out-of-band by the exit code."
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "code": "rich_members_emitted_with_annotations",
+      "severity": "info",
+      "message": "value-kind `severity` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations",
+      "plugin_name": "enum-rich",
+      "kind_name": "severity"
+    }
+  ]
+}

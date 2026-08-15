@@ -1,0 +1,78 @@
+; Cross-ref fixture. Exercises every refinement axis of `:cross-ref`:
+;
+;   * `:cross-ref :target …`              — bare (target form only)
+;   * `:cross-ref :target … :acyclic true`— acyclic flag
+;   * `:cross-ref :target … :scope-form …`— scope-form scoped
+;   * `:cross-ref :provider … :source-key …` — provider route
+;
+; All four variants produce identical wire shapes on the JSON Schema
+; side (a `{$sym: string}` object); the difference lands in the
+; `x-sjon-cross-ref` annotation and the per-slot `cross_ref_annotation_only`
+; info warning. TS emits `CrossRef<"target-form">` with JSDoc.
+;
+; The provider route needs no `:impl` here: export never executes an
+; extractor — there is no document at export time to extract from — so
+; a declaration is all the exporter can and does render.
+
+(plugin :name xref :version "1.0.0" :sjon "1.2"
+  (form :name node
+    :description "Named graph node. Referenced by `:edge`."
+    (key :name id :type symbol :description "Stable identifier within the document.")
+    (key :name label :type string :optional true)
+    ; Self-edge through the acyclic cross-ref so the cycle detector has
+    ; something to follow. Optional — leaf nodes have no parent.
+    (key :name parent :type node-acyclic :optional true))
+
+  (form :name phrase
+    :description "Composable phrase. Referenced by `:phrase-ref` (scope-form scoped to a parent `(piece …)`)."
+    (key :name name :type symbol)
+    (key :name body :type string :optional true))
+
+  (form :name piece
+    :description "Scope-form root for nested `(phrase …)` registries."
+    (key :name title :type string)
+    :positional any)
+
+  (form :name shader
+    :description "Opaque source blob. Its `:code` string is the member set for `:uniform-ref`, read by the `uniforms` provider."
+    (key :name name :type symbol)
+    (key :name code :type string))
+
+  (cross-ref-provider :name uniforms
+    :description "Names the uniform declarations inside a shader source.")
+
+  ; Bare cross-ref — closed-set check only, no cycle / scope rules.
+  (value-kind :name node-ref
+    :description "Cross-ref to a `(node …)` declared elsewhere."
+    :underlying symbol
+    :cross-ref (cross-ref :target node :name-key id))
+
+  ; Acyclic cross-ref — the runtime forbids cycles through this slot.
+  (value-kind :name node-acyclic
+    :description "Acyclic cross-ref to a `(node …)`."
+    :underlying symbol
+    :cross-ref (cross-ref :target node :name-key id :acyclic true))
+
+  ; Scope-form-scoped cross-ref — the registry walked at validation time
+  ; is the nearest enclosing `(piece …)`'s `(phrase …)` children.
+  (value-kind :name phrase-ref
+    :description "Cross-ref to a `(phrase …)` declared within the enclosing `(piece …)`."
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase :name-key name :scope piece))
+
+  ; Provider-route cross-ref — the member set is extracted from each
+  ; `(shader …)`'s `:code` string, not read off a `:name-key` symbol.
+  ; `:name-key` and `:acyclic` are not available here: the loader rejects
+  ; the first beside a provider, and the second needs per-name
+  ; declaration sites that extracted names don't have.
+  (value-kind :name uniform-ref
+    :description "Cross-ref to a uniform declared inside some `(shader …)`'s source."
+    :underlying symbol
+    :cross-ref (cross-ref :target shader :provider uniforms :source-key code))
+
+  (form :name edge
+    :description "Directed edge between two `(node …)` declarations."
+    (key :name from :type node-ref)
+    (key :name to :type node-acyclic)
+    (key :name phrase :type phrase-ref :optional true)
+    (key :name uniform :type uniform-ref :optional true)))

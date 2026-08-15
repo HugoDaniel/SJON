@@ -1,0 +1,68 @@
+; SJON plugin manifest for the Redux-on-SJON TODO demo.
+;
+; The web app fetches this file at boot and feeds the contents to its
+; resolver so `SjonHost.validateDocument` recognises (todo-app …) and
+; (todo …) as well-typed forms.
+;
+; Three expr-funcs, all bodied by the sidecar `todo-plugin.wasm`:
+;
+;   * (sum xs)          — sums a vector of numbers (kept around as
+;                          the simplest cross-host check)
+;   * (count-done xs)   — counts (todo …) forms with `:done true`
+;   * (count-active xs) — counts (todo …) forms with `:done false`
+;
+; The web-todo demo invokes `count-done` / `count-active` via the
+; `sjon_host_eval_expr` export, splicing the current `:items` list
+; into the expression source on every state change. That replaces the
+; previous v0.1 trick of using `:plugin-check`'s materialised default
+; to demonstrate the wasm pathway runs.
+
+(plugin :name todo-app :version "0.1.0"
+
+  (form :name todo
+    (key :name id   :type number  :optional false)
+    (key :name text :type string  :optional false)
+    (key :name done :type boolean :optional false))
+
+  (value-kind :name todo-form
+    :underlying form
+    :description "A single (todo …) form."
+    :heads (head-set :names [todo]))
+
+  (value-kind :name todo-list
+    :underlying vector
+    :description "Vector of (todo …) forms."
+    :vector (vector-shape :element todo-form))
+
+  (value-kind :name number-vector
+    :underlying vector
+    :description "Vector of numbers — argument to (sum …)."
+    :vector (vector-shape :element number))
+
+  (value-kind :name filter-kw
+    :underlying symbol
+    :description "Display filter: all, active, or done."
+    :members (member-set :values [all active done]))
+
+  (form :name todo-app
+    (key :name filter  :type filter-kw :optional false)
+    (key :name next-id :type number    :optional false)
+    (key :name items   :type todo-list :optional false))
+
+  (expr-func :name sum
+    :arity (fixed 1)
+    :params [number-vector]
+    :result number
+    :impl "wasm:sum_vector")
+
+  (expr-func :name count-done
+    :arity (fixed 1)
+    :params [todo-list]
+    :result number
+    :impl "wasm:count_done")
+
+  (expr-func :name count-active
+    :arity (fixed 1)
+    :params [todo-list]
+    :result number
+    :impl "wasm:count_active"))

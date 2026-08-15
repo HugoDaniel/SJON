@@ -1,0 +1,17 @@
+; A tree recovered from a syntax error is not a placeholder — it evaluates.
+; `parse-unclosed-form` proves the recovered form is structurally complete
+; (its required key is satisfied); this case pushes the same recovered node
+; all the way through the evaluator and the envelope encoder, so a host
+; cannot honour recovery structurally while quietly refusing to compute on
+; the result.
+;
+; Named into the `expr-trig-*` family deliberately: the value is the whole
+; point, and TS-parity's standing reason for skipping that family — "binds
+; via `(values …)`, which needs the Expr evaluator" — is exactly why it
+; cannot run this one either. Its half of the recovery contract is pinned
+; by `parse-unclosed-form` and `parse-recovery-continues`, which it does
+; run.
+;
+; `sin 1.0` is the same input as `expr-trig-sin` form 0, so the expected
+; value is that case's, unchanged: recovery must not perturb it.
+(sin 1.0

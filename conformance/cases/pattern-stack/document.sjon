@@ -1,0 +1,14 @@
+; `(stack a b …)` layers its children so they all sound at once — the
+; only combinator that produces overlapping haps, and the last of the
+; seven never to have crossed the `sjon_query_pattern` boundary.
+;
+; Two `pure` atoms each span a whole cycle, so over the two-cycle window
+; below there are four haps in two overlapping pairs. The ordering is the
+; part a fixture pins that a unit test would not: the output is
+; child-major, not time-sorted. Both of bd's cycles come first, then both
+; of sn's, so [0 720720] appears at index 0 and again at index 2. A
+; consumer that assumes the hap stream arrives in time order — a
+; scheduler feeding an audio callback, say — is wrong about this, and
+; the corpus compares haps in order, so any host that "helpfully" sorts
+; them fails here.
+(stack bd sn)

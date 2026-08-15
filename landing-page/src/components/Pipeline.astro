@@ -1,0 +1,85 @@
+---
+// Architecture diagram — same shape as the README block, but as inline
+// SVG with hairline strokes. The Ast.Tree node and the source.sjon
+// node carry accent fills so the eye lands on the canonical pieces
+// first; everything else stays monochrome.
+---
+
+<figure class="pipeline card">
+    <div class="card__deck">
+        <div class="card__panel pipeline-panel">
+            <svg viewBox="0 0 600 340" role="img" aria-label="SJON pipeline: source.sjon to Lexer to Parser to Ast.Tree to Printer, Validator, Expr, JSON, Binary, and Edit." xmlns="http://www.w3.org/2000/svg">
+                <g stroke="var(--ink)" fill="none" stroke-width="1" font-family="'Inter', system-ui, sans-serif" font-size="14" font-weight="500">
+                    <rect x="240" y="14"  width="120" height="32" rx="4" fill="var(--accent)" stroke="var(--ink)" />
+                    <text x="300" y="35"  text-anchor="middle" stroke="none" fill="#ffffff" font-weight="500">source.sjon</text>
+
+                    <path d="M300 46 L300 72" stroke="var(--ink)" />
+
+                    <rect x="240" y="72"  width="120" height="32" rx="4" fill="var(--surface)" />
+                    <text x="300" y="93"  text-anchor="middle" stroke="none" fill="var(--ink)">Lexer</text>
+
+                    <path d="M300 104 L300 128" stroke="var(--ink)" />
+
+                    <rect x="240" y="128" width="120" height="32" rx="4" fill="var(--surface)" />
+                    <text x="300" y="149" text-anchor="middle" stroke="none" fill="var(--ink)">Parser</text>
+
+                    <path d="M300 160 L300 188" stroke="var(--ink)" />
+
+                    <rect x="220" y="188" width="160" height="40" rx="4" stroke-width="1.5" fill="var(--accent-cool)" stroke="var(--ink)" />
+                    <text x="300" y="213" text-anchor="middle" stroke="none" fill="var(--ink)" font-weight="600">Ast.Tree</text>
+
+                    <path d="M300 228 L300 264" stroke="var(--ink)" />
+                    <path d="M75  264 L525 264" stroke="var(--ink)" />
+
+                    <path d="M75  264 L75  280" stroke="var(--ink)" />
+                    <path d="M165 264 L165 280" stroke="var(--ink)" />
+                    <path d="M255 264 L255 280" stroke="var(--ink)" />
+                    <path d="M345 264 L345 280" stroke="var(--ink)" />
+                    <path d="M435 264 L435 280" stroke="var(--ink)" />
+                    <path d="M525 264 L525 280" stroke="var(--ink)" />
+
+                    <rect x="35"  y="280" width="80" height="32" rx="4" fill="var(--surface)" />
+                    <text x="75"  y="301" text-anchor="middle" stroke="none" fill="var(--ink)">Printer</text>
+
+                    <rect x="125" y="280" width="80" height="32" rx="4" fill="var(--surface)" />
+                    <text x="165" y="301" text-anchor="middle" stroke="none" fill="var(--ink)">Validator</text>
+
+                    <rect x="215" y="280" width="80" height="32" rx="4" fill="var(--surface)" />
+                    <text x="255" y="301" text-anchor="middle" stroke="none" fill="var(--ink)">Expr</text>
+
+                    <rect x="305" y="280" width="80" height="32" rx="4" fill="var(--surface)" />
+                    <text x="345" y="301" text-anchor="middle" stroke="none" fill="var(--ink)">JSON</text>
+
+                    <rect x="395" y="280" width="80" height="32" rx="4" fill="var(--surface)" />
+                    <text x="435" y="301" text-anchor="middle" stroke="none" fill="var(--ink)">Binary</text>
+
+                    <rect x="485" y="280" width="80" height="32" rx="4" fill="var(--surface)" />
+                    <text x="525" y="301" text-anchor="middle" stroke="none" fill="var(--ink)">Edit</text>
+                </g>
+            </svg>
+            <figcaption>The parser runs once. Every downstream tool reads the same tree, so diagnostics, edits, and round trips can't drift apart.</figcaption>
+        </div>
+    </div>
+</figure>
+
+<style>
+    .pipeline { margin: var(--space-3) 0; }
+    .pipeline-panel {
+        padding: var(--space-3) var(--space-4) var(--space-4);
+        background: transparent;
+    }
+    .pipeline svg {
+        width: 100%;
+        max-width: 600px;
+        margin: 0 auto;
+        display: block;
+    }
+    .pipeline figcaption {
+        text-align: center;
+        font-family: var(--body);
+        font-size: 13.5px;
+        color: var(--ink-soft);
+        max-width: 56ch;
+        margin: var(--space-3) auto 0;
+    }
+</style>

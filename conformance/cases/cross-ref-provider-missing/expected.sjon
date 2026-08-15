@@ -1,0 +1,5 @@
+; The slot path the identity route uses too (`cross-ref-missing` pins
+; the same shape): the diagnostic belongs to the reference site, not to
+; the blob that failed to declare it.
+(diagnostics
+  (diagnostic :code not_cross_ref :path [bind uniform]))

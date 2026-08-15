@@ -1,0 +1,9 @@
+(plugin :name draw :version "1.0.0"
+  (value-kind :name fill-rule
+    :underlying symbol
+    :members (member-set :values [nonzero evenodd]))
+  (form :name circle
+    (key :name radius :type number :optional true)
+    (key :name fill :type fill-rule :optional true)))
+
+(circle :radius 1 :fill diagonal)

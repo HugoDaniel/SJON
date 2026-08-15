@@ -36,6 +36,22 @@ export * as e from './expr.ts';
 export { sjon } from './template.ts';
 export { quoteSjonString, serializeValue } from './value.ts';
 export type { SjonFormValue, SjonValue } from './value.ts';
+
+// Canonical `$`-discriminator keys of the JSON shape — single-sourced here and
+// re-exported by the typescript-parity port (`schemaExport/discriminators.ts`).
+export {
+  CHILDREN_KEY,
+  DATE_KEY,
+  EXPR_KEY,
+  FORM_KEY,
+  KW_KEY,
+  NS_KEY,
+  NUM_KEY,
+  RESERVED_KEYS,
+  ROOTS_KEY,
+  SYM_KEY,
+  TIME_KEY,
+} from './discriminators.ts';
 export type { Binder, BoolLike, ExprLike, NumLike, Ref, VecLike } from './expr.ts';
 
 // The edit / write-back side (plan 03): the `edit.*` action builders + the pure
@@ -103,6 +119,7 @@ export type {
 export { serializeFormAsPlugin, serializePlugin } from './serialize.ts';
 export type {
   CrossRefIR,
+  CrossRefProviderDef,
   FormDef,
   NamedKindDef,
   NodeDef,

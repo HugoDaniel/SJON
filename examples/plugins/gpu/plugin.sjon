@@ -1,0 +1,66 @@
+; GPU-resource fixture. Exercises the value-kind refinements that matter
+; when SJON drives a graphics backend — each one a different axis:
+;
+;   * `:repr (repr-shape :type …)` — the machine type a downstream emitter
+;     encodes the number as (`f32`/`u32`/`u16`/`i32`/`f16`). The validator
+;     checks the value's range, and — for the integer types — its
+;     integrality, at validate time (`repr_out_of_range`); precision
+;     narrowing (e.g. an f32 losing a low mantissa bit) is the emitter's
+;     accepted lossy step, not a validation failure. On export the tag
+;     rides as an `x-sjon-gpu-repr` annotation plus a branded TS alias
+;     (`U16`/`F32`/`U32`) — it is NOT lowered to JSON-Schema
+;     `minimum`/`maximum`/`type:integer`.
+;
+;   * variable-arity `(vector-shape :min-len M :max-len N)` — a vector slot
+;     that accepts any length in the inclusive `[M, N]` window, which a
+;     fixed `:len` cannot express. A too-short vector trips
+;     `vector_too_short`, a too-long one `vector_too_long`. Exports as
+;     `minItems`/`maxItems`; the TS surface widens to `Array<E>` (TS has no
+;     type-level element count).
+;
+;   * `(unit-shape :reject true)` — a bare scalar: ANY unit suffix is an
+;     error (`unit_forbidden`), the opposite pole of `:required`. This
+;     closes the silent `1.0f -> 0` GPU-backfill defect — the lexer reads
+;     the trailing `f` in `1.0f` as a unit, so without `:reject` the value
+;     would land as `number_with_unit{1.0,"f"}` and a naive emitter could
+;     backfill 0. A reject kind exports as a plain number (no `$num` tuple).
+
+(plugin :name gpu :version "1.0.0"
+  ; --- repr: GPU machine types -------------------------------------------
+  (value-kind :name channel
+    :description "Normalized colour channel encoded as a u16 — integer in [0, 65535]."
+    :underlying number
+    :repr (repr-shape :type u16))
+
+  (value-kind :name scalar
+    :description "A 32-bit float scalar (line width, bias, …). Floats carry no integrality constraint."
+    :underlying number
+    :repr (repr-shape :type f32))
+
+  (value-kind :name vertex-index
+    :description "Index into a vertex buffer — non-negative integer in [0, 2^32)."
+    :underlying number
+    :repr (repr-shape :type u32))
+
+  ; --- variable-arity vector ---------------------------------------------
+  (value-kind :name attribute
+    :description "A vertex attribute of 2 to 4 float components (vec2..vec4)."
+    :underlying vector
+    :vector (vector-shape :element number :min-len 2 :max-len 4))
+
+  ; --- unit reject: bare scalar ------------------------------------------
+  (value-kind :name raw-uniform
+    :description "A raw uniform / push-constant value — bare number only, never a unit suffix."
+    :underlying number
+    :unit (unit-shape :reject true))
+
+  (form :name vertex
+    :description "One mesh vertex: a 2..4-component position plus an optional u16 tint channel."
+    (key :name position :type attribute :optional false)
+    (key :name tint :type channel :optional true))
+
+  (form :name draw
+    :description "A draw call: f32 line width, u32 base vertex, and a bare LOD bias."
+    (key :name line-width :type scalar :optional false)
+    (key :name base-vertex :type vertex-index :optional false)
+    (key :name lod-bias :type raw-uniform :optional true)))

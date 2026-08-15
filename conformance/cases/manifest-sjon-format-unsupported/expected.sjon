@@ -1,0 +1,5 @@
+; Manifest phase first, then validation against a schema the plugin never
+; joined.
+(diagnostics
+  (diagnostic :code sjon_format_unsupported :path [plugin])
+  (diagnostic :code unknown_form :path [pt]))

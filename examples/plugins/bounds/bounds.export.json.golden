@@ -1,0 +1,376 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "bounds",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "profile",
+          "description": "User profile carrying one slot per bound flavour.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "handle",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "string_with_bounds",
+                "min_len": 3,
+                "max_len": 32,
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "format": null
+              }
+            },
+            {
+              "name": "email",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "string_with_bounds",
+                "min_len": null,
+                "max_len": null,
+                "pattern": null,
+                "format": "email"
+              }
+            },
+            {
+              "name": "homepage",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "string_with_bounds",
+                "min_len": null,
+                "max_len": null,
+                "pattern": null,
+                "format": "uri"
+              }
+            },
+            {
+              "name": "uuid",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "string_with_bounds",
+                "min_len": null,
+                "max_len": null,
+                "pattern": null,
+                "format": "uuid"
+              }
+            },
+            {
+              "name": "release",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "string_with_bounds",
+                "min_len": null,
+                "max_len": null,
+                "pattern": null,
+                "format": "semver"
+              }
+            },
+            {
+              "name": "workspace",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "string_with_bounds",
+                "min_len": null,
+                "max_len": null,
+                "pattern": null,
+                "format": "path"
+              }
+            },
+            {
+              "name": "score",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "number_bounded",
+                "bounds": {
+                  "min": {
+                    "value": 0,
+                    "exact_int": true
+                  },
+                  "max": {
+                    "value": 100,
+                    "exact_int": true
+                  }
+                }
+              }
+            },
+            {
+              "name": "ratio",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "number_bounded",
+                "bounds": {
+                  "min": {
+                    "value": 0,
+                    "exact_int": true
+                  },
+                  "max": {
+                    "value": 1,
+                    "exact_int": true
+                  },
+                  "exclusive_min": true
+                }
+              }
+            },
+            {
+              "name": "visits",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "number_bounded",
+                "bounds": {
+                  "min": {
+                    "value": 0,
+                    "exact_int": true
+                  },
+                  "integer": true
+                }
+              }
+            },
+            {
+              "name": "big-id",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "number_bounded",
+                "bounds": {
+                  "min": {
+                    "value": 0,
+                    "exact_int": true
+                  },
+                  "max": {
+                    "value": 100000000000000000,
+                    "exact_int": true
+                  },
+                  "integer": true
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": [
+        {
+          "name": "score",
+          "description": "Inclusive 0..100 range.",
+          "shape": {
+            "kind": "number_bounded",
+            "bounds": {
+              "min": {
+                "value": 0,
+                "exact_int": true
+              },
+              "max": {
+                "value": 100,
+                "exact_int": true
+              }
+            }
+          }
+        },
+        {
+          "name": "ratio",
+          "description": "Exclusive 0..1 range.",
+          "shape": {
+            "kind": "number_bounded",
+            "bounds": {
+              "min": {
+                "value": 0,
+                "exact_int": true
+              },
+              "max": {
+                "value": 1,
+                "exact_int": true
+              },
+              "exclusive_min": true
+            }
+          }
+        },
+        {
+          "name": "count",
+          "description": "Non-negative integer.",
+          "shape": {
+            "kind": "number_bounded",
+            "bounds": {
+              "min": {
+                "value": 0,
+                "exact_int": true
+              },
+              "integer": true
+            }
+          }
+        },
+        {
+          "name": "big",
+          "description": "Integer bounded above by ~10^16 to exercise the >2^53 annotation. (At this magnitude the f64 wire value loses ~3 bits of precision; `x-sjon-exact-bound.max` carries the round-tripped digit string so SJON-aware tooling can recover exact intent.)",
+          "shape": {
+            "kind": "number_bounded",
+            "bounds": {
+              "min": {
+                "value": 0,
+                "exact_int": true
+              },
+              "max": {
+                "value": 100000000000000000,
+                "exact_int": true
+              },
+              "integer": true
+            }
+          }
+        },
+        {
+          "name": "email-string",
+          "description": "RFC-5322 email.",
+          "shape": {
+            "kind": "string_with_bounds",
+            "min_len": null,
+            "max_len": null,
+            "pattern": null,
+            "format": "email"
+          }
+        },
+        {
+          "name": "slug",
+          "description": "URL-safe identifier.",
+          "shape": {
+            "kind": "string_with_bounds",
+            "min_len": 3,
+            "max_len": 32,
+            "pattern": "^[a-z][a-z0-9-]*$",
+            "format": null
+          }
+        },
+        {
+          "name": "url",
+          "description": "Absolute URI.",
+          "shape": {
+            "kind": "string_with_bounds",
+            "min_len": null,
+            "max_len": null,
+            "pattern": null,
+            "format": "uri"
+          }
+        },
+        {
+          "name": "uuid-string",
+          "description": "UUID 8-4-4-4-12 form.",
+          "shape": {
+            "kind": "string_with_bounds",
+            "min_len": null,
+            "max_len": null,
+            "pattern": null,
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "version-tag",
+          "description": "Semver string — `x-sjon-format` only (not JSON-Schema standard).",
+          "shape": {
+            "kind": "string_with_bounds",
+            "min_len": null,
+            "max_len": null,
+            "pattern": null,
+            "format": "semver"
+          }
+        },
+        {
+          "name": "file-path",
+          "description": "Path string — `x-sjon-format` only.",
+          "shape": {
+            "kind": "string_with_bounds",
+            "min_len": null,
+            "max_len": null,
+            "pattern": null,
+            "format": "path"
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "code": "string_bounds_emitted_via_keywords",
+      "severity": "info",
+      "message": "value-kind `slug` string bounds emitted via `minLength`/`maxLength`/`pattern`/`format`; codepoint-vs-UTF16 length and SJON-deferred regex semantics carry their own caveats",
+      "plugin_name": "bounds",
+      "kind_name": "slug"
+    },
+    {
+      "code": "string_bounds_emitted_via_keywords",
+      "severity": "info",
+      "message": "value-kind `email-string` string bounds emitted via `minLength`/`maxLength`/`pattern`/`format`; codepoint-vs-UTF16 length and SJON-deferred regex semantics carry their own caveats",
+      "plugin_name": "bounds",
+      "kind_name": "email-string"
+    },
+    {
+      "code": "string_bounds_emitted_via_keywords",
+      "severity": "info",
+      "message": "value-kind `url` string bounds emitted via `minLength`/`maxLength`/`pattern`/`format`; codepoint-vs-UTF16 length and SJON-deferred regex semantics carry their own caveats",
+      "plugin_name": "bounds",
+      "kind_name": "url"
+    },
+    {
+      "code": "string_bounds_emitted_via_keywords",
+      "severity": "info",
+      "message": "value-kind `uuid-string` string bounds emitted via `minLength`/`maxLength`/`pattern`/`format`; codepoint-vs-UTF16 length and SJON-deferred regex semantics carry their own caveats",
+      "plugin_name": "bounds",
+      "kind_name": "uuid-string"
+    },
+    {
+      "code": "string_bounds_emitted_via_keywords",
+      "severity": "info",
+      "message": "value-kind `version-tag` string bounds emitted via `minLength`/`maxLength`/`pattern`/`format`; codepoint-vs-UTF16 length and SJON-deferred regex semantics carry their own caveats",
+      "plugin_name": "bounds",
+      "kind_name": "version-tag"
+    },
+    {
+      "code": "string_bounds_emitted_via_keywords",
+      "severity": "info",
+      "message": "value-kind `file-path` string bounds emitted via `minLength`/`maxLength`/`pattern`/`format`; codepoint-vs-UTF16 length and SJON-deferred regex semantics carry their own caveats",
+      "plugin_name": "bounds",
+      "kind_name": "file-path"
+    },
+    {
+      "code": "numeric_bounds_emitted_via_min_max",
+      "severity": "info",
+      "message": "value-kind `score` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=false); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values",
+      "plugin_name": "bounds",
+      "kind_name": "score"
+    },
+    {
+      "code": "numeric_bounds_emitted_via_min_max",
+      "severity": "info",
+      "message": "value-kind `ratio` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=false); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values",
+      "plugin_name": "bounds",
+      "kind_name": "ratio"
+    },
+    {
+      "code": "numeric_bounds_emitted_via_min_max",
+      "severity": "info",
+      "message": "value-kind `count` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values",
+      "plugin_name": "bounds",
+      "kind_name": "count"
+    },
+    {
+      "code": "numeric_bounds_emitted_via_min_max",
+      "severity": "info",
+      "message": "value-kind `big` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values",
+      "plugin_name": "bounds",
+      "kind_name": "big"
+    },
+    {
+      "code": "numeric_bound_exceeds_double_range",
+      "severity": "info",
+      "message": "value-kind `big` max bound 100000000000000000 exceeds 2^53; non-bigint JSON Schema validators may lose precision — see `x-sjon-exact-bound.max`",
+      "plugin_name": "bounds",
+      "kind_name": "big"
+    }
+  ]
+}

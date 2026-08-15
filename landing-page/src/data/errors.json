@@ -1,0 +1,627 @@
+[
+  {
+    "code": "unspecified",
+    "short": "Generic catch-all when no more-specific code applies.",
+    "long": ""
+  },
+  {
+    "code": "unknown_form",
+    "short": "A form's head name is not declared by any loaded plugin.",
+    "long": "Forms must be declared by some plugin reachable from the document\n(either inlined as a `(plugin …)` declaration, or imported via\n`(use-plugin …)`). Qualified spellings (`<plugin>/<form>`) bypass\nambiguity when two plugins declare the same name.\n\nIf the head is a typo, the rich format suggests the nearest\nspelling under the loaded vocabulary. If the head exists in a\nplugin you forgot to import, the suggestion includes the import\npath."
+  },
+  {
+    "code": "unknown_key",
+    "short": "Form does not declare this `:keyword` and is not `:open true`.",
+    "long": ""
+  },
+  {
+    "code": "ambiguous_form",
+    "short": "Two plugins declare a form with the same bare head — qualify the spelling.",
+    "long": ""
+  },
+  {
+    "code": "ambiguous_expr",
+    "short": "Two plugins declare an expression with the same name — qualify the spelling.",
+    "long": ""
+  },
+  {
+    "code": "ambiguous_element_kind",
+    "short": "Element kind reference matches multiple plugin-declared kinds.",
+    "long": ""
+  },
+  {
+    "code": "unknown_element_kind",
+    "short": "Element kind name resolves to no plugin.",
+    "long": ""
+  },
+  {
+    "code": "recursion_depth",
+    "short": "Validator's depth ceiling exceeded — the input is pathologically nested.",
+    "long": ""
+  },
+  {
+    "code": "not_cross_ref",
+    "short": "Symbol is not a registered name for the cross-ref's target — no target instance declares (or provides) it.",
+    "long": ""
+  },
+  {
+    "code": "duplicate_cross_ref_target",
+    "short": "Two forms share the same `:name` value within one cross-ref's target scope.",
+    "long": ""
+  },
+  {
+    "code": "unknown_cross_ref_target",
+    "short": "The `:target` declared on a `(cross-ref …)` resolves to no form in the aggregated schema.",
+    "long": ""
+  },
+  {
+    "code": "ambiguous_cross_ref_target",
+    "short": "Cross-ref symbol matches multiple targets — typically a name collision under scopes.",
+    "long": ""
+  },
+  {
+    "code": "cross_ref_name_key_unknown",
+    "short": "The `:name-key` declared on a `(cross-ref …)` is not a key on the target form.",
+    "long": ""
+  },
+  {
+    "code": "acyclic_without_self_edge",
+    "short": "`(cross-ref … :acyclic true)` declared on a kind that can't form cycles.",
+    "long": ""
+  },
+  {
+    "code": "cyclic_cross_ref",
+    "short": "Acyclic cross-ref forms a cycle — at least one edge must be removed.",
+    "long": ""
+  },
+  {
+    "code": "unknown_cross_ref_scope",
+    "short": "Cross-ref `:scope` is not a known form name.",
+    "long": ""
+  },
+  {
+    "code": "ambiguous_cross_ref_scope",
+    "short": "Cross-ref `:scope` matches multiple form names; qualify the spelling.",
+    "long": ""
+  },
+  {
+    "code": "cross_ref_outside_scope",
+    "short": "Cross-ref references a target outside the enclosing scope's instance.",
+    "long": ""
+  },
+  {
+    "code": "duplicate_key",
+    "short": "Same `:key` appears twice on the same form.",
+    "long": ""
+  },
+  {
+    "code": "too_many_keys",
+    "short": "Form has more keyword slots than `Plugin.MAX_FORM_KEYS` permits.",
+    "long": ""
+  },
+  {
+    "code": "missing_required_key",
+    "short": "Form omits a `:key :optional false` slot with no default.",
+    "long": ""
+  },
+  {
+    "code": "positional_not_allowed",
+    "short": "Form's `:positional` declaration is `none` but a positional child was provided.",
+    "long": ""
+  },
+  {
+    "code": "expr_kvpair_not_allowed",
+    "short": "Expression function does not opt into labeled-call form (`:param-names`).",
+    "long": ""
+  },
+  {
+    "code": "missing_discriminant_key",
+    "short": "Discriminated form lacks the discriminant key.",
+    "long": ""
+  },
+  {
+    "code": "unknown_discriminant_value",
+    "short": "Discriminant's value is not a member of its declared enum.",
+    "long": ""
+  },
+  {
+    "code": "discriminant_not_closed_enum",
+    "short": "Discriminant key's value-kind does not declare a closed `(member-set …)`.",
+    "long": ""
+  },
+  {
+    "code": "variant_key_collision",
+    "short": "Variant declares a key that already lives on the form's common keys.",
+    "long": ""
+  },
+  {
+    "code": "mutually_exclusive_keys_present",
+    "short": "Multiple alternatives of an exclusive group are present at once.",
+    "long": ""
+  },
+  {
+    "code": "multiple_defaulted_alternatives_in_group",
+    "short": "Exclusive group has more than one alternative with a `:default`.",
+    "long": ""
+  },
+  {
+    "code": "required_one_of_missing",
+    "short": "`exactly-one` exclusive group has zero alternatives present.",
+    "long": ""
+  },
+  {
+    "code": "exclusive_group_invalid",
+    "short": "Exclusive group declaration is malformed (overlapping alts, missing keys, …).",
+    "long": ""
+  },
+  {
+    "code": "wrong_underlying",
+    "short": "Value's structural shape does not match the declared `:underlying`.",
+    "long": ""
+  },
+  {
+    "code": "vector_length_mismatch",
+    "short": "Vector value does not match the declared `:vector :len`.",
+    "long": ""
+  },
+  {
+    "code": "unit_required",
+    "short": "Number value lacks a unit but the kind requires one.",
+    "long": ""
+  },
+  {
+    "code": "unit_not_allowed",
+    "short": "Number value carries a unit but the kind's `:allowed` list rejects it.",
+    "long": ""
+  },
+  {
+    "code": "not_member",
+    "short": "Closed `(member-set …)` does not include this value.",
+    "long": ""
+  },
+  {
+    "code": "deprecated_member",
+    "short": "Member is declared `:deprecated true` — accepted, but the LSP marks it deprecated.",
+    "long": ""
+  },
+  {
+    "code": "not_head_member",
+    "short": "Form's head is not in the kind's `(head-set …)` whitelist.",
+    "long": ""
+  },
+  {
+    "code": "union_no_branch_matched",
+    "short": "No alternative in a `(union-shape …)` accepted the value.",
+    "long": ""
+  },
+  {
+    "code": "nested_union",
+    "short": "Union alternative resolves to another union — flatten the alternatives.",
+    "long": ""
+  },
+  {
+    "code": "arity_mismatch",
+    "short": "Expression function called with the wrong number of arguments.",
+    "long": ""
+  },
+  {
+    "code": "expr_type_mismatch",
+    "short": "Expression argument's type does not satisfy the function's `:params` declaration.",
+    "long": "Two failures share this code, and the message tells them apart.\n\nThe static one is the declared-type check: an argument whose\ntype does not satisfy the head's `:params` / `:rest`. It is\nanchored at the offending argument and names it by path\n(`sqrt/0`).\n\nThe runtime one fires when the types are fine but an evaluated\n*value* falls outside the function's domain — `(clamp 5 10 0)`\nwith lo above hi, `(nth [1 2 3] 9)` past the end,\n`(normalize [0 0])` with no direction, `(/ 1 0)`. The validator\ncannot reach these: it knows what a slot declares, not what an\nexpression computes. They are anchored at the form's head with\nno path, and the form yields no value while its neighbours keep\nevaluating."
+  },
+  {
+    "code": "expr_unknown_label",
+    "short": "Labeled-call kvpair key does not match any declared `:param-names`.",
+    "long": ""
+  },
+  {
+    "code": "expr_duplicate_label",
+    "short": "Labeled call supplies the same label twice.",
+    "long": ""
+  },
+  {
+    "code": "expr_missing_label",
+    "short": "Labeled call omits a declared parameter.",
+    "long": ""
+  },
+  {
+    "code": "expr_mixed_args",
+    "short": "Call mixes positional and labeled arguments — pick one form.",
+    "long": ""
+  },
+  {
+    "code": "invalid_manifest",
+    "short": "Manifest source failed to load (read error, malformed shape, etc.).",
+    "long": ""
+  },
+  {
+    "code": "unresolved_plugin",
+    "short": "A `(use-plugin …)` reference's name is not in the project file.",
+    "long": "The host walks references in document order. For each, it asks\nthe resolver to produce manifest bytes. The default\n`FilesystemResolver` consults the project file's `:plugins`\nindex — if the bare name is missing, this code fires.\n\nTwo ways out: add the manifest to `sjon-project.sjon`'s\n`:plugins` (preferred for reusable plugins), or use the\n`(use-plugin \"name\" :path \"…\")` shape to point the resolver at\nan explicit file (preferred for one-off includes)."
+  },
+  {
+    "code": "plugin_version_mismatch",
+    "short": "`(use-plugin … :version …)` pin disagrees with the manifest's `:version`.",
+    "long": ""
+  },
+  {
+    "code": "plugin_hash_mismatch",
+    "short": "`(use-plugin … :hash …)` pin does not match the resolved wasm bytes.",
+    "long": "Hash pins are sha256 digests of the paired wasm binary,\nformatted as `sha256-<64 lowercase hex>`. Use them to ensure\nreproducibility against a specific build of a plugin.\n\nCompute the current digest with `sjon plugin hash <wasm>`;\nupdate the pin if the new bytes are intentional, or fetch the\nold binary if they aren't."
+  },
+  {
+    "code": "duplicate_plugin_name",
+    "short": "Two manifests in the project's `:plugins` index declare the same `:name`.",
+    "long": ""
+  },
+  {
+    "code": "plugin_name_mismatch",
+    "short": "Resolved manifest's `:name` differs from the `(use-plugin …)` name.",
+    "long": ""
+  },
+  {
+    "code": "project_file_not_found",
+    "short": "`sjon-project.sjon` not found at the requested or discovered root.",
+    "long": ""
+  },
+  {
+    "code": "plugin_abi_mismatch",
+    "short": "Plugin wasm reports a `sjon_plugin_abi_version()` the host does not implement.",
+    "long": ""
+  },
+  {
+    "code": "plugin_export_missing",
+    "short": "Manifest references a `:impl wasm:<name>` export the wasm binary does not define.",
+    "long": ""
+  },
+  {
+    "code": "plugin_import_forbidden",
+    "short": "Plugin wasm imports a forbidden host symbol — ABI v2 plugins are pure.",
+    "long": ""
+  },
+  {
+    "code": "plugin_wasm_required",
+    "short": "Manifest declares `:impl wasm:…` but the resolver returned no wasm bytes.",
+    "long": ""
+  },
+  {
+    "code": "plugin_describe_invalid",
+    "short": "`sjon_plugin_describe()` output is malformed or inconsistent with the manifest.",
+    "long": ""
+  },
+  {
+    "code": "plugin_func_trapped",
+    "short": "Plugin export trapped during invocation (unreachable, OOB memory, etc.).",
+    "long": ""
+  },
+  {
+    "code": "plugin_func_result_type",
+    "short": "Plugin export's return value's tag mismatches the manifest's declared `:result`.",
+    "long": ""
+  },
+  {
+    "code": "plugin_func_failed",
+    "short": "Plugin export returned an error status — runtime semantic failure.",
+    "long": ""
+  },
+  {
+    "code": "plugin_func_alloc_failed",
+    "short": "Plugin allocation hook (`sjon_alloc`) returned null.",
+    "long": ""
+  },
+  {
+    "code": "default_eval_failed",
+    "short": "Expression-shaped `:default` failed at evaluation time.",
+    "long": ""
+  },
+  {
+    "code": "lowering_hook_missing",
+    "short": "Host has no implementation registered for the `:lowering :hook` named by the manifest.",
+    "long": ""
+  },
+  {
+    "code": "lowering_hook_failed",
+    "short": "Lowering hook returned an error or invalid output.",
+    "long": ""
+  },
+  {
+    "code": "lowering_produced_invalid_head",
+    "short": "Lowering output's form head is not in the manifest's `:produces` whitelist.",
+    "long": ""
+  },
+  {
+    "code": "lowering_produced_lowerable_head",
+    "short": "Lowering output's form head is itself a surface — lowering must terminate.",
+    "long": ""
+  },
+  {
+    "code": "lowering_output_too_large",
+    "short": "Lowering output exceeded one of `MAX_LOWERED_FORMS` / `MAX_LOWERED_DEPTH` / `MAX_LOWERED_BYTES`.",
+    "long": ""
+  },
+  {
+    "code": "number_overflow_exact_integer",
+    "short": "Integer literal exceeds u64 — falls back to f64 with precision loss.",
+    "long": ""
+  },
+  {
+    "code": "date_invalid_year",
+    "short": "Date year `0000` rejected (ISO 8601 disallows year 0).",
+    "long": ""
+  },
+  {
+    "code": "date_invalid_month",
+    "short": "Date month outside `[1, 12]`.",
+    "long": ""
+  },
+  {
+    "code": "date_invalid_day",
+    "short": "Date day outside the month's valid range.",
+    "long": ""
+  },
+  {
+    "code": "time_invalid_hour",
+    "short": "Time hour outside `[0, 23]`.",
+    "long": ""
+  },
+  {
+    "code": "time_invalid_minute",
+    "short": "Time minute outside `[0, 59]`.",
+    "long": ""
+  },
+  {
+    "code": "time_invalid_second",
+    "short": "Time second outside `[0, 59]` (no leap seconds).",
+    "long": ""
+  },
+  {
+    "code": "number_below_min",
+    "short": "Number value below inclusive `:min`.",
+    "long": ""
+  },
+  {
+    "code": "number_above_max",
+    "short": "Number value above inclusive `:max`.",
+    "long": ""
+  },
+  {
+    "code": "number_at_or_below_exclusive_min",
+    "short": "Number value ≤ `:min` when `:exclusive-min true`.",
+    "long": ""
+  },
+  {
+    "code": "number_at_or_above_exclusive_max",
+    "short": "Number value ≥ `:max` when `:exclusive-max true`.",
+    "long": ""
+  },
+  {
+    "code": "number_not_integer",
+    "short": "Value violates `:integer true` (fractional or non-finite).",
+    "long": ""
+  },
+  {
+    "code": "numeric_bound_unit_mismatch",
+    "short": "Bound carries a unit but the validated value does not match it.",
+    "long": ""
+  },
+  {
+    "code": "numeric_bounds_invalid",
+    "short": "`(numeric-bounds …)` declaration is internally inconsistent.",
+    "long": ""
+  },
+  {
+    "code": "string_too_short",
+    "short": "String shorter than `:min-len` UTF-8 codepoints.",
+    "long": ""
+  },
+  {
+    "code": "string_too_long",
+    "short": "String longer than `:max-len` UTF-8 codepoints.",
+    "long": ""
+  },
+  {
+    "code": "string_format_mismatch",
+    "short": "String value fails the declared `:format` (email/uri/path/uuid/semver).",
+    "long": ""
+  },
+  {
+    "code": "string_pattern_mismatch",
+    "short": "String value fails the declared `:pattern` (regex).",
+    "long": ""
+  },
+  {
+    "code": "string_pattern_unsupported",
+    "short": "Host build has no regex engine; the `:pattern` is stored but not checked.",
+    "long": ""
+  },
+  {
+    "code": "string_bounds_invalid",
+    "short": "`(string-bounds …)` declaration is internally inconsistent.",
+    "long": ""
+  },
+  {
+    "code": "exclusive_bundle_partial",
+    "short": "Multi-key bundle in an exclusive group is partially present.",
+    "long": ""
+  },
+  {
+    "code": "exclusive_bundle_collision",
+    "short": "Same key appears in two alternatives of the same exclusive group.",
+    "long": ""
+  },
+  {
+    "code": "plugin_wasm_resolved_outside_package",
+    "short": "Manifest's `:wasm-file` resolves outside its own directory.",
+    "long": "The override is checked lexically against the manifest's\ndirectory — any `..` segments that walk above the directory\nboundary are rejected, as are absolute paths. The check uses\nlexical normalization (no realpath) so symlink hops are not\ncaught; the goal is honest path-traversal blocking, not full\nfilesystem containment."
+  },
+  {
+    "code": "plugin_wasm_self_hash_malformed",
+    "short": "`:wasm-sha256` is not in the canonical `sha256-<64 lowercase hex>` shape.",
+    "long": ""
+  },
+  {
+    "code": "plugin_wasm_self_hash_mismatch",
+    "short": "Manifest's `:wasm-sha256` stamp disagrees with the bytes on disk.",
+    "long": ""
+  },
+  {
+    "code": "license_unrecognized",
+    "short": "Advisory: `:license` is not a canonical SPDX identifier.",
+    "long": ""
+  },
+  {
+    "code": "too_many_keywords",
+    "short": "Advisory: `:keywords` exceeds the soft cap of 16 entries.",
+    "long": ""
+  },
+  {
+    "code": "sjon_format_unsupported",
+    "short": "Manifest declares a `:sjon` version newer than this host implements.",
+    "long": ""
+  },
+  {
+    "code": "unknown_project_key",
+    "short": "Advisory: project file declared a top-level key the host doesn't recognize.",
+    "long": ""
+  },
+  {
+    "code": "glob_no_matches",
+    "short": "Advisory: a `:documents` pattern matched zero files.",
+    "long": ""
+  },
+  {
+    "code": "pin_disagreement",
+    "short": "Project `(plugin-entry … :version/:hash)` pin disagrees with a `(use-plugin …)` pin.",
+    "long": ""
+  },
+  {
+    "code": "project_documents_outside_root",
+    "short": "`:documents` glob resolves outside the project root.",
+    "long": ""
+  },
+  {
+    "code": "lockfile_drift",
+    "short": "Lockfile entry's hash disagrees with the on-disk bytes.",
+    "long": "`sjon-project.lock` records the observed sha256 of each\nplugin's manifest and (optionally) its paired wasm. When\n`sjon project verify` (or any `sjon check` against a project\nwith a lockfile) sees a hash that differs from the recorded\none, it emits this code.\n\nTwo ways out: `sjon project lock` to record the new bytes\n(if the change is intentional), or restore the old plugin\nbytes (if the change is accidental)."
+  },
+  {
+    "code": "lockfile_missing_entry",
+    "short": "Project references a plugin the lockfile does not record.",
+    "long": ""
+  },
+  {
+    "code": "lockfile_orphan",
+    "short": "Advisory: lockfile entry is no longer referenced by the project.",
+    "long": ""
+  },
+  {
+    "code": "lockfile_version_unsupported",
+    "short": "Lockfile `:version` exceeds this host's understanding.",
+    "long": ""
+  },
+  {
+    "code": "lockfile_corrupt",
+    "short": "Lockfile failed to parse or has the wrong top-level shape.",
+    "long": ""
+  },
+  {
+    "code": "not_flag_member",
+    "short": "Positional keyword flag is not in the form's `:positional (flag-set …)` set.",
+    "long": ""
+  },
+  {
+    "code": "lowering_cycle",
+    "short": "A `:lowering :produces` graph cycles — following produces-edges leads back to a lowering form.",
+    "long": "Staged lowering follows `:produces` edges: a form's lowering hook\nemits forms whose heads are listed in `:produces`, and those forms\nmay themselves be lowerable. The aggregate schema check builds this\ngraph (nodes = lowering forms, edges = their `:produces` heads) and\nrejects any cycle, so staging is guaranteed to terminate before a\nsingle hook runs.\n\nBreak the cycle: a chain like `a -> b -> a` means following the\nproduces declarations loops forever. Re-point one `:produces` edge\nat a terminal (non-lowering) form, or drop the `:lowering` on one of\nthe forms in the loop."
+  },
+  {
+    "code": "lowering_target_plugin_absent",
+    "short": "A `:lowering :produces` head names a plugin that isn't loaded — a dangling cross-plugin edge.",
+    "long": "A `:produces` entry spelled `<plugin>/<form>` resolves against the\nloaded aggregate. When the named plugin is present but lacks the\nform you get `unknown_form`; when the plugin itself was never\nloaded, the edge dangles on load order rather than on a typo, and\nthat is reported separately as `lowering_target_plugin_absent`.\n\nFix it by loading the target plugin (add the missing `(use-plugin\n…)` / dependency) or by re-pointing the `:produces` entry at a form\nthat the current plugin set actually declares."
+  },
+  {
+    "code": "duplicate_positional_flag",
+    "short": "A declared positional keyword flag is repeated on one form, e.g. `(task :done :done)`.",
+    "long": ""
+  },
+  {
+    "code": "lowering_nested_lowerable",
+    "short": "A `:lowering` form is a positional child of another `:lowering` form — container and child can't both lower.",
+    "long": "Container lowering puts `:lowering` on a container and leaves its\nchildren plain data: the one hook invocation consumes every child at\nonce. If a child *also* declares `:lowering`, both hooks fire in the\nsame layer — the container consumes the child while the child lowers\nitself — and their output overlaps or orphans (often surfacing later\nas a confusing `duplicate_cross_ref_target`).\n\nFix it by declaring `:lowering` on the container OR the child, never\nboth. In container lowering the children stay data; only the\ncontainer lowers. The check is emit-only, so lowering still runs — the\ndiagnostic just names the contradiction at the child."
+  },
+  {
+    "code": "unit_forbidden",
+    "short": "Number value carries a unit but the kind's `:unit (unit-shape :reject true)` demands bare numbers.",
+    "long": ""
+  },
+  {
+    "code": "vector_too_short",
+    "short": "Vector has fewer elements than the declared `:vector :min-len`.",
+    "long": ""
+  },
+  {
+    "code": "vector_too_long",
+    "short": "Vector has more elements than the declared `:vector :max-len`.",
+    "long": ""
+  },
+  {
+    "code": "vector_bounds_invalid",
+    "short": "`(vector-shape …)` declaration is internally inconsistent (`:len` with a range, or `:min-len` > `:max-len`).",
+    "long": ""
+  },
+  {
+    "code": "repr_out_of_range",
+    "short": "Number value does not fit its value-kind's `:repr` GPU type (out of range, or non-integral under `u16`/`u32`/`i32`).",
+    "long": ""
+  },
+  {
+    "code": "unknown_local_form",
+    "short": "Form head in a slot-local slot matches neither a local form nor any global form.",
+    "long": "A slot may carry inline slot-local form definitions on either a\nkeyword (`(key :name shape :type form (form …) (form …))`) or a\nform's positional slot (inline `(form …)` children directly under\nthe parent `(form …)`). A form value in that slot resolves\nlocal-first: the local forms shadow same-named globals, and a head\nthat isn't local still falls back to the global catalog (additive).\nOnly when the head matches *neither* a local form *nor* any global\nform is this emitted — at the slot path: the key path for a keyword\nslot (e.g. `[canvas shape]`) or the parent form's path for a\npositional slot (e.g. `[canvas]`), listing the allowed local heads.\nThe generic `unknown_form` is suppressed for that node so you get one\nprecise diagnostic, not two.\n\nA *qualified* head (`<plugin>/<form>`) bypasses the locals entirely\nand resolves against the global catalog only — so a typo'd\nqualified head yields `unknown_form`, not this."
+  },
+  {
+    "code": "pattern_tick_overflow",
+    "short": "A `fast` / `slow` combinator expanded the query window past the 2^53 tick ceiling.",
+    "long": "Pattern time is integer ticks on a fixed grid (`PPC` per cycle).\n`fast n` queries its child over a window scaled up by `n`; chain\nenough of them (e.g. `(fast 1000000000 (fast 1000000000 bd))`) and\nthe scaled window magnitude exceeds `2^53`, the largest integer a\nTypeScript `number` represents exactly. Rather than drift or\noverflow, the engine refuses: the offending combinator contributes\nno haps and emits this code, while the rest of the pattern is\nqueried normally (collection over abort). The same trip fires\nbit-identically in every host."
+  },
+  {
+    "code": "pattern_value_eval_failed",
+    "short": "A `(pure …)` expression leaf failed to evaluate at the cycle-0 dry-run.",
+    "long": "A form in `(pure …)` value position is an expression of time —\n`(pure (* 0.5 (+ 1 (sin (* (tau) cycle)))))` — evaluated per hap\nwith `cycle` / `tick` / `seed` bound. At compile time the engine\ndry-runs it once at cycle 0 / seed 0; static validity is\nseed-independent, so cycle 0 catches the whole document-defect class\n— an unbound name, division by zero, an arity error, a resource\nbudget. The leaf then degrades to `silence` and this code is\ncollected. A failure that only appears at a *later* cycle (e.g.\n`(/ 1 (- cycle 2))` at cycle 2) is NOT this code: it is a domain\nhole, so that one hap is silently dropped and the rest of the\npattern queries normally."
+  },
+  {
+    "code": "pattern_value_result_invalid",
+    "short": "A `(pure …)` expression evaluated but produced a value no hap can carry.",
+    "long": "The cycle-0 dry-run of a `(pure …)` expression leaf succeeded, but\nits result is a form, a vector, a date, or a time — none of which a\nhap value can be (a hap carries a symbol / string / keyword /\nnumber / boolean / nil). The most common cause is a misspelled\nfunction name: an unresolved head does not error, it evaluates to a\nform *literal* (SJON's form-construction semantics), which then\nfails this shape check. The leaf degrades to `silence`. Fix the\nname, or have the expression reduce to a scalar."
+  },
+  {
+    "code": "unknown_cross_ref_provider",
+    "short": "Cross-ref `:provider` names an extractor no loaded plugin declares.",
+    "long": "A `(cross-ref :provider p …)` draws its member set from a\n`(cross-ref-provider :name p …)` declared by some plugin. This\nfires when no loaded plugin declares `p`.\n\nUsual causes: the plugin that declares the provider is missing\nfrom `:plugins`, or the name is misspelled. Providers live in\ntheir own catalog, so an expression function or form of the same\nname does not satisfy the reference."
+  },
+  {
+    "code": "ambiguous_cross_ref_provider",
+    "short": "Bare cross-ref `:provider` name is declared by two or more plugins — qualify the spelling.",
+    "long": "Two loaded plugins declare a provider with the same bare name,\nso `:provider uniforms` cannot pick one. Qualify it with the\nowning plugin: `:provider glsl/uniforms`.\n\nSame rule the other bare-or-qualified vocabularies follow —\nforms, expression functions, and value kinds all resolve bare\nnames only when exactly one plugin claims them."
+  },
+  {
+    "code": "cross_ref_source_key_unknown",
+    "short": "The `:source-key` declared on a provider-route `(cross-ref …)` is not a string-typed key on the target form.",
+    "long": "A provider-route cross-ref reads the string under `:source-key`\nfrom each `:target` instance and hands it to the provider. This\nfires when the target form declares no such key, or declares it\nwith a type that is not string-shaped — either way no instance\ncould ever supply the provider with anything, so the member set\nwould silently be empty.\n\n`:source-key` defaults to `src`; declare the key on the target\nform, or point `:source-key` at the key that actually holds the\ncontent."
+  },
+  {
+    "code": "cross_ref_extraction_failed",
+    "short": "A cross-ref provider ran against this source and rejected it, so the set of valid names here is unknown.",
+    "long": "The names this cross-ref accepts are extracted from the string\nunder `:source-key` by the declared provider. The provider ran\nand reported a failure — usually the content itself doesn't\nparse, and the message carries the provider's own explanation.\n\nBecause no member set could be computed, references into this\ntarget are *not* checked: fixing the source restores checking.\nThat is why one broken source produces one diagnostic here\nrather than an \"unknown name\" error at every reference site."
+  },
+  {
+    "code": "cross_ref_provider_unavailable",
+    "short": "The provider backing this cross-ref could not be run, so the set of valid names here is unknown.",
+    "long": "Unlike `cross_ref_extraction_failed`, the provider never ran at\nall. The usual causes are host-side, not document-side: the\ndeclaring plugin was loaded without an executable runtime, its\nWASM module doesn't export the function the manifest's `:impl`\nnames, or this build has plugin execution compiled out.\n\nAs with a failed extraction the target is left unchecked rather\nthan reported as empty, so a host that cannot execute plugins\nvalidates everything else about the document and stays silent\nabout member names it has no way to know."
+  },
+  {
+    "code": "cross_ref_target_collapse",
+    "short": "Two value-kinds cross-reference the same form but disagree on how its member set is built — the first one declared wins.",
+    "long": "A target form's member set is collected once, not once per\nreferring value-kind. When two `(cross-ref …)` declarations name\nthe same target and differ — one reads a `:name-key`, the other\nruns a `:provider`; or they name different keys, providers, or\n`:scope` forms — the first in plugin × value-kind order builds\nthe set and the second's declaration has no effect. References\nthrough the losing kind are still checked, but against the\nwinner's names.\n\nTwo kinds that declare the *same* spec on one target are fine and\nstay silent: that is ordinary aliasing, and both agree on what\nthe members are. To fix a real disagreement, give the kinds\ndistinct `:target` forms, or make the two declarations match."
+  }
+]

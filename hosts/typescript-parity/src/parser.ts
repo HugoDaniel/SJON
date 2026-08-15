@@ -3,16 +3,35 @@
 // Tokenises and parses in one combined pass since the language is
 // LL(1). Produces an array of root nodes; each node is a tree built
 // with constructor objects from `ast.ts`. No comment retention,
-// no spans-on-trivia, no error recovery — a parser-level error
-// throws synchronously and the caller is expected to short-circuit
-// (the conformance corpus inputs are all well-formed at the parser
-// level by construction).
+// no spans-on-trivia.
 //
-// One exception: pure-integer literals that exceed the i64/u64 range
-// don't trip a throw — the parser falls back to `Number.parseFloat`
-// storage and accumulates a `number_overflow_exact_integer` diagnostic
-// into the optional out-param. This mirrors `Parser.zig`'s overflow
-// path (collection over abort) so consumers can keep parsing past a
+// STRUCTURAL RECOVERY. `Parser.zig`'s contract — "trees always exist
+// after parse (possibly partial); collection over abort"
+// (docs/LANGUAGE.md §4.3) — is honoured here for the three *structural* deviations,
+// each emitting an `unspecified` diagnostic and continuing:
+//
+//   * a form left open at end of input   (closed at `source.length`)
+//   * a vector left open at end of input (ditto)
+//   * a close delimiter at top level     (skipped)
+//
+// This is not full parity with `Parser.zig`, which recovers from every
+// deviation. The remaining sites — an unterminated string, an invalid
+// number literal, a close delimiter that mismatches its opener — still
+// throw a `ParseError`. They are listed in
+// `test/parse-recovery.test.ts`, which pins both halves so the split
+// stays deliberate rather than drifting.
+//
+// Recovery needs the semantic path a diagnostic is attributed to, which
+// `Parser.zig` snapshots off its frame stack (`buildPath`). Recursive
+// descent has no such stack, so `frames` mirrors one for attribution
+// only — pushed on entry to a form/vector, popped on exit. See
+// `buildPath` below for the walk it reproduces.
+//
+// Integer literals that exceed the i64/u64 range are a fourth
+// collection-over-abort site: the parser falls back to
+// `Number.parseFloat` storage and accumulates a
+// `number_overflow_exact_integer` diagnostic. This mirrors
+// `Parser.zig`'s overflow path so consumers can keep parsing past a
 // lossy integer literal.
 
 import type { Node, FormNode, Span } from './ast.ts';
@@ -23,6 +42,17 @@ export function parse(source: string, diagOut?: Diagnostic[]): readonly Node[] {
   const out: Node[] = [];
   p.skipWhitespace();
   while (!p.atEnd()) {
+    // A close delimiter with no opener belongs to no form, so it is
+    // reported with an empty path and skipped. `parseNode` would send
+    // it to `parseSymbolOrLiteral`, which throws on the empty
+    // identifier; recovering here keeps every *following* root — the
+    // half of the contract a bare "did it throw?" check misses.
+    const c = p.peek();
+    if (c === ')' || c === ']') {
+      p.recordUnexpectedClose();
+      p.skipWhitespace();
+      continue;
+    }
     out.push(p.parseNode());
     p.skipWhitespace();
   }
@@ -30,13 +60,103 @@ export function parse(source: string, diagOut?: Diagnostic[]): readonly Node[] {
   return out;
 }
 
+/** How a child node is named within its parent: a kvpair key, or a
+ *  positional/element ordinal rendered as a decimal string. */
+interface PathStep {
+  step: string;
+  viaKvpair: boolean;
+}
+
+const NO_STEP: PathStep = { step: '', viaKvpair: false };
+
+/** One entry of the attribution stack mirroring `Parser.zig`'s `Frame`.
+ *  Carries only what `buildPath` reads — no children, no spans. */
+interface PathFrame {
+  kind: 'form' | 'vector';
+  /** Form head; `''` for vectors and for synthetic empty-head forms. */
+  head: string;
+  /** The step naming this frame within its parent: a kvpair key, or a
+   *  positional/element ordinal rendered as a decimal string. */
+  parentStep: string;
+  /** True when this frame is the value of a kvpair, in which case the
+   *  key *and* the head both appear in the path. */
+  parentViaKvpair: boolean;
+}
+
 class Parser {
   private readonly src: string;
   private pos: number = 0;
   readonly diagnostics: Diagnostic[] = [];
+  /** Enclosing forms/vectors, innermost last. Attribution only. */
+  private readonly frames: PathFrame[] = [];
+  /** Set by a parent immediately before descending into a child; taken
+   *  by `parseNode`, which hands it to the child's frame push. Mirrors
+   *  `computeChildStep`. Read through `takePendingStep` only — a step
+   *  left behind by a non-container child (a number, a symbol) would
+   *  otherwise be picked up by the next form pushed, prefixing its path
+   *  with a sibling's key. */
+  private pendingStep: PathStep = NO_STEP;
 
   constructor(src: string) {
     this.src = src;
+  }
+
+  peek(): string | undefined {
+    return this.src[this.pos];
+  }
+
+  /** Snapshot the semantic path of the currently-open frames. Mirrors
+   *  `Parser.zig:buildPath` with `in_progress = false`: per frame, a
+   *  kvpair key (when reached as a kvpair value) followed by the form
+   *  head; vectors contribute their parent step alone. Zig skips its
+   *  root frame — `frames` here holds no root, so the walk is total. */
+  private buildPath(): string[] {
+    const out: string[] = [];
+    for (const f of this.frames) {
+      if (f.parentViaKvpair) {
+        if (f.parentStep.length > 0) out.push(f.parentStep);
+        if (f.kind === 'form' && f.head.length > 0) out.push(f.head);
+      } else {
+        const step = f.kind === 'form' && f.head.length > 0 ? f.head : f.parentStep;
+        if (step.length > 0) out.push(step);
+      }
+    }
+    return out;
+  }
+
+  /** Emit a parser diagnostic against the open frames. Parser syntax
+   *  diagnostics all carry `unspecified`, per `Parser.zig`. */
+  private recordSyntax(message: string, start: number, end: number): void {
+    this.diagnostics.push({
+      code: 'unspecified',
+      message,
+      path: this.buildPath(),
+      span: { start, end },
+      severity: 'err',
+    });
+  }
+
+  /** Report and consume a close delimiter that closes nothing. */
+  recordUnexpectedClose(): void {
+    this.recordSyntax('unexpected close delimiter at top level', this.pos, this.pos + 1);
+    this.pos++;
+  }
+
+  /** Read and clear the step the parent left for this child. */
+  private takePendingStep(): PathStep {
+    const s = this.pendingStep;
+    this.pendingStep = NO_STEP;
+    return s;
+  }
+
+  /** Push the frame a child node opens. */
+  private pushFrame(kind: 'form' | 'vector', head: string, parent: PathStep): void {
+    this.frames.push({
+      kind,
+      head,
+      parentStep: parent.step,
+      parentViaKvpair: parent.viaKvpair,
+    });
   }
 
   atEnd(): boolean {
@@ -60,19 +180,23 @@ class Parser {
 
   parseNode(): Node {
     this.skipWhitespace();
+    // Taken unconditionally: only forms and vectors open a frame, so a
+    // step left for any other node kind must be discarded here rather
+    // than surviving to the next container.
+    const parentStep = this.takePendingStep();
     if (this.atEnd()) {
       throw new ParseError('unexpected end of input', this.pos);
     }
     const c = this.src[this.pos]!;
-    if (c === '(') return this.parseForm();
-    if (c === '[') return this.parseVector();
+    if (c === '(') return this.parseForm(parentStep);
+    if (c === '[') return this.parseVector(parentStep);
     if (c === ':') return this.parseKeyword();
     if (c === '"') return this.parseString();
     if (c === '-' || (c >= '0' && c <= '9')) return this.parseNumber();
     return this.parseSymbolOrLiteral();
   }
 
-  parseForm(): FormNode {
+  parseForm(parentStep: PathStep): FormNode {
     const start = this.pos;
     this.expect('(');
     this.skipWhitespace();
@@ -89,18 +213,29 @@ class Parser {
       head = headRaw.slice(slash + 1);
     }
     const headSpan: Span = { start: headStart, end: headEnd };
+    this.pushFrame('form', head, parentStep);
 
     // Parse children (greedy `:k v` pairing).
     const children: Node[] = [];
+    /** Positional (non-kvpair, non-keyword) children so far — the step
+     *  a positional child is named by. Mirrors `computeChildStep`. */
+    let positionals = 0;
     while (true) {
       this.skipWhitespace();
       if (this.atEnd()) {
-        throw new ParseError('unterminated form', this.pos);
+        // Recovery: close the form at end of input. `Parser.zig`'s
+        // `closeUnclosedFrames` emits before popping, so the path
+        // still names this form — emit while the frame is pushed. In
+        // recursive descent the innermost open frame reaches this
+        // first, which reproduces Zig's innermost-first ordering.
+        this.recordSyntax('unclosed delimiter at end of input', this.pos, this.pos);
+        break;
       }
       if (this.src[this.pos] === ')') {
         this.pos++;
         break;
       }
+      this.pendingStep = { step: String(positionals), viaKvpair: false };
       const ch = this.parseNode();
       if (ch.tag === 'keyword') {
         // Greedy pairing — consume the next non-keyword node as value.
@@ -109,7 +244,7 @@ class Parser {
         // but we mirror the rule for fidelity).
         this.skipWhitespace();
         if (!this.atEnd() && this.src[this.pos] !== ')' && this.src[this.pos] !== ':') {
-          const valueStart = this.pos;
+          this.pendingStep = { step: ch.name, viaKvpair: true };
           const value = this.parseNode();
           children.push({
             tag: 'kvpair',
@@ -118,14 +253,15 @@ class Parser {
             value,
             span: { start: ch.span.start, end: this.pos },
           });
-          void valueStart;
         } else {
           children.push(ch);
         }
       } else {
         children.push(ch);
+        positionals++;
       }
     }
+    this.frames.pop();
 
     const span: Span = { start, end: this.pos };
     return {
@@ -138,19 +274,27 @@ class Parser {
     };
   }
 
-  parseVector(): Node {
+  parseVector(parentStep: PathStep): Node {
     const start = this.pos;
     this.expect('[');
+    this.pushFrame('vector', '', parentStep);
     const elements: Node[] = [];
     while (true) {
       this.skipWhitespace();
-      if (this.atEnd()) throw new ParseError('unterminated vector', this.pos);
+      if (this.atEnd()) {
+        // Recovery, as in `parseForm`. A vector contributes only its
+        // parent step to the path — it has no head of its own.
+        this.recordSyntax('unclosed delimiter at end of input', this.pos, this.pos);
+        break;
+      }
       if (this.src[this.pos] === ']') {
         this.pos++;
         break;
       }
+      this.pendingStep = { step: String(elements.length), viaKvpair: false };
       elements.push(this.parseNode());
     }
+    this.frames.pop();
     return { tag: 'vector', elements, span: { start, end: this.pos } };
   }
 

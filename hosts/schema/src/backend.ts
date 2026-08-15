@@ -12,6 +12,7 @@
 
 // Type-only — `edit.ts` is the leaf and never imports back, so this is fully
 // erasable and introduces no runtime cycle.
+import { FORM_KEY, NS_KEY } from './discriminators.ts';
 import type { EditAction } from './edit.ts';
 import { isFormObject, isRecord } from './internal.ts';
 
@@ -201,18 +202,18 @@ function stampForm(json: unknown, ns: string, head: string): Record<string, unkn
   let obj: unknown = json;
   if (Array.isArray(json)) {
     obj =
-      json.find((r) => isFormObject(r) && r['$form'] === head) ??
+      json.find((r) => isFormObject(r) && r[FORM_KEY] === head) ??
       json.find((r) => isRecord(r) && !isPluginRoot(r)) ??
       json[0];
   }
   const record: Record<string, unknown> = isRecord(obj) ? { ...obj } : {};
-  record['$form'] = head;
-  record['$ns'] = ns;
+  record[FORM_KEY] = head;
+  record[NS_KEY] = ns;
   return record;
 }
 
 function isPluginRoot(r: unknown): boolean {
-  return isRecord(r) && (r['$form'] === 'plugin' || r['$form'] === 'use-plugin');
+  return isRecord(r) && (r[FORM_KEY] === 'plugin' || r[FORM_KEY] === 'use-plugin');
 }
 
 /** Validate `manifest + source`, returning the validated data on success. */

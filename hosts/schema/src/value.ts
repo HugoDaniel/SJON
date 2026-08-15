@@ -33,6 +33,18 @@
 //
 // Lifetime: pure functions over JS-owned immutable data. No allocator handle.
 
+import {
+  CHILDREN_KEY,
+  DATE_KEY,
+  EXPR_KEY,
+  FORM_KEY,
+  KW_KEY,
+  NS_KEY,
+  NUM_KEY,
+  SYM_KEY,
+  TIME_KEY,
+} from './discriminators.ts';
+
 /**
  * A value in SJON's canonical JSON shape — the same shape `toJson` produces
  * and `fromValue` consumes, and the supertype every plan-01 brand
@@ -65,7 +77,7 @@ export interface SjonFormValue {
 }
 
 /** Structural keys that drive a form's shape rather than emit as kvpairs. */
-const FORM_DISCRIMINATORS: ReadonlySet<string> = new Set(['$form', '$ns', '$children']);
+const FORM_DISCRIMINATORS: ReadonlySet<string> = new Set([FORM_KEY, NS_KEY, CHILDREN_KEY]);
 
 /**
  * Serialize a {@link SjonValue} to canonical SJON text.
@@ -142,13 +154,13 @@ function emit(value: unknown): string {
   // Dispatch on discriminators in the same order as `Json.objectToForm`
   // (`Discriminators.atom_keys`: $expr $num $kw $sym $date $time), then $form.
   const obj = value as Record<string, unknown>;
-  if ('$expr' in obj) return emitExpr(obj);
-  if ('$num' in obj) return emitUnit(obj);
-  if ('$kw' in obj) return `:${unescapeKey(stringField(obj, '$kw'))}`;
-  if ('$sym' in obj) return unescapeKey(stringField(obj, '$sym'));
-  if ('$date' in obj) return stringField(obj, '$date');
-  if ('$time' in obj) return stringField(obj, '$time');
-  if ('$form' in obj) return emitForm(obj);
+  if (EXPR_KEY in obj) return emitExpr(obj);
+  if (NUM_KEY in obj) return emitUnit(obj);
+  if (KW_KEY in obj) return `:${unescapeKey(stringField(obj, KW_KEY))}`;
+  if (SYM_KEY in obj) return unescapeKey(stringField(obj, SYM_KEY));
+  if (DATE_KEY in obj) return stringField(obj, DATE_KEY);
+  if (TIME_KEY in obj) return stringField(obj, TIME_KEY);
+  if (FORM_KEY in obj) return emitForm(obj);
   throw new Error(
     'SJON serializeValue: object has no SJON discriminator ' +
       '($form / $expr / $sym / $kw / $date / $time / $num). ' +
@@ -161,7 +173,7 @@ function emitVector(items: readonly unknown[]): string {
 }
 
 function emitExpr(obj: Record<string, unknown>): string {
-  const parts = obj['$expr'];
+  const parts = obj[EXPR_KEY];
   if (!Array.isArray(parts) || parts.length === 0) {
     throw new Error('SJON serializeValue: $expr must be a non-empty array [op, …args].');
   }
@@ -173,7 +185,7 @@ function emitExpr(obj: Record<string, unknown>): string {
 }
 
 function emitUnit(obj: Record<string, unknown>): string {
-  const num = obj['$num'];
+  const num = obj[NUM_KEY];
   if (
     !Array.isArray(num) ||
     num.length !== 2 ||
@@ -186,7 +198,7 @@ function emitUnit(obj: Record<string, unknown>): string {
 }
 
 function emitForm(obj: Record<string, unknown>): string {
-  const head = unescapeKey(stringField(obj, '$form'));
+  const head = unescapeKey(stringField(obj, FORM_KEY));
   const parts: string[] = [`${nsPrefix(obj)}${head}`];
   for (const key of Object.keys(obj)) {
     if (FORM_DISCRIMINATORS.has(key)) continue;
@@ -195,7 +207,7 @@ function emitForm(obj: Record<string, unknown>): string {
     parts.push(`:${unescapeKey(key)}`);
     parts.push(emit(v));
   }
-  const children = obj['$children'];
+  const children = obj[CHILDREN_KEY];
   if (children !== undefined) {
     if (!Array.isArray(children)) {
       throw new Error('SJON serializeValue: $children must be an array of values.');
@@ -211,7 +223,7 @@ function emitForm(obj: Record<string, unknown>): string {
 
 /** `(<ns>/` when the object carries a string `$ns`, else `""`. */
 function nsPrefix(obj: Record<string, unknown>): string {
-  const ns = obj['$ns'];
+  const ns = obj[NS_KEY];
   return typeof ns === 'string' ? `${ns}/` : '';
 }
 

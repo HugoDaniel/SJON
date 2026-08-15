@@ -1,0 +1,20 @@
+; A form whose head is in the `event` alternative's head-set (`n` / `rest`)
+; is accepted through the union on both validation paths — the complement of
+; `union-form-reject`.
+(plugin :name ev :version "1.0.0"
+  (value-kind :name note-or-rest
+    :underlying symbol
+    :members (member-set :values [E4 G4 _]))
+  (value-kind :name event
+    :underlying form
+    :heads (head-set :names [n rest]))
+  (value-kind :name note-or-event
+    :underlying union
+    :union (union-shape :alternatives [note-or-rest event]))
+  (form :name track
+    (key :name ev :type note-or-event))
+  (form :name n :positional any)
+  (form :name rest :positional any)
+  (form :name other :positional any))
+
+(track :ev (n E4))

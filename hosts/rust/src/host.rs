@@ -107,6 +107,28 @@ impl SjonHost {
         Ok(result)
     }
 
+    /// Query a pattern document (`PatternQuery` over WASM) on the half-open
+    /// tick window `[begin, end)` with RNG `seed`. Returns the framed SJON
+    /// text — `(haps …)` on success, `(diagnostics …)` when the query
+    /// collected any. The pattern vocabulary is built into the artifact, so
+    /// no resolver / plugin schema is needed.
+    pub fn query_pattern(
+        &mut self,
+        source: &str,
+        begin: i64,
+        end: i64,
+        seed: i64,
+    ) -> Result<String, SjonHostError> {
+        let payload = self
+            .wasm
+            .call_query_pattern(source.as_bytes(), begin, end, seed)
+            .map_err(|err| SjonHostError::WasmCall {
+                export: "sjon_query_pattern",
+                source: err,
+            })?;
+        Ok(String::from_utf8_lossy(&payload).into_owned())
+    }
+
     fn encode_wasm_options(&self, options: &HostOptions) -> Result<Vec<u8>, SjonHostError> {
         let wasm_opts = WasmHostOptions {
             project_root: options.project_root.as_deref(),

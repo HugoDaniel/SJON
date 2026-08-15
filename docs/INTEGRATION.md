@@ -1,5 +1,9 @@
 # Integrating SJON
 
+> **Embedding the engine** in your own program? You're in the right
+> place. **Setting up an editor** (LSP, syntax highlighting) or using the
+> `sjon` CLI lives in [docs/TOOLING.md](TOOLING.md).
+
 SJON ships as a Zig library with three reference host wrappers that
 re-expose the same engine in other ecosystems. Pick the row that
 matches your runtime; every host shares the diagnostic vocabulary, the
@@ -62,6 +66,31 @@ verification — not a published package. Use it as a starting point
 when porting SJON to another platform, or to reproduce diagnostics in
 a TypeScript test harness. See
 [hosts/typescript-parity/README.md](../hosts/typescript-parity/README.md).
+
+## Choosing your type-sync lane
+
+Two ways to keep host-language types and the SJON schema in lockstep —
+pick by where the source of truth lives:
+
+- **Builder-first** (`hosts/schema`, `@sjon/schema`) — you own the
+  schema in TypeScript. Build it with the fluent builder, take static
+  types via `s.infer<typeof Form>`, and serialize the canonical
+  manifest with `.manifest()` when a host needs it. Zero codegen: the
+  static type and the emitted `.d.ts` agree by construction
+  (`s.infer` is the compile-time mirror of
+  `exportSchema(manifest()).tsTypes`). Start at
+  [hosts/schema/README.md](../hosts/schema/README.md).
+- **Manifest-first** (`sjon export-schema`) — the `.sjon` manifest is
+  the source of truth (hand-written, or produced by another team).
+  Wire `sjon export-schema plugin.sjon --target=typescript
+  --output=src/generated` into your build and treat the emitted
+  `.d.ts` like any other generated artifact; in CI, re-run the export
+  and fail on diff (the repo's own golden discipline). Full mapping
+  reference: [docs/SCHEMA_EXPORT.md](SCHEMA_EXPORT.md); `--target=markdown`
+  renders the same descriptors as human reference pages.
+
+Both lanes meet at the same place — a manifest any host validates
+against — so switching later is a build-step change, not a rewrite.
 
 ## Cross-host parity contract
 

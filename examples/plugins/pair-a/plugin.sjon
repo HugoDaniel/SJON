@@ -1,0 +1,26 @@
+; First half of the per-plugin layout fixture pair.
+;
+; `pair-a` declares a `(palette …)` form whose `:swatch` slot is a
+; head-set referencing `(color …)` and `(gradient …)` — both of which
+; live in `pair-b`. The per-plugin emit produces:
+;
+;   * `pair-a.schema.json` with `$ref` paths that resolve to
+;     `./pair-b.schema.json#/$defs/form.pair-b.color` (sibling file).
+;   * `pair-a.d.ts` with `import type { PairB_Color } from "./pair-b";`
+;     at the top, then a `Palette` interface that unions over the
+;     imported types for the `swatch` slot.
+;
+; The aggregated emit folds both plugins into one schema and one .d.ts
+; with no cross-file refs.
+
+(plugin :name pair-a :version "1.0.0"
+  (value-kind :name swatch-form
+    :description "Either a colour or a gradient — both declared in `pair-b`."
+    :underlying form
+    :heads (head-set :names [color gradient]))
+
+  (form :name palette
+    :description "Named palette holding one cross-plugin form per slot."
+    (key :name name :type symbol)
+    (key :name primary :type swatch-form)
+    (key :name accent :type swatch-form :optional true)))

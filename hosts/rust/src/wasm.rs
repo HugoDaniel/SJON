@@ -145,6 +145,7 @@ pub(crate) struct SjonWasm {
     host_validate: TypedFunc<(u32, u32, u32, u32), u32>,
     host_eval_expr: TypedFunc<(u32, u32, u32, u32), u32>,
     export_schema: TypedFunc<(u32, u32, u32, u32), u32>,
+    query_pattern: TypedFunc<(u32, u32, i64, i64, i64), u32>,
 }
 
 impl SjonWasm {
@@ -201,6 +202,10 @@ impl SjonWasm {
             .get_typed_func::<(u32, u32, u32, u32), u32>(&mut store, "sjon_export_schema")
             .context("getting sjon_export_schema export")
             .map_err(LoadError::Instantiate)?;
+        let query_pattern = instance
+            .get_typed_func::<(u32, u32, i64, i64, i64), u32>(&mut store, "sjon_query_pattern")
+            .context("getting sjon_query_pattern export")
+            .map_err(LoadError::Instantiate)?;
 
         Ok(Self {
             store,
@@ -210,6 +215,7 @@ impl SjonWasm {
             host_validate,
             host_eval_expr,
             export_schema,
+            query_pattern,
         })
     }
 
@@ -250,6 +256,49 @@ impl SjonWasm {
     ) -> wasmtime::Result<Vec<u8>> {
         let fn_handle = self.export_schema.clone();
         self.call_two_buffer_export(fn_handle, "sjon_export_schema", source, options)
+    }
+
+    /// Run `sjon_query_pattern(source, begin, end, seed)`. Returns the raw
+    /// framed SJON text — `(haps …)` or `(diagnostics …)`. The three tick
+    /// args cross the i64 ABI boundary directly.
+    pub(crate) fn call_query_pattern(
+        &mut self,
+        source: &[u8],
+        begin: i64,
+        end: i64,
+        seed: i64,
+    ) -> wasmtime::Result<Vec<u8>> {
+        let src_alloc_len = u32_len(source.len().max(1));
+        let src_ptr = self
+            .alloc
+            .call(&mut self.store, src_alloc_len)
+            .map_err(|e| e.context("sjon_alloc(source)"))?;
+        if src_ptr == 0 {
+            return Err(wasmtime::Error::msg(
+                "sjon_alloc returned null for source buffer (OOM in WASM)",
+            ));
+        }
+        let handle = self.query_pattern.clone();
+        let result = (|| -> wasmtime::Result<Vec<u8>> {
+            if !source.is_empty() {
+                self.memory
+                    .write(&mut self.store, src_ptr as usize, source)
+                    .map_err(|e| {
+                        wasmtime::Error::from(e).context("writing source bytes into wasm memory")
+                    })?;
+            }
+            let result_ptr = handle
+                .call(
+                    &mut self.store,
+                    (src_ptr, u32_len(source.len()), begin, end, seed),
+                )
+                .map_err(|e| e.context("sjon_query_pattern"))?;
+            self.read_framed(result_ptr)
+        })();
+        let free_src = self.free.call(&mut self.store, (src_ptr, src_alloc_len));
+        let payload = result?;
+        free_src.map_err(|e| e.context("sjon_free(source)"))?;
+        Ok(payload)
     }
 
     /// Shared marshalling skeleton for both two-buffer host exports.
@@ -417,6 +466,86 @@ fn host_resolve(mut caller: Caller<'_, StoreData>, ref_ptr: u32, ref_len: u32) -
     frame_payload(&mut caller, true, &json)
 }
 
+/// The manifest identity a host needs before a full load: the plugin's
+/// own `:name` and every declared `:impl "wasm:<export>"` name, across
+/// both catalogs that can declare one. Mirrors the framed JSON
+/// `sjon_manifest_meta` returns.
+#[derive(serde::Deserialize)]
+struct ManifestMeta {
+    name: Option<String>,
+    wasm_impls: Vec<String>,
+}
+
+/// Read a manifest's [`ManifestMeta`] via the host's own
+/// `sjon_manifest_meta` export — a structural walk (parse → load →
+/// plugin fields) that can't be fooled by source order, unlike the
+/// retired byte-walker which anchored on the FIRST `:name` and so
+/// mis-keyed a plugin whose own `:name` trailed a nested
+/// `(expr-func :name …)`.
+///
+/// Runs re-entrantly on the main instance during resolver-bridge
+/// pre-flight (this handler is itself a callback out of a running
+/// `sjon_host_validate_document`). Safe: the export neither resolves
+/// plugins nor re-enters the host, and its `sjon_alloc`/`sjon_free` pair
+/// is balanced before it returns — the same re-entrant marshalling
+/// `frame_payload` already performs. Returns `None` on any marshalling
+/// failure (missing export, alloc null, memory fault, `ok=0`, malformed
+/// JSON); the caller treats that like "no plugin" and skips pre-flight.
+fn read_manifest_meta(caller: &mut Caller<'_, StoreData>, source: &str) -> Option<ManifestMeta> {
+    let alloc = caller
+        .get_export("sjon_alloc")
+        .and_then(Extern::into_func)?
+        .typed::<u32, u32>(&caller)
+        .ok()?;
+    let free = caller
+        .get_export("sjon_free")
+        .and_then(Extern::into_func)?
+        .typed::<(u32, u32), ()>(&caller)
+        .ok()?;
+    let meta_fn = caller
+        .get_export("sjon_manifest_meta")
+        .and_then(Extern::into_func)?
+        .typed::<(u32, u32), u32>(&caller)
+        .ok()?;
+    let memory = caller.get_export("memory").and_then(Extern::into_memory)?;
+
+    let src = source.as_bytes();
+    // sjon_alloc(0) returns null; reserve a byte for an empty source so
+    // the pointer stays well-formed.
+    let src_alloc_len = u32_len(src.len().max(1));
+    let src_ptr = alloc.call(&mut *caller, src_alloc_len).ok()?;
+    if src_ptr == 0 {
+        return None;
+    }
+    let payload = (|| -> Option<Vec<u8>> {
+        if !src.is_empty() {
+            memory.write(&mut *caller, src_ptr as usize, src).ok()?;
+        }
+        let result_ptr = meta_fn
+            .call(&mut *caller, (src_ptr, u32_len(src.len())))
+            .ok()?;
+        if result_ptr == 0 {
+            return None;
+        }
+        let mut header = [0u8; HEADER_BYTES];
+        memory
+            .read(&*caller, result_ptr as usize, &mut header)
+            .ok()?;
+        let ok = read_u32_le(&header[0..4]);
+        let len = read_u32_le(&header[4..8]) as usize;
+        let mut body = vec![0u8; len];
+        if len > 0 {
+            memory
+                .read(&*caller, result_ptr as usize + HEADER_BYTES, &mut body)
+                .ok()?;
+        }
+        let _ = free.call(&mut *caller, (result_ptr, u32_len(HEADER_BYTES + len)));
+        (ok == 1).then_some(body)
+    })();
+    let _ = free.call(&mut *caller, (src_ptr, src_alloc_len));
+    serde_json::from_slice(&payload?).ok()
+}
+
 /// Instantiate `bytes` with empty imports and pre-flight per spec
 /// `docs/executable-plugin-abi.md` §§5-7. On success, register the
 /// instance in `caller.data_mut().plugins` keyed by the manifest's
@@ -439,7 +568,13 @@ fn preflight_and_register(
     source: &str,
     bytes: &[u8],
 ) -> std::result::Result<(), PluginLoadErr> {
-    let Some(plugin_name) = extract_plugin_name(source) else {
+    // Structural `:name` + `:impl` read via `sjon_manifest_meta`. A read
+    // failure or a nameless manifest means "nothing to key the pool on" —
+    // skip pre-flight and let the loader emit `invalid_manifest`.
+    let Some(meta) = read_manifest_meta(caller, source) else {
+        return Ok(());
+    };
+    let Some(plugin_name) = meta.name else {
         return Ok(());
     };
     let engine = caller.data().engine.clone();
@@ -466,7 +601,8 @@ fn preflight_and_register(
     verify_abi_version(&instance, &mut plugin_store, &plugin_name)?;
     let (alloc, free, memory) =
         require_standard_exports(&instance, &mut plugin_store, &plugin_name)?;
-    let exports = collect_impl_exports(&instance, &mut plugin_store, source, &plugin_name)?;
+    let exports =
+        collect_impl_exports(&instance, &mut plugin_store, &meta.wasm_impls, &plugin_name)?;
 
     // First-wins: if a plugin with this `:name` is already registered,
     // keep the existing instance. Zig's manifest-load dedupe later emits
@@ -564,15 +700,20 @@ fn require_standard_exports(
 /// Build the per-manifest `:impl "wasm:<name>"` typed-func table. Same
 /// missing-vs-wrong-sig split as the standard exports: every impl is
 /// contractually `(i32, i32) -> i32`.
+///
+/// `impls` is undiscriminated across both catalogs that can declare an
+/// export — expr-funcs and cross-ref providers — because pre-flight asks
+/// them the same question. A provider call is an ordinary plugin call,
+/// right down to the signature.
 fn collect_impl_exports(
     instance: &wasmtime::Instance,
     plugin_store: &mut Store<()>,
-    source: &str,
+    impls: &[String],
     plugin_name: &str,
 ) -> std::result::Result<HashMap<String, PluginImplFn>, PluginLoadErr> {
     let mut exports: HashMap<String, PluginImplFn> = HashMap::new();
-    for name in extract_wasm_impl_names(source) {
-        let Some(f) = instance.get_func(&mut *plugin_store, &name) else {
+    for name in impls {
+        let Some(f) = instance.get_func(&mut *plugin_store, name) else {
             return Err((
                 "plugin_export_missing".to_string(),
                 format!(
@@ -588,7 +729,7 @@ fn collect_impl_exports(
                 ),
             )
         })?;
-        exports.insert(name, typed);
+        exports.insert(name.clone(), typed);
     }
     Ok(exports)
 }
@@ -823,9 +964,11 @@ pub fn parse_invoke_request(buf: &[u8]) -> Option<(String, String, Vec<u8>)> {
 }
 
 /// Allocate sjon memory, write a `[u32 ok][u32 len][payload]` frame into
-/// it, and return the pointer. The Zig invoker frees `8 + len` after
-/// reading.
-fn frame_invoke_payload(caller: &mut Caller<'_, StoreData>, ok: u32, payload: &[u8]) -> u32 {
+/// it, and return the pointer (0 on any alloc/write failure). The single
+/// frame writer behind both `frame_payload` (boolean `ok`) and
+/// `frame_invoke_payload` (the plugin's raw `ok`, passed through
+/// verbatim). Caller frees `8 + len` after reading.
+fn write_frame(caller: &mut Caller<'_, StoreData>, ok_bits: u32, payload: &[u8]) -> u32 {
     let total = HEADER_BYTES + payload.len();
     let Some(alloc) = caller
         .get_export("sjon_alloc")
@@ -844,7 +987,7 @@ fn frame_invoke_payload(caller: &mut Caller<'_, StoreData>, ok: u32, payload: &[
         return 0;
     }
     let mut header = [0u8; HEADER_BYTES];
-    header[0..4].copy_from_slice(&ok.to_le_bytes());
+    header[0..4].copy_from_slice(&ok_bits.to_le_bytes());
     header[4..8].copy_from_slice(&u32_len(payload.len()).to_le_bytes());
     if memory.write(&mut *caller, ptr as usize, &header).is_err() {
         return 0;
@@ -857,6 +1000,15 @@ fn frame_invoke_payload(caller: &mut Caller<'_, StoreData>, ok: u32, payload: &[
         return 0;
     }
     ptr
+}
+
+/// Frame the plugin's invoke result, passing its raw `ok` field through
+/// verbatim. The Zig invoker distinguishes `ok == 1` from everything
+/// else, and the Web host splices the plugin's header through unchanged
+/// (`reframeIntoSjon`), so an out-of-contract `ok` must stay
+/// out-of-contract here too — do not normalise to a bool.
+fn frame_invoke_payload(caller: &mut Caller<'_, StoreData>, ok: u32, payload: &[u8]) -> u32 {
+    write_frame(caller, ok, payload)
 }
 
 /// Build a structured-error frame (`PluginValueCodec.encodeErrFrame`
@@ -876,133 +1028,14 @@ fn frame_invoke_error(caller: &mut Caller<'_, StoreData>, code: &str, detail: &s
     frame_invoke_payload(caller, 0, &payload)
 }
 
-/// Pull the manifest's plugin `:name` out of `source`. Mirrors the JS
-/// regex `/\(\s*plugin\s+[^)]*?:name\s+([A-Za-z_][\w-]*)/` — anchor on
-/// the first `(plugin` form, scan its body up to (but not across) the
-/// next `)`, and capture the identifier following `:name`. Returns
-/// `None` if no `:name` is present in the first plugin form; the loader
-/// then emits `invalid_manifest` and pre-flight is a no-op.
-fn extract_plugin_name(source: &str) -> Option<String> {
-    let bytes = source.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != b'(' {
-            i += 1;
-            continue;
-        }
-        let mut j = i + 1;
-        while j < bytes.len() && (bytes[j] as char).is_ascii_whitespace() {
-            j += 1;
-        }
-        if j + 6 > bytes.len()
-            || &bytes[j..j + 6] != b"plugin"
-            || !(bytes[j + 6] as char).is_ascii_whitespace()
-        {
-            i = j;
-            continue;
-        }
-        // We're inside the first `(plugin …)` form's body — scan up to
-        // (but not across) the matching `)`. Same behavior as the JS
-        // regex's `[^)]*?`.
-        let mut k = j + 7;
-        while k < bytes.len() && bytes[k] != b')' {
-            if bytes[k..].starts_with(b":name") {
-                let mut s = k + 5;
-                while s < bytes.len() && (bytes[s] as char).is_ascii_whitespace() {
-                    s += 1;
-                }
-                let start = s;
-                if s < bytes.len() && (bytes[s].is_ascii_alphabetic() || bytes[s] == b'_') {
-                    s += 1;
-                    while s < bytes.len()
-                        && (bytes[s].is_ascii_alphanumeric()
-                            || bytes[s] == b'_'
-                            || bytes[s] == b'-')
-                    {
-                        s += 1;
-                    }
-                    return std::str::from_utf8(&bytes[start..s]).ok().map(String::from);
-                }
-            }
-            k += 1;
-        }
-        return None;
-    }
-    None
-}
-
-/// Collect every `:impl "wasm:<name>"` export name declared by `source`.
-/// Used by pre-flight to verify the plugin binary actually defines each
-/// referenced export.
-fn extract_wasm_impl_names(source: &str) -> Vec<String> {
-    let bytes = source.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if !bytes[i..].starts_with(b":impl") {
-            i += 1;
-            continue;
-        }
-        let mut j = i + 5;
-        while j < bytes.len() && (bytes[j] as char).is_ascii_whitespace() {
-            j += 1;
-        }
-        if j >= bytes.len() || bytes[j] != b'"' {
-            i += 5;
-            continue;
-        }
-        let body_start = j + 1;
-        let mut k = body_start;
-        while k < bytes.len() && bytes[k] != b'"' {
-            k += 1;
-        }
-        if k > body_start && bytes[body_start..k].starts_with(b"wasm:") {
-            let name_start = body_start + 5;
-            if let Ok(name) = std::str::from_utf8(&bytes[name_start..k]) {
-                out.push(name.to_string());
-            }
-        }
-        i = k + 1;
-    }
-    out
-}
-
 fn frame_error(caller: &mut Caller<'_, StoreData>, message: &str) -> u32 {
     frame_payload(caller, false, message.as_bytes())
 }
 
+/// Frame a boolean-tagged payload (`ok=1` → JSON result / `ok=0` → UTF-8
+/// error name), the shape every non-invoke host export returns.
 fn frame_payload(caller: &mut Caller<'_, StoreData>, ok: bool, payload: &[u8]) -> u32 {
-    let total = HEADER_BYTES + payload.len();
-    let Some(alloc) = caller
-        .get_export("sjon_alloc")
-        .and_then(Extern::into_func)
-        .and_then(|f| f.typed::<u32, u32>(&caller).ok())
-    else {
-        return 0;
-    };
-    let Some(memory) = caller.get_export("memory").and_then(Extern::into_memory) else {
-        return 0;
-    };
-    let Ok(ptr) = alloc.call(&mut *caller, u32_len(total)) else {
-        return 0;
-    };
-    if ptr == 0 {
-        return 0;
-    }
-    let mut header = [0u8; HEADER_BYTES];
-    header[0..4].copy_from_slice(&u32::from(ok).to_le_bytes());
-    header[4..8].copy_from_slice(&u32_len(payload.len()).to_le_bytes());
-    if memory.write(&mut *caller, ptr as usize, &header).is_err() {
-        return 0;
-    }
-    if !payload.is_empty()
-        && memory
-            .write(&mut *caller, ptr as usize + HEADER_BYTES, payload)
-            .is_err()
-    {
-        return 0;
-    }
-    ptr
+    write_frame(caller, u32::from(ok), payload)
 }
 
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {

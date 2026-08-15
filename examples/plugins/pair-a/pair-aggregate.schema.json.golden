@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 1,
+  "x-sjon-export-warnings": [
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `swatch-form` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin": "pair-a",
+      "kind": "swatch-form"
+    }
+  ],
+  "$defs": {
+    "form.pair-a.palette": {
+      "type": "object",
+      "description": "Named palette holding one cross-plugin form per slot.",
+      "properties": {
+        "$form": {
+          "const": "palette"
+        },
+        "$ns": {
+          "const": "pair-a"
+        },
+        "accent": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/form.pair-b.color"
+            },
+            {
+              "$ref": "#/$defs/form.pair-b.gradient"
+            }
+          ],
+          "x-sjon-head-set": [
+            "color",
+            "gradient"
+          ]
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "primary": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/form.pair-b.color"
+            },
+            {
+              "$ref": "#/$defs/form.pair-b.gradient"
+            }
+          ],
+          "x-sjon-head-set": [
+            "color",
+            "gradient"
+          ]
+        }
+      },
+      "required": [
+        "$form",
+        "name",
+        "primary"
+      ],
+      "additionalProperties": false
+    },
+    "form.pair-b.color": {
+      "type": "object",
+      "description": "A solid colour swatch.",
+      "properties": {
+        "$form": {
+          "const": "color"
+        },
+        "$ns": {
+          "const": "pair-b"
+        },
+        "hex": {
+          "description": "Hex `#RRGGBB`.",
+          "type": "string"
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "$form",
+        "hex"
+      ],
+      "additionalProperties": false
+    },
+    "form.pair-b.gradient": {
+      "type": "object",
+      "description": "A two-stop linear gradient.",
+      "properties": {
+        "$form": {
+          "const": "gradient"
+        },
+        "$ns": {
+          "const": "pair-b"
+        },
+        "angle": {
+          "type": "number"
+        },
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "$form",
+        "from",
+        "to"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.pair-a.palette"
+    },
+    {
+      "$ref": "#/$defs/form.pair-b.color"
+    },
+    {
+      "$ref": "#/$defs/form.pair-b.gradient"
+    }
+  ]
+}

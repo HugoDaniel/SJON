@@ -1,7 +1,8 @@
 // Default Node `fs`-backed resolver for `SjonHost`. Mirrors
 // `hosts/typescript-parity/src/FilesystemResolver.ts` semantics:
 //
-//   1. Read `sjon-project.sjon`, walk `(project :plugins […])`.
+//   1. Read `sjon-project.sjon`, walk `(project :plugins […])`. An
+//      entry is a path string or a `(plugin-entry :path "…" …)` form.
 //   2. For each entry, read the manifest, parse its top-level
 //      `(plugin :name <symbol> …)` to extract the name, index by name.
 //   3. Duplicate `:name` → `duplicate_plugin_name` diagnostic.
@@ -14,14 +15,18 @@
 // under `phase: 'manifest'` exactly like Zig's `Host.validateDocument`
 // drains its own FilesystemResolver project diagnostics.
 //
-// The micro-parser only handles the SJON subset needed for the project
-// file (`(project :plugins ["…" …])`) and the manifest `:name`
-// extraction. Full SJON parsing lives in the WASM artifact for the
-// actual document validation pass — this is intentionally separate so
-// the resolver can index manifests *before* the WASM is loaded.
+// The SJON-subset parser it uses (`./sjonSubsetParser.ts`, shared with
+// the conformance runner) only handles what the project file
+// (`(project :plugins ["…" …])`) and the manifest `:name` extraction
+// need. Full SJON parsing lives in the WASM artifact for the actual
+// document validation pass — this is intentionally separate so the
+// resolver can index manifests *before* the WASM is loaded.
 
 import { readFileSync } from 'node:fs';
 import { resolve as resolvePath, isAbsolute } from 'node:path';
+import { errMsg } from './errMsg.ts';
+import { parseNode, RESOLVER_DIALECT, skipTrivia } from './sjonSubsetParser.ts';
+import type { Cursor, FormNode, ParsedNode } from './sjonSubsetParser.ts';
 import type { HostDiagnostic, ResolverFn } from './types.ts';
 
 /**
@@ -167,17 +172,68 @@ function loadProjectFile(
   }
 }
 
+/**
+ * Reduce one `:plugins` entry to the manifest path it names, or null
+ * after pushing a diagnostic. Mirrors `indexOneManifest`'s entry switch
+ * in `src/FilesystemResolver.zig` — a bare path string, or a
+ * `(plugin-entry :path "…" …)` form.
+ *
+ * `:version` and `:hash` are *project-level* pins, parsed by the
+ * reference resolver only to cross-check them against the document's
+ * `(use-plugin …)` pins and emit `pin_disagreement`. That check is
+ * FilesystemResolver-local by design (a deliberate parity boundary:
+ * the project file is one resolver's config format, not a language
+ * surface), so they are accepted and inert here — as are the
+ * forward-compat `:optional` and the reserved `:as`. Accepting the
+ * *syntax* is not optional: rejecting the form outright, as this did
+ * until now, made a project file the reference accepts fail on three of
+ * the four hosts. Enforcement of the document's own pins is unaffected —
+ * it happens above the resolver, in `SjonHost`.
+ */
+function entryManifestPath(elem: ParsedNode, diagnostics: HostDiagnostic[]): string | null {
+  if (elem.tag === 'string') return elem.value;
+  if (elem.tag !== 'form') {
+    diagnostics.push(
+      projectDiag(
+        'invalid_manifest',
+        '`:plugins` entries must be a path string or `(plugin-entry …)` form',
+      ),
+    );
+    return null;
+  }
+  if (elem.head !== 'plugin-entry') {
+    diagnostics.push(
+      projectDiag(
+        'invalid_manifest',
+        '`:plugins` entries must be a path string or `(plugin-entry …)`; ' +
+          `got \`(${elem.head} …)\``,
+      ),
+    );
+    return null;
+  }
+  let path = '';
+  for (const child of elem.children) {
+    if (child.tag !== 'kvpair') continue;
+    if (child.key === 'path' && child.value.tag === 'string') path = child.value.value;
+  }
+  if (path === '') {
+    diagnostics.push(
+      projectDiag('invalid_manifest', '`(plugin-entry …)` requires a `:path` string'),
+    );
+    return null;
+  }
+  return path;
+}
+
 function indexOneManifest(
   projectRoot: string,
   elem: ParsedNode,
   nameIndex: Map<string, ManifestEntry>,
   diagnostics: HostDiagnostic[],
 ): void {
-  if (elem.tag !== 'string') {
-    diagnostics.push(projectDiag('invalid_manifest', '`:plugins` entries must be path strings'));
-    return;
-  }
-  const manifestPath = resolveAgainstRoot(projectRoot, elem.value);
+  const relPath = entryManifestPath(elem, diagnostics);
+  if (relPath === null) return;
+  const manifestPath = resolveAgainstRoot(projectRoot, relPath);
   let manifestSource: string;
   try {
     manifestSource = readFileSync(manifestPath, 'utf8');
@@ -248,49 +304,17 @@ function projectDiag(code: string, message: string): HostDiagnostic {
   };
 }
 
-function errMsg(err: unknown): string {
-  if (err && typeof err === 'object' && 'message' in err) {
-    return (err as { message: string }).message;
-  }
-  return String(err);
-}
-
-// ---------------------------------------------------------------------------
-// Tiny SJON-subset parser
-// ---------------------------------------------------------------------------
-//
-// Handles only what `sjon-project.sjon` and `(plugin :name … …)`
-// manifests need: forms, kvpairs (greedy `:k v`), vectors, strings,
-// symbols, line comments (`;`), and any whitespace. Ignores numbers /
-// booleans / nested structures past what we actually walk. The full
-// validating parser lives in `sjon.wasm` and runs against the document
-// itself; this is just the bootstrap so the resolver can index
-// manifests before WASM is loaded.
-
-type FormNode = { tag: 'form'; head: string; children: ParsedNode[] };
-
-type ParsedNode =
-  | FormNode
-  | { tag: 'kvpair'; key: string; value: ParsedNode }
-  | { tag: 'vector'; elements: ParsedNode[] }
-  | { tag: 'string'; value: string }
-  | { tag: 'symbol'; value: string }
-  | { tag: 'other' };
-
-interface Cursor {
-  src: string;
-  i: number;
-}
-
 /**
- * Parse a single top-level form. Returns `null` for an empty source
- * (whitespace + comments only). Throws on any structural error.
+ * Parse a single top-level form from a manifest / project file. Returns
+ * `null` for an empty source (whitespace + comments only); throws on any
+ * structural error. Uses the shared subset parser with the resolver
+ * dialect (bare `:` stays a `:`-prefixed symbol; no time literals).
  */
 function parseProjectFile(source: string): FormNode | null {
   const cursor: Cursor = { src: source, i: 0 };
   skipTrivia(cursor);
   if (cursor.i >= cursor.src.length) return null;
-  const node = parseNode(cursor);
+  const node = parseNode(cursor, RESOLVER_DIALECT);
   if (node.tag !== 'form') {
     throw new Error('expected a form at top level');
   }
@@ -299,124 +323,4 @@ function parseProjectFile(source: string): FormNode | null {
     throw new Error('expected a single top-level form');
   }
   return node;
-}
-
-function skipTrivia(c: Cursor): void {
-  while (c.i < c.src.length) {
-    const ch = c.src[c.i];
-    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
-      c.i++;
-    } else if (ch === ';') {
-      while (c.i < c.src.length && c.src[c.i] !== '\n') c.i++;
-    } else break;
-  }
-}
-
-function parseNode(c: Cursor): ParsedNode {
-  skipTrivia(c);
-  if (c.i >= c.src.length) throw new Error('unexpected end of input');
-  const ch = c.src[c.i];
-  if (ch === '(') return parseForm(c);
-  if (ch === '[') return parseVector(c);
-  if (ch === '"') return parseString(c);
-  if (ch === ':') {
-    // Bare keyword without a paired value is uncommon outside kvpair
-    // context; treat as a symbol-like token (we never use it as a value).
-    c.i++;
-    const key = readSymbol(c);
-    return { tag: 'symbol', value: ':' + key };
-  }
-  return parseAtom(c);
-}
-
-function parseForm(c: Cursor): ParsedNode {
-  c.i++; // consume '('
-  skipTrivia(c);
-  const head = readSymbol(c);
-  const children: ParsedNode[] = [];
-  while (true) {
-    skipTrivia(c);
-    if (c.i >= c.src.length) throw new Error('unterminated form');
-    if (c.src[c.i] === ')') {
-      c.i++;
-      return { tag: 'form', head, children };
-    }
-    if (c.src[c.i] === ':') {
-      c.i++;
-      const key = readSymbol(c);
-      skipTrivia(c);
-      const value = parseNode(c);
-      children.push({ tag: 'kvpair', key, value });
-      continue;
-    }
-    children.push(parseNode(c));
-  }
-}
-
-function parseVector(c: Cursor): ParsedNode {
-  c.i++; // consume '['
-  const elements: ParsedNode[] = [];
-  while (true) {
-    skipTrivia(c);
-    if (c.i >= c.src.length) throw new Error('unterminated vector');
-    if (c.src[c.i] === ']') {
-      c.i++;
-      return { tag: 'vector', elements };
-    }
-    elements.push(parseNode(c));
-  }
-}
-
-function parseString(c: Cursor): ParsedNode {
-  c.i++; // consume '"'
-  let out = '';
-  while (c.i < c.src.length) {
-    const ch = c.src[c.i];
-    if (ch === '"') {
-      c.i++;
-      return { tag: 'string', value: out };
-    }
-    if (ch === '\\') {
-      c.i++;
-      const esc = c.src[c.i];
-      if (esc === 'n') out += '\n';
-      else if (esc === 'r') out += '\r';
-      else if (esc === 't') out += '\t';
-      else out += esc;
-      c.i++;
-    } else {
-      out += ch;
-      c.i++;
-    }
-  }
-  throw new Error('unterminated string');
-}
-
-function parseAtom(c: Cursor): ParsedNode {
-  const value = readSymbol(c);
-  if (value.length === 0) throw new Error(`unexpected character \`${c.src[c.i]}\``);
-  return { tag: 'symbol', value };
-}
-
-function readSymbol(c: Cursor): string {
-  const start = c.i;
-  while (c.i < c.src.length) {
-    const ch = c.src[c.i];
-    if (
-      ch === '(' ||
-      ch === ')' ||
-      ch === '[' ||
-      ch === ']' ||
-      ch === '"' ||
-      ch === ':' ||
-      ch === ' ' ||
-      ch === '\t' ||
-      ch === '\n' ||
-      ch === '\r' ||
-      ch === ';'
-    )
-      break;
-    c.i++;
-  }
-  return c.src.slice(start, c.i);
 }

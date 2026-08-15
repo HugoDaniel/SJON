@@ -1,0 +1,23 @@
+; Example usage of the `xref` plugin. Each variant of `:cross-ref` is
+; exercised:
+;
+;   * bare cross-ref — `(edge :from a)` references a declared `(node :id a)`
+;   * acyclic — `(node :parent a)` chains nodes without cycling
+;   * scope-form — `(edge :phrase intro)` references a `(phrase :name intro)`
+;     declared inside the enclosing `(piece …)`
+;   * provider — `(edge :uniform u_time)` references a name the `uniforms`
+;     provider extracts from `(shader :code …)`. This fixture declares that
+;     provider without an `:impl` (export never runs one), so a host
+;     validating this document reports `cross_ref_provider_unavailable` at
+;     the shader and stays silent at the reference — loud once at the
+;     source, not once per use.
+
+(node :id a :label "Origin")
+(node :id b :parent a :label "Branch")
+
+(shader :name main :code "uniform float u_time;\nuniform vec2 u_res;")
+
+(piece :title "demo"
+  (phrase :name intro :body "rest 4")
+  (phrase :name coda :body "tutti")
+  (edge :from a :to b :phrase intro :uniform u_time))

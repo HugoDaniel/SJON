@@ -21,16 +21,23 @@ node_modules/
 hosts/typescript-parity/node_modules/
 hosts/web/node_modules/
 
+# VS Code extension bundle (emitted by `pnpm --filter sjon-vscode run bundle`)
+editors/vscode/dist/
+
 # Rust host build artifacts
 hosts/rust/target/
 hosts/rust/Cargo.lock
 
 # Local working areas (not part of the release)
 .claude/
-SJON/
+# Anchored: the repo is itself named SJON, so an unanchored `SJON/` would
+# silently hide any directory of that name at any depth — a source dir, a
+# fixture dir, a host package — not just the root-level notes vault this is
+# for. `.mirrorignore` already anchors its copy.
+/SJON/
 .playwright-mcp/
-/BAUBLE.md
-/rust_mastery_audit_*.md
+# Assessment / audit scratch notes live under docs/notes/, untracked by design.
+/docs/notes/
 
 # Landing page build outputs
 landing-page/node_modules/
@@ -44,5 +51,6 @@ examples/web-todo/todo-plugin.wasm
 # Browser-ESM build of the web host (emitted by `zig build web-host-browser`)
 hosts/web/dist/
 
-# Playground WASM (staged by `zig build landing-page-assets`)
+# Playground WASM + its staleness sidecar (staged by `zig build landing-page-assets`)
 landing-page/public/sjon-lsp.wasm
+landing-page/public/sjon-lsp.meta.json

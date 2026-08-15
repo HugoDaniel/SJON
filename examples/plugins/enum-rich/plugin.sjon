@@ -1,0 +1,36 @@
+; Rich member-set fixture. The `severity` value-kind enumerates four
+; members of a log level enum:
+;
+;   * info  — routine status (label + description)
+;   * warn  — caution-worthy condition (label + description)
+;   * error — failure path (label + description)
+;   * fatal — deprecated alias for `error` (deprecated + deprecation-message)
+;
+; M2 emits each member as a `oneOf` arm carrying `title`, `description`,
+; `deprecated`, and `x-sjon-deprecation-message` annotations in the
+; JSON Schema, and renders a JSDoc `@member` block per member in TS.
+
+(plugin :name enum-rich :version "1.0.0"
+  (value-kind :name severity
+    :description "Log level — used to tag every diagnostic the host emits."
+    :underlying symbol
+    :members (member-set
+      (member :name info
+        :label "Info"
+        :description "Routine status; safe to ignore in production.")
+      (member :name warn
+        :label "Warning"
+        :description "Caution-worthy; investigate when the budget allows.")
+      (member :name error
+        :label "Error"
+        :description "Failure path; the host couldn't complete the request.")
+      (member :name fatal
+        :label "Fatal"
+        :description "Unrecoverable; the host is about to halt."
+        :deprecated true
+        :deprecation-message "Use `error` instead — fatality is signalled out-of-band by the exit code.")))
+
+  (form :name log
+    :description "One log record."
+    (key :name level :type severity :description "Severity tag.")
+    (key :name message :type string)))

@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 1,
+  "x-sjon-export-warnings": [
+    {
+      "code": "local_forms_emitted_inline",
+      "severity": "info",
+      "message": "slot `:child` on form `group` declares 1 local form(s) — emitted as an inline union plus an open generic branch for the additive global fallback; local-first/global resolution order is SJON-only",
+      "plugin": "local-forms",
+      "form": "group",
+      "key": "child"
+    },
+    {
+      "code": "local_forms_emitted_inline",
+      "severity": "info",
+      "message": "slot `:shape` on form `canvas` declares 3 local form(s) — emitted as an inline union plus an open generic branch for the additive global fallback; local-first/global resolution order is SJON-only",
+      "plugin": "local-forms",
+      "form": "canvas",
+      "key": "shape"
+    }
+  ],
+  "$defs": {
+    "form.local-forms.canvas": {
+      "type": "object",
+      "description": "A drawing canvas; its :shape slot scopes its own forms.",
+      "properties": {
+        "$form": {
+          "const": "canvas"
+        },
+        "$ns": {
+          "const": "local-forms"
+        },
+        "shape": {
+          "description": "Slot-local: circle | rect | group (plus any global form).",
+          "anyOf": [
+            {
+              "type": "object",
+              "description": "Slot-local circle — shadows the global circle.",
+              "properties": {
+                "$form": {
+                  "const": "circle"
+                },
+                "$ns": {
+                  "const": "local-forms"
+                },
+                "r": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "$form",
+                "r"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "description": "Slot-local rectangle (local-only — invisible globally).",
+              "properties": {
+                "$form": {
+                  "const": "rect"
+                },
+                "$ns": {
+                  "const": "local-forms"
+                },
+                "h": {
+                  "type": "number"
+                },
+                "w": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "$form",
+                "w",
+                "h"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "description": "Slot-local group; its :child slot nests a local dot.",
+              "properties": {
+                "$form": {
+                  "const": "group"
+                },
+                "$ns": {
+                  "const": "local-forms"
+                },
+                "child": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "$form": {
+                          "const": "dot"
+                        },
+                        "$ns": {
+                          "const": "local-forms"
+                        }
+                      },
+                      "required": [
+                        "$form"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "$form"
+                      ]
+                    }
+                  ],
+                  "x-sjon-local-forms": [
+                    "dot"
+                  ]
+                }
+              },
+              "required": [
+                "$form",
+                "child"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": [
+                "$form"
+              ]
+            }
+          ],
+          "x-sjon-local-forms": [
+            "circle",
+            "rect",
+            "group"
+          ]
+        }
+      },
+      "required": [
+        "$form",
+        "shape"
+      ],
+      "additionalProperties": false
+    },
+    "form.local-forms.line": {
+      "type": "object",
+      "description": "A global form (declared at top level, no local slot).",
+      "properties": {
+        "$form": {
+          "const": "line"
+        },
+        "$ns": {
+          "const": "local-forms"
+        },
+        "from": {
+          "type": "array",
+          "items": {}
+        },
+        "to": {
+          "type": "array",
+          "items": {}
+        }
+      },
+      "required": [
+        "$form",
+        "from",
+        "to"
+      ],
+      "additionalProperties": false
+    },
+    "form.local-forms.circle": {
+      "type": "object",
+      "description": "Global circle — shadowed by the local circle inside canvas.:shape.",
+      "properties": {
+        "$form": {
+          "const": "circle"
+        },
+        "$ns": {
+          "const": "local-forms"
+        },
+        "radius": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "$form",
+        "radius"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.local-forms.canvas"
+    },
+    {
+      "$ref": "#/$defs/form.local-forms.line"
+    },
+    {
+      "$ref": "#/$defs/form.local-forms.circle"
+    }
+  ]
+}

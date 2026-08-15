@@ -1,0 +1,16 @@
+; Parse failure, alone. The corpus had no case containing a syntax error at
+; all, so "trees always exist after parse (possibly partial) — collection
+; over abort" had never crossed a host boundary: a host was free to abort on
+; a parse error and no gate would notice. One did — see
+; `hosts/typescript-parity/src/parser.ts`.
+;
+; `(pt :x 1` is unclosed at end of input. `Parser.closeUnclosedFrames`
+; finalises the frame at `source.len`, so the recovered tree must hold a
+; *complete* `(pt :x 1)`: `:x` is required (keys are required unless
+; `:optional true`), so a host that recovered an empty or truncated form
+; would add `missing_required_key` here. Exactly one diagnostic is the
+; assertion that the child was really attached.
+(plugin :name p :version "1.0.0"
+  (form :name pt (key :name x :type number)))
+
+(pt :x 1

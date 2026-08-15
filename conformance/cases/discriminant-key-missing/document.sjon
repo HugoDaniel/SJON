@@ -1,0 +1,23 @@
+; A discriminated form with no discriminant supplied. `:kind` selects which
+; `(variant …)` applies, so without it the validator cannot know which key
+; set to check `(track)` against — it reports the missing discriminant
+; rather than guessing a variant or falling through to the common keys.
+;
+; `:kind` carries no `:default` here, deliberately. The corpus reaches this
+; code today only through `effective-axis-d-*`, where the key DOES default
+; and the case exists to show axis D suppressing the diagnostic. That makes
+; the axis-off baseline incidental to those cases; this one pins the plain
+; reading directly, on a form where no overlay could apply.
+(plugin :name probe :version "1.0.0"
+  (value-kind :name kind-tag
+    :underlying symbol
+    :members (member-set :values [kick bass]))
+  (form :name track
+    :discriminant kind
+    (key :name kind :type kind-tag :optional true)
+    (variant :when kick
+      (key :name step :type number :optional true))
+    (variant :when bass
+      (key :name sequence :type any :optional true))))
+
+(track)

@@ -131,7 +131,53 @@ walks the buffer with `BinaryCursor` and produces the same
 | `Plugin`, `Schema`     | Comptime descriptor types + multi-plugin aggregator.                          |
 | `ManifestLoader`       | Reads a v1 portable manifest (`docs/portable-manifest-v1.md`) into an in-memory `Plugin` after meta-validation. |
 | `MetaSchema`           | The hardcoded bootstrap meta-plugin. Every conforming impl validates user manifests against this baseline. |
-| `wasm` / `wasm_binary` | Two WASM artifacts (kitchen-sink + read-only).                                |
+| `Host`                 | Cross-host contract over the schema pipeline: `validateDocument` (inline-manifest one-shot), `evalExpr`, schema/lowering export, and the two-phase `preloadSchema` + `HostOptions.preloaded` — compile an external schema once, then borrow it additively across many document validations instead of prepending it (and rebasing spans) every time. |
+| `Pattern`, `PatternQuery` | Deterministic Strudel-style pattern types + windowed query producing `(haps …)` / `(diagnostics …)` over a tree or Binary IR. |
+| `Lowering`, `LoweringGraph` | Host-registered lowering-hook registry + the graph a hook run emits (source forest → lowered forest). |
+| `EffectiveView`, `MaterializedDefaults` | Read-only effective-value overlay: resolves schema `:default`s (literal or `(expr …)`) over an author tree without mutating it. |
+| `Resolver`, `FilesystemResolver` | `(use-plugin …)` reference resolution; the default filesystem resolver reads a `sjon-project.sjon` project file. |
+| `PluginRuntime`        | Executable-plugin ABI dispatch (`-Dplugin-exec`): instantiate sidecar wasm, pre-flight the import surface + ABI, invoke exports. |
+| `EffectiveDocument`    | The whole-document counterpart to `EffectiveView`: schema defaults + lowering applied, ready to hand to a consumer. |
+| `SchemaExport`         | Schema → JSON Schema 2020-12 / TypeScript `.d.ts` / an intermediate IR, plus (CLI-only, asked for by name) Markdown reference pages. Ported natively in `hosts/typescript-parity/src/schemaExport/`. |
+| `Explanations`         | The prose behind each `Diagnostic.Code` — one entry per variant, completeness pinned at comptime. Feeds `sjon explain`, the REPL's `:explain`, and `landing-page/src/data/errors.json`. |
+| `Lockfile`, `Sha256Pin` | `sjon-lock.sjon` parse/emit and the `sha256:…` pin format `(use-plugin …)` and the project file agree on. |
+| `Glob`                 | The `:search-roots` / `:ignore` matcher. No filesystem access of its own — it decides, `FilesystemResolver` walks. |
+| `StringFormats`, `StringEscape` | `:format` refinements (uuid, email, …) and the one escape/unescape pair the Lexer and Printer share. |
+| `DidYouMean`           | Bounded edit-distance suggestion used by every "unknown X" diagnostic that can name a near miss. |
+| `CappedRead`           | Read a file with a byte ceiling, so a hostile or accidental multi-gigabyte manifest is a diagnostic and not an OOM. |
+| `PluginValueCodec`     | `Expr.Value` ↔ the executable-plugin ABI's wire encoding (depth-bounded; see `MAX_VALUE_DEPTH`). |
+| `ProviderExtraction`   | Runs the pure `bytes → names` extractors behind provider-backed cross-refs into a content-addressed table. A host pre-pass in lowering's layer, so the validator still cannot execute anything. |
+| `Date`, `Time`, `trig` | Calendar/clock scalar types (see below) and the vendored transcendentals that make `(pow)`, `(exp)`, `(log)` bit-reproducible native-vs-WASM. |
+| `wasm_common`          | The framing protocol (`[u32 ok][u32 len][payload]`) and value encoder every artifact shares. |
+| `ConformanceExpected`  | Parses a corpus `expected.sjon` — the reference runner's half of the four-host contract. |
+| `Lowering_test_hooks`  | Test-only lowering hooks, `pub` because `src/fuzz.zig` is its own module root and must reach them through the `sjon` module. |
+| `src/cli/`             | The `sjon` binary: verbs, diagnostic rendering (human / rich / json / github), REPL, completions, share links, and the structured `Hints` surface. CLI-local by design — see CLAUDE.md. |
+| `src/lsp/`             | The language server: JSON-RPC dispatch over `Handler`, built for wasm as `sjon-lsp.wasm`. |
+| `wasm` / `wasm_binary` / `lsp/wasm` | Three WASM artifacts — see below.                          |
+
+## Public API entrypoints
+
+Exposed at the top of `src/root.zig`. Every entrypoint walks the
+canonical SoA `Ast.Tree` natively — one tree representation, one
+canonical entrypoint per operation. Everything is arena-owned: each
+result holds a `std.heap.ArenaAllocator`, and `result.deinit()`
+releases the entire intermediate graph in one call.
+
+| Symbol             | What it does                                                 |
+| ------------------ | ------------------------------------------------------------ |
+| `parse`            | source `[:0]const u8` → `Ast.Tree` (always succeeds)         |
+| `print`            | `Tree → []u8` in canonical or lossless mode                  |
+| `validate`         | `Tree × Schema → Validator.Result` (diagnostics)             |
+| `evalExpr`         | `(*Tree, NodeIndex) × Env × Schema → Expr.Result`            |
+| `toJson`           | `Tree → std.json.Value` (canonical / lossy)                  |
+| `fromJson`         | `std.json.Value → Tree`                                      |
+| `toJsonRoots`      | `Tree → {"$roots": [...]}` (multi-root)                      |
+| `fromJsonRoots`    | `{"$roots": [...]} → Tree`                                   |
+| `applyEdit`        | `source × action_json → []u8` (parse → mutate → print)       |
+| `toBinary`         | `Tree → []u8` (Binary IR; flag-gated spans / comments)       |
+| `fromBinary`       | `[]u8 → Tree` (self-contained, no aliasing)                  |
+| `validateBinary`   | `[]u8 × Schema → Validator.Result` (streams via `BinaryCursor`, no `Tree` built) |
+| `evalExprBinary`   | `[]u8 × Env × Schema → Expr.Result` (streams via `BinaryCursor`, no `Tree` built) |
 
 ## SoA AST (`Ast.Tree`)
 
@@ -185,6 +231,85 @@ result is self-contained and does not borrow from the input buffer.
 `Validator.validateBinary` and `Expr.evalBinary` skip the tree
 build entirely and stream the same bytes through `BinaryCursor`.
 
+Six flag bits gate which optional sections are emitted:
+
+| Bit | Flag                            | Default | Effect                                                  |
+| --- | -------------------------------- | ------- | ------------------------------------------------------- |
+|  0  | `with_spans`                    | on      | Emit per-`Node` `Span` (8 B inline)                     |
+|  1  | `with_head_spans`               | on      | Emit per-`Form` `head_span` inline                      |
+|  2  | `with_kvpair_key_spans`         | on      | Emit per-`KeywordPair` `key_span` inline                |
+|  3  | `with_node_comments`            | off     | Emit `Node.leading_comments` + `Form.trailing_comments` |
+|  4  | `with_kvpair_comments`          | off     | Emit `KeywordPair.leading_comments`                     |
+|  5  | `with_tree_trailing_comments`   | off     | Emit `Tree.trailing_comments` block                     |
+
+Two presets are exposed: `Binary.ToBinaryOptions.stripped()` clears every
+flag (smallest output, ≈0.7× the canonical text size on a typical scene);
+`Binary.ToBinaryOptions.lossless()` sets every flag (full round-trip).
+
+### Worked trace: `(camera :ortho :zoom 2)` under `flags = 0x00`
+
+After parsing into a tree and encoding with `stripped()` flags:
+
+```
+header   53 4A 31 0A 01 00 00 00 10 00 00 00 22 00 00 00
+         ^magic       ^v ^fl ^reserved ^pool_off=16   ^roots_off=34
+
+pool     03                              // entry_count = 3
+         12                              // byte_size   = 18
+         04 7A 6F 6F 6D                  // "zoom"  (idx 0)
+         05 6F 72 74 68 6F               // "ortho" (idx 1)
+         06 63 61 6D 65 72 61            // "camera"(idx 2)
+
+roots    01                              // root_count  = 1
+         08                              // tag: form-bare
+         02                              // head_idx    = 2  ("camera")
+         02                              // child_count = 2
+         10                              // child-positional
+         05                              // tag: keyword
+         01                              // pool_idx    = 1  ("ortho")
+         11                              // child-keyword
+         00                              // key_idx     = 0  ("zoom")
+         03                              // tag: number
+         00 00 00 00 00 00 00 40         // f64 LE = 2.0
+```
+
+Total: 16 (header) + 20 (pool) + 18 (roots) = 54 bytes. The same form's
+canonical text is 23 ASCII bytes. The binary is larger here because the
+header + pool dominate on a one-form fixture; on realistic scenes (many
+recurring identifiers) the binary settles at ≈0.7× the canonical text
+size with `flags = 0x00`.
+
+### Zero-allocation cursor
+
+`BinaryCursor` walks `bytes` in a single linear pass without allocating.
+All returned `[]const u8` slices borrow from the input buffer (which must
+outlive the cursor). Use it when you need to validate or interpret a
+binary tree without producing a `Tree`:
+
+```zig
+var cursor = try sjon.BinaryCursor.Cursor.init(bytes);
+var roots  = try cursor.rootIter();
+while (try roots.next()) |view| {
+    switch (view.kind) {
+        .number => {
+            const x = try sjon.BinaryCursor.readNumber(&cursor, view);
+            // use x
+        },
+        .form => {
+            var fv = try sjon.BinaryCursor.readForm(&cursor, view);
+            // fv.head, fv.namespace, fv.head_span
+            while (try fv.children.next()) |child| {
+                // recurse on child.value or skipBody(&cursor, child.value)
+            }
+        },
+        else => try sjon.BinaryCursor.skipBody(&cursor, view),
+    }
+}
+```
+
+See [`examples/binary-ir-demo.zig`](../examples/binary-ir-demo.zig) for a
+runnable end-to-end example (`zig build demo-binary`).
+
 ## Unit-suffixed numbers
 
 Numbers can carry an optional unit suffix — `4b`, `90deg`, `50%`,
@@ -219,10 +344,16 @@ Lossy mode emits a bare JSON number and drops the unit (one-way, like
 **Wire format.** Binary IR introduces tag byte `0x0A`
 (`number_with_unit`) with payload `[f64 LE 8] [varint unit_pool_idx]`.
 The unit string lives in the existing per-tree string pool, so two
-nodes sharing a unit share one pool entry. Wire version stays `0x01`
-— old decoders return `error.InvalidTag` for `0x0A`, the desired
-forward-incompat behavior. The cursor exposes
-`NodeKind.number_with_unit` and `readNumberWithUnit`.
+nodes sharing a unit share one pool entry. This tag was introduced at
+wire version `0x01` — old decoders return `error.InvalidTag` for `0x0A`,
+the desired forward-incompat behavior. (The wire version has since
+advanced to `0x05` across four further bumps: exact-integer tags
+`0x0B`/`0x0C` at v2, `date` `0x0D` at v3, `time` `0x0E` at v4, and at v5
+a trailing-comment field on `vector` payloads — symmetric with forms,
+gated by `with_node_comments` — so lossless round-trips preserve a
+comment wedged before a vector's closing `]`.) The cursor exposes
+`NodeKind.number_with_unit`
+and `readNumberWithUnit`.
 
 **Adjacent tokens.** `90deg5px` lexes as two number tokens (`90deg`
 then `5px`), consistent with how `12foo` lexes today as `.number
@@ -330,16 +461,26 @@ shared with `Expr.eval`.
 
 ## WASM exports
 
-Two artifacts ship:
+Three artifacts ship. The first two share the `wasm_common` framing and
+are what a host embeds; the third is a language server and is embedded by
+an editor instead.
 
 - `sjon-binary.wasm` — read-only: validate / eval over a binary IR
   buffer. `sjon_eval_expr_binary` streams via `Expr.evalBinary` (no
   `Tree` materialisation); `sjon_validate_binary` walks the binary IR
   through a streaming validator that emits diagnostics with the same
-  `(code, path)` shape as the tree path.
+  `(code, path)` shape as the tree path. Its import closure is an
+  enforced allowlist (`zig build audit-wasm-imports`) — the whole point
+  is to ship the IR consumer without the parser, printer, or `std.json`.
 - `sjon.wasm` — kitchen-sink: parse / print / validate / toJson /
   fromJson / toBinary / fromBinary / applyEdit / evalExpr /
-  evalExprBinary.
+  evalExprBinary / exportSchema.
+- `sjon-lsp.wasm` — the language server (`src/lsp/`), driven by a
+  JSON-RPC byte pump (`sjon_lsp_alloc` / `_send` / `_recv` / `_dealloc`)
+  rather than the `[u32 ok][u32 len]` envelope. It declares **zero**
+  imports — it is instantiated with `{}`, so it has no host surface to
+  disagree about — and `zig build audit-lsp-wasm-imports` asserts that.
+  The playground is its consumer; see CLAUDE.md's landing-page section.
 
 ## Editor integration & lossless round-trip
 
@@ -441,4 +582,4 @@ bump. Schema *export* lowers such a slot to an inline anonymous union
   known set).
 - `examples/binary-ir-demo.zig` and `examples/plugins/shapes-demo.zig`
   are wired into `zig build test` so the public-API examples can't
-  drift from the implementation without a CI failure.
+  drift from the implementation without a `zig build test` failure.

@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "kit-xor",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "phrase",
+          "description": "A single phrase rendered either as notes or as events — never both, never neither.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "name",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            },
+            {
+              "name": "notes",
+              "optional": true,
+              "description": "Pitch-class sequence.",
+              "value": {
+                "kind": "vector",
+                "len": null,
+                "element": {
+                  "kind": "any"
+                }
+              }
+            },
+            {
+              "name": "events",
+              "optional": true,
+              "description": "Time-stamped event list.",
+              "value": {
+                "kind": "vector",
+                "len": null,
+                "element": {
+                  "kind": "any"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "tag",
+          "description": "Optional decoration on a phrase. Colour and shape are mutually exclusive but both omittable.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "name",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            },
+            {
+              "name": "color",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "shape",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": []
+    }
+  ],
+  "warnings": [
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `phrase` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin_name": "kit-xor",
+      "form_name": "phrase"
+    },
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `tag` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin_name": "kit-xor",
+      "form_name": "tag"
+    }
+  ]
+}

@@ -38,8 +38,19 @@ const encoder = new TextEncoder();
 //     `PluginFuncAllocFailed` if anything ever does call through here
 //     instead of crashing the WASM module.
 //
-// `sjon-binary.wasm` doesn't import anything from `env`, so the field
-// is harmless when ignored.
+// `sjon-binary.wasm` declares `env.sjon_host_invoke_plugin` too — its
+// closure reaches `wasm_plugin_invoker.zig`, which is built with
+// `wasm_plugin_host = true` (`build.zig`) — so the stub is required
+// there, not merely tolerated: instantiating without it throws. It never
+// declares `sjon_host_resolve`, which is why passing both is the shape
+// that works for either artifact.
+//
+// The read-only artifact still cannot reach a provider-backed cross-ref:
+// `sjon_validate_binary` is hardwired to `core_schema`, so no user schema
+// (and hence no `(cross-ref … :provider …)`) is ever in scope there. The
+// stub answering 0 is what makes that a clean failure rather than a trap
+// if anything ever does call through. See `src/ProviderExtraction.zig`'s
+// header for the read-side descope.
 const DEFAULT_IMPORTS: WebAssembly.Imports = Object.freeze({
   env: Object.freeze({
     sjon_host_resolve: () => 0,
@@ -172,9 +183,19 @@ export class SjonWasm {
    * `(srcPtr, srcLen, optsPtr, optsLen) -> ?[*]u8`; both buffers are
    * copied in, the framed result is copied out, and all three WASM
    * allocations are released before this returns.
+   *
+   * `sjon_alloc(0)` returns null, so an empty first buffer `a` gets a
+   * 1-byte reservation — the length arg stays `a.length` (0), so no
+   * bytes are read from the reserved slot; it only keeps the pointer
+   * well-formed. This is the single two-buffer marshaller for both the
+   * reader exports and `SjonHost`'s host-export calls.
    */
   _callBytesTwo(fnName: string, a: Uint8Array, b: Uint8Array): Uint8Array {
-    const aPtr = this._alloc(a);
+    const aAllocLen = a.length || 1;
+    const alloc = this.exports['sjon_alloc'] as (n: number) => number;
+    const aPtr = alloc(aAllocLen);
+    if (aPtr === 0) throw new Error('sjon_alloc returned null (OOM in WASM)');
+    if (a.length > 0) new Uint8Array(this.memory.buffer, aPtr, a.length).set(a);
     let bPtr = 0;
     try {
       bPtr = this._alloc(b);
@@ -184,7 +205,7 @@ export class SjonWasm {
       if (!ok) throw new SjonWasmError(fnName, decoder.decode(payload));
       return payload;
     } finally {
-      this._free(aPtr, a.length);
+      this._free(aPtr, aAllocLen);
       if (bPtr !== 0) this._free(bPtr, b.length);
     }
   }
@@ -275,6 +296,33 @@ export class SjonEncoder extends SjonWasm {
    */
   evalExpr(source: string): SjonValue {
     return this._callJson('sjon_eval_expr', encoder.encode(source)) as SjonValue;
+  }
+
+  /**
+   * Query a pattern document over the half-open tick window
+   * `[begin, end)` with RNG `seed`. Returns the framed SJON text — a
+   * `(haps …)` form on success, or `(diagnostics …)` when the query
+   * collected any (e.g. `pattern_tick_overflow`). Tick args cross the
+   * i64 ABI boundary as BigInt.
+   */
+  queryPattern(source: string, begin: number, end: number, seed: number): string {
+    const input = encoder.encode(source);
+    const inPtr = this._alloc(input);
+    try {
+      const fn = this.exports['sjon_query_pattern'] as (
+        p: number,
+        n: number,
+        b: bigint,
+        e: bigint,
+        s: bigint,
+      ) => number;
+      const ptr = fn(inPtr, input.length, BigInt(begin), BigInt(end), BigInt(seed));
+      const { ok, payload } = this._readFramed(ptr);
+      if (!ok) throw new SjonWasmError('sjon_query_pattern', decoder.decode(payload));
+      return decoder.decode(payload);
+    } finally {
+      this._free(inPtr, input.length);
+    }
   }
 
   /**

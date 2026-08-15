@@ -1,0 +1,32 @@
+; Unit-bearing numbers fixture. Exercises `(unit-shape :allowed [...])`
+; and `(unit-shape :required true :allowed [...])` plus the bounded-
+; magnitude case via `:numeric (numeric-bounds :min ... :max ...)`.
+;
+; The emitted JSON Schema encodes each unit-bearing slot as an object
+; with `$num` as a 2-tuple `prefixItems: [<magnitude>, <unit>]`. The unit
+; slot is an `enum` of the allowed strings; the magnitude slot carries
+; any propagated numeric bounds. The TS surface emits a tuple type
+; literal `[number, "deg" | "rad" | "turn"]` per allowed unit.
+
+(plugin :name units :version "1.0.0"
+  (value-kind :name angle
+    :description "Plane angle in degrees, radians, or turns. 0..360deg inclusive."
+    :underlying number
+    :unit (unit-shape :required true :allowed [deg rad turn])
+    :numeric (numeric-bounds :min 0deg :max 360deg))
+
+  (value-kind :name duration
+    :description "Non-negative duration. Any unit suffix is acceptable."
+    :underlying number
+    :unit (unit-shape :required false))
+
+  (value-kind :name distance
+    :description "Distance in metric SI prefixes."
+    :underlying number
+    :unit (unit-shape :required true :allowed [mm cm m km]))
+
+  (form :name shape
+    :description "Geometry with bounded angle + free-form duration + sized distance."
+    (key :name rotation :type angle)
+    (key :name decay :type duration :optional true)
+    (key :name radius :type distance)))

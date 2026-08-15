@@ -1,0 +1,8 @@
+; Example usage of the `local-forms` plugin. Each canvas exercises one
+; resolution path of the `:shape` slot:
+;   * a slot-local `circle` (shadows the global circle requiring :radius);
+;   * a nested slot-local `group` → local `dot`;
+;   * the additive global fallback to a top-level `line`.
+(canvas :shape (circle :r 12))
+(canvas :shape (group :child (dot)))
+(canvas :shape (line :from [0 0] :to [10 10]))

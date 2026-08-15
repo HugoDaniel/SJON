@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 1,
+  "x-sjon-export-warnings": [
+    {
+      "code": "union_emitted_via_anyof",
+      "severity": "info",
+      "message": "value-kind `note-or-event` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`",
+      "plugin": "audio",
+      "kind": "note-or-event"
+    },
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `event` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin": "audio",
+      "kind": "event"
+    },
+    {
+      "code": "union_emitted_via_anyof",
+      "severity": "info",
+      "message": "value-kind `phrase-or-ref` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`",
+      "plugin": "audio",
+      "kind": "phrase-or-ref"
+    },
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `phrase-inline` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin": "audio",
+      "kind": "phrase-inline"
+    },
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `phrase-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin": "audio",
+      "kind": "phrase-ref"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `phrase-ref` cross-ref annotation surfaces target-form=`phrase` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "plugin": "audio",
+      "kind": "phrase-ref"
+    }
+  ],
+  "$defs": {
+    "form.audio.phrase": {
+      "type": "object",
+      "description": "A note sequence — named (a reusable definition) or anonymous (inline).",
+      "properties": {
+        "$form": {
+          "const": "phrase"
+        },
+        "$ns": {
+          "const": "audio"
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "enum": [
+                  {
+                    "$sym": "E4"
+                  },
+                  {
+                    "$sym": "G4"
+                  },
+                  {
+                    "$sym": "A4"
+                  },
+                  {
+                    "$sym": "B4"
+                  },
+                  {
+                    "$sym": "_"
+                  }
+                ]
+              },
+              {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/form.audio.n"
+                  },
+                  {
+                    "$ref": "#/$defs/form.audio.rest"
+                  }
+                ],
+                "x-sjon-head-set": [
+                  "n",
+                  "rest"
+                ]
+              }
+            ],
+            "x-sjon-union-alternatives": [
+              "note-or-rest",
+              "event"
+            ]
+          }
+        }
+      },
+      "required": [
+        "$form",
+        "notes"
+      ],
+      "additionalProperties": false
+    },
+    "form.audio.track": {
+      "type": "object",
+      "description": "A phrase slot filled inline or by reference to a named phrase.",
+      "properties": {
+        "$form": {
+          "const": "track"
+        },
+        "$ns": {
+          "const": "audio"
+        },
+        "lead": {
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/form.audio.phrase"
+                }
+              ],
+              "x-sjon-head-set": [
+                "phrase"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "phrase",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "phrase-inline",
+            "phrase-ref"
+          ]
+        }
+      },
+      "required": [
+        "$form",
+        "lead"
+      ],
+      "additionalProperties": false
+    },
+    "form.audio.n": {
+      "type": "object",
+      "description": "A pitched note event.",
+      "properties": {
+        "$form": {
+          "const": "n"
+        },
+        "$ns": {
+          "const": "audio"
+        },
+        "$children": {
+          "type": "array"
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "additionalProperties": false
+    },
+    "form.audio.rest": {
+      "type": "object",
+      "description": "A rest event.",
+      "properties": {
+        "$form": {
+          "const": "rest"
+        },
+        "$ns": {
+          "const": "audio"
+        },
+        "$children": {
+          "type": "array"
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.audio.phrase"
+    },
+    {
+      "$ref": "#/$defs/form.audio.track"
+    },
+    {
+      "$ref": "#/$defs/form.audio.n"
+    },
+    {
+      "$ref": "#/$defs/form.audio.rest"
+    }
+  ]
+}

@@ -1,0 +1,78 @@
+# xref v1.0.0
+
+## Forms
+
+### `(node …)`
+
+Named graph node. Referenced by `:edge`.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:id` | `symbol` | yes | — | Stable identifier within the document. |
+| `:label` | `string` | no | — | — |
+| `:parent` | `ref → (node :id …)` | no | — | — |
+
+### `(phrase …)`
+
+Composable phrase. Referenced by `:phrase-ref` (scope-form scoped to a parent `(piece …)`).
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:name` | `symbol` | yes | — | — |
+| `:body` | `string` | no | — | — |
+
+### `(piece …)`
+
+Scope-form root for nested `(phrase …)` registries.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:title` | `string` | yes | — | — |
+
+Positional children: any.
+
+### `(shader …)`
+
+Opaque source blob. Its `:code` string is the member set for `:uniform-ref`, read by the `uniforms` provider.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:name` | `symbol` | yes | — | — |
+| `:code` | `string` | yes | — | — |
+
+### `(edge …)`
+
+Directed edge between two `(node …)` declarations.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:from` | `ref → (node :id …)` | yes | — | — |
+| `:to` | `ref → (node :id …)` | yes | — | — |
+| `:phrase` | `ref → (phrase :name …)` | no | — | — |
+| `:uniform` | `ref → (shader :code via uniforms)` | no | — | — |
+
+## Value kinds
+
+### node-ref
+
+Cross-ref to a `(node …)` declared elsewhere.
+
+Type: `ref → (node :id …)`.
+
+### node-acyclic
+
+Acyclic cross-ref to a `(node …)`.
+
+Type: `ref → (node :id …)`.
+
+### phrase-ref
+
+Cross-ref to a `(phrase …)` declared within the enclosing `(piece …)`.
+
+Type: `ref → (phrase :name …)`.
+
+### uniform-ref
+
+Cross-ref to a uniform declared inside some `(shader …)`'s source.
+
+Type: `ref → (shader :code via uniforms)`.

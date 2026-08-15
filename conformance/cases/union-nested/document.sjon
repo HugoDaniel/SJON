@@ -1,0 +1,21 @@
+; Schema-compile family, 4 of 4, and the only one not about discriminants.
+; `outer` lists `inner` as an alternative, and `inner` is itself a union.
+;
+; Union dispatch is first-match over a flat alternative list. Nesting would
+; make the order of `[inner a]` decide whether `x` matched through `inner`
+; or directly — same answer here, but not in general, and the author has no
+; way to say which they meant. Flattening is always available (`outer` could
+; list `[a b]`), so the nesting is rejected rather than assigned a
+; traversal order.
+;
+; `x` is a member of `a`, which is an alternative of BOTH unions — so the
+; document would validate under either reading. The case is about the
+; schema, not the document.
+(plugin :name probe :version "1.0.0"
+  (value-kind :name a :underlying symbol :members (member-set :values [x]))
+  (value-kind :name b :underlying symbol :members (member-set :values [y]))
+  (value-kind :name inner :underlying union :union (union-shape :alternatives [a b]))
+  (value-kind :name outer :underlying union :union (union-shape :alternatives [inner a]))
+  (form :name use (key :name v :type outer)))
+
+(use :v x)

@@ -1,0 +1,9 @@
+; `pow` with a fractional exponent is host-independent: routed through
+; `src/trig.zig`'s vendored `pow64` (musl Arm optimized-routines), not
+; `std.math.pow` whose fractional path calls the `@exp`/`@log` builtins and
+; would differ in the last ULP between the native build and both WASM
+; artifacts. Pinned decimals are the canonical `{d}` rendering. Form 0 is the
+; correctly-rounded sqrt(2); form 1 (3^1.5) exercises the integrated
+; log_inline + exp_inline that carries a tail term between the log and exp.
+(pow 2.0 0.5)
+(pow 3.0 1.5)

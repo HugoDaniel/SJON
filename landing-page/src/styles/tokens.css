@@ -1,0 +1,194 @@
+/* Paper / typographic design tokens.
+ *
+ * Light by default (the 'paper'); dark via [data-theme='dark'] on <html>.
+ * Loaded once each by Marketing.astro and Lesson.astro so both halves
+ * of the site share one ink/paper palette.
+ */
+
+:root {
+  --paper: #faf8f3;
+  --ink: #1a1916;
+  --ink-soft: #4a4742;
+  --rule: color-mix(in oklch, var(--ink) 12%, transparent);
+  --selection: #e9e2cd;
+  --correct: #3f7d4f; /* muted forest green — right answers */
+  --wrong: #b23a2e; /* brick red — wrong answers */
+
+  --serif: "Source Serif 4 Variable", "Iowan Old Style", "Charter", Cambria, Georgia, serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  --measure: 64ch;
+  --leading-body: 1.65;
+  --leading-tight: 1.25;
+
+  --step-0: 18px;
+  --step-1: 22px;
+  --step-2: 28px;
+  --step-3: 38px;
+  --step-4: 56px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 16px;
+  --space-4: 32px;
+  --space-5: 64px;
+  --space-6: 128px;
+
+  --topbar-height: 56px;
+}
+
+:root[data-theme="dark"] {
+  --paper: #15140f;
+  --ink: #ece6d3;
+  --ink-soft: #b8b1a0;
+  --rule: color-mix(in oklch, var(--ink) 14%, transparent);
+  --selection: #2c2a23;
+  --correct: #84c393; /* lighter green for dark paper */
+  --wrong: #e2917f; /* lighter red for dark paper */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #15140f;
+    --ink: #ece6d3;
+    --ink-soft: #b8b1a0;
+    --rule: color-mix(in oklch, var(--ink) 14%, transparent);
+    --selection: #2c2a23;
+    --correct: #84c393; /* lighter green for dark paper */
+    --wrong: #e2917f; /* lighter red for dark paper */
+  }
+}
+
+/* --- Shiki dual-theme ------------------------------------------------- *
+ * Shiki emits each token with both --shiki-light and --shiki-dark CSS
+ * vars. We pick the right one per theme using the same selectors as the
+ * paper/ink swap above, so highlighting tracks the rest of the palette.
+ * .shiki is from the runtime highlight() helper; .astro-code is what
+ * Astro's markdown pipeline emits — both carry the same vars. */
+.shiki,
+.shiki span,
+.astro-code,
+.astro-code span {
+  color: var(--shiki-light);
+}
+:root[data-theme="dark"] .shiki,
+:root[data-theme="dark"] .shiki span,
+:root[data-theme="dark"] .astro-code,
+:root[data-theme="dark"] .astro-code span {
+  color: var(--shiki-dark);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .shiki,
+  :root:not([data-theme="light"]) .shiki span,
+  :root:not([data-theme="light"]) .astro-code,
+  :root:not([data-theme="light"]) .astro-code span {
+    color: var(--shiki-dark);
+  }
+}
+
+/* --- Reset + base ----------------------------------------------------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+html {
+  color-scheme: light dark;
+}
+body,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p,
+ul,
+ol,
+figure {
+  margin: 0;
+  padding: 0;
+}
+ul,
+ol {
+  list-style: none;
+}
+img,
+svg {
+  display: block;
+  max-width: 100%;
+}
+a {
+  color: inherit;
+  text-decoration-thickness: 0.5px;
+  text-underline-offset: 3px;
+}
+a:hover {
+  text-decoration-thickness: 1.5px;
+}
+a:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+::selection {
+  background: var(--selection);
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: var(--step-0);
+  line-height: var(--leading-body);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "kern", "liga", "onum";
+}
+
+code,
+kbd,
+pre,
+samp {
+  font-family: var(--mono);
+  font-size: 0.92em;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--serif);
+  font-weight: 600;
+  line-height: var(--leading-tight);
+  letter-spacing: 0;
+}
+h1 {
+  font-size: var(--step-4);
+  font-weight: 400;
+}
+h2 {
+  font-size: var(--step-3);
+}
+h3 {
+  font-size: var(--step-2);
+}
+h4 {
+  font-size: var(--step-1);
+}
+
+p + p {
+  margin-top: 1em;
+}
+
+/* --- Reduced motion --------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

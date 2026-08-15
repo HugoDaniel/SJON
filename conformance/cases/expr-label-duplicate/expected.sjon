@@ -1,0 +1,5 @@
+; Attributed to the repeated label. `:to` is missing as well, and — as in
+; `expr-label-unknown` — the malformed-labels diagnostic stands alone
+; rather than compounding with a completeness complaint.
+(diagnostics
+  (diagnostic :code expr_duplicate_label :path [lerp from]))

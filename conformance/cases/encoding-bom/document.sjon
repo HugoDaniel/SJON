@@ -1,0 +1,19 @@
+﻿; This file opens with a UTF-8 BOM — three bytes, EF BB BF, before
+; the first character of the comment. `Lexer.init` skips them.
+;
+; That is not cosmetic. The two TypeScript hosts read a document through
+; a UTF-8 decoder, which drops the BOM before their parser sees it, so a
+; byte-oriented lexer that kept it made the reference reject a document
+; that a shipped host accepted silently — three `unspecified` diagnostics
+; on one side, none on the other. Skipping it is the only spelling under
+; which all four hosts agree, and it is what every editor that writes a
+; BOM without asking assumes.
+;
+; So this case asserts an absence: a BOM'd document validates exactly
+; like the same bytes without one. Only at offset 0 — a BOM anywhere
+; else is still three invalid bytes, which `Lexer.zig`'s unit test pins.
+(plugin :name enc :version "1.0.0"
+  (form :name a :open true
+    (key :name b :type number)))
+
+(a :b 1)

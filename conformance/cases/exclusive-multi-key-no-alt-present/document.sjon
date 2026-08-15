@@ -1,0 +1,18 @@
+; The other direction of the same group: zero alternatives present. This is
+; what separates `exactly-one` from `at-most-one` — the schema is otherwise
+; identical to `exclusive-multi-key-at-most-one`'s, and under that
+; cardinality `(route)` would be accepted.
+;
+; It is also the case that shows the group carries requiredness the keys
+; cannot: all three keys are `:optional true`, so no `missing_required_key`
+; fires and `(route)` would be silently accepted without the group check.
+(plugin :name routes :version "1.0.0"
+  (form :name route
+    (key :name from :type symbol :optional true)
+    (key :name to :type symbol :optional true)
+    (key :name at :type symbol :optional true)
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [from to])
+      (alt :keys [at]))))
+
+(route)

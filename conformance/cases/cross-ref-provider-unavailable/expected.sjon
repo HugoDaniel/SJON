@@ -1,0 +1,6 @@
+; Same shape as `cross-ref-provider-extraction-failed`: one diagnostic at
+; the source's span, empty path, and no `not_cross_ref` behind it. The
+; two codes differ in *why* the member set is unknown, not in what an
+; unknown member set does to the references.
+(diagnostics
+  (diagnostic :code cross_ref_provider_unavailable :path []))

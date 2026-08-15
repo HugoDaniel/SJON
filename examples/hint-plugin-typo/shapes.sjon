@@ -1,0 +1,5 @@
+; Declarative-only plugin (no paired wasm) — the project index entry
+; the did-you-mean hint suggests when a (use-plugin …) name is close.
+(plugin :name shapes :version "1.0.0"
+  (form :name circle
+    (key :name r :type number :optional false)))

@@ -1,0 +1,4 @@
+(diagnostics
+  (diagnostic :code unspecified :path [sin]))
+(values
+  (value :index 0 :result 0.8414709848078965))

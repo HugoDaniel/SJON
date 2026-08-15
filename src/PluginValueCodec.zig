@@ -1,3 +1,23 @@
+//! Binary `Expr.Value` codec for the executable plugin ABI.
+//!
+//! Wire format per `docs/executable-plugin-abi.md` §9 — seven
+//! tagged variants, all integers little-endian. Distinct tags for
+//! string vs keyword (no JSON-style `$kw` discriminator). Vectors
+//! carry a u32 count plus that many nested encoded values. Forms
+//! carry head + namespace + child list + kvpair list. Numbers cross
+//! verbatim as raw IEEE-754 `f64` bits, including NaN / ±inf.
+//!
+//! The codec is pure Zig and has no engine dependency. Every host
+//! (Zig native, Web/TS, Rust) speaks the same byte sequence; this file
+//! is the Zig-side reference implementation. Hostile encoder and decoder
+//! inputs are both bounded by `MAX_VALUE_DEPTH`.
+//!
+//! Memory model: callers should pass an arena for the decode allocator.
+//! On a partial-decode error (truncated bytes, depth exceeded, invalid
+//! tag) any slices already allocated for the in-progress value are
+//! stranded — the per-call arena pattern in `PluginRuntime` adapters
+//! drops them when the call ends.
+
 const std = @import("std");
 const Expr = @import("Expr.zig");
 const Date = @import("Date.zig");
@@ -5,6 +25,8 @@ const Time = @import("Time.zig");
 
 const Allocator = std.mem.Allocator;
 
+/// Wire tag for each `Expr.Value` variant. The numeric values are part
+/// of the v2 ABI — changing one bumps the ABI version.
 pub const Tag = enum(u8) {
     number = 0x01,
     boolean = 0x02,
@@ -12,13 +34,28 @@ pub const Tag = enum(u8) {
     string = 0x04,
     keyword = 0x05,
     vector = 0x06,
+    /// Added in v2. Carries `[u32 head_len][head][u32 ns_len][ns][u32
+    /// child_count][value]*[u32 kv_count][[u32 key_len][key][value]]*`.
     form = 0x07,
+    /// Calendar date `(year:i16, month:u8, day:u8)`. Payload is 4 bytes:
+    /// `[i16 LE year][u8 month][u8 day]`. Mirrors `Binary.Tag.date`
+    /// shape on the substrate wire.
     date = 0x08,
+    /// Clock time `(hour:u8, minute:u8, second:u8, millisecond:u16)`.
+    /// Payload is 5 bytes: `[u8 hour][u8 minute][u8 second][u16 LE ms]`.
+    /// Mirrors `Binary.Tag.time` shape on the substrate wire.
     time = 0x09,
 };
 
+/// Defensive cap on nested-vector decoder recursion. Plugins can be
+/// hostile or buggy; refusing pathological depth keeps the host stack
+/// bounded.
 pub const MAX_VALUE_DEPTH: u8 = 32;
 
+/// Header size of a result frame (4 bytes ok + 4 bytes len). Spelled
+/// `HEADER_SIZE` to match `wasm_common.HEADER_SIZE` and
+/// `Binary.HEADER_SIZE` — every "fixed-size prefix in bytes" constant
+/// in the project shares this name and `u32` type.
 pub const HEADER_SIZE: u32 = 8;
 
 pub const Error = error{
@@ -29,11 +66,34 @@ pub const Error = error{
     DepthExceeded,
 };
 
+// ---------------------------------------------------------------------------
+// Encoder
+// ---------------------------------------------------------------------------
+
+/// Append the binary encoding of `value` to `buf`. Fails on allocation or
+/// on `error.DepthExceeded` when `value` nests past `MAX_VALUE_DEPTH`:
+/// plugin args reach here mid-eval, before the evaluator's final
+/// deepCopyValue caps depth, so the encoder enforces the same bound the
+/// decoder does rather than trusting arg shape.
 pub fn encodeValue(
     a: Allocator,
     buf: *std.ArrayList(u8),
     value: Expr.Value,
-) Allocator.Error!void {
+) error{ OutOfMemory, DepthExceeded }!void {
+    return encodeValueDepth(a, buf, value, 0);
+}
+
+/// Depth-guarded encoder body, symmetric with `decodeValueDepth`. Refuses a
+/// value nested past `MAX_VALUE_DEPTH` so a mid-eval plugin argument (not
+/// yet capped by the evaluator's final deepCopyValue) cannot drive
+/// unbounded host-stack recursion here.
+fn encodeValueDepth(
+    a: Allocator,
+    buf: *std.ArrayList(u8),
+    value: Expr.Value,
+    depth: u8,
+) error{ OutOfMemory, DepthExceeded }!void {
+    if (depth >= MAX_VALUE_DEPTH) return error.DepthExceeded;
     switch (value) {
         .number => |n| {
             try buf.append(a, @intFromEnum(Tag.number));
@@ -42,6 +102,10 @@ pub fn encodeValue(
             std.mem.writeInt(u64, &b, bits, .little);
             try buf.appendSlice(a, &b);
         },
+        // Plugin ABI has no exact-integer tag yet; collapse to f64 on
+        // the wire so the codec stays bidirectionally stable. Lossy
+        // beyond 2^53 — matches the arithmetic-collapse contract used
+        // by `expectNumber` / `applySum`.
         .integer_i64 => |n| {
             try buf.append(a, @intFromEnum(Tag.number));
             const bits: u64 = @bitCast(@as(f64, @floatFromInt(n)));
@@ -84,7 +148,7 @@ pub fn encodeValue(
         .vector => |xs| {
             try buf.append(a, @intFromEnum(Tag.vector));
             try writeU32(a, buf, @intCast(xs.len));
-            for (xs) |xv| try encodeValue(a, buf, xv);
+            for (xs) |xv| try encodeValueDepth(a, buf, xv, depth + 1);
         },
         .form => |f| {
             try buf.append(a, @intFromEnum(Tag.form));
@@ -93,36 +157,41 @@ pub fn encodeValue(
             try writeU32(a, buf, @intCast(f.namespace.len));
             try buf.appendSlice(a, f.namespace);
             try writeU32(a, buf, @intCast(f.children.len));
-            for (f.children) |child| try encodeValue(a, buf, child);
+            for (f.children) |child| try encodeValueDepth(a, buf, child, depth + 1);
             try writeU32(a, buf, @intCast(f.kvpairs.len));
             for (f.kvpairs) |pair| {
                 try writeU32(a, buf, @intCast(pair.key.len));
                 try buf.appendSlice(a, pair.key);
-                try encodeValue(a, buf, pair.value);
+                try encodeValueDepth(a, buf, pair.value, depth + 1);
             }
         },
     }
 }
 
+/// Encode an argument list per §9.2: `[u32 count][value][value]…`.
 pub fn encodeArgs(
     a: Allocator,
     buf: *std.ArrayList(u8),
     args: []const Expr.Value,
-) Allocator.Error!void {
+) error{ OutOfMemory, DepthExceeded }!void {
     try writeU32(a, buf, @intCast(args.len));
     for (args) |v| try encodeValue(a, buf, v);
 }
 
+/// Encode a successful result frame per §9.3 — `[u32 ok=1][u32 len][value]`.
+/// Returned slice is owned by the caller (allocated from `a`).
 pub fn encodeOkFrame(
     a: Allocator,
     value: Expr.Value,
-) Allocator.Error![]u8 {
+) error{ OutOfMemory, DepthExceeded }![]u8 {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(a);
     try encodeValue(a, &payload, value);
     return try assembleFrame(a, true, payload.items);
 }
 
+/// Encode a structured-error frame per §9.3:
+/// `[u32 ok=0][u32 len][u32 code_len][code][u32 detail_len][detail]`.
 pub fn encodeErrFrame(
     a: Allocator,
     code: []const u8,
@@ -138,6 +207,8 @@ pub fn encodeErrFrame(
 }
 
 fn assembleFrame(a: Allocator, ok: bool, payload: []const u8) Allocator.Error![]u8 {
+    // The payload length is stored in the frame's u32 length field.
+    std.debug.assert(payload.len <= std.math.maxInt(u32));
     const total = HEADER_SIZE + payload.len;
     const out = try a.alloc(u8, total);
     std.mem.writeInt(u32, out[0..4], if (ok) 1 else 0, .little);
@@ -166,6 +237,10 @@ fn writeU32(
     std.mem.writeInt(u32, &b, n, .little);
     try buf.appendSlice(a, &b);
 }
+
+// ---------------------------------------------------------------------------
+// Decoder
+// ---------------------------------------------------------------------------
 
 const Cursor = struct {
     bytes: []const u8,
@@ -204,11 +279,18 @@ const Cursor = struct {
     }
 };
 
+/// Decoded value plus the number of bytes consumed. Strings, keywords,
+/// and vector backing arrays are duplicated into `a`.
 pub const DecodedValue = struct {
     value: Expr.Value,
     consumed: usize,
 };
 
+/// Decode one `Expr.Value` from the head of `bytes`. Strings, keywords,
+/// and vector backing arrays are duplicated into `a`; the input may be
+/// freed once this returns. Nested vectors deeper than `MAX_VALUE_DEPTH`
+/// surface as `error.DepthExceeded`. Trailing bytes past the decoded
+/// value are reported via `DecodedValue.consumed` and not consumed.
 pub fn decodeValue(a: Allocator, bytes: []const u8) Error!DecodedValue {
     var cur = Cursor{ .bytes = bytes };
     const v = try decodeValueDepth(a, &cur, 0);
@@ -292,6 +374,8 @@ fn decodeValueDepth(a: Allocator, cur: *Cursor, depth: u8) Error!Expr.Value {
     };
 }
 
+/// Decode an argument list per §9.2. Returned slice is allocated from
+/// `a`; element strings/keywords/vectors are also `a`-owned.
 pub fn decodeArgs(a: Allocator, bytes: []const u8) Error![]Expr.Value {
     var cur = Cursor{ .bytes = bytes };
     const n = try cur.readU32();
@@ -300,11 +384,23 @@ pub fn decodeArgs(a: Allocator, bytes: []const u8) Error![]Expr.Value {
     return xs;
 }
 
+// ---------------------------------------------------------------------------
+// Frames
+// ---------------------------------------------------------------------------
+
+/// Decoded result-frame header. `ok = false` means the payload is a
+/// structured error (decode further with `decodeStructuredError`);
+/// `ok = true` means the payload is an `Expr.Value` (`decodeValue`).
 pub const Frame = struct {
     ok: bool,
     payload: []const u8,
 };
 
+/// Decode a result-frame header per §9.3 — `[u32 ok][u32 len][u8... payload]`.
+/// Returns `error.UnexpectedEof` if `bytes` is shorter than `HEADER_SIZE`
+/// or shorter than the declared payload length. The returned `payload`
+/// slice borrows from `bytes`; do not retain past the input's lifetime.
+/// Complexity: O(1).
 pub fn decodeFrame(bytes: []const u8) Error!Frame {
     if (bytes.len < HEADER_SIZE) return error.UnexpectedEof;
     const ok = std.mem.readInt(u32, bytes[0..4], .little);
@@ -318,6 +414,8 @@ pub const StructuredError = struct {
     detail: []const u8,
 };
 
+/// Decode the `ok=0` payload per §9.3 — `[u32 code_len][code][u32
+/// detail_len][detail]`. Returned slices are duplicated into `a`.
 pub fn decodeStructuredError(
     a: Allocator,
     payload: []const u8,
@@ -332,6 +430,10 @@ pub fn decodeStructuredError(
         .detail = try a.dupe(u8, detail),
     };
 }
+
+// ===========================================================================
+// Tests
+// ===========================================================================
 
 const testing = std.testing;
 
@@ -365,4 +467,339 @@ fn freeValue(a: Allocator, v: Expr.Value) void {
         },
         else => {},
     }
+}
+
+test "round-trip: number (finite)" {
+    const out = try roundTrip(.{ .number = 42.0 });
+    try testing.expect(Expr.Value.equals(out, .{ .number = 42.0 }));
+}
+
+test "round-trip: number (NaN bit-pattern preserved)" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try encodeValue(testing.allocator, &buf, .{ .number = std.math.nan(f64) });
+    const out = try decodeValue(testing.allocator, buf.items);
+    try testing.expect(std.math.isNan(out.value.number));
+}
+
+test "round-trip: number (positive infinity)" {
+    const out = try roundTrip(.{ .number = std.math.inf(f64) });
+    try testing.expect(std.math.isPositiveInf(out.number));
+}
+
+test "round-trip: boolean" {
+    const t = try roundTrip(.{ .boolean = true });
+    const f = try roundTrip(.{ .boolean = false });
+    try testing.expect(Expr.Value.equals(t, .{ .boolean = true }));
+    try testing.expect(Expr.Value.equals(f, .{ .boolean = false }));
+}
+
+test "round-trip: nil" {
+    const out = try roundTrip(.nil);
+    try testing.expect(out == .nil);
+}
+
+test "round-trip: string vs keyword keep distinct tags" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try encodeValue(testing.allocator, &buf, .{ .string = "ok" });
+    try testing.expectEqual(@intFromEnum(Tag.string), buf.items[0]);
+
+    var buf2: std.ArrayList(u8) = .empty;
+    defer buf2.deinit(testing.allocator);
+    try encodeValue(testing.allocator, &buf2, .{ .keyword = "ok" });
+    try testing.expectEqual(@intFromEnum(Tag.keyword), buf2.items[0]);
+}
+
+test "round-trip: keyword payload" {
+    const out = try roundTrip(.{ .keyword = "ok" });
+    defer freeValue(testing.allocator, out);
+    try testing.expect(out == .keyword);
+    try testing.expectEqualStrings("ok", out.keyword);
+}
+
+test "round-trip: 3-vector of numbers" {
+    const xs = [_]Expr.Value{
+        .{ .number = 1.0 },
+        .{ .number = 2.0 },
+        .{ .number = 3.0 },
+    };
+    const out = try roundTrip(.{ .vector = &xs });
+    defer freeValue(testing.allocator, out);
+    try testing.expect(out == .vector);
+    try testing.expectEqual(@as(usize, 3), out.vector.len);
+    try testing.expectEqual(@as(f64, 2.0), out.vector[1].number);
+}
+
+test "byte-level: (double 21) args buffer matches spec example" {
+    // §9.4: [01 00 00 00] count=1, [01] number tag, [00 00 00 00 00 00 35 40] f64 21.0.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try encodeArgs(testing.allocator, &buf, &.{.{ .number = 21.0 }});
+    const expected = [_]u8{
+        0x01, 0x00, 0x00, 0x00, // count = 1
+        0x01, // number tag
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x35, 0x40, // f64 21.0
+    };
+    try testing.expectEqualSlices(u8, &expected, buf.items);
+}
+
+test "byte-level: (double 21) → 42 result frame matches spec example" {
+    // §9.4: [01 00 00 00] ok=1, [09 00 00 00] len=9, [01] tag, [...f64 42.0].
+    const bytes = try encodeOkFrame(testing.allocator, .{ .number = 42.0 });
+    defer testing.allocator.free(bytes);
+    const expected = [_]u8{
+        0x01, 0x00, 0x00, 0x00, // ok = 1
+        0x09, 0x00, 0x00, 0x00, // len = 9
+        0x01, // number tag
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x45, 0x40, // f64 42.0
+    };
+    try testing.expectEqualSlices(u8, &expected, bytes);
+}
+
+test "byte-level: keyword :ok result frame matches spec example" {
+    const bytes = try encodeOkFrame(testing.allocator, .{ .keyword = "ok" });
+    defer testing.allocator.free(bytes);
+    const expected = [_]u8{
+        0x01, 0x00, 0x00, 0x00, // ok = 1
+        0x07, 0x00, 0x00, 0x00, // len = 7  (1 tag + 4 strlen + 2 utf8)
+        0x05, // keyword tag
+        0x02, 0x00, 0x00, 0x00, // strlen = 2
+        'o',  'k',
+    };
+    try testing.expectEqualSlices(u8, &expected, bytes);
+}
+
+test "decodeFrame: ok=1 splits header and payload" {
+    const bytes = try encodeOkFrame(testing.allocator, .nil);
+    defer testing.allocator.free(bytes);
+    const frame = try decodeFrame(bytes);
+    try testing.expect(frame.ok);
+    try testing.expectEqual(@as(usize, 1), frame.payload.len);
+    try testing.expectEqual(@intFromEnum(Tag.nil), frame.payload[0]);
+}
+
+test "decodeFrame: ok=0 carries structured error" {
+    const bytes = try encodeErrFrame(testing.allocator, "domain", "negative root");
+    defer testing.allocator.free(bytes);
+    const frame = try decodeFrame(bytes);
+    try testing.expect(!frame.ok);
+    const err = try decodeStructuredError(testing.allocator, frame.payload);
+    defer testing.allocator.free(err.code);
+    defer testing.allocator.free(err.detail);
+    try testing.expectEqualStrings("domain", err.code);
+    try testing.expectEqualStrings("negative root", err.detail);
+}
+
+test "decodeArgs: empty list" {
+    const bytes = [_]u8{ 0x00, 0x00, 0x00, 0x00 };
+    const xs = try decodeArgs(testing.allocator, &bytes);
+    defer testing.allocator.free(xs);
+    try testing.expectEqual(@as(usize, 0), xs.len);
+}
+
+test "decodeArgs: round-trip three values" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try encodeArgs(testing.allocator, &buf, &.{
+        .{ .number = 1.0 },
+        .{ .boolean = true },
+        .nil,
+    });
+    const xs = try decodeArgs(testing.allocator, buf.items);
+    defer testing.allocator.free(xs);
+    try testing.expectEqual(@as(usize, 3), xs.len);
+    try testing.expect(xs[0] == .number);
+    try testing.expect(xs[1] == .boolean);
+    try testing.expect(xs[2] == .nil);
+}
+
+test "decoder: invalid tag rejected" {
+    const bytes = [_]u8{0x99};
+    try testing.expectError(error.InvalidTag, decodeValue(testing.allocator, &bytes));
+}
+
+test "decoder: invalid boolean byte rejected" {
+    const bytes = [_]u8{ @intFromEnum(Tag.boolean), 0x02 };
+    try testing.expectError(error.InvalidBoolean, decodeValue(testing.allocator, &bytes));
+}
+
+test "decoder: truncated string fails with UnexpectedEof" {
+    // string tag + length=5 but only 2 bytes after.
+    const bytes = [_]u8{
+        @intFromEnum(Tag.string),
+        0x05,
+        0x00,
+        0x00,
+        0x00,
+        'h',
+        'i',
+    };
+    try testing.expectError(error.UnexpectedEof, decodeValue(testing.allocator, &bytes));
+}
+
+test "round-trip: bare form with no children or kvpairs" {
+    const out = try roundTrip(.{ .form = .{
+        .head = "todo",
+        .namespace = "",
+        .children = &.{},
+        .kvpairs = &.{},
+    } });
+    defer freeValue(testing.allocator, out);
+    try testing.expect(out == .form);
+    try testing.expectEqualStrings("todo", out.form.head);
+    try testing.expectEqualStrings("", out.form.namespace);
+    try testing.expectEqual(@as(usize, 0), out.form.children.len);
+    try testing.expectEqual(@as(usize, 0), out.form.kvpairs.len);
+}
+
+test "round-trip: qualified form preserves namespace" {
+    const out = try roundTrip(.{ .form = .{
+        .head = "circle",
+        .namespace = "shapes",
+        .children = &.{},
+        .kvpairs = &.{},
+    } });
+    defer freeValue(testing.allocator, out);
+    try testing.expectEqualStrings("shapes", out.form.namespace);
+}
+
+test "round-trip: form with positional children" {
+    const children = [_]Expr.Value{
+        .{ .number = 1.0 },
+        .{ .number = 2.0 },
+    };
+    const out = try roundTrip(.{ .form = .{
+        .head = "pair",
+        .namespace = "",
+        .children = &children,
+        .kvpairs = &.{},
+    } });
+    defer freeValue(testing.allocator, out);
+    try testing.expectEqual(@as(usize, 2), out.form.children.len);
+    try testing.expectEqual(@as(f64, 1.0), out.form.children[0].number);
+    try testing.expectEqual(@as(f64, 2.0), out.form.children[1].number);
+}
+
+test "round-trip: form with keyword kvpair" {
+    const kvs = [_]Expr.KvPair{
+        .{ .key = "id", .value = .{ .number = 7.0 } },
+        .{ .key = "done", .value = .{ .boolean = true } },
+    };
+    const out = try roundTrip(.{ .form = .{
+        .head = "todo",
+        .namespace = "",
+        .children = &.{},
+        .kvpairs = &kvs,
+    } });
+    defer freeValue(testing.allocator, out);
+    try testing.expectEqual(@as(usize, 2), out.form.kvpairs.len);
+    try testing.expectEqualStrings("id", out.form.kvpairs[0].key);
+    try testing.expectEqual(@as(f64, 7.0), out.form.kvpairs[0].value.number);
+    try testing.expectEqualStrings("done", out.form.kvpairs[1].key);
+    try testing.expect(out.form.kvpairs[1].value.boolean);
+}
+
+test "round-trip: vector-of-form (the count-done arg shape)" {
+    const todos = [_]Expr.Value{
+        .{ .form = .{
+            .head = "todo",
+            .namespace = "",
+            .children = &.{},
+            .kvpairs = &.{
+                .{ .key = "id", .value = .{ .number = 1 } },
+                .{ .key = "done", .value = .{ .boolean = false } },
+            },
+        } },
+        .{ .form = .{
+            .head = "todo",
+            .namespace = "",
+            .children = &.{},
+            .kvpairs = &.{
+                .{ .key = "id", .value = .{ .number = 2 } },
+                .{ .key = "done", .value = .{ .boolean = true } },
+            },
+        } },
+    };
+    const out = try roundTrip(.{ .vector = &todos });
+    defer freeValue(testing.allocator, out);
+    try testing.expectEqual(@as(usize, 2), out.vector.len);
+    try testing.expect(out.vector[0] == .form);
+    try testing.expectEqual(@as(f64, 1), out.vector[0].form.kvpairs[0].value.number);
+    try testing.expect(out.vector[1].form.kvpairs[1].value.boolean);
+}
+
+test "decoder: depth limit catches deeply-nested forms" {
+    // Build encoded bytes for MAX_VALUE_DEPTH+1 nested forms via a
+    // single child each. Form descent must count for the depth cap.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    var i: usize = 0;
+    while (i <= MAX_VALUE_DEPTH) : (i += 1) {
+        try buf.append(testing.allocator, @intFromEnum(Tag.form));
+        try writeU32(testing.allocator, &buf, 1); // head_len
+        try buf.append(testing.allocator, 'x');
+        try writeU32(testing.allocator, &buf, 0); // ns_len
+        try writeU32(testing.allocator, &buf, 1); // child_count = 1
+    }
+    try buf.append(testing.allocator, @intFromEnum(Tag.nil));
+    // After the innermost nil, every outer form still needs its
+    // (empty) kvpair count to be well-formed.
+    var j: usize = 0;
+    while (j <= MAX_VALUE_DEPTH) : (j += 1) {
+        try writeU32(testing.allocator, &buf, 0);
+    }
+    try testing.expectError(error.DepthExceeded, decodeValue(arena.allocator(), buf.items));
+}
+
+fn nestVec(a: Allocator, depth: usize) !Expr.Value {
+    var v: Expr.Value = .nil;
+    for (0..depth) |_| {
+        const one = try a.alloc(Expr.Value, 1);
+        one[0] = v;
+        v = .{ .vector = one };
+    }
+    return v;
+}
+
+test "encoder: depth limit catches deeply-nested vectors" {
+    // Symmetric with the decoder cap: encodeValue must refuse a value
+    // nested past MAX_VALUE_DEPTH. Plugin args are mid-eval values, not yet
+    // capped by the evaluator's deepCopyValue, so the encoder guards itself.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Under the cap encodes cleanly...
+    var ok_buf: std.ArrayList(u8) = .empty;
+    defer ok_buf.deinit(testing.allocator);
+    try encodeValue(testing.allocator, &ok_buf, try nestVec(a, MAX_VALUE_DEPTH - 2));
+
+    // ...over the cap trips DepthExceeded before overflowing the stack.
+    var bad_buf: std.ArrayList(u8) = .empty;
+    defer bad_buf.deinit(testing.allocator);
+    try testing.expectError(error.DepthExceeded, encodeValue(testing.allocator, &bad_buf, try nestVec(a, MAX_VALUE_DEPTH + 8)));
+}
+
+test "decoder: depth limit catches deeply-nested vectors" {
+    // Build encoded bytes for MAX_VALUE_DEPTH+1 nested vectors. The
+    // partial decode strands per-vector backing arrays — an arena is the
+    // documented allocator contract for the decoder, so use one here so
+    // the leak detector sees it released cleanly.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    var i: usize = 0;
+    while (i <= MAX_VALUE_DEPTH) : (i += 1) {
+        try buf.append(testing.allocator, @intFromEnum(Tag.vector));
+        try writeU32(testing.allocator, &buf, 1);
+    }
+    // Innermost: tag=nil so the byte stream is well-formed apart from depth.
+    try buf.append(testing.allocator, @intFromEnum(Tag.nil));
+    try testing.expectError(error.DepthExceeded, decodeValue(arena.allocator(), buf.items));
 }

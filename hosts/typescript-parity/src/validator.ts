@@ -18,13 +18,25 @@
 // `:scope <form>`), and `:acyclic true` cross-refs are checked with
 // iterative DFS coloring on the per-scope graph captured during the
 // index pass.
+//
+// House rule for this file: narrow, never cast. Every walk here is a
+// `switch (node.tag)` or an early `if (node.tag !== …) return`, which
+// already narrows `Node` to the variant — a following `node as FormNode`
+// buys nothing and costs the guarantee, because a cast keeps compiling
+// after someone edits the guard above it while narrowing stops. Ten of
+// these had accumulated; they're gone. Biome's narrowed rule set
+// (correctness + suspicious) has no no-unnecessary-assertion rule, so
+// this one is on review.
 
-import type { Node, FormNode, KvPairNode, NumberNode, VectorNode, Span } from './ast.ts';
+import type { Node, FormNode, KvPairNode, NumberNode, Span } from './ast.ts';
 import type { Diagnostic, DiagnosticCode } from './diagnostics.ts';
 import type {
   Schema,
+  Alternative,
+  ExclusiveGroup,
   FormSpec,
   ExprFunc,
+  KeySpec,
   Member,
   ValueType,
   ValueKind,
@@ -60,7 +72,7 @@ type FormExprResolution =
 
 function resolveFormExpression(schema: Schema, node: Node): FormExprResolution {
   if (node.tag !== 'form') return { kind: 'unresolved' };
-  const fn = node as FormNode;
+  const fn = node;
   if (fn.head.length === 0) return { kind: 'unresolved' };
   const formHit = lookupForm(schema, fn.head, fn.namespace);
   if (formHit.kind === 'found') return { kind: 'data_form' };
@@ -548,7 +560,7 @@ function walkIndex(
 
     if (pushed) scopeStack.pop();
   } else if (node.tag === 'vector') {
-    for (const e of (node as VectorNode).elements) {
+    for (const e of node.elements) {
       walkIndex(
         schema,
         e,
@@ -566,7 +578,7 @@ function walkIndex(
   } else if (node.tag === 'kvpair') {
     walkIndex(
       schema,
-      (node as KvPairNode).value,
+      node.value,
       treeIdx,
       treeScope,
       scopeStack,
@@ -661,7 +673,7 @@ function captureCycleNode(
       if (ch.value.tag === 'symbol') edges.push(ch.value.text);
     } else {
       if (ch.value.tag !== 'vector') continue;
-      for (const elem of (ch.value as VectorNode).elements) {
+      for (const elem of ch.value.elements) {
         if (elem.tag === 'symbol') edges.push(elem.text);
       }
     }
@@ -752,11 +764,13 @@ function emitCyclicCrossRef(
 // ─── Main walk ───────────────────────────────────────────────────────
 
 /// Slot-local form registry in scope for the node being visited. Set on a
-/// form value frame when the enclosing slot's `KeySpec.localForms` is
-/// non-empty: the value's head then resolves local-first against `registry`,
-/// and a terminal miss reports `unknown_local_form` at `slotPath` (the
-/// enclosing kvpair, e.g. `[canvas shape]`). Mirrors the Zig tree path's
-/// `Frame.local_form_registry` / `local_form_slot_path` seam.
+/// form value frame when the enclosing slot carries local forms — either a
+/// keyed slot (`KeySpec.localForms`, e.g. `[canvas shape]`) or a form's
+/// positional slot (`FormSpec.localForms`, e.g. `[canvas]`). The value's head
+/// then resolves local-first against `registry`, and a terminal miss reports
+/// `unknown_local_form` at `slotPath` (the enclosing kvpair for a keyed slot,
+/// the parent form's path for a positional slot). Mirrors the Zig tree path's
+/// `Frame.local_form_registry` / `local_form_slot_path` seam (both carriers).
 interface LocalFormScope {
   readonly registry: readonly FormSpec[];
   readonly slotPath: readonly string[];
@@ -775,7 +789,7 @@ function visit(
 ): void {
   switch (node.tag) {
     case 'form': {
-      const formNode = node as FormNode;
+      const formNode = node;
       // Slot-local resolution: a bare head in a local-forms slot resolves
       // local-first (a qualified head bypasses locals). Computed once and
       // reused for both head validation and the children's spec lookup.
@@ -841,12 +855,32 @@ function visit(
           visit(schema, registry, value, valuePath, chain, treeScope, treeIdx, diags, childScope);
         } else {
           let step: string;
+          let childScope: LocalFormScope | null = null;
           if (child.tag === 'form' && child.head.length > 0) {
             step = child.head;
+            // Positional slot-local resolution: a form-shaped positional child
+            // resolves local-first when this form carries `FormSpec.localForms`
+            // (slot path = this form's own path). The positional mirror of the
+            // kvpair-value attach above; rides independent of the positional
+            // variant (`any` / head-set). Mirrors the Zig tree child-push /
+            // binary `.positional` seam.
+            if (ownSpec && ownSpec.localForms && ownSpec.localForms.length > 0) {
+              childScope = { registry: ownSpec.localForms, slotPath: path };
+            }
           } else {
             step = String(positionalCount);
           }
-          visit(schema, registry, child, [...path, step], chain, treeScope, treeIdx, diags, null);
+          visit(
+            schema,
+            registry,
+            child,
+            [...path, step],
+            chain,
+            treeScope,
+            treeIdx,
+            diags,
+            childScope,
+          );
           positionalCount++;
         }
       }
@@ -854,7 +888,7 @@ function visit(
     }
     case 'vector': {
       let i = 0;
-      for (const elem of (node as VectorNode).elements) {
+      for (const elem of node.elements) {
         visit(
           schema,
           registry,
@@ -871,17 +905,7 @@ function visit(
       break;
     }
     case 'kvpair': {
-      visit(
-        schema,
-        registry,
-        (node as KvPairNode).value,
-        path,
-        scopeChain,
-        treeScope,
-        treeIdx,
-        diags,
-        null,
-      );
+      visit(schema, registry, node.value, path, scopeChain, treeScope, treeIdx, diags, null);
       break;
     }
     default:
@@ -1108,6 +1132,37 @@ function validateFormKeys(
   }
 
   const seenIdx = new Set<number>();
+  // Variant-only keys the author wrote, by index into the *resolved*
+  // variant's `keys`. Stays empty while no variant is resolved.
+  const seenVariantIdx = new Set<number>();
+  const variants = spec.variants ?? [];
+  // The active variant, set the moment the discriminant kvpair is matched
+  // to a declared `:when`. Null until then — which is exactly what makes a
+  // variant-only key written *before* the discriminant fall through to
+  // `unknown_key`. That position rule is the schema's, not an artifact:
+  // both Zig walkers apply it, so producers emit the discriminant first.
+  let resolvedWhen: string | null = null;
+  let resolvedVariantIdx: number | null = null;
+
+  /** Type-check one kvpair value against the slot it landed in, and emit
+   *  the two slot warnings on success. Shared by the declared-key and
+   *  variant-key arms, which differ only in where the spec came from. */
+  const checkKvpairValue = (child: KvPairNode, valueType: ValueType): void => {
+    const fail = matchType(schema, registry, child.value, valueType, scopeChain, treeScope, 0);
+    if (fail) {
+      emit(
+        diags,
+        child.value.span,
+        [...path, child.key],
+        fail.code,
+        fail.message(spec.name, child.key),
+      );
+    } else {
+      emitDeprecatedMember(diags, schema, valueType, child.value, [...path, child.key]);
+      emitStringPatternUnsupported(diags, schema, valueType, child.value, [...path, child.key]);
+    }
+  };
+
   // Positional ordinal (mirrors Zig's `positional_n`) and the per-form
   // set of already-seen flag names (mirrors Zig's `seen_flags`).
   let posIndex = 0;
@@ -1118,37 +1173,37 @@ function validateFormKeys(
       if (matchIdx >= 0) {
         seenIdx.add(matchIdx);
         const k = spec.keys[matchIdx]!;
-        const fail = matchType(
-          schema,
-          registry,
-          child.value,
-          k.valueType,
-          scopeChain,
-          treeScope,
-          0,
-        );
-        if (fail) {
-          emit(
-            diags,
-            child.value.span,
-            [...path, child.key],
-            fail.code,
-            fail.message(spec.name, child.key),
-          );
-        } else {
-          emitDeprecatedMember(diags, schema, k.valueType, child.value, [...path, child.key]);
-          emitStringPatternUnsupported(diags, schema, k.valueType, child.value, [
-            ...path,
-            child.key,
-          ]);
+        checkKvpairValue(child, k.valueType);
+        // Discriminant slot: capture the author-written variant. The type
+        // check above already emitted `not_member` for a value outside the
+        // enum, so such a value leaves the variant unresolved rather than
+        // selecting a branch on a name the schema does not admit.
+        if (spec.discriminantIdx === matchIdx && child.value.tag === 'symbol') {
+          const sym = child.value.text;
+          const vi = variants.findIndex((v) => v.when === sym);
+          if (vi >= 0) {
+            resolvedWhen = variants[vi]!.when;
+            resolvedVariantIdx = vi;
+          }
         }
+        continue;
+      }
+      // Variant-key fallthrough — only reachable once the discriminant has
+      // resolved.
+      const activeVariant = resolvedVariantIdx === null ? null : variants[resolvedVariantIdx]!;
+      const variantIdx = activeVariant
+        ? activeVariant.keys.findIndex((vk) => vk.name === child.key)
+        : -1;
+      if (activeVariant && variantIdx >= 0) {
+        seenVariantIdx.add(variantIdx);
+        checkKvpairValue(child, activeVariant.keys[variantIdx]!.valueType);
       } else if (!spec.open) {
         emit(
           diags,
           child.keySpan,
           [...path, child.key],
           'unknown_key',
-          `unknown keyword \`:${child.key}\` in form \`${spec.name}\``,
+          unknownKeywordMessage(spec, child.key, resolvedWhen),
         );
       }
     } else {
@@ -1238,23 +1293,260 @@ function validateFormKeys(
     }
   }
 
-  if (!spec.open) {
-    for (let ki = 0; ki < spec.keys.length; ki++) {
-      const k = spec.keys[ki]!;
-      // A defaulted key is effectively optional — the default fills the slot,
-      // so its absence is not `missing_required_key` (mirrors the Zig
-      // validator's `effectiveOptional` gate in both tree + binary paths).
-      if (effectiveOptional(k)) continue;
-      if (seenIdx.has(ki)) continue;
+  // Everything below enforces closed-form *shape*; type checks above always
+  // run, so an open form still gets typed values in its declared slots.
+  if (spec.open) return;
+
+  // A discriminated form with no discriminant supplied gets exactly one
+  // diagnostic, not a pile of missing-variant-key ones: no variant could be
+  // selected, and that is the thing to fix.
+  const didx = spec.discriminantIdx;
+  if (didx !== undefined && !seenIdx.has(didx)) {
+    const dname = spec.discriminantName ?? spec.keys[didx]?.name ?? 'kind';
+    emit(
+      diags,
+      node.headSpan,
+      path,
+      'missing_discriminant_key',
+      `form \`${spec.name}\` is missing required discriminant \`:${dname}\``,
+    );
+  }
+
+  const groups = spec.exclusiveGroups ?? [];
+  for (let ki = 0; ki < spec.keys.length; ki++) {
+    const k = spec.keys[ki]!;
+    // A defaulted key is effectively optional — the default fills the slot,
+    // so its absence is not `missing_required_key` (mirrors the Zig
+    // validator's `effectiveOptional` gate in both tree + binary paths).
+    if (effectiveOptional(k)) continue;
+    if (seenIdx.has(ki)) continue;
+    // The discriminant slot is covered by the emit above.
+    if (ki === didx) continue;
+    // A grouped key's presence is the group sweep's business — "one of
+    // these" is not "this one is missing".
+    if (keyInExclusiveGroup(groups, k.name)) continue;
+    emit(
+      diags,
+      node.headSpan,
+      path,
+      'missing_required_key',
+      `form \`${spec.name}\` is missing required keyword \`:${k.name}\``,
+    );
+  }
+
+  emitExclusiveGroupDiagnostics(
+    diags,
+    groups,
+    spec.keys,
+    seenIdx,
+    spec.name,
+    null,
+    node.headSpan,
+    path,
+  );
+
+  // Variant-only required sweep. Skips a key the author *did* write but
+  // which landed as `unknown_key` for preceding the discriminant — they
+  // wrote it, just in the wrong order, and the ordering diagnostic is the
+  // one to act on.
+  if (resolvedVariantIdx !== null) {
+    const v = variants[resolvedVariantIdx]!;
+    const variantGroups = v.exclusiveGroups ?? [];
+    for (let vki = 0; vki < v.keys.length; vki++) {
+      const vk = v.keys[vki]!;
+      if (effectiveOptional(vk)) continue;
+      if (seenVariantIdx.has(vki)) continue;
+      if (node.children.some((c) => c.tag === 'kvpair' && c.key === vk.name)) continue;
+      if (keyInExclusiveGroup(variantGroups, vk.name)) continue;
       emit(
         diags,
         node.headSpan,
         path,
         'missing_required_key',
-        `form \`${spec.name}\` is missing required keyword \`:${k.name}\``,
+        `form \`${spec.name}\` (variant \`:when ${v.when}\`) is missing required keyword \`:${vk.name}\``,
+      );
+    }
+    emitExclusiveGroupDiagnostics(
+      diags,
+      variantGroups,
+      v.keys,
+      seenVariantIdx,
+      spec.name,
+      v.when,
+      node.headSpan,
+      path,
+    );
+  }
+}
+
+// ─── Exclusive groups ───────────────────────────────────────────────────
+//
+// Mirrors `emitExclusiveGroupDiagnostics` and its three `alternative*`
+// predicates in `src/Validator.zig`, minus the overlay leg: without the
+// default-materialization overlay this host has no *defaulted* alternative,
+// so `default_count` is structurally zero and
+// `multiple_defaulted_alternatives_in_group` — which fires only when two
+// alternatives are satisfied by defaults alone — cannot arise here. That is
+// the one exclusive-group code the wasm-backed hosts can emit and this one
+// cannot, and it is an axis-C code, already outside this port's scope.
+
+/** True when `name` appears in any alternative of any group. Both required-key
+ *  sweeps use it to stand down: the group sweep owns presence diagnostics for
+ *  grouped keys, and two reports of the same absence read as two problems. */
+function keyInExclusiveGroup(groups: readonly ExclusiveGroup[], name: string): boolean {
+  return groups.some((g) => g.alternatives.some((alt) => alt.keys.includes(name)));
+}
+
+/** True when every key in `alt` is present. An alt key with no slot in `keys`
+ *  counts as absent — the loader rejects that shape, so reaching here means a
+ *  hand-built spec, and treating the unknown name as present would invent a
+ *  satisfied alternative. */
+function alternativePresent(
+  alt: Alternative,
+  keys: readonly KeySpec[],
+  seen: ReadonlySet<number>,
+): boolean {
+  if (alt.keys.length === 0) return false;
+  return alt.keys.every((kn) => {
+    const idx = keys.findIndex((k) => k.name === kn);
+    return idx >= 0 && seen.has(idx);
+  });
+}
+
+/** True when a multi-key bundle is partly present: at least one key set, at
+ *  least one absent. Single-key alts never report partial — a bundle is what
+ *  can be half-written. */
+function alternativePartiallyPresent(
+  alt: Alternative,
+  keys: readonly KeySpec[],
+  seen: ReadonlySet<number>,
+): boolean {
+  if (alt.keys.length <= 1) return false;
+  let anySet = false;
+  let anyAbsent = false;
+  for (const kn of alt.keys) {
+    const idx = keys.findIndex((k) => k.name === kn);
+    if (idx >= 0 && seen.has(idx)) anySet = true;
+    else anyAbsent = true;
+  }
+  return anySet && anyAbsent;
+}
+
+function emitExclusiveGroupDiagnostics(
+  diags: Diagnostic[],
+  groups: readonly ExclusiveGroup[],
+  keys: readonly KeySpec[],
+  seen: ReadonlySet<number>,
+  formName: string,
+  variantWhen: string | null,
+  span: Span,
+  path: readonly string[],
+): void {
+  for (const group of groups) {
+    const presentCount = group.alternatives.filter((alt) =>
+      alternativePresent(alt, keys, seen),
+    ).length;
+
+    if (presentCount >= 2) {
+      emit(
+        diags,
+        span,
+        path,
+        'mutually_exclusive_keys_present',
+        exclusiveGroupMessage(formName, variantWhen, group, 'mutually_exclusive_keys_present'),
+      );
+      continue;
+    }
+
+    // Partial bundles fire only when no sibling alt is fully present: a full
+    // sibling already won the group above, and a partial next to a satisfied
+    // sibling is just overspecification, not a broken bundle.
+    if (presentCount > 0) continue;
+
+    let anyPartial = false;
+    for (const alt of group.alternatives) {
+      if (!alternativePartiallyPresent(alt, keys, seen)) continue;
+      anyPartial = true;
+      emit(
+        diags,
+        span,
+        path,
+        'exclusive_bundle_partial',
+        exclusiveBundleMessage(formName, variantWhen, alt, keys, seen),
+      );
+    }
+
+    // A partial bundle suppresses `required_one_of_missing`: the author did
+    // pick an alternative, so naming its missing siblings beats telling them
+    // they picked none.
+    if (!anyPartial && group.cardinality === 'exactly_one') {
+      emit(
+        diags,
+        span,
+        path,
+        'required_one_of_missing',
+        exclusiveGroupMessage(formName, variantWhen, group, 'required_one_of_missing'),
       );
     }
   }
+}
+
+/** `:k1` / `:k1+:k2` bundles joined by ` | ` — readable for both the v1
+ *  single-key shape and multi-key bundles. */
+function renderAlternatives(group: ExclusiveGroup): string {
+  return group.alternatives.map((alt) => alt.keys.map((k) => `:${k}`).join('+')).join(' | ');
+}
+
+function exclusiveGroupMessage(
+  formName: string,
+  variantWhen: string | null,
+  group: ExclusiveGroup,
+  code: 'mutually_exclusive_keys_present' | 'required_one_of_missing',
+): string {
+  const scope = variantWhen === null ? '' : ` (variant \`:when ${variantWhen}\`)`;
+  const [lead, tail] =
+    code === 'mutually_exclusive_keys_present'
+      ? [': at most one of ', ' may be present']
+      : [': exactly one of ', ' must be present'];
+  return `form \`${formName}\`${scope}${lead}${renderAlternatives(group)}${tail}`;
+}
+
+/** Names every key in the bundle, tagged set/missing, so the author can see
+ *  which sibling to add. */
+function exclusiveBundleMessage(
+  formName: string,
+  variantWhen: string | null,
+  alt: Alternative,
+  keys: readonly KeySpec[],
+  seen: ReadonlySet<number>,
+): string {
+  const scope = variantWhen === null ? '' : ` (variant \`:when ${variantWhen}\`)`;
+  const bundle = alt.keys.map((k) => `:${k}`).join('+');
+  const detail = alt.keys
+    .map((kn) => {
+      const idx = keys.findIndex((k) => k.name === kn);
+      return `:${kn}${idx >= 0 && seen.has(idx) ? ' set' : ' missing'}`;
+    })
+    .join(', ');
+  return `form \`${formName}\`${scope}: exclusive-group alt \`${bundle}\` is partially present (${detail}); bundles are all-or-nothing`;
+}
+
+/**
+ * Prose for `unknown_key`, in the two shapes the Zig walkers use. A
+ * discriminated form whose discriminant has *not* resolved gets the ordering
+ * hint — on such a form the likeliest cause of an unknown key is a
+ * variant-only key written too early, and the plain message would send the
+ * author looking for a typo instead. Otherwise the message is plain,
+ * annotated with the active variant when there is one. Mirrors
+ * `unknownKeywordMsg` + `UnknownKeyContext` in `src/Validator.zig`.
+ */
+function unknownKeywordMessage(spec: FormSpec, key: string, resolvedWhen: string | null): string {
+  if (spec.discriminantIdx !== undefined && resolvedWhen === null) {
+    const dname = spec.discriminantName ?? 'kind';
+    return `unknown keyword \`:${key}\` in form \`${spec.name}\` — \`:${dname}\` must be set before variant-only keys`;
+  }
+  const suffix = resolvedWhen === null ? '' : ` (variant \`:when ${resolvedWhen}\`)`;
+  return `unknown keyword \`:${key}\` in form \`${spec.name}\`${suffix}`;
 }
 
 interface MatchFail {
@@ -1382,10 +1674,14 @@ function matchKind(
   depth: number,
 ): MatchFail | null {
   // Form values reaching a named kind: defer the structural HeadSet
-  // check to the `.form` underlying branch below; otherwise dispatch
-  // through the form-expression resolver so refined-named primitives
-  // (vec3-like kinds) reject coarse expression results consistently.
-  if (node.tag === 'form' && kind.underlying !== 'form') {
+  // check to the `.form` underlying branch below; a `union_of` kind falls
+  // through to the union arm so the form can be dispatched against each
+  // alternative (a form-head-set alternative can accept it) — parity with
+  // the Zig validator's matchFormAgainstTypeBinary / tree union-over-forms
+  // path. Every other underlying dispatches through the form-expression
+  // resolver so refined-named primitives (vec3-like kinds) reject coarse
+  // expression results consistently.
+  if (node.tag === 'form' && kind.underlying !== 'form' && kind.underlying !== 'union_of') {
     return checkFormInTypedSlot(schema, node, { kind: 'named', name: kind.name, namespace: null });
   }
   switch (kind.underlying) {
@@ -1403,13 +1699,13 @@ function matchKind(
         }
       }
       if (kind.numeric) {
-        const fail = checkNumericBounds(node as NumberNode, kind.numeric);
+        const fail = checkNumericBounds(node, kind.numeric);
         if (fail) return fail;
       }
       // Repr narrowing is orthogonal to :numeric — both may be set and
       // each is checked independently (parity with the Zig .number arm).
       if (kind.repr) {
-        const fail = checkReprValue(node as NumberNode, kind.repr);
+        const fail = checkReprValue(node, kind.repr);
         if (fail) return fail;
       }
       return null;
@@ -1450,7 +1746,7 @@ function matchKind(
     case 'vector':
       if (node.tag !== 'vector') return wrongUnderlying('vector');
       if (kind.vector) {
-        const elements = (node as VectorNode).elements;
+        const elements = node.elements;
         if (kind.vector.len !== undefined && elements.length !== kind.vector.len) {
           return vectorLengthMismatch(kind.vector.len, elements.length);
         }

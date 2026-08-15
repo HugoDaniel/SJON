@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code pattern_tick_overflow :path [fast]))

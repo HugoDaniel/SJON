@@ -1,0 +1,9 @@
+(haps
+  (hap :part [0 180180] bd)
+  (hap :part [180180 360360] sn)
+  (hap :part [360360 540540] bd)
+  (hap :part [540540 720720] sn)
+  (hap :part [720720 900900] bd)
+  (hap :part [900900 1081080] sn)
+  (hap :part [1081080 1261260] bd)
+  (hap :part [1261260 1441440] sn))

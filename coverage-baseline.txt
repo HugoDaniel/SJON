@@ -1,0 +1,93 @@
+# kcov line coverage, per file (alphabetical) then total.
+# Generated — do not hand-edit. Refresh at the end of each plan program (or
+# after any change that moves coverage materially):
+#
+#     zig build coverage && tools/coverage_summary.sh > coverage-baseline.txt
+#
+# A review aid, not a gate — nothing fails when it drifts, which is exactly
+# why it needs a stated cadence. It had gone five weeks stale before r1-06,
+# still reporting `src/lsp/wasm.zig 9.85%` for a file that had since grown 38
+# dispatch tests.
+ 98.47%    642/652    src/Ast.zig
+ 99.55%    443/445    src/Binary.zig
+ 98.75%    712/721    src/BinaryCursor.zig
+ 98.17%    107/109    src/BinaryFormat.zig
+ 99.63%   1076/1080   src/Binary_tests.zig
+100.00%     20/20     src/CappedRead.zig
+ 96.53%    195/202    src/ConformanceExpected.zig
+100.00%    227/227    src/Date.zig
+100.00%    127/127    src/DidYouMean.zig
+ 97.14%    510/525    src/Edit.zig
+ 92.93%    171/184    src/EffectiveDocument.zig
+ 97.39%    224/230    src/EffectiveView.zig
+ 95.24%     20/21     src/Explanations.zig
+ 99.52%   1246/1252   src/Expr.zig
+ 99.44%   2818/2834   src/Expr_tests.zig
+ 93.05%    616/662    src/FilesystemResolver.zig
+100.00%    151/151    src/Glob.zig
+ 91.13%    709/778    src/Host.zig
+ 98.66%   1102/1117   src/Host_tests.zig
+ 96.21%    279/290    src/Json.zig
+ 99.69%    965/968    src/Json_tests.zig
+ 98.84%    769/778    src/Lexer.zig
+ 99.18%    242/244    src/Lockfile.zig
+ 96.16%   1002/1042   src/Lowering.zig
+ 97.50%     39/40     src/LoweringGraph.zig
+ 97.41%    564/579    src/Lowering_test_hooks.zig
+ 96.87%   1052/1086   src/ManifestLoader.zig
+ 98.79%   1552/1571   src/ManifestLoader_tests.zig
+ 99.69%    317/318    src/MaterializedDefaults.zig
+ 97.39%    112/115    src/MetaSchema.zig
+ 98.88%   1413/1429   src/Parser.zig
+100.00%    182/182    src/Pattern.zig
+ 96.09%   1252/1303   src/PatternQuery.zig
+100.00%    173/173    src/Plugin.zig
+ 86.38%    241/279    src/PluginRuntime.zig
+ 91.40%    340/372    src/PluginValueCodec.zig
+ 99.52%    616/619    src/Printer.zig
+ 93.91%    108/115    src/Resolver.zig
+ 97.65%   1039/1064   src/Schema.zig
+100.00%     20/20     src/SchemaExport/Discriminators.zig
+ 85.76%    831/969    src/SchemaExport/JsonSchema.zig
+ 98.50%    131/133    src/SchemaExport/JsonSchema_tests.zig
+ 63.64%    210/330    src/SchemaExport/Markdown.zig
+100.00%     26/26     src/SchemaExport/Model.zig
+ 87.59%    840/959    src/SchemaExport/SchemaExport.zig
+ 89.38%    572/640    src/SchemaExport/TsTypes.zig
+100.00%     13/13     src/SchemaExport/Warnings.zig
+100.00%     47/47     src/Sha256Pin.zig
+100.00%     55/55     src/StringEscape.zig
+100.00%    182/182    src/StringFormats.zig
+100.00%    179/179    src/Time.zig
+ 96.74%   2431/2513   src/Validator.zig
+ 99.66%   4636/4652   src/Validator_tests.zig
+ 76.92%   1486/1932   src/cli/Cli.zig
+ 99.26%   1599/1611   src/cli/Cli_tests.zig
+100.00%     19/19     src/cli/Color.zig
+100.00%     43/43     src/cli/Completions.zig
+ 97.70%    170/174    src/cli/DiagnosticFormat.zig
+ 84.62%    143/169    src/cli/Hints.zig
+ 94.87%     37/39     src/cli/ShareLink.zig
+100.00%    202/202    src/cli/SnippetRenderer.zig
+ 98.85%     86/87     src/cli/ValueText.zig
+ 96.79%    151/156    src/cli/WatchSet.zig
+ 85.05%    182/214    src/composition_tests.zig
+ 82.71%    646/781    src/conformance_tests.zig
+ 92.09%   2432/2641   src/lsp/Handler.zig
+ 99.48%   3807/3827   src/lsp/Handler_tests.zig
+100.00%    223/223    src/lsp/offsets.zig
+ 98.46%     64/65     src/lsp/text_sync.zig
+ 99.29%    139/140    src/lsp/uri.zig
+ 72.35%   1332/1841   src/lsp/wasm.zig
+ 99.08%    108/109    src/lsp/workspace_scan.zig
+ 93.68%    667/712    src/oom_tests.zig
+ 90.91%     20/22     src/plugins/core.zig
+100.00%      9/9      src/plugins/pattern.zig
+ 93.04%    214/230    src/root.zig
+ 89.37%    185/207    src/runtimes/wasmtime.zig
+ 92.48%    726/785    src/trig.zig
+ 96.57%    197/204    src/wasm_common.zig
+ 80.77%     63/78     src/wasm_host_json.zig
+ 84.42%     65/77     src/wasm_plugin_invoker.zig
+
+ 94.81%  48561/51219  TOTAL

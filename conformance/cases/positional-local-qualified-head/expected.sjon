@@ -1,0 +1,4 @@
+; A qualified head bypasses locals → global-only resolution → unknown_form
+; (NOT unknown_local_form). The path uses the bare head `bogus`.
+(diagnostics
+  (diagnostic :code unknown_form :path [bind-group bogus]))

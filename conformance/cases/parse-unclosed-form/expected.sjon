@@ -1,0 +1,6 @@
+; Parser syntax diagnostics carry `code = .unspecified` — the code is not
+; the interesting part, the *shape* is: one diagnostic, attributed to the
+; form that was left open, and a tree complete enough to satisfy the
+; schema's required key.
+(diagnostics
+  (diagnostic :code unspecified :path [pt]))

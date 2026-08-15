@@ -1,0 +1,18 @@
+; Second half of the per-plugin layout fixture pair. Declares the two
+; forms (`(color …)` and `(gradient …)`) that `pair-a/palette` references
+; via its head-set `:swatch-form`. The per-plugin emit produces a
+; self-contained schema for `pair-b` whose `$defs` only holds these two
+; forms; cross-plugin `$ref`s into this file resolve as
+; `./pair-b.schema.json#/$defs/form.pair-b.<form>`.
+
+(plugin :name pair-b :version "1.0.0"
+  (form :name color
+    :description "A solid colour swatch."
+    (key :name hex :type string :description "Hex `#RRGGBB`.")
+    (key :name name :type symbol :optional true))
+
+  (form :name gradient
+    :description "A two-stop linear gradient."
+    (key :name from :type string)
+    (key :name to :type string)
+    (key :name angle :type number :optional true)))

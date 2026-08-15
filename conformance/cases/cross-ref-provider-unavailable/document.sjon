@@ -1,0 +1,18 @@
+; Provider-route executable family, 4 of 7 — absence, made loud.
+;
+; The schema is well-formed and the provider resolves; there is simply no
+; implementation behind it on any host. The tempting behaviour is to skip
+; the check and pass, which would make a document validate differently
+; depending on how its validator was built. Instead the bucket is
+; poisoned exactly as a refusal poisons it, and one diagnostic says so.
+;
+; The two references are unchecked, not accepted and not rejected —
+; `u_res` is deliberately not among the names the source would have
+; yielded, and it is still silent. A host that reported it would be
+; claiming to know a member set it never computed.
+(use-plugin "lines")
+
+(shader :name main :src "u_time")
+
+(bind :uniform u_time)
+(bind :uniform u_res)

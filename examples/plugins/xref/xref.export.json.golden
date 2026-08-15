@@ -1,0 +1,296 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "xref",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "node",
+          "description": "Named graph node. Referenced by `:edge`.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "id",
+              "optional": false,
+              "description": "Stable identifier within the document.",
+              "value": {
+                "kind": "symbol"
+              }
+            },
+            {
+              "name": "label",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "parent",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "cross_ref",
+                "target_form": "node",
+                "name_key": "id",
+                "acyclic": true,
+                "scope_form": null,
+                "provider": null,
+                "source_key": null
+              }
+            }
+          ]
+        },
+        {
+          "name": "phrase",
+          "description": "Composable phrase. Referenced by `:phrase-ref` (scope-form scoped to a parent `(piece …)`).",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "name",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            },
+            {
+              "name": "body",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "string"
+              }
+            }
+          ]
+        },
+        {
+          "name": "piece",
+          "description": "Scope-form root for nested `(phrase …)` registries.",
+          "open": false,
+          "positional": "any",
+          "keys": [
+            {
+              "name": "title",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "string"
+              }
+            }
+          ]
+        },
+        {
+          "name": "shader",
+          "description": "Opaque source blob. Its `:code` string is the member set for `:uniform-ref`, read by the `uniforms` provider.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "name",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            },
+            {
+              "name": "code",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "string"
+              }
+            }
+          ]
+        },
+        {
+          "name": "edge",
+          "description": "Directed edge between two `(node …)` declarations.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "from",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "cross_ref",
+                "target_form": "node",
+                "name_key": "id",
+                "acyclic": false,
+                "scope_form": null,
+                "provider": null,
+                "source_key": null
+              }
+            },
+            {
+              "name": "to",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "cross_ref",
+                "target_form": "node",
+                "name_key": "id",
+                "acyclic": true,
+                "scope_form": null,
+                "provider": null,
+                "source_key": null
+              }
+            },
+            {
+              "name": "phrase",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "cross_ref",
+                "target_form": "phrase",
+                "name_key": "name",
+                "acyclic": false,
+                "scope_form": "piece",
+                "provider": null,
+                "source_key": null
+              }
+            },
+            {
+              "name": "uniform",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "cross_ref",
+                "target_form": "shader",
+                "name_key": "name",
+                "acyclic": false,
+                "scope_form": null,
+                "provider": "uniforms",
+                "source_key": "code"
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": [
+        {
+          "name": "node-ref",
+          "description": "Cross-ref to a `(node …)` declared elsewhere.",
+          "shape": {
+            "kind": "cross_ref",
+            "target_form": "node",
+            "name_key": "id",
+            "acyclic": false,
+            "scope_form": null,
+            "provider": null,
+            "source_key": null
+          }
+        },
+        {
+          "name": "node-acyclic",
+          "description": "Acyclic cross-ref to a `(node …)`.",
+          "shape": {
+            "kind": "cross_ref",
+            "target_form": "node",
+            "name_key": "id",
+            "acyclic": true,
+            "scope_form": null,
+            "provider": null,
+            "source_key": null
+          }
+        },
+        {
+          "name": "phrase-ref",
+          "description": "Cross-ref to a `(phrase …)` declared within the enclosing `(piece …)`.",
+          "shape": {
+            "kind": "cross_ref",
+            "target_form": "phrase",
+            "name_key": "name",
+            "acyclic": false,
+            "scope_form": "piece",
+            "provider": null,
+            "source_key": null
+          }
+        },
+        {
+          "name": "uniform-ref",
+          "description": "Cross-ref to a uniform declared inside some `(shader …)`'s source.",
+          "shape": {
+            "kind": "cross_ref",
+            "target_form": "shader",
+            "name_key": "name",
+            "acyclic": false,
+            "scope_form": null,
+            "provider": "uniforms",
+            "source_key": "code"
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `node-acyclic` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin_name": "xref",
+      "kind_name": "node-acyclic"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `node-acyclic` cross-ref annotation surfaces target-form=`node` name-key=`id` acyclic=true scope-form=``; none are enforceable by JSON Schema",
+      "plugin_name": "xref",
+      "kind_name": "node-acyclic"
+    },
+    {
+      "code": "acyclic_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `node-acyclic` declares `:acyclic true`; cycle detection cannot be enforced by JSON Schema",
+      "plugin_name": "xref",
+      "kind_name": "node-acyclic"
+    },
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `node-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin_name": "xref",
+      "kind_name": "node-ref"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `node-ref` cross-ref annotation surfaces target-form=`node` name-key=`id` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "plugin_name": "xref",
+      "kind_name": "node-ref"
+    },
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `phrase-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin_name": "xref",
+      "kind_name": "phrase-ref"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `phrase-ref` cross-ref annotation surfaces target-form=`phrase` name-key=`name` acyclic=false scope-form=`piece`; none are enforceable by JSON Schema",
+      "plugin_name": "xref",
+      "kind_name": "phrase-ref"
+    },
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `uniform-ref` cross-ref: schema validates symbol shape only; the member set is extracted from each target's `:code` string by provider `uniforms` during validation, so it is not knowable at export time",
+      "plugin_name": "xref",
+      "kind_name": "uniform-ref"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `uniform-ref` cross-ref annotation surfaces target-form=`shader` provider=`uniforms` source-key=`code` scope-form=``; none are enforceable by JSON Schema",
+      "plugin_name": "xref",
+      "kind_name": "uniform-ref"
+    }
+  ]
+}

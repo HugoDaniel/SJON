@@ -1,0 +1,35 @@
+; A target form's member set is collected *once*, keyed by the canonical
+; target name and built first-wins in plugin × value-kind order. So a
+; second `(cross-ref …)` naming the same target contributes nothing to
+; the registry — and when the two disagree about how the set is built,
+; the loser's references end up checked against names its own
+; declaration had no part in producing.
+;
+; Before the provider route the worst two declarations could differ on
+; was a key. Now they can differ on the *route*, which is what makes the
+; collapse worth a diagnostic: `shader-name` reads a symbol off each
+; `(shader …)`, `uniform-name` would have run `lines` over the same
+; form's `:src` string, and only the first of those happens.
+;
+; `.warning`, not `.err`: the schema still loads and every reference is
+; still checked — just not the way the second kind declared.
+(plugin :name probe :version "1.0.0" :sjon "1.2"
+  (cross-ref-provider :name lines
+    :description "One name per non-empty line.")
+
+  (form :name shader
+    (key :name name :type symbol :optional false)
+    (key :name src :type string :optional false))
+
+  ; Declared first, so this one builds the registry: the members of
+  ; `probe/shader` are the symbols under `:name`.
+  (value-kind :name shader-name
+    :underlying symbol
+    :cross-ref (cross-ref :target shader))
+
+  ; Declared second on the same target, by the other route. Inert.
+  (value-kind :name uniform-name
+    :underlying symbol
+    :cross-ref (cross-ref :target shader :provider lines)))
+
+nil

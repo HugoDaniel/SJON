@@ -623,7 +623,7 @@ canonical print and canonical JSON.
 | Tree-trailing comments | per-tree | no | no | yes (with `with_tree_trailing_comments`) |
 | Kvpair comments | per-kvpair | no | no | yes (with `with_kvpair_comments`) |
 | Spans | per-node, per-head, per-key | no | no | yes (with `with_spans` / `with_head_spans` / `with_kvpair_key_spans`) |
-| String form (`"…"` vs `"""…"""`) | per-string-node | no | no | no (deferred) |
+| String form (`"…"` vs `"""…"""`) | per-string-node | no | no | no (not preserved) |
 
 The binary IR exposes one flag per trivia channel and groups them
 into three presets (§10.2): `compact` clears every flag, `canonical`
@@ -634,16 +634,12 @@ language-server features all depend on them; comments are default-off
 because nothing downstream of an emitter consumes them. See §10.2
 for the rationale and per-bit table.
 
-**String-form preservation is deferred.** Every print mode emits
+**String form is not preserved.** Every print mode emits
 escape-quoted `"…"`, so a triple-quoted source round-tripped through
 lossless binary comes back as escape-quoted text. The decoded bytes
 are identical (`"""hello"""` and `"hello"` are the same value), so
 nothing observable is lost — only the author's choice of delimiter.
-The mechanics for preserving it are sketched (one bit per string
-node, one binary IR flag in the reserved space, one printer branch);
-the work is gated on a real use case rather than shipped ahead of
-demand. Until then, `"…"` is the only form any SJON tool will hand
-back.
+`"…"` is the only form any SJON tool hands back.
 
 ### 4.3 Diagnostics and partial trees
 
@@ -1088,6 +1084,32 @@ which *narrows* a slot to a closed set of **global** form heads by
 byte-equality; slot-local forms instead *add* slot-scoped, anonymous form
 bodies on top of the global catalog.
 
+The same local-first machinery also scopes a form's **positional** slot.
+Inline `(form …)` children placed directly under a `(form …)` — the
+positional mirror of nesting them under a `(key …)` — populate the
+form-wide `FormSpec.local_forms`:
+
+```sjon
+(form :name bind-group
+  (form :name entry  (key :name binding :type number :optional false))
+  (form :name buffer (key :name slot    :type number :optional false)))
+```
+
+A form-shaped positional child resolves local-first identically:
+`(bind-group (entry :binding 0))` validates `entry` against the local
+spec — shadowing any global `entry` — while a bare head matching neither
+a local nor a global is `unknown_local_form` at the **parent form's**
+path (`[bind-group]`, the positional slot). Because a form has one
+positional stance yet the locals are declared independently, inline
+locals with **no** explicit `:positional` imply `.any` (otherwise they
+would be dead behind `positional_not_allowed`); pairing them with
+`:positional (flag-set …)` is a contradiction the loader rejects as
+`invalid_manifest`. Gating the slot with `:positional <head-set-kind>`
+(§6.5) closes it to a fixed set of heads whose in-set members then
+resolve their local bodies — the recipe for a **closed positional form
+set**. Both carriers share `Plugin.MAX_LOCAL_FORM_DEPTH` and compose
+freely: a positional local may itself carry key-locals, and vice-versa.
+
 ### 6.4 ValueType — what a slot accepts
 
 `ValueType` is the validator's per-slot type vocabulary. It is closed:
@@ -1212,6 +1234,8 @@ pub const CrossRef = struct {
     name_key: []const u8 = "name",           // symbol-valued name key on each target
     acyclic: bool = false,                   // true = reject cycles over self-edge keys
     scope_form: ?[]const u8 = null,          // null = whole forest; non-null = lexical scope form
+    provider: ?[]const u8 = null,            // null = identity route; else a CrossRefProvider name
+    source_key: []const u8 = "src",          // provider route: the key whose string is extracted
 };
 
 pub const UnionShape = struct {
@@ -1378,6 +1402,38 @@ kind. Target, name-key, and scope resolution failures are schema
 diagnostics; missing names, duplicates, out-of-scope uses, and cycles
 are validation diagnostics (§7.6).
 
+**The provider route.** `provider` replaces `name_key` as the source of
+names: instead of reading a symbol off each target instance, the host
+hands that instance's `source_key` string — opaque bytes SJON does not
+parse — to the named `(cross-ref-provider …)`, and every name it returns
+joins the registry. It is how a vocabulary defined in another language
+becomes checkable here: the uniforms of a shader, the captures of a
+regex, the columns of a schema. Everything downstream is unchanged —
+scoping, duplicate detection, `acyclic`, goto-definition — because the
+route only decides where a bucket's names come from, not what a bucket
+is. The two are exclusive: a `CrossRef` naming both a `provider` and a
+non-default `name_key` is rejected at manifest load.
+
+Three properties hold whatever a provider does:
+
+1. **Document bytes only.** A provider receives the source string and
+   nothing else — no filesystem, no network, no clock, no ambient state.
+   Its result is a pure function of `(provider, bytes)`, which is what
+   lets the host cache it and what keeps a document's validity a property
+   of the document.
+2. **Pinned.** A provider ships in a plugin, and a plugin is pinned by
+   `:version` / `:hash` like any other. A member set that changed under a
+   document without its schema changing would be a validity that drifts
+   with the weather.
+3. **Loud when absent.** A host that cannot run a provider — no
+   executable-plugin support, no implementation shipped — does not skip
+   the check and pass. The bucket is *poisoned*: one
+   `cross_ref_provider_unavailable` at the source instance, and silence
+   at every reference. The names are unchecked, which is neither accepted
+   nor rejected, and no host claims to know a member set it never
+   computed. `cross_ref_extraction_failed` is the same shape for the
+   other reason: the provider ran and refused the source.
+
 `UnionShape` applies only to `.union_of` underlying. Each alternative
 is a value-kind name or the primitive shortcut `number`, `string`,
 `symbol`, `vector`, `form`, or `any`. Alternatives are tried in
@@ -1507,10 +1563,10 @@ Format semantics — the `:format` symbol is drawn from a closed set:
 
 Unknown format names are rejected at manifest-load time (the meta-
 schema's `string-format-tag` member-set gates entry). The set is
-deliberately small for v1 — `date-time`, `ipv4`, `ipv6`, `hostname`,
-and `json-pointer` are deferred until corpus demand justifies the
-checker code; `date` and `time` already exist as first-class SJON
-literal tags and do not need string-format duplication.
+deliberately small — `date-time`, `ipv4`, `ipv6`, `hostname`, and
+`json-pointer` are not in it; `date` and `time` already exist as
+first-class SJON literal tags and do not need string-format
+duplication.
 
 `:pattern` is accept-but-warn in v1. The loader stores the raw
 pattern source and the validator emits `string_pattern_unsupported`
@@ -1900,6 +1956,12 @@ change for downstream conformance fixtures.
 | `cross_ref_outside_scope`     | a cross-ref symbol is used outside any enclosing `:scope` form (validate-time)             |
 | `cyclic_cross_ref`            | a cycle of `:acyclic true` cross-ref edges among forest forms (validate-time)              |
 | `acyclic_without_self_edge`   | `:acyclic true` declared on a kind whose target form has no key whose type resolves back   |
+| `unknown_cross_ref_provider`  | `(cross-ref :provider p …)` names a provider no plugin declares (load-time)                 |
+| `ambiguous_cross_ref_provider`| bare `:provider` resolves to ≥ 2 plugins; qualify with `<plugin>/<name>` (load-time)        |
+| `cross_ref_source_key_unknown`| `:source-key` doesn't appear on the target form, or its value type isn't string-shaped      |
+| `cross_ref_extraction_failed` | a `:provider` extractor ran on a source instance and rejected it (validate-time)           |
+| `cross_ref_provider_unavailable` | the host could not run a `:provider` extractor at all (validate-time)                   |
+| `cross_ref_target_collapse`   | two value-kinds cross-ref one target with differing specs; first-wins (load-time, warning) |
 
 **Form-shape rules** — kvpair / positional integrity.
 
@@ -2381,6 +2443,15 @@ Each entry's typed signature (where declared) is shown alongside its
 arity — the validator catches mistyped literal arguments at validate
 time.
 
+What it cannot catch is a **domain** failure: an argument of the right
+type whose *value* the function rejects. `(clamp 5 10 0)` inverts the
+range, `(nth [1 2 3] 9)` runs off the end, `(normalize [0 0])` has no
+direction, `(/ 1 0)` divides by zero — every one of them type-checks,
+and the validator knows what a slot declares, not what an expression
+computes. These are reported at evaluation, as `expr_type_mismatch`
+anchored at the form's head. The failing form yields no value; the
+forms around it keep evaluating.
+
 #### Arithmetic
 
 | Form | Arity | Args | Result | Meaning |
@@ -2389,7 +2460,7 @@ time.
 | `(- x ...)` | 1+ | `number, …number` | `number` | Negation when called with one arg; subtraction (left-fold) for two or more. |
 | `(* x ...)` | 0+ | `…number` | `number` | Product. `(*)` → `1`. |
 | `(/ x y ...)` | 2+ | `number, …number` | `number` | Division (left-fold). Division by zero returns `error.DivisionByZero`. |
-| `(mod x y)` | 2 | `number, number` | `number` | Floating-point remainder. |
+| `(mod x y)` | 2 | `number, number` | `number` | Floored remainder; the result takes the divisor's sign (as GLSL `mod` / Python `%`). |
 
 #### Comparison (binary)
 
@@ -3084,11 +3155,9 @@ no functional gain.
 - **`lossless`** / `full` — every flag on. Round-trips every trivia
   channel a re-emitter or refactoring tool needs.
 
-If the naming friction matters in a future cleanup, the
-implementation rename is small (`Ast.Mode` + `forMode` + a fixture
-sweep): `compact` → `compact`, `canonical` → `diagnostic`, `full` →
-`lossless`. Until then, the spec keeps the names that match the
-code.
+The spec keeps the names that match the code — `canonical` is the
+diagnostic-grade preset, `full` the lossless one — accepting the
+naming friction rather than renaming across the corpus.
 
 ```zig
 const opts = sjon.Binary.ToBinaryOptions.forMode(.full);

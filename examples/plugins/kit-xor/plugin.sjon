@@ -1,0 +1,30 @@
+; Two exclusive-group fixtures in one plugin:
+;
+;   * `(phrase …)` — `exactly_one [notes, events]`: every phrase
+;     row must declare exactly one rendering mode.
+;   * `(tag …)`    — `at_most_one [color, shape]`: a tag is either
+;     a colour mark or a shape mark, but it's also fine to leave
+;     both off.
+;
+; Modelled on `phrase_xor_plugin` (src/Validator_tests.zig:3483-3504)
+; and `phrase_atmostone_plugin` (3507-3528). M2 emits `oneOf` for the
+; exactly_one case and `not:{allOf}` for the at_most_one case.
+
+(plugin :name kit-xor :version "1.0.0"
+  (form :name phrase
+    :description "A single phrase rendered either as notes or as events — never both, never neither."
+    (key :name name :type symbol)
+    (key :name notes :type vector :optional true :description "Pitch-class sequence.")
+    (key :name events :type vector :optional true :description "Time-stamped event list.")
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [notes])
+      (alt :keys [events])))
+
+  (form :name tag
+    :description "Optional decoration on a phrase. Colour and shape are mutually exclusive but both omittable."
+    (key :name name :type symbol)
+    (key :name color :type string :optional true)
+    (key :name shape :type string :optional true)
+    (exclusive-group :cardinality at-most-one
+      (alt :keys [color])
+      (alt :keys [shape]))))

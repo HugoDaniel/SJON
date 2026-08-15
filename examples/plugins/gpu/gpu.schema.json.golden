@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 1,
+  "$defs": {
+    "form.gpu.vertex": {
+      "type": "object",
+      "description": "One mesh vertex: a 2..4-component position plus an optional u16 tint channel.",
+      "properties": {
+        "$form": {
+          "const": "vertex"
+        },
+        "$ns": {
+          "const": "gpu"
+        },
+        "position": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2,
+          "maxItems": 4
+        },
+        "tint": {
+          "type": "number",
+          "x-sjon-gpu-repr": "u16"
+        }
+      },
+      "required": [
+        "$form",
+        "position"
+      ],
+      "additionalProperties": false
+    },
+    "form.gpu.draw": {
+      "type": "object",
+      "description": "A draw call: f32 line width, u32 base vertex, and a bare LOD bias.",
+      "properties": {
+        "$form": {
+          "const": "draw"
+        },
+        "$ns": {
+          "const": "gpu"
+        },
+        "base-vertex": {
+          "type": "number",
+          "x-sjon-gpu-repr": "u32"
+        },
+        "line-width": {
+          "type": "number",
+          "x-sjon-gpu-repr": "f32"
+        },
+        "lod-bias": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "$form",
+        "line-width",
+        "base-vertex"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.gpu.vertex"
+    },
+    {
+      "$ref": "#/$defs/form.gpu.draw"
+    }
+  ]
+}

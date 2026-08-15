@@ -1,0 +1,5 @@
+; `cross_ref_extraction_failed`, the same code a refused source produces:
+; from the document's point of view the provider did not answer, and the
+; reason lives in the message rather than in the wire-stable enum.
+(diagnostics
+  (diagnostic :code cross_ref_extraction_failed :path []))

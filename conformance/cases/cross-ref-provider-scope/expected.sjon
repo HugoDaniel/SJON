@@ -1,0 +1,8 @@
+; Document order: the cross-pass reference inside the first pass, then
+; the unscoped one at root. Both land on the reference site's slot path,
+; which is where the author has to make the change — and the paths
+; differ only by the enclosing `pass`, which is the scope that made the
+; first one a miss and the second one unscoped.
+(diagnostics
+  (diagnostic :code not_cross_ref :path [pass bind uniform])
+  (diagnostic :code cross_ref_outside_scope :path [bind uniform]))

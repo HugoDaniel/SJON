@@ -1,0 +1,5 @@
+(plugin :name sequencer :version "1.0.0"
+  (form :name scene
+    (key :name bpm :type number :optional true)))
+
+(scene :bpm 120)

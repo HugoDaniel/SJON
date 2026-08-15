@@ -1,26 +1,64 @@
+//! `sjon-project.lock` — Slice 12 of the local-packaging plan.
+//!
+//! The lockfile captures the observed manifest + wasm hashes for every
+//! plugin reachable from a project at a point in time. It's never
+//! auto-created; `sjon project lock` writes it explicitly. `sjon
+//! project verify` (and any `sjon check` run when a lockfile is
+//! present) compares the recorded hashes against current bytes and
+//! emits `lockfile_drift` / `lockfile_missing_entry` /
+//! `lockfile_orphan` as appropriate.
+//!
+//! Wire format (deterministic, git-diff friendly):
+//!
+//! ```
+//! (lockfile :version 1
+//!           :project-hash "sha256-…"
+//!           :generated-at "2026-05-24T10:42:00Z"
+//!           :sjon-version "0.x.y"
+//!           :plugins
+//!           [(locked :name          shapes
+//!                    :version       "1.0.0"
+//!                    :path          "./vendor/shapes.sjon"
+//!                    :manifest-hash "sha256-…"
+//!                    :wasm-hash     "sha256-…"
+//!                    :resolved-from project-plugins)])
+//! ```
+//!
+//! Hashes are always `sha256-<64 lowercase hex>`. Entries sort by
+//! `:name` lexicographically. LF newlines, single trailing newline,
+//! no trailing whitespace.
+
 const std = @import("std");
 const Ast = @import("Ast.zig");
 const Parser = @import("Parser.zig");
+const Sha256Pin = @import("Sha256Pin.zig");
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
+/// The format version this host writes. Bumped on incompatible
+/// changes. A higher value in an existing lockfile is rejected via
+/// `lockfile_version_unsupported`.
 pub const FORMAT_VERSION: u32 = 1;
 
 pub const Error = error{ OutOfMemory, Corrupt, UnsupportedVersion };
 
 pub const ResolvedFrom = enum { project_plugins, search_roots };
 
+/// One locked plugin entry — everything `sjon project verify` needs to
+/// check whether the on-disk bytes still match.
 pub const LockedEntry = struct {
     name: []const u8,
     version: []const u8,
     path: []const u8,
     manifest_hash: []const u8,
+    /// Null for declarative-only plugins (no paired wasm).
     wasm_hash: ?[]const u8 = null,
     resolved_from: ResolvedFrom = .project_plugins,
 };
 
+/// In-memory lockfile.
 pub const Lockfile = struct {
     arena: std.heap.ArenaAllocator,
     version: u32 = FORMAT_VERSION,
@@ -33,6 +71,7 @@ pub const Lockfile = struct {
         self.arena.deinit();
     }
 
+    /// Find a plugin by name. Linear scan — lockfiles are small.
     pub fn find(self: *const Lockfile, name: []const u8) ?*const LockedEntry {
         for (self.plugins) |*p| {
             if (std.mem.eql(u8, p.name, name)) return p;
@@ -41,13 +80,18 @@ pub const Lockfile = struct {
     }
 };
 
+/// Compute `sha256-<hex>` over `bytes`. Returns an arena-owned slice.
+/// The `sha256-<hex>` render is owned by the `Sha256Pin` leaf.
 pub fn hashBytes(arena: Allocator, bytes: []const u8) Allocator.Error![]const u8 {
     var digest: [Sha256.digest_length]u8 = undefined;
     Sha256.hash(bytes, &digest, .{});
-    const hex = std.fmt.bytesToHex(digest, .lower);
-    return try std.fmt.allocPrint(arena, "sha256-{s}", .{hex});
+    const pin = Sha256Pin.renderDigest(digest);
+    return try arena.dupe(u8, &pin);
 }
 
+/// Serialize a lockfile to bytes. Returns an arena-owned slice. The
+/// caller is responsible for sorting `entries` by name lexicographically
+/// — `write` does NOT sort (it's pure rendering).
 pub fn write(
     arena: Allocator,
     lf: Lockfile,
@@ -104,11 +148,19 @@ pub fn write(
     return try buf.toOwnedSlice(arena);
 }
 
+/// Parse a lockfile from sentinel-terminated source. Returns
+/// `error.Corrupt` on any structural failure, `error.UnsupportedVersion`
+/// when the `:version` exceeds `FORMAT_VERSION`. Propagates
+/// `error.OutOfMemory` separately so OOM stress can distinguish it
+/// from a genuine parse failure.
 pub fn parse(gpa: Allocator, source: [:0]const u8) Error!Lockfile {
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
     const a = arena.allocator();
 
+    // Parser.parse only returns Allocator.Error — never a parse-failure
+    // class. OOM propagates; the lockfile is "structurally corrupt"
+    // only when the resulting tree shape disagrees with our checks.
     var tree = try Parser.parse(gpa, source);
     defer tree.deinit();
     if (tree.root.len != 1) return error.Corrupt;
@@ -117,6 +169,12 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) Error!Lockfile {
     const hdr = tree.formHeader(root);
     if (!std.mem.eql(u8, hdr.head, "lockfile")) return error.Corrupt;
 
+    // Build all owned data into locals first. We don't copy the arena
+    // into the `Lockfile` struct until everything is allocated —
+    // bitwise-copying `ArenaAllocator` snapshots its
+    // `state.buffer_list.first` pointer, so any allocation through
+    // `a` after the copy lands in the source arena's list but not
+    // the copy's, causing leaks on `deinit`.
     var version: u32 = FORMAT_VERSION;
     var project_hash: ?[]const u8 = null;
     var generated_at: ?[]const u8 = null;
@@ -192,6 +250,7 @@ fn parseLocked(a: Allocator, tree: Ast.Tree, idx: Ast.NodeIndex) Error!LockedEnt
     return entry;
 }
 
+/// Sort entries by `:name` lexicographically. Mutates in place.
 pub fn sortEntries(entries: []LockedEntry) void {
     std.mem.sort(LockedEntry, entries, {}, lessThan);
 }
@@ -200,4 +259,233 @@ fn lessThan(_: void, a: LockedEntry, b: LockedEntry) bool {
     return std.mem.lessThan(u8, a.name, b.name);
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
+
+test "Lockfile.hashBytes: produces sha256-<hex> format" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const h = try hashBytes(arena.allocator(), "hello");
+    try testing.expect(std.mem.startsWith(u8, h, "sha256-"));
+    try testing.expectEqual(@as(usize, 7 + 64), h.len);
+}
+
+test "Lockfile.write+parse round-trip" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var lf: Lockfile = .{
+        .arena = std.heap.ArenaAllocator.init(testing.allocator),
+        .version = FORMAT_VERSION,
+        .generated_at = "2026-05-24T00:00:00Z",
+        .plugins = &[_]LockedEntry{
+            .{
+                .name = "shapes",
+                .version = "1.0.0",
+                .path = "./vendor/shapes.sjon",
+                .manifest_hash = "sha256-0000000000000000000000000000000000000000000000000000000000000000",
+                .wasm_hash = "sha256-1111111111111111111111111111111111111111111111111111111111111111",
+            },
+        },
+    };
+    defer lf.arena.deinit();
+
+    const bytes = try write(a, lf);
+    try testing.expect(std.mem.indexOf(u8, bytes, "(lockfile :version 1") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, ":name          shapes") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "sha256-0000") != null);
+
+    const sentinel = try a.dupeZ(u8, bytes);
+    var parsed = try parse(testing.allocator, sentinel);
+    defer parsed.deinit();
+    try testing.expectEqual(@as(usize, 1), parsed.plugins.len);
+    try testing.expectEqualStrings("shapes", parsed.plugins[0].name);
+    try testing.expectEqualStrings("1.0.0", parsed.plugins[0].version);
+    try testing.expectEqualStrings("sha256-0000000000000000000000000000000000000000000000000000000000000000", parsed.plugins[0].manifest_hash);
+    try testing.expect(parsed.plugins[0].wasm_hash != null);
+}
+
+test "Lockfile.parse: rejects unsupported version" {
+    const src: [:0]const u8 = "(lockfile :version 99 :plugins [])";
+    const r = parse(testing.allocator, src);
+    try testing.expectError(error.UnsupportedVersion, r);
+}
+
+test "Lockfile.parse: rejects malformed root" {
+    const src: [:0]const u8 = "(not-a-lockfile)";
+    const r = parse(testing.allocator, src);
+    try testing.expectError(error.Corrupt, r);
+}
+
+test "Lockfile.sortEntries: alphabetical by name" {
+    var entries = [_]LockedEntry{
+        .{ .name = "zebra", .version = "", .path = "", .manifest_hash = "x" },
+        .{ .name = "alpha", .version = "", .path = "", .manifest_hash = "x" },
+        .{ .name = "mango", .version = "", .path = "", .manifest_hash = "x" },
+    };
+    sortEntries(&entries);
+    try testing.expectEqualStrings("alpha", entries[0].name);
+    try testing.expectEqualStrings("mango", entries[1].name);
+    try testing.expectEqualStrings("zebra", entries[2].name);
+}
+
+test "Lockfile.hashBytes: deterministic — same input, same hash" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const h1 = try hashBytes(a, "stable input");
+    const h2 = try hashBytes(a, "stable input");
+    try testing.expectEqualStrings(h1, h2);
+}
+
+test "Lockfile.hashBytes: different input → different hash" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const h1 = try hashBytes(a, "input one");
+    const h2 = try hashBytes(a, "input two");
+    try testing.expect(!std.mem.eql(u8, h1, h2));
+}
+
+test "Lockfile.write: empty plugins vector still produces a valid file" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var lf: Lockfile = .{ .arena = std.heap.ArenaAllocator.init(testing.allocator) };
+    defer lf.arena.deinit();
+
+    const bytes = try write(a, lf);
+    try testing.expect(std.mem.indexOf(u8, bytes, "(lockfile :version 1") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, ":plugins") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "[]") != null);
+
+    const sentinel = try a.dupeZ(u8, bytes);
+    var parsed = try parse(testing.allocator, sentinel);
+    defer parsed.deinit();
+    try testing.expectEqual(@as(usize, 0), parsed.plugins.len);
+}
+
+test "Lockfile: write+parse preserves wasm_hash = null" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var lf: Lockfile = .{
+        .arena = std.heap.ArenaAllocator.init(testing.allocator),
+        .plugins = &[_]LockedEntry{
+            .{
+                .name = "declarative",
+                .version = "1.0.0",
+                .path = "./d.sjon",
+                .manifest_hash = "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                .wasm_hash = null,
+            },
+        },
+    };
+    defer lf.arena.deinit();
+
+    const bytes = try write(a, lf);
+    try testing.expect(std.mem.indexOf(u8, bytes, "wasm-hash") == null);
+
+    const sentinel = try a.dupeZ(u8, bytes);
+    var parsed = try parse(testing.allocator, sentinel);
+    defer parsed.deinit();
+    try testing.expectEqual(@as(?[]const u8, null), parsed.plugins[0].wasm_hash);
+}
+
+test "Lockfile: ResolvedFrom round-trip" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var lf: Lockfile = .{
+        .arena = std.heap.ArenaAllocator.init(testing.allocator),
+        .plugins = &[_]LockedEntry{
+            .{
+                .name = "a-via-roots",
+                .version = "1",
+                .path = "/x",
+                .manifest_hash = "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                .resolved_from = .search_roots,
+            },
+            .{
+                .name = "b-via-project",
+                .version = "1",
+                .path = "/y",
+                .manifest_hash = "sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                .resolved_from = .project_plugins,
+            },
+        },
+    };
+    defer lf.arena.deinit();
+    const bytes = try write(a, lf);
+    const sentinel = try a.dupeZ(u8, bytes);
+    var parsed = try parse(testing.allocator, sentinel);
+    defer parsed.deinit();
+    try testing.expectEqual(ResolvedFrom.search_roots, parsed.plugins[0].resolved_from);
+    try testing.expectEqual(ResolvedFrom.project_plugins, parsed.plugins[1].resolved_from);
+}
+
+test "Lockfile.parse: rejects locked entry missing :name" {
+    const src: [:0]const u8 =
+        \\(lockfile :version 1 :plugins [(locked :manifest-hash "sha256-0000000000000000000000000000000000000000000000000000000000000000")])
+    ;
+    try testing.expectError(error.Corrupt, parse(testing.allocator, src));
+}
+
+test "Lockfile.parse: rejects locked entry missing :manifest-hash" {
+    const src: [:0]const u8 =
+        \\(lockfile :version 1 :plugins [(locked :name foo)])
+    ;
+    try testing.expectError(error.Corrupt, parse(testing.allocator, src));
+}
+
+test "Lockfile.parse: unknown lockfile-level keys ignored (forward-compat)" {
+    const src: [:0]const u8 =
+        \\(lockfile :version 1 :future-key "ignored" :plugins [])
+    ;
+    var lf = try parse(testing.allocator, src);
+    defer lf.deinit();
+    try testing.expectEqual(@as(u32, 1), lf.version);
+}
+
+test "Lockfile.find: returns entry by name" {
+    const src: [:0]const u8 =
+        \\(lockfile :version 1 :plugins [(locked :name foo :manifest-hash "sha256-0000000000000000000000000000000000000000000000000000000000000000")])
+    ;
+    var lf = try parse(testing.allocator, src);
+    defer lf.deinit();
+    const found = lf.find("foo");
+    try testing.expect(found != null);
+    try testing.expectEqualStrings("foo", found.?.name);
+    try testing.expect(lf.find("nonexistent") == null);
+}
+
+test "Lockfile.write: round-trip is byte-stable" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var lf: Lockfile = .{
+        .arena = std.heap.ArenaAllocator.init(testing.allocator),
+        .generated_at = "2026-05-24T00:00:00Z",
+        .plugins = &[_]LockedEntry{
+            .{
+                .name = "shapes",
+                .version = "1.0.0",
+                .path = "./shapes.sjon",
+                .manifest_hash = "sha256-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            },
+        },
+    };
+    defer lf.arena.deinit();
+
+    const bytes1 = try write(a, lf);
+    // Parse and re-write — should produce the same bytes.
+    const sentinel = try a.dupeZ(u8, bytes1);
+    var parsed = try parse(testing.allocator, sentinel);
+    defer parsed.deinit();
+    const bytes2 = try write(a, parsed);
+    try testing.expectEqualStrings(bytes1, bytes2);
+}

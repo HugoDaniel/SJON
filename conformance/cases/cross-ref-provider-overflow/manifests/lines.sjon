@@ -1,0 +1,26 @@
+; The overflow twin of the fixture: `extract_lines_overflow` reads its
+; source as a decimal *count* and emits that many names. Taking the count
+; from the document keeps `ProviderExtraction.MAX_EXTRACTED_NAMES` in one
+; place — a fixture that hard-coded 4097 would have to be edited in
+; lockstep with the ceiling, and would silently stop testing it if it
+; were not. `conformance/fixtures/lines_plugin.zig` carries the tripwire
+; that fails if the two drift.
+;
+; Both exports live in one `lines.wasm`; declaring two providers over one
+; binary is ordinary (the `double.wasm` fixture does the same for five
+; expr-funcs).
+(plugin :name lines :version "1.0.0" :sjon "1.2"
+  (cross-ref-provider :name lines-overflow
+    :description "Emits as many names as its source asks for."
+    :impl "wasm:extract_lines_overflow")
+
+  (form :name counter
+    (key :name name :type symbol :optional false)
+    (key :name src :type string :optional false))
+
+  (value-kind :name counted-name
+    :underlying symbol
+    :cross-ref (cross-ref :target counter :provider lines-overflow))
+
+  (form :name use
+    (key :name n :type counted-name :optional false)))

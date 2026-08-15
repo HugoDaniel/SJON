@@ -80,7 +80,7 @@
   (value-kind :name plugin-decl
     :underlying form
     :description "A declaration sub-form inside (plugin …)."
-    :heads (head-set :names [value-kind form expr-func]))
+    :heads (head-set :names [value-kind form expr-func cross-ref-provider]))
 
   ; (form …) positional children — `(key …)` sub-forms, plus
   ; `(variant …)` sub-forms on discriminated forms, plus
@@ -89,6 +89,18 @@
     :underlying form
     :description "A (key …) | (variant …) | (exclusive-group …) sub-form."
     :heads (head-set :names [key variant exclusive-group]))
+
+  ; (form …) positional children — the `key-decl` set plus inline `(form …)`
+  ; positional-local definitions (FormSpec.local_forms). Adding `form` to the
+  ; head-set lets a form nest a local form directly (not via a `(key …)` slot),
+  ; meta-validated against the (form …) meta-form — recursing form->form,
+  ; bounded by MAX_VALIDATE_FRAMES. `variant` keeps the narrower `key-decl`
+  ; (no positional locals there). The loader enforces the remaining rules
+  ; (depth, dup names, flag-set conflict, implied `.any` positional).
+  (value-kind :name form-child-decl
+    :underlying form
+    :description "A (key …) | (variant …) | (exclusive-group …) | (form …) sub-form inside (form …)."
+    :heads (head-set :names [key variant exclusive-group form]))
 
   ; (key …) positional children — inline slot-local `(form …)` definitions
   ; (KeySpec.local_forms). Pins the slot to the (form …) head so each inline
@@ -316,13 +328,20 @@
     :open false
     (key :name names :type symbol-list :optional false))
 
+  ; Two mutually exclusive routes to the member set: identity
+  ; (`:name-key`, the default) and provider (`:provider` + `:source-key`).
+  ; The meta-schema types both; the loader enforces the exclusions
+  ; (`:provider` with `:name-key`, `:provider` with `:acyclic true`,
+  ; `:source-key` without `:provider`) as `invalid_manifest`.
   (form :name cross-ref
     :description "Document-spanning name-reference constraint for :symbol underlyings."
     :open false
-    (key :name target   :type symbol  :optional false)
-    (key :name name-key :type symbol  :optional true)
-    (key :name acyclic  :type boolean :optional true)
-    (key :name scope    :type symbol  :optional true))
+    (key :name target     :type symbol  :optional false)
+    (key :name name-key   :type symbol  :optional true)
+    (key :name acyclic    :type boolean :optional true)
+    (key :name scope      :type symbol  :optional true)
+    (key :name provider   :type symbol  :optional true)
+    (key :name source-key :type symbol  :optional true))
 
   (form :name union-shape
     :description "Pins alternative kind names on a :union underlying."
@@ -334,7 +353,7 @@
   (form :name form
     :description "Declares a data-form constructor (e.g. (scene …))."
     :open false
-    :positional key-decl
+    :positional form-child-decl
     (key :name name          :type symbol       :optional false)
     (key :name description   :type string       :optional true)
     (key :name positional    :type positional-ref :optional true)
@@ -379,6 +398,21 @@
     (key :name param-names :type symbol-list :optional true)
     (key :name rest        :type type-ref    :optional true)
     (key :name result      :type type-ref    :optional true)
+    (key :name description :type string      :optional true)
+    (key :name impl        :type binding-ref :optional true))
+
+  ; ---- cross-ref provider declarations ------------------------------
+  ;
+  ; A named, pure name-extractor: one string in, a vector of symbol-
+  ; spelling strings out. Referenced by `(cross-ref :provider <name>)`.
+  ; `:impl` follows the expr-func convention (`"wasm:<export>"`);
+  ; declaration-only is legal and surfaces at extraction time as
+  ; `cross_ref_provider_unavailable`.
+
+  (form :name cross-ref-provider
+    :description "Declares a pure name-extractor backing a provider-route cross-ref."
+    :open false
+    (key :name name        :type symbol      :optional false)
     (key :name description :type string      :optional true)
     (key :name impl        :type binding-ref :optional true))
 

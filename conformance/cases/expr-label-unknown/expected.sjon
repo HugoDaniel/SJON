@@ -1,0 +1,5 @@
+; Attributed to the offending label, not the call — the path names which
+; one. `:t` is also absent, but a call carrying an unknown label is not
+; additionally reported as incomplete: one diagnostic, not two.
+(diagnostics
+  (diagnostic :code expr_unknown_label :path [lerp nope]))

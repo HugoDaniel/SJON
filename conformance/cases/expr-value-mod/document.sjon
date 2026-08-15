@@ -1,0 +1,30 @@
+; `mod` is floored for every divisor: the result takes the *divisor's*
+; sign. (mod -7 3) is 2 and (mod 7 -3) is -2, matching GLSL's `mod()` and
+; Python's `%`, and NOT C's `fmod` (which gives -1 and 1).
+;
+; This case exists because it used to be two functions. `applyMod` was a
+; bare `@mod(x, y)`, which is floored only for a positive divisor and
+; silently degrades to truncated for a negative one — so (mod 7 -3) was 1,
+; and Zig's own documented identity for the builtin,
+; (@divFloor(a, b) * b) + @mod(a, b) == a, did not hold there either:
+; @divFloor(7, -3) is -3, and -3 * -3 + 1 is 10, not 7. Form 2 is the
+; discriminating input and was pinned at 1 until 2026-08-12, when the
+; split was settled in favour of floored everywhere. Form 3 agrees with
+; both readings, which is why a test that only tried (mod -7 -3) found
+; nothing.
+;
+; The fix corrects `@mod` for a negative divisor rather than computing
+; x - y * floor(x / y), so the positive-divisor region is bit-identical to
+; what it always was. Form 6 pins the branch guard: an exact multiple of a
+; negative divisor stays 0 rather than being pushed to the divisor.
+;
+; Nothing here disagrees between the four hosts — they all call the same
+; builtin — so this was a language wart, not a parity bug. Changing any
+; value in this file is a deliberate redefinition of the operator.
+(mod 7.0 3.0)
+(mod -7.0 3.0)
+(mod 7.0 -3.0)
+(mod -7.0 -3.0)
+(mod 7.5 2.0)
+(mod -7.5 2.0)
+(mod 6.0 -3.0)

@@ -1,0 +1,22 @@
+; Provider-route executable family, 6 of 7 — one name, two sources.
+;
+; Both shaders yield `u_time`, from two *different* sources (so this is
+; two extractions colliding, not one extraction counted twice). The
+; second registration loses and reports `duplicate_cross_ref_target`,
+; exactly as two `(phrase :name p0)` forms do on the identity route —
+; the rule is about the registry, not about how names reach it.
+;
+; Worth stating because the neighbouring rule goes the other way: a name
+; repeated *within* one source is the provider's business and is silently
+; collapsed (a blob's internal redundancy is not a document error). Two
+; sources in one scope claiming one name is the document's business,
+; because the document chose to put both there.
+;
+; The reference resolves to the first declaration, so it contributes no
+; diagnostic of its own — first-wins, as everywhere else.
+(use-plugin "lines")
+
+(shader :name a :src "u_time\nu_a")
+(shader :name b :src "u_time\nu_b")
+
+(bind :uniform u_time)

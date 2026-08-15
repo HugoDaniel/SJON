@@ -1,0 +1,238 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "shapes",
+      "version": "",
+      "forms": [
+        {
+          "name": "canvas",
+          "description": "Drawing surface. Positional children are shapes.",
+          "open": false,
+          "positional": "any",
+          "keys": [
+            {
+              "name": "w",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "number"
+              }
+            },
+            {
+              "name": "h",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "number"
+              }
+            },
+            {
+              "name": "bg",
+              "optional": true,
+              "description": "Named background colour (\"black\", \"#202028\", …).",
+              "value": {
+                "kind": "string"
+              }
+            }
+          ]
+        },
+        {
+          "name": "circle",
+          "description": "Filled circle at :center with given :radius.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "center",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "vector",
+                "len": null,
+                "element": {
+                  "kind": "any"
+                }
+              }
+            },
+            {
+              "name": "radius",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "number"
+              }
+            },
+            {
+              "name": "fill",
+              "optional": true,
+              "description": "Optional :evenodd or :nonzero fill rule.",
+              "value": {
+                "kind": "symbol_members",
+                "names": [
+                  "evenodd",
+                  "nonzero"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "rect",
+          "description": "Axis-aligned rectangle from :origin spanning :size.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "origin",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "vector",
+                "len": null,
+                "element": {
+                  "kind": "any"
+                }
+              }
+            },
+            {
+              "name": "size",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "vector",
+                "len": null,
+                "element": {
+                  "kind": "any"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "group",
+          "description": "Named container of shapes; positional children are shapes.",
+          "open": false,
+          "positional": "any",
+          "keys": [
+            {
+              "name": "name",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "string"
+              }
+            }
+          ]
+        },
+        {
+          "name": "scene",
+          "description": "Top-level scene. `open = true` so authors can attach ad-hoc metadata keywords without the validator complaining.",
+          "open": true,
+          "positional": "any",
+          "keys": [
+            {
+              "name": "title",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "string"
+              }
+            }
+          ]
+        },
+        {
+          "name": "badge",
+          "description": "Tiny labelled mark. `:shape` is HeadSet-pinned: only `(circle …)` or `(rect …)` are accepted as the focal form.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "label",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "shape",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "form_heads",
+                "refs": [
+                  {
+                    "plugin": "shapes",
+                    "name": "circle"
+                  },
+                  {
+                    "plugin": "shapes",
+                    "name": "rect"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": [
+        {
+          "name": "length",
+          "description": "Non-negative scalar in canvas units.",
+          "shape": {
+            "kind": "number"
+          }
+        },
+        {
+          "name": "point",
+          "description": "[x y] vector in canvas coordinates.",
+          "shape": {
+            "kind": "vector",
+            "len": null,
+            "element": {
+              "kind": "any"
+            }
+          }
+        },
+        {
+          "name": "fill-rule",
+          "description": "SVG-style fill rule. One of `evenodd` or `nonzero`.",
+          "shape": {
+            "kind": "symbol_members",
+            "names": [
+              "evenodd",
+              "nonzero"
+            ]
+          }
+        },
+        {
+          "name": "shape-form",
+          "description": "Form-as-slot: `(circle …)` or `(rect …)`. Used by `(badge :shape …)` to pin the focal element's identity.",
+          "shape": {
+            "kind": "form_heads",
+            "refs": [
+              {
+                "plugin": "shapes",
+                "name": "circle"
+              },
+              {
+                "plugin": "shapes",
+                "name": "rect"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `shape-form` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin_name": "shapes",
+      "kind_name": "shape-form"
+    }
+  ]
+}

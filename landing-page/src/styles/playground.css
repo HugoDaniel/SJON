@@ -1,0 +1,399 @@
+/* Playground page — paper-aesthetic chrome for the embedded CodeMirror editor.
+ *
+ * Consumes the same tokens as the rest of the marketing site (system-tokens.css).
+ */
+
+.playground {
+  max-width: var(--landing-width);
+  margin: var(--space-4) auto var(--space-5);
+  padding: 0 var(--landing-inset);
+}
+
+.playground .kicker {
+  font-family: var(--display);
+  font-size: 15px;
+  line-height: 1.25;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+  margin-bottom: var(--space-2);
+}
+
+.playground h1 {
+  font-family: var(--body);
+  font-weight: 600;
+  font-size: var(--step-3);
+  letter-spacing: 0;
+  color: var(--ink);
+  margin-bottom: var(--space-2);
+}
+
+.playground .lede {
+  font-family: var(--body);
+  font-size: var(--step-0);
+  color: var(--ink-soft);
+  line-height: var(--leading-body);
+  margin-bottom: var(--space-3);
+  max-width: var(--measure);
+}
+
+.editor-frame {
+  /* The values panel's share of the editor area's height budget; the editor
+     itself takes the remainder (`.pg-body`). Big enough for five rows and the
+     label, which covers every worked example on the site. */
+  --pg-eval-height: 8rem;
+  border: 1px solid var(--ink);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+  background: var(--surface);
+  box-shadow: 5px 5px 0 var(--shadow);
+}
+
+/* Stale-asset banner — unhidden by boot.ts when the running LSP wasm disagrees
+ * with the build-staged sidecar. No `display` rule so the `hidden` attribute
+ * governs visibility. */
+.pg-stale {
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--accent);
+  background: rgba(240, 100, 73, 0.08);
+  color: var(--ink);
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.pg-stale code {
+  font-family: var(--mono);
+}
+
+/* Language-server boot failure. Same shape as .pg-stale — it sits in the same
+ * slot above the tab bar — with a heavier tint, because .pg-stale is advice to
+ * a developer and this one tells a visitor half the page is dead. */
+.pg-failed {
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--accent);
+  background: rgba(240, 100, 73, 0.16);
+  color: var(--ink);
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+/* Empty until `showLspFailure` fills it in, so it must not reserve space. */
+.pg-failed code {
+  font-family: var(--mono);
+}
+
+.pg-failed code:empty {
+  display: none;
+}
+
+/* Tab bar — document + schema panes, an add button, and copy-link.
+ * Tokens mirror the host-language tabs in HostStartTabs.astro. */
+.pg-tabs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px var(--space-4);
+  background: var(--surface);
+  border-bottom: 1px solid var(--rule-mute);
+}
+
+.pg-tablist {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pg-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  appearance: none;
+  border: 1px solid var(--rule-mute);
+  border-radius: 5px;
+  background: var(--surface-mute);
+  color: var(--ink);
+  cursor: pointer;
+  font: 600 13px/1 var(--body);
+  padding: 7px 10px;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.pg-tab:hover,
+.pg-tab:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.pg-tab[aria-selected='true'] {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--surface);
+}
+
+.pg-tab__label {
+  pointer-events: none;
+}
+
+.pg-tab__close {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: 600 15px/1 var(--body);
+  padding: 0 1px;
+  opacity: 0.55;
+  border-radius: 3px;
+  transition: opacity 0.12s ease;
+}
+
+.pg-tab__close:hover,
+.pg-tab__close:focus-visible {
+  opacity: 1;
+  outline: none;
+}
+
+.pg-tab--add {
+  appearance: none;
+  border: 1px dashed var(--rule-mute);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+  font: 600 13px/1 var(--body);
+  padding: 7px 10px;
+  transition: border-color 0.12s ease, color 0.12s ease;
+}
+
+.pg-tab--add:hover,
+.pg-tab--add:focus-visible {
+  border-color: var(--accent);
+  color: var(--ink);
+  outline: none;
+}
+
+/* Example picker — sits with the content controls (tabs, "+ schema") rather
+ * than with the action buttons on the right, because it changes what is in
+ * the panes rather than acting on it. */
+.pg-examples {
+  display: inline-flex;
+  align-items: center;
+}
+
+.pg-examples__select {
+  appearance: none;
+  border: 1px solid var(--rule-mute);
+  border-radius: 5px;
+  background: var(--surface-mute);
+  color: var(--ink-soft);
+  cursor: pointer;
+  font: 600 12.5px/1 var(--body);
+  /* Room on the right for the caret drawn below. */
+  padding: 7px 26px 7px 10px;
+  transition: border-color 0.12s ease, color 0.12s ease;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 14px) 52%, calc(100% - 9px) 52%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+.pg-examples__select:hover,
+.pg-examples__select:focus-visible {
+  border-color: var(--accent);
+  color: var(--ink);
+  outline: none;
+}
+
+.pg-copy-link {
+  margin-left: auto;
+  appearance: none;
+  border: 1px solid var(--rule-mute);
+  border-radius: 5px;
+  background: var(--surface-mute);
+  color: var(--ink-soft);
+  cursor: pointer;
+  font: 600 12.5px/1 var(--body);
+  padding: 7px 10px;
+  transition: border-color 0.12s ease, color 0.12s ease;
+}
+
+.pg-copy-link:hover,
+.pg-copy-link:focus-visible {
+  border-color: var(--accent);
+  color: var(--ink);
+  outline: none;
+}
+
+/* Panes — only the active one is shown. The editor mount and CodeMirror
+ * inside fill the pane's fixed height, which is the frame's total budget
+ * (`.pg-body`) minus the values panel's share. One budget for both, so adding
+ * the panel below the editor cost the page no extra vertical space — stacked
+ * on top of a full-height editor it landed entirely below the fold. */
+.pg-pane {
+  height: 100%;
+}
+
+.pg-pane[hidden] {
+  display: none;
+}
+
+.pg-pane > div {
+  height: 100%;
+}
+
+.pg-pane .cm-editor {
+  height: 100%;
+}
+
+/* Outline strip — the document's form tree, beside the editor. Collapsed by
+ * default (the toolbar toggle owns `hidden`) so the editor keeps its full
+ * width until asked. Flex row so the panes give up exactly the strip's width;
+ * `min-width: 0` on the panes keeps CodeMirror's own horizontal scrolling from
+ * forcing the row wider than the frame. */
+.pg-body {
+  display: flex;
+  align-items: stretch;
+  height: calc(min(70vh, 600px) - var(--pg-eval-height));
+}
+
+.pg-body > .pg-panes {
+  flex: 1;
+  min-width: 0;
+}
+
+.pg-outline {
+  width: 13rem;
+  flex: none;
+  height: 100%;
+  overflow-y: auto;
+  border-left: 1px solid var(--rule-mute);
+  background: var(--surface-mute);
+  padding: 10px 0;
+}
+
+.pg-outline[hidden] {
+  display: none;
+}
+
+.pg-outline__title {
+  margin: 0 0 6px 10px;
+  color: var(--ink-soft);
+  font: 600 11px/1 var(--body);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.pg-outline__rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.pg-outline__row {
+  appearance: none;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--ink-soft);
+  cursor: pointer;
+  font: 500 12.5px/1.7 var(--mono, var(--body));
+  padding-block: 1px;
+  padding-inline-end: 8px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pg-outline__row:hover,
+.pg-outline__row:focus-visible {
+  background: var(--surface);
+  color: var(--ink);
+  outline: none;
+}
+
+.pg-outline__empty {
+  margin: 0;
+  padding-inline: 10px;
+  color: var(--ink-soft);
+  font: 400 12px/1.6 var(--body);
+  opacity: 0.7;
+}
+
+/* Evaluated output: one row per expression root, below the editor. Its height
+   is a fixed share of the frame's budget (see `.pg-body`) rather than
+   content-sized — a panel that grew with the document would push the editor
+   around on every keystroke that added an expression. Extra rows scroll. */
+.pg-eval {
+  height: var(--pg-eval-height);
+  border-top: 1px solid var(--rule-mute);
+  background: var(--surface-mute);
+  overflow-y: auto;
+  padding: 10px 0;
+}
+
+.pg-eval__title {
+  margin: 0 0 6px 10px;
+  color: var(--ink-soft);
+  font: 600 11px/1 var(--body);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.pg-eval__rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.pg-eval__row {
+  appearance: none;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--ink);
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  font: 500 12.5px/1.7 var(--mono, var(--body));
+  padding-block: 1px;
+  padding-inline: 10px;
+  text-align: left;
+}
+
+.pg-eval__row:hover,
+.pg-eval__row:focus-visible {
+  background: var(--surface);
+  outline: none;
+}
+
+/* Fixed gutter so the values line up in a column regardless of line number. */
+.pg-eval__line {
+  flex: none;
+  min-width: 2.5rem;
+  color: var(--ink-soft);
+  opacity: 0.65;
+  text-align: right;
+}
+
+/* A value is a single row: computed strings can contain newlines, and a row
+   that grew to fit one would shove the rest of the panel down. */
+.pg-eval__text {
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pg-eval__row--muted .pg-eval__text {
+  color: var(--ink-soft);
+  font-style: italic;
+  opacity: 0.75;
+}
+
+.pg-eval__empty {
+  margin: 0;
+  padding-inline: 10px;
+  color: var(--ink-soft);
+  font: 400 12px/1.6 var(--body);
+  opacity: 0.7;
+}

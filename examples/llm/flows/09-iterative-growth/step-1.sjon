@@ -1,0 +1,7 @@
+(plugin :name spec :version "1.0.0"
+  (form :name service
+    (key :name name :type string :optional false)
+    (key :name port :type number :optional true)
+    (key :name replicas :type number :optional true)))
+
+(service :name "api")

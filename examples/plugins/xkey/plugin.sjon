@@ -1,0 +1,32 @@
+; Multi-key exclusive groups. Each `(alt :keys [...])` lists one *or more*
+; key names; a multi-key bundle is "present" iff every key in the bundle
+; is present. The JSON Schema side emits `{required: [<bundle-keys>]}`
+; per bundle inside `oneOf` (or pairwise `not:{allOf}` for at_most_one).
+;
+;   * `(route …)` — `exactly_one [(from + to), at]`
+;   * `(tag …)`   — `at_most_one [(prefix + suffix), literal]`
+;
+; Bundle atomicity (partial bundles fail) requires SJON-aware runtime
+; validation — the JSON Schema constraint sees a partial bundle as "no
+; alternative present" (failing `exactly_one` via `oneOf` mismatch).
+
+(plugin :name xkey :version "1.0.0"
+  (form :name route
+    :description "A route declaration. Either name both endpoints `(from + to)` or supply a single `at` waypoint."
+    (key :name name :type symbol)
+    (key :name from :type symbol :optional true)
+    (key :name to :type symbol :optional true)
+    (key :name at :type symbol :optional true)
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [from to])
+      (alt :keys [at])))
+
+  (form :name tag
+    :description "A tag decoration. Use `(prefix + suffix)` to flank, or `literal` alone — but never both."
+    (key :name name :type symbol)
+    (key :name prefix :type string :optional true)
+    (key :name suffix :type string :optional true)
+    (key :name literal :type string :optional true)
+    (exclusive-group :cardinality at-most-one
+      (alt :keys [prefix suffix])
+      (alt :keys [literal]))))

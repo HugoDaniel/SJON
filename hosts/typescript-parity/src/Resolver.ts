@@ -1,9 +1,9 @@
 // Plugin resolver contract — second-host TypeScript implementation.
 //
 // Mirrors `src/Resolver.zig`: a `(use-plugin "name" …)` form is parsed
-// into a `Reference`; a `ResolverFn` maps that reference to manifest
-// source bytes, WASM bytes, or a structured failure. The shape the
-// host then plugs into its three-phase pipeline.
+// into a `Reference`; a `ResolverFn` maps that reference to a manifest
+// (with an optional paired WASM sidecar) or a structured failure. The
+// shape the host then plugs into its three-phase pipeline.
 //
 // Only the parser + types live here. The default Node `fs`-backed
 // resolver is in `FilesystemResolver.ts`; the Host's mock-resolver
@@ -24,9 +24,23 @@ export interface Reference {
   readonly span: Span;
 }
 
+/// A resolver's reply. Shape-identical to `src/Resolver.zig`'s
+/// `Resolution` union, `hosts/web/types.ts`, and `hosts/rust`'s enum: a
+/// successful resolution is a manifest that *optionally carries* a paired
+/// WASM sidecar, never a bare wasm blob. The pairing invariant is the
+/// contract — wasm cannot resolve without a manifest
+/// (`docs/executable-plugin-abi.md` §3–§4).
+///
+/// This host is declarative-only, so a non-null `wasm` is refused with a
+/// diagnostic rather than instantiated (see `Host.handleResolution`).
+/// That is a capability difference; it is not licence to model the
+/// contract differently. A resolver written against the reference has to
+/// typecheck here, and until this shape landed it didn't — the old
+/// three-arm `manifest_source | wasm_bytes | failure` couldn't express
+/// the pairing at all, and the corpus can't catch that because
+/// plugin-exec families are skipped in this host.
 export type Resolution =
-  | { readonly kind: 'manifest_source'; readonly bytes: string }
-  | { readonly kind: 'wasm_bytes'; readonly bytes: Uint8Array }
+  | { readonly kind: 'manifest'; readonly source: string; readonly wasm: Uint8Array | null }
   | { readonly kind: 'failure'; readonly code: DiagnosticCode; readonly detail: string };
 
 export type ResolverFn = (ref: Reference) => Resolution;

@@ -1,0 +1,7 @@
+; Example usage of the `pair-b` plugin standalone. `pair-a`'s
+; `(palette …)` form is the cross-plugin consumer, but these forms
+; are also valid on their own — useful for testing the per-plugin
+; schema in isolation.
+
+(color :hex "#1f2937" :name slate)
+(gradient :from "#9333ea" :to "#06b6d4" :angle 45)

@@ -1,0 +1,30 @@
+; The happy path: every `(bind :uniform …)` below resolves against a
+; name the `uniforms` provider extracted from the shader's WGSL — none
+; of `u_time`, `u_resolution`, `u_tint` appears anywhere in the
+; document's own syntax. The commented-out `u_debug` declaration is the
+; scanner earning its keep: a line-splitter would have registered it.
+;
+;   sjon validate --project-root=examples/plugins/uniforms \
+;     examples/plugins/uniforms/scene.sjon
+;
+; exits 0 with no diagnostics.
+(use-plugin "uniforms")
+
+(shader :name sky :src """// Fullscreen sky gradient.
+@group(0) @binding(0) var<uniform> u_time: f32;
+@group(0) @binding(1) var<uniform> u_resolution: vec2f;
+@group(0) @binding(2) var<uniform> u_tint: vec4f;
+// @group(0) @binding(3) var<uniform> u_debug: f32;  // disabled — not a member
+@group(1) @binding(0) var<storage, read> particles: array<vec2f>;  // storage, not a member
+
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let uv = pos.xy / u_resolution;
+  let glow = 0.5 + 0.5 * sin(u_time);
+  return vec4f(uv * glow, 0.5, 1.0) * u_tint;
+}
+""")
+
+(bind :uniform u_time :group 0 :binding 0)
+(bind :uniform u_resolution :group 0 :binding 1)
+(bind :uniform u_tint :group 0 :binding 2)

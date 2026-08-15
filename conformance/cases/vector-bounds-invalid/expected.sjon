@@ -1,0 +1,5 @@
+; Pathed at the value-kind's `:vector` declaration — a manifest-phase
+; diagnostic, not the value site. The vector `[1 2 3]` is never reached.
+(diagnostics
+  (diagnostic :code vector_bounds_invalid :path [vv vector])
+  (diagnostic :code unknown_form :path [pt]))

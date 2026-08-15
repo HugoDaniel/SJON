@@ -1,0 +1,1 @@
+(diagnostics (diagnostic :code pattern_value_eval_failed :path [pure]))

@@ -1,0 +1,7 @@
+; Example usage of the `enum-rich` plugin. Uses every non-deprecated
+; severity member. The `fatal` arm is deprecated; consumers should
+; reach for `error` instead per the manifest's deprecation message.
+
+(log :level info :message "service started on port 8080")
+(log :level warn :message "config file missing; using defaults")
+(log :level error :message "database connection refused")

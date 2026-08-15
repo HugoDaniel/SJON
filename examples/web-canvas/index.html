@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SJON · Canvas demo</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; }
+    h1 { font-size: 1.2rem; margin: 0 0 0.75rem; }
+    p { margin: 0 0 1rem; color: #555; font-size: 0.9rem; }
+    canvas { border: 1px solid #888; display: block; cursor: crosshair; background: #fafafa; }
+    .controls { margin-top: 1rem; display: flex; gap: 0.75rem; align-items: center; }
+    button, label.file { font: inherit; padding: 0.4rem 0.8rem; border: 1px solid #888; background: #f0f0f0; border-radius: 4px; cursor: pointer; }
+    button:hover, label.file:hover { background: #e4e4e4; }
+    label.file input { display: none; }
+    pre { margin-top: 1rem; padding: 0.75rem; background: #f5f5f5; border: 1px solid #ddd; max-height: 12rem; overflow: auto; font-size: 0.8rem; }
+    .boot { color: #888; }
+  </style>
+</head>
+<body>
+  <h1>SJON · Canvas demo</h1>
+  <p>Click the canvas to add a random rectangle. State is held as a SJON source string; every click rewrites it through <code>applyEdit</code>.</p>
+  <canvas id="c" width="800" height="600"></canvas>
+  <div class="controls">
+    <button id="export" type="button">Export .sjon</button>
+    <label class="file"><input id="import" type="file" accept=".sjon,text/plain"> Import .sjon</label>
+    <button id="clear" type="button">Clear</button>
+  </div>
+  <pre id="echo" class="boot">Loading SJON…</pre>
+  <script type="module" src="./main.mjs"></script>
+</body>
+</html>

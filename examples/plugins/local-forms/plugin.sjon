@@ -1,0 +1,42 @@
+; Slot-local forms — a `:type form` slot carrying its own inline form set.
+;
+; The `canvas.:shape` slot declares local `circle` / `rect` / `group`. A form
+; value there resolves local-first (a local shadows a same-named global), then
+; falls back additively to the global catalog; a head matching neither global
+; nor local is `unknown_local_form`. The local `circle` (keys: `:r`) SHADOWS
+; the global `circle` (keys: `:radius`); `rect` is local-only; `group` nests
+; its own local `:child` slot (local `dot`).
+;
+; Schema export lowers each such slot to an inline anonymous union: one object
+; schema per local plus a trailing open generic branch for the additive global
+; fallback (carried as `x-sjon-local-forms` / `anyOf` in JSON Schema, and a
+; `| { $form: string }` arm in the TS union).
+(plugin :name local-forms :version "1.0.0"
+  :description "Reference plugin for slot-local form resolution."
+
+  (form :name canvas
+    :description "A drawing canvas; its :shape slot scopes its own forms."
+    (key :name shape :type form :optional false
+      :description "Slot-local: circle | rect | group (plus any global form)."
+      (form :name circle
+        :description "Slot-local circle — shadows the global circle."
+        (key :name r :type number :optional false))
+      (form :name rect
+        :description "Slot-local rectangle (local-only — invisible globally)."
+        (key :name w :type number :optional false)
+        (key :name h :type number :optional false))
+      (form :name group
+        :description "Slot-local group; its :child slot nests a local dot."
+        (key :name child :type form :optional false
+          (form :name dot)))))
+
+  ; A non-local global form, reachable from the slot via the additive fallback.
+  (form :name line
+    :description "A global form (declared at top level, no local slot)."
+    (key :name from :type vector :optional false)
+    (key :name to :type vector :optional false))
+
+  ; The shadow target: a global `circle` requiring :radius (not :r).
+  (form :name circle
+    :description "Global circle — shadowed by the local circle inside canvas.:shape."
+    (key :name radius :type number :optional false)))

@@ -1,0 +1,9 @@
+(diagnostics)
+(values
+  (value :index 0 :result 1)
+  (value :index 1 :result 2)
+  (value :index 2 :result -2)
+  (value :index 3 :result -1)
+  (value :index 4 :result 1.5)
+  (value :index 5 :result 0.5)
+  (value :index 6 :result 0))

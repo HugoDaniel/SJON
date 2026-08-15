@@ -184,11 +184,22 @@ export interface ModelMember {
   readonly deprecationMessage: string;
 }
 
+/**
+ * Mirror of `Model.CrossRef` in `src/SchemaExport/Model.zig`. `provider`
+ * and `sourceKey` are the provider route: both null on the identity route,
+ * both non-null on the provider one (a source key without a provider is
+ * rejected at manifest load). Nothing here is enforceable by any export
+ * target, and the provider route is the less enforceable of the two — its
+ * member set does not exist until a host runs an extraction pre-pass over
+ * a document the exporter never sees.
+ */
 export interface ModelCrossRef {
   readonly targetForm: string;
   readonly nameKey: string;
   readonly acyclic: boolean;
   readonly scopeForm: string | null;
+  readonly provider: string | null;
+  readonly sourceKey: string | null;
 }
 
 export interface ModelFormRef {

@@ -1,0 +1,27 @@
+; Provider-route aggregate family, 2 of 3.
+;
+; Two plugins each declare a provider named `lines`, so the bare
+; `:provider lines` has two claimants and cannot pick one. The remedy is
+; the same one every other bare-or-qualified vocabulary offers: spell it
+; `glsl/lines`. Provider-route twin of `ambiguous_cross_ref_target`.
+;
+; The two plugins carry distinct `:name`s on purpose — same-named plugins
+; would die earlier, at `duplicate_plugin_name`, and this case would then
+; be pinning the wrong thing.
+(plugin :name glsl :version "1.0.0" :sjon "1.2"
+  (cross-ref-provider :name lines
+    :description "One name per non-empty line."))
+
+(plugin :name sql :version "1.0.0" :sjon "1.2"
+  (cross-ref-provider :name lines
+    :description "Also one name per non-empty line.")
+
+  (form :name shader
+    (key :name name :type symbol :optional false)
+    (key :name src :type string :optional false))
+
+  (value-kind :name uniform-name
+    :underlying symbol
+    :cross-ref (cross-ref :target shader :provider lines)))
+
+nil

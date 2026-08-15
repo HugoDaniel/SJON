@@ -1,0 +1,7 @@
+(plugin :name geometry :version "1.0.0"
+  (form :name circle
+    (key :name x :type number :optional true)
+    (key :name y :type number :optional true)
+    (key :name radius :type number :optional false)))
+
+(circle :x 0 :y 0)

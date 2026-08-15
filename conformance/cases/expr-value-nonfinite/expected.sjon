@@ -1,0 +1,15 @@
+; Indices 0, 7 and 10 are the non-finite results themselves and carry no
+; entry — see the document for why they cannot. They are still evaluated
+; on every host; what the listed indices assert is what those three
+; values then do.
+(diagnostics)
+(values
+  (value :index 1 :result false)
+  (value :index 2 :result false)
+  (value :index 3 :result false)
+  (value :index 4 :result false)
+  (value :index 5 :result 1)
+  (value :index 6 :result 1)
+  (value :index 8 :result true)
+  (value :index 9 :result true)
+  (value :index 11 :result true))

@@ -11,9 +11,22 @@
       "hosts/highlight/**",
       "hosts/web/**",
       "hosts/typescript-parity/**",
+      "hosts/conformance-shared/**",
+      "editors/vscode/**",
       "landing-page/src/**",
-      "landing-page/*.{js,ts,mjs,cjs,json}",
-      "*.{js,ts,mjs,cjs,json}",
+      "landing-page/*.js",
+      "landing-page/*.ts",
+      "landing-page/*.mjs",
+      "landing-page/*.cjs",
+      "landing-page/*.json",
+      "landing-page/scripts/*.mjs",
+      "landing-page/plugins/*.mjs",
+      "tools/*.mjs",
+      "*.js",
+      "*.ts",
+      "*.mjs",
+      "*.cjs",
+      "*.json",
       "package.json",
       "biome.json"
     ],
@@ -24,6 +37,7 @@
       "**/zig-out/**",
       "**/.zig-cache/**",
       "**/target/**",
+      ".gitnexus/**",
       "**/*.wasm",
       "**/*.astro",
       "**/*.css",
@@ -35,7 +49,8 @@
       "examples/**",
       "SJON/**",
       "hosts/typescript-parity/test/golden/**",
-      "hosts/schema/src/expr.gen.ts"
+      "hosts/schema/src/expr.gen.ts",
+      "landing-page/src/data/errors.json"
     ]
   },
   "formatter": {
@@ -60,7 +75,12 @@
     }
   },
   "linter": {
-    "enabled": false
+    "enabled": true,
+    "rules": {
+      "recommended": false,
+      "correctness": { "recommended": true },
+      "suspicious": { "recommended": true }
+    }
   },
   "organizeImports": {
     "enabled": false

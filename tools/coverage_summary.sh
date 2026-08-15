@@ -9,6 +9,15 @@
 #  output directory it was given, alongside the merged HTML report.)
 
 set -e
+
+# Force the C locale so awk parses and formats numbers with '.' decimals
+# regardless of the caller's LC_NUMERIC. Without this, a comma-decimal locale
+# (e.g. pt_PT) makes awk read the JSON's period-decimal percentages as
+# truncated integers ("98.22" -> 98) and re-emit them as "98,00" — which both
+# loses precision and breaks the stable-bytes promise above, diverging from the
+# checked-in coverage-baseline.txt on every machine with a non-C locale.
+export LC_ALL=C
+
 cd "$(dirname "$0")/.."
 
 JSON="${1:-zig-out/coverage/merged/kcov-merged/coverage.json}"
@@ -22,6 +31,23 @@ if [ ! -f "$JSON" ]; then
     echo "tools/coverage_summary.sh: $JSON not found — run \`zig build coverage\` first" >&2
     exit 1
 fi
+
+# The header travels with the output, not with the checked-in file: the
+# documented refresh command redirects over `coverage-baseline.txt`, so a
+# header living only in that file would be deleted by the very command it
+# documents — which is how it read until r1-12.
+cat <<'HEADER'
+# kcov line coverage, per file (alphabetical) then total.
+# Generated — do not hand-edit. Refresh at the end of each plan program (or
+# after any change that moves coverage materially):
+#
+#     zig build coverage && tools/coverage_summary.sh > coverage-baseline.txt
+#
+# A review aid, not a gate — nothing fails when it drifts, which is exactly
+# why it needs a stated cadence. It had gone five weeks stale before r1-06,
+# still reporting `src/lsp/wasm.zig 9.85%` for a file that had since grown 38
+# dispatch tests.
+HEADER
 
 # Per-file, sorted alphabetically by repo-relative path.
 jq -r '

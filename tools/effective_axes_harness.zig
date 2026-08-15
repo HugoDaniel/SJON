@@ -1,3 +1,28 @@
+//! Effective-validation axis-diff harness.
+//!
+//! Walks every directory under `conformance/cases/`, validates each case
+//! through `Host.validateDocument` once per mode (production + each of
+//! axes A–D individually + all-on + all-off = 7 runs), reduces each
+//! result to a sorted list of `(code, path)` tuples, and reports the
+//! per-axis diffs against the production reference.
+//!
+//! Output: a markdown report at `tools/effective-axes-snapshot.md`.
+//! Re-running the harness overwrites that file. It is an on-demand
+//! diagnostic aid — not committed and not gated; running the harness writes
+//! an untracked report you inspect when an axis question comes up. There is
+//! no pinned copy and no drift check.
+//!
+//! Axis E (lowering-hook input) has no call site in the current codebase
+//! — hooks are spec-only. The harness records the literal row
+//! "E: no call site; skipped" and continues.
+//!
+//! `(use-plugin …)` cases that need a filesystem resolver are covered:
+//! the harness gives every case the case-dir as `project_root` and
+//! attaches `project_file` when a sibling `sjon-project.sjon` exists.
+//! Plugin-exec cases (`plugin-exec-*`) are skipped — Zig-native cannot
+//! instantiate sidecar `.wasm` binaries (see `docs/executable-plugin-abi.md`
+//! §15.1).
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -8,12 +33,18 @@ const Host = sjon.Host;
 const Validator = sjon.Validator;
 
 const Mode = enum {
+    /// The reference (post-graduation): A + B + C + D all on.
     production,
+    /// "Axis A off, rest on" — measures A's corpus contribution.
     axis_a_off,
+    /// "Axis B off, rest on" — measures B's corpus contribution.
     axis_b_off,
+    /// "Axis C off, rest on" — measures C's corpus contribution.
     axis_c_off,
+    /// "Axis D off, rest on" — measures D's corpus contribution.
     axis_d_off,
     all_on,
+    /// Cumulative graduation cost — every flag off.
     all_off,
 
     fn axes(self: Mode) Validator.EffectiveAxes {
@@ -96,11 +127,15 @@ const Tuple = struct {
 const Diff = struct {
     added: []const Tuple,
     removed: []const Tuple,
+    /// Cases whose error-set differed in ANY way (added or removed).
+    /// Used for the summary table's "cases changed" column.
     case_changed: bool,
 };
 
 const CaseDiffs = struct {
     name: []const u8,
+    /// Index by `@intFromEnum(Mode)` — the `production` slot is unused
+    /// (it is the reference) but kept for indexing simplicity.
     diffs: [@typeInfo(Mode).@"enum".fields.len]Diff,
 };
 
@@ -212,6 +247,9 @@ fn synthesizeCaseSource(a: Allocator, io: Io, case_name: []const u8) ![:0]const 
         return buf;
     }
 
+    // Legacy case: stitch schema + extras + input into a single inline-
+    // manifest source, matching `runLegacyCaseAsHost` in
+    // `src/conformance_tests.zig`.
     var doc_buf: std.ArrayList(u8) = .empty;
 
     const schema_path = try std.fmt.bufPrint(&path_buf, "conformance/cases/{s}/schema.sjon", .{case_name});
@@ -282,6 +320,9 @@ fn runMode(
         for (d.path, 0..) |step, i| path[i] = try a.dupe(u8, step);
         try tuples.append(a, .{ .code = d.code, .path = path });
     }
+    // Sort for stable diff. Within a case the host's emission order is
+    // stable, but the diff routine needs a canonical order anyway because
+    // adding a single diagnostic can shift relative positions of others.
     std.mem.sort(Tuple, tuples.items, {}, tupleLessThan);
     return tuples.items;
 }

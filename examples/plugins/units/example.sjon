@@ -1,0 +1,5 @@
+; Example usage of the `units` plugin. Each slot exercises a different
+; unit shape: bounded magnitude with allowed enum, optional unit, and
+; required unit with allowed enum.
+
+(shape :rotation 45deg :decay 1.5s :radius 12cm)

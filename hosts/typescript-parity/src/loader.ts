@@ -5,14 +5,18 @@
 // corpus needs: name, forms (with keys + positional + open),
 // value-kinds (with underlying + heads + members).
 
-import type { Node, FormNode } from './ast.ts';
+import type { Node, FormNode, Span } from './ast.ts';
 import type { Diagnostic } from './diagnostics.ts';
 import {
   MAX_FORM_KEYS,
   MAX_KEYWORDS,
   MAX_LOCAL_FORM_DEPTH,
   SUPPORTED_SJON_FORMAT,
+  type Alternative,
   type Arity,
+  type Cardinality,
+  type CrossRefProvider,
+  type ExclusiveGroup,
   type ExprFunc,
   type FlagDecl,
   type FormSpec,
@@ -30,6 +34,7 @@ import {
   type UnitShape,
   type ValueKind,
   type ValueType,
+  type Variant,
 } from './plugin.ts';
 import * as StringFormats from './stringFormats.ts';
 
@@ -60,6 +65,7 @@ export function loadManifest(roots: readonly Node[]): LoadResult {
     forms: [],
     exprFuncs: [],
     valueKinds: [],
+    crossRefProviders: [],
   };
 
   if (roots.length !== 1) {
@@ -85,6 +91,7 @@ export function loadManifest(roots: readonly Node[]): LoadResult {
   const forms: FormSpec[] = [];
   const valueKinds: ValueKind[] = [];
   const exprFuncs: ExprFunc[] = [];
+  const crossRefProviders: CrossRefProvider[] = [];
   const diagnostics: Diagnostic[] = [];
 
   for (const child of root.children) {
@@ -181,6 +188,9 @@ export function loadManifest(roots: readonly Node[]): LoadResult {
         case 'expr-func':
           exprFuncs.push(buildExprFunc(child));
           break;
+        case 'cross-ref-provider':
+          crossRefProviders.push(buildCrossRefProvider(child));
+          break;
       }
     }
   }
@@ -215,6 +225,7 @@ export function loadManifest(roots: readonly Node[]): LoadResult {
     forms,
     exprFuncs,
     valueKinds,
+    crossRefProviders,
   };
   return { plugin, errors, diagnostics };
 }
@@ -306,12 +317,22 @@ function buildFormSpec(form: FormNode, diagnostics: Diagnostic[], depth = 1): Fo
   let positional: PositionalSpec = { kind: 'none' };
   const keys: KeySpec[] = [];
   let keyCount = 0;
+  let discriminantName: string | null = null;
+  let discriminantSpan: Span | null = null;
+  const builtVariants: BuiltVariant[] = [];
+  const builtGroups: BuiltGroup[] = [];
 
   for (const child of form.children) {
     if (child.tag === 'kvpair') {
       switch (child.key) {
         case 'name':
           if (child.value.tag === 'symbol') name = child.value.text;
+          break;
+        case 'discriminant':
+          if (child.value.tag === 'symbol') {
+            discriminantName = child.value.text;
+            discriminantSpan = child.value.span;
+          }
           break;
         case 'open':
           if (child.value.tag === 'boolean') open = child.value.value;
@@ -359,6 +380,10 @@ function buildFormSpec(form: FormNode, diagnostics: Diagnostic[], depth = 1): Fo
       // MAX_FORM_KEYS so downstream validator code (which assumes
       // `keys.length <= MAX_FORM_KEYS`) stays sound.
       if (keyCount <= MAX_FORM_KEYS) keys.push(buildKeySpec(child, diagnostics, depth));
+    } else if (child.tag === 'form' && child.head === 'variant') {
+      builtVariants.push(buildVariant(child, diagnostics, depth));
+    } else if (child.tag === 'form' && child.head === 'exclusive-group') {
+      builtGroups.push(buildExclusiveGroup(child));
     }
   }
 
@@ -372,13 +397,286 @@ function buildFormSpec(form: FormNode, diagnostics: Diagnostic[], depth = 1): Fo
     });
   }
 
-  return { name, keys, positional, open };
+  // Inline positional slot-local forms: `(form …)` children directly under
+  // this `(form …)` — the positional mirror of `buildKeySpec`'s key-local arm.
+  // Recurse via `buildFormSpec` (depth+1, bounded by MAX_LOCAL_FORM_DEPTH);
+  // first occurrence wins on a name clash (the validator resolves local-first
+  // by first match). Locals with no `:positional` imply `any` so they aren't
+  // dead behind `positional_not_allowed` (mirrors the Zig loader ergonomic); a
+  // `(flag-set …)` positional conflicts with locals and is a core-owned
+  // `invalid_manifest`, which this validation-parity port (well-formed input
+  // only) does not re-check.
+  const localForms: FormSpec[] = [];
+  if (depth < MAX_LOCAL_FORM_DEPTH) {
+    const seen = new Set<string>();
+    for (const child of form.children) {
+      if (child.tag !== 'form' || child.head !== 'form') continue;
+      const local = buildFormSpec(child, diagnostics, depth + 1);
+      if (seen.has(local.name)) continue;
+      seen.add(local.name);
+      localForms.push(local);
+    }
+  }
+  if (localForms.length > 0 && positional.kind === 'none') positional = { kind: 'any' };
+
+  // `:discriminant` names one of this form's own keys. Resolve it to an index
+  // here so the validator never re-scans; a name matching no key is
+  // structurally an `unknown_key` against the form *declaration* (mirrors the
+  // Zig loader) and leaves `discriminantIdx` unset, so no consumer can index
+  // past `keys`.
+  let discriminantIdx: number | null = null;
+  if (discriminantName !== null) {
+    const di = keys.findIndex((k) => k.name === discriminantName);
+    if (di >= 0) {
+      discriminantIdx = di;
+    } else {
+      diagnostics.push({
+        code: 'unknown_key',
+        message: `form \`${name}\` declares discriminant \`:${discriminantName}\` but no such key is defined`,
+        path: [name, 'discriminant'],
+        span: discriminantSpan ?? form.headSpan,
+        severity: 'err',
+      });
+    }
+  }
+
+  // Exclusive groups resolve *after* the child sweep rather than inline with
+  // it: validating an alt's key names needs the complete `keys` list, and the
+  // diagnostic messages need `:name`, which a manifest may legally write after
+  // its `(exclusive-group …)` children. (The Zig loader resolves at the same
+  // point for the first reason; deferring the name read is this port being
+  // insensitive to child order where Zig is not.)
+  const exclusiveGroups = resolveExclusiveGroups(
+    builtGroups,
+    keys,
+    discriminantName,
+    name,
+    null,
+    diagnostics,
+  );
+  const variants: Variant[] = builtVariants.map((bv) => {
+    // A variant's groups name the variant's own keys, and a variant has no
+    // discriminant of its own — hence the `null` third argument.
+    const groups = resolveExclusiveGroups(bv.groups, bv.keys, null, name, bv.when, diagnostics);
+    return groups.length > 0
+      ? { when: bv.when, keys: bv.keys, exclusiveGroups: groups }
+      : { when: bv.when, keys: bv.keys };
+  });
+
+  const spec: Mutable<FormSpec> = { name, keys, positional, open };
+  if (localForms.length > 0) spec.localForms = localForms;
+  if (discriminantName !== null) spec.discriminantName = discriminantName;
+  if (discriminantIdx !== null) spec.discriminantIdx = discriminantIdx;
+  if (variants.length > 0) spec.variants = variants;
+  if (exclusiveGroups.length > 0) spec.exclusiveGroups = exclusiveGroups;
+  return spec;
+}
+
+/** Strips `readonly` so the builders above can assemble a spec field by field
+ *  and still return it as the frozen-by-convention interface. Optional fields
+ *  stay optional, which `exactOptionalPropertyTypes` needs: an absent
+ *  `discriminantIdx` must be *missing*, not `undefined`. */
+type Mutable<T> = { -readonly [K in keyof T]: T[K] };
+
+/** A `(variant …)` as parsed, before its exclusive groups are resolved
+ *  against its own `keys`. Mirrors the split the Zig loader makes between
+ *  `buildVariant` and `resolveExclusiveGroups`. */
+interface BuiltVariant {
+  readonly when: string;
+  readonly keys: readonly KeySpec[];
+  readonly groups: readonly BuiltGroup[];
+}
+
+function buildVariant(form: FormNode, diagnostics: Diagnostic[], depth: number): BuiltVariant {
+  let when = '';
+  const keys: KeySpec[] = [];
+  let keyCount = 0;
+  const groups: BuiltGroup[] = [];
+
+  for (const child of form.children) {
+    if (child.tag === 'kvpair') {
+      if (child.key === 'when' && child.value.tag === 'symbol') when = child.value.text;
+    } else if (child.tag === 'form' && child.head === 'key') {
+      keyCount++;
+      if (keyCount <= MAX_FORM_KEYS) keys.push(buildKeySpec(child, diagnostics, depth));
+    } else if (child.tag === 'form' && child.head === 'exclusive-group') {
+      groups.push(buildExclusiveGroup(child));
+    }
+  }
+
+  return { when, keys, groups };
+}
+
+/** Intermediate shape captured during the structural walk of
+ *  `(exclusive-group …)`. Mirrors `BuiltGroup` in `src/ManifestLoader.zig` —
+ *  the real {@link ExclusiveGroup} needs the enclosing scope's `keys`, which
+ *  are not known until the child sweep finishes. */
+interface BuiltGroup {
+  readonly cardinality: Cardinality;
+  readonly alternatives: readonly BuiltAlt[];
+  readonly span: Span;
+}
+
+interface BuiltAlt {
+  readonly keys: readonly string[];
+  readonly span: Span;
+}
+
+function buildExclusiveGroup(form: FormNode): BuiltGroup {
+  // An unrecognised `:cardinality` symbol falls back to `exactly-one`, as in
+  // the Zig loader — the meta-schema is what rejects the typo.
+  let cardinality: Cardinality = 'exactly_one';
+  const alternatives: BuiltAlt[] = [];
+  for (const child of form.children) {
+    if (child.tag === 'kvpair') {
+      if (child.key === 'cardinality' && child.value.tag === 'symbol') {
+        cardinality = child.value.text === 'at-most-one' ? 'at_most_one' : 'exactly_one';
+      }
+    } else if (child.tag === 'form' && child.head === 'alt') {
+      alternatives.push(buildAlternative(child));
+    }
+  }
+  return { cardinality, alternatives, span: form.headSpan };
+}
+
+function buildAlternative(form: FormNode): BuiltAlt {
+  let keys: readonly string[] = [];
+  let span: Span = form.headSpan;
+  for (const child of form.children) {
+    if (child.tag !== 'kvpair') continue;
+    if (child.key === 'keys' && child.value.tag === 'vector') {
+      keys = parseSymbolList(child.value.elements);
+      span = child.value.span;
+    }
+  }
+  return { keys, span };
+}
+
+/**
+ * Validate `builtGroups` against the enclosing scope and produce the
+ * {@link ExclusiveGroup} list. Mirrors `resolveExclusiveGroups` in
+ * `src/ManifestLoader.zig`, including which failure gets which code:
+ * `exclusive_bundle_collision` is the *in-group* repeat (one key named by two
+ * alts of the same group), everything else — too few alts, an undeclared key,
+ * the discriminant, a key shared across two groups — is
+ * `exclusive_group_invalid`.
+ *
+ * Each failure is reported and the group is still emitted: a malformed group
+ * makes the whole manifest fail to load (the host drops a plugin with any
+ * err-severity load diagnostic), so the returned value is never consulted.
+ */
+function resolveExclusiveGroups(
+  builtGroups: readonly BuiltGroup[],
+  keys: readonly KeySpec[],
+  discriminantName: string | null,
+  formName: string,
+  variantWhen: string | null,
+  diagnostics: Diagnostic[],
+): ExclusiveGroup[] {
+  if (builtGroups.length === 0) return [];
+
+  const seenInAnyGroup = new Set<string>();
+  const out: ExclusiveGroup[] = [];
+  for (const bg of builtGroups) {
+    if (bg.alternatives.length < 2) {
+      emitExclusiveInvalid(
+        diagnostics,
+        bg.span,
+        formName,
+        variantWhen,
+        'exclusive_group_invalid',
+        'needs at least 2 alternatives',
+      );
+    }
+
+    const seenInThisGroup = new Set<string>();
+    const alternatives: Alternative[] = [];
+    for (const ba of bg.alternatives) {
+      for (const kn of ba.keys) {
+        if (!keys.some((k) => k.name === kn)) {
+          emitExclusiveInvalid(
+            diagnostics,
+            ba.span,
+            formName,
+            variantWhen,
+            'exclusive_group_invalid',
+            `exclusive-group alt names \`${kn}\` but no such key is declared`,
+          );
+        }
+        if (discriminantName !== null && discriminantName === kn) {
+          emitExclusiveInvalid(
+            diagnostics,
+            ba.span,
+            formName,
+            variantWhen,
+            'exclusive_group_invalid',
+            `exclusive-group must not name discriminant \`:${discriminantName}\``,
+          );
+        }
+        const inThisGroup = seenInThisGroup.has(kn);
+        seenInThisGroup.add(kn);
+        if (inThisGroup) {
+          emitExclusiveInvalid(
+            diagnostics,
+            ba.span,
+            formName,
+            variantWhen,
+            'exclusive_bundle_collision',
+            `key \`${kn}\` appears in more than one alt of the same exclusive-group`,
+          );
+        }
+        const inAnyGroup = seenInAnyGroup.has(kn);
+        seenInAnyGroup.add(kn);
+        // Guarded on `!inThisGroup` so an in-group repeat reports once, as
+        // the bundle collision — not twice, once per set.
+        if (inAnyGroup && !inThisGroup) {
+          emitExclusiveInvalid(
+            diagnostics,
+            ba.span,
+            formName,
+            variantWhen,
+            'exclusive_group_invalid',
+            `key \`${kn}\` appears in more than one exclusive-group`,
+          );
+        }
+      }
+      alternatives.push({ keys: ba.keys });
+    }
+    out.push({ alternatives, cardinality: bg.cardinality });
+  }
+  return out;
+}
+
+/** Shared body for the two load-time exclusive-group diagnostics — identical
+ *  modulo the code and the pre-formatted reason tail. Mirrors
+ *  `emitExclusiveInvalid` in `src/ManifestLoader.zig`. */
+function emitExclusiveInvalid(
+  diagnostics: Diagnostic[],
+  span: Span,
+  formName: string,
+  variantWhen: string | null,
+  code: 'exclusive_group_invalid' | 'exclusive_bundle_collision',
+  reason: string,
+): void {
+  diagnostics.push({
+    code,
+    message:
+      variantWhen !== null
+        ? `form \`${formName}\` (variant \`:when ${variantWhen}\`): ${reason}`
+        : `form \`${formName}\`: ${reason}`,
+    path:
+      variantWhen !== null
+        ? [formName, variantWhen, 'exclusive-group']
+        : [formName, 'exclusive-group'],
+    span,
+    severity: 'err',
+  });
 }
 
 function buildKeySpec(form: FormNode, diagnostics: Diagnostic[], depth: number): KeySpec {
   let name = '';
   let valueType: ValueType = { kind: 'any' };
-  let optional = true;
+  let optional: boolean | null = null;
   let defaultValue: KeyDefault | null = null;
   for (const child of form.children) {
     if (child.tag !== 'kvpair') continue;
@@ -403,6 +701,15 @@ function buildKeySpec(form: FormNode, diagnostics: Diagnostic[], depth: number):
     }
   }
 
+  // Spec rule (docs/portable-manifest-v1.md §5.1): an unwritten `:optional`
+  // is false for a key with no `:default` and true for one that has it — a
+  // default fills the slot, so absence is not a missing key. Mirrors the
+  // same fixup at the end of `ManifestLoader.buildKey`; this port used to
+  // hardcode `true`, which made every key that omits `:optional` unrequired
+  // here and required on the other three hosts. Invisible to the corpus,
+  // whose fixtures all write `:optional` explicitly.
+  const effective = optional ?? defaultValue !== null;
+
   // Inline slot-local forms: positional `(form …)` children on a `:type form`
   // slot. Mirrors `ManifestLoader.buildKey`'s `.form` arm — recurse via
   // `buildFormSpec` (depth+1, bounded by MAX_LOCAL_FORM_DEPTH), first
@@ -421,11 +728,11 @@ function buildKeySpec(form: FormNode, diagnostics: Diagnostic[], depth: number):
       localForms.push(local);
     }
     if (localForms.length > 0) {
-      return { name, valueType, optional, default: defaultValue, localForms };
+      return { name, valueType, optional: effective, default: defaultValue, localForms };
     }
   }
 
-  return { name, valueType, optional, default: defaultValue };
+  return { name, valueType, optional: effective, default: defaultValue };
 }
 
 /**
@@ -522,6 +829,7 @@ function buildValueKind(form: FormNode, diagnostics: Diagnostic[]): ValueKind {
   let isScalarOrRef = false;
   let scalarOrRefForm: FormNode | undefined;
   let scalarOrRefSpan: { start: number; end: number } | undefined;
+  let unionForm: FormNode | undefined;
   let crossRef: ValueKind['crossRef'];
 
   // First pass picks up `:name` so the rich-form diagnostics emitted by
@@ -548,6 +856,10 @@ function buildValueKind(form: FormNode, diagnostics: Diagnostic[]): ValueKind {
             // Surface shorthand — desugars to `union [<base> symbol]` after
             // the loop. Leave `underlying` at its default for now.
             isScalarOrRef = true;
+          } else if (u === 'union') {
+            // Explicit union — alternatives come from the `:union
+            // (union-shape …)` slot parsed below.
+            underlying = 'union_of';
           } else if (
             u === 'number' ||
             u === 'string' ||
@@ -572,6 +884,7 @@ function buildValueKind(form: FormNode, diagnostics: Diagnostic[]): ValueKind {
       case 'vector':
         if (child.value.tag === 'form' && child.value.head === 'vector-shape') {
           vector = readVectorShape(child.value);
+          if (vector) validateVectorShape(vector, kindName, child.value.headSpan, diagnostics);
         }
         break;
       case 'unit':
@@ -603,9 +916,14 @@ function buildValueKind(form: FormNode, diagnostics: Diagnostic[]): ValueKind {
           scalarOrRefSpan = child.value.headSpan;
         }
         break;
+      case 'union':
+        if (child.value.tag === 'form' && child.value.head === 'union-shape') {
+          unionForm = child.value;
+        }
+        break;
       case 'cross-ref':
         if (child.value.tag === 'form' && child.value.head === 'cross-ref') {
-          crossRef = readCrossRef(child.value);
+          crossRef = readCrossRef(child.value, name, diagnostics);
         }
         break;
     }
@@ -639,6 +957,12 @@ function buildValueKind(form: FormNode, diagnostics: Diagnostic[]): ValueKind {
     if (repr) (kind as { repr?: Repr }).repr = repr;
   }
   if (crossRef) (kind as { crossRef?: ValueKind['crossRef'] }).crossRef = crossRef;
+  // Explicit `:underlying union` + `:union (union-shape :alternatives […])` —
+  // the raw union form (e.g. the audio plugin's note-or-event). The
+  // scalar-or-ref shorthand is desugared separately just below.
+  if (underlying === 'union_of' && unionForm) {
+    (kind as { unionOf?: ValueKind['unionOf'] }).unionOf = readUnionShape(unionForm);
+  }
   // Desugar `:underlying scalar-or-ref` → `union [<base> symbol]` last, so
   // the earlier consistency checks saw the placeholder underlying (parity
   // with the loop ordering in src/ManifestLoader.zig).
@@ -671,6 +995,25 @@ function buildValueKind(form: FormNode, diagnostics: Diagnostic[]): ValueKind {
 // Mirrors buildScalarOrRefShape in src/ManifestLoader.zig. A missing `:base`
 // is unreachable on a meta-valid manifest (the meta-schema marks it
 // required); the degenerate `[symbol]` fallback keeps the kind well-formed.
+// Read an explicit `(union-shape :alternatives [a b …])` slot into a
+// unionOf. Each alternative is a symbol that may carry a namespace
+// (`ns/name`); non-symbol elements are skipped. Mirrors the Zig loader's
+// union-shape parsing.
+function readUnionShape(form: FormNode): { alternatives: QualifiedRef[] } {
+  const alternatives: QualifiedRef[] = [];
+  for (const child of form.children) {
+    if (child.tag !== 'kvpair') continue;
+    if (child.key !== 'alternatives') continue;
+    if (child.value.tag !== 'vector') continue;
+    for (const e of child.value.elements) {
+      if (e.tag !== 'symbol') continue;
+      const split = splitNamespace(e.text);
+      alternatives.push({ name: split.name, namespace: split.namespace });
+    }
+  }
+  return { alternatives };
+}
+
 function buildScalarOrRefUnion(form: FormNode): { alternatives: QualifiedRef[] } {
   let base: QualifiedRef | undefined;
   for (const c of form.children) {
@@ -1052,31 +1395,148 @@ function readVectorShape(form: FormNode): ValueKind['vector'] | undefined {
   return shape;
 }
 
-function readCrossRef(form: FormNode): ValueKind['crossRef'] | undefined {
+/** Reject a `(vector-shape …)` that cannot mean one thing. Mirrors
+ *  `ManifestLoader.zig`'s two `vector_bounds_invalid` triggers; the
+ *  `:string-bounds` equivalent above has been here since M3, and this is
+ *  the same shape of check on the sibling declaration.
+ *
+ *  Path is `[<kind> vector]`, matching the reference — the value-kind and
+ *  the refinement that is wrong, not the individual bound. */
+function validateVectorShape(
+  shape: NonNullable<ValueKind['vector']>,
+  kindName: string,
+  span: Span,
+  diagnostics: Diagnostic[],
+): void {
+  if (shape.len !== undefined && (shape.minLen !== undefined || shape.maxLen !== undefined)) {
+    diagnostics.push({
+      code: 'vector_bounds_invalid',
+      message: `value-kind \`${kindName}\` \`:vector\` sets a fixed \`:len\` together with \`:min-len\`/\`:max-len\` — a fixed length already subsumes a range`,
+      path: [kindName, 'vector'],
+      span,
+      severity: 'err',
+    });
+  }
+  if (shape.minLen !== undefined && shape.maxLen !== undefined && shape.minLen > shape.maxLen) {
+    diagnostics.push({
+      code: 'vector_bounds_invalid',
+      message: `value-kind \`${kindName}\` \`:vector\` has empty range: :min-len ${shape.minLen} > :max-len ${shape.maxLen}`,
+      path: [kindName, 'vector'],
+      span,
+      severity: 'err',
+    });
+  }
+}
+
+/// Parse a `(cross-ref …)` refinement, enforcing the two routes'
+/// exclusions. Mirrors `buildCrossRef` in `src/ManifestLoader.zig`,
+/// including the drop-the-offending-key half: a half-honoured
+/// contradiction is worse than either reading, so downstream only ever
+/// sees a spec that took exactly one route.
+function readCrossRef(
+  form: FormNode,
+  kindName: string,
+  diagnostics: Diagnostic[],
+): ValueKind['crossRef'] | undefined {
   let target: string | undefined;
   let nameKey: string | undefined;
   let acyclic: boolean | undefined;
   let scopeForm: string | undefined;
+  let provider: string | undefined;
+  let sourceKey: string | undefined;
+  // Spans for the exclusion diagnostics — key spans, matching Zig.
+  let nameKeySpan: Span | undefined;
+  let sourceKeySpan: Span | undefined;
+  let acyclicSpan: Span | undefined;
   for (const child of form.children) {
     if (child.tag !== 'kvpair') continue;
     if (child.key === 'target' && child.value.tag === 'symbol') {
       target = child.value.text;
     } else if (child.key === 'name-key' && child.value.tag === 'symbol') {
       nameKey = child.value.text;
+      nameKeySpan = child.keySpan;
     } else if (child.key === 'acyclic' && child.value.tag === 'boolean') {
       acyclic = child.value.value;
+      acyclicSpan = child.keySpan;
     } else if (child.key === 'scope' && child.value.tag === 'symbol') {
       scopeForm = child.value.text;
+    } else if (child.key === 'provider' && child.value.tag === 'symbol') {
+      provider = child.value.text;
+    } else if (child.key === 'source-key' && child.value.tag === 'symbol') {
+      sourceKey = child.value.text;
+      sourceKeySpan = child.keySpan;
     }
   }
   if (!target) return undefined;
-  const cr: { target: string; nameKey?: string; acyclic?: boolean; scopeForm?: string } = {
+
+  if (provider !== undefined) {
+    if (nameKey !== undefined) {
+      diagnostics.push({
+        code: 'invalid_manifest',
+        message: `value-kind \`${kindName}\` \`:cross-ref\` sets both \`:provider\` and \`:name-key\` — the two extraction routes are exclusive`,
+        path: [kindName, 'cross-ref', 'name-key'],
+        span: nameKeySpan ?? form.headSpan,
+        severity: 'err',
+      });
+      nameKey = undefined;
+    }
+    if (acyclic === true) {
+      diagnostics.push({
+        code: 'invalid_manifest',
+        message: `value-kind \`${kindName}\` \`:cross-ref\` sets both \`:provider\` and \`:acyclic true\` — cycle edges are defined per declaration site, and extracted names share one source span`,
+        path: [kindName, 'cross-ref', 'acyclic'],
+        span: acyclicSpan ?? form.headSpan,
+        severity: 'err',
+      });
+      acyclic = false;
+    }
+  } else if (sourceKey !== undefined) {
+    diagnostics.push({
+      code: 'invalid_manifest',
+      message: `value-kind \`${kindName}\` \`:cross-ref\` sets \`:source-key\` without \`:provider\` — nothing reads it on the identity route`,
+      path: [kindName, 'cross-ref', 'source-key'],
+      span: sourceKeySpan ?? form.headSpan,
+      severity: 'err',
+    });
+    sourceKey = undefined;
+  }
+
+  const cr: {
+    target: string;
+    nameKey?: string;
+    acyclic?: boolean;
+    scopeForm?: string;
+    provider?: string;
+    sourceKey?: string;
+  } = {
     target,
   };
   if (nameKey !== undefined) cr.nameKey = nameKey;
   if (acyclic !== undefined) cr.acyclic = acyclic;
   if (scopeForm !== undefined) cr.scopeForm = scopeForm;
+  if (provider !== undefined) cr.provider = provider;
+  if (sourceKey !== undefined) cr.sourceKey = sourceKey;
   return cr;
+}
+
+/// Parse `(cross-ref-provider :name … :description …)`.
+///
+/// `:impl` is deliberately dropped: this host is declarative-only and
+/// does the same for expr-func `:impl` today. The declaration is what
+/// matters here — it is the catalog `(cross-ref :provider …)` resolves
+/// against.
+function buildCrossRefProvider(form: FormNode): CrossRefProvider {
+  let name = '';
+  let description = '';
+  for (const child of form.children) {
+    if (child.tag !== 'kvpair') continue;
+    if (child.key === 'name' && child.value.tag === 'symbol') {
+      name = child.value.text;
+    } else if (child.key === 'description' && child.value.tag === 'string') {
+      description = child.value.value;
+    }
+  }
+  return { name, description };
 }
 
 function readSymbolList(form: FormNode, key: string): string[] {

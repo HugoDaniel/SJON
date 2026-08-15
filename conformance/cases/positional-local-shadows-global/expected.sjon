@@ -1,0 +1,6 @@
+; The local `entry` (keys: :binding) shadows the global `entry` (keys: :at).
+; Validating against the local: :at is unknown_key and :binding is missing — a
+; global entry would have accepted :at cleanly, so this proves the shadow.
+(diagnostics
+  (diagnostic :code unknown_key :path [bind-group entry at])
+  (diagnostic :code missing_required_key :path [bind-group entry]))

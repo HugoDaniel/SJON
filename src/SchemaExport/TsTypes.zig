@@ -1,9 +1,25 @@
+//! Model → TypeScript `.d.ts` bytes.
+//!
+//! Emits one interface per form (named `<plugin>_<form>` PascalCase),
+//! one type alias per value-kind, and a barrel `Sjon<plugin>` union for
+//! discoverability. The output describes the *canonical* JSON shape of
+//! `sjon to-json` — `$form`, `$ns`, `$kw`, `$sym`, etc. — not the
+//! source-level S-expression syntax.
+//!
+//! Branded primitives (`Keyword_<S>`, `Symbol_<S>`, `Date_`, `Time_`,
+//! `Expr_`) sit at the top of every emit so consumers can `import` the
+//! `.d.ts` directly into a TS project that's about to read SJON-as-JSON.
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const Model = @import("Model.zig");
+const Plugin = @import("../Plugin.zig");
 const Warnings = @import("Warnings.zig");
 
+/// Branded TS alias for a GPU representation tag. The aliases are defined
+/// in `writePrelude`; this maps the `Repr` enum to the alias name so a
+/// `:repr`-tagged number renders as `F32` … `F16` instead of `number`.
 fn reprTsAlias(r: Plugin.ValueKind.Repr) []const u8 {
     return switch (r) {
         .f32 => "F32",
@@ -29,6 +45,10 @@ pub fn emit(
     return aw.toOwnedSlice();
 }
 
+/// Per-plugin emit. Produces a self-contained `.d.ts` for one plugin
+/// with `import type` lines at the top for any cross-plugin form/kind
+/// references. Cross-plugin form-head unions reference `<other>_<head>`
+/// from a sibling file path.
 pub fn emitForPlugin(
     a: Allocator,
     model: Model.Model,
@@ -76,6 +96,10 @@ fn writeCrossPluginImports(
     model: Model.Model,
     this_plugin: []const u8,
 ) std.Io.Writer.Error!void {
+    // Walk every form in this plugin and collect referenced (plugin, name)
+    // pairs whose plugin is not `this_plugin`. Dedupe in-place against a
+    // small append-only buffer so repeated references emit a single
+    // `import type` line. Deterministic order: first-seen.
     var seen_buf: [128]ImportEntry = undefined;
     var seen_len: usize = 0;
     for (model.plugins) |p| {
@@ -120,6 +144,8 @@ fn emitCrossPluginRefsForShape(
             for (refs) |ref| {
                 if (ref.plugin.len == 0) continue;
                 if (std.mem.eql(u8, ref.plugin, this_plugin)) continue;
+                // Dedupe by (plugin, name) — repeated references across
+                // slots emit a single import.
                 var already = false;
                 var i: usize = 0;
                 while (i < seen_len.*) : (i += 1) {
@@ -205,10 +231,15 @@ fn writeForm(
     }
 }
 
+/// Form-level JSDoc: description (if any) followed by one
+/// `@sjon-exclusive-group` line per exclusive group on the form. TS
+/// cannot type-enforce cardinality — the JSDoc is documentation only,
+/// matching the JSON Schema's `x-sjon-exclusive-groups` annotation.
 fn writeFormDoc(w: *std.Io.Writer, f: Model.Form) std.Io.Writer.Error!void {
     const has_desc = f.description.len > 0;
     const has_groups = f.exclusive_groups.len > 0;
     if (!has_desc and !has_groups) return;
+    // Multi-line block when both are present, single-line when only one.
     if (has_desc and !has_groups) {
         try w.writeAll("/** ");
         try w.writeAll(f.description);
@@ -251,11 +282,8 @@ fn writeFormInterface(w: *std.Io.Writer, p: Model.Plugin_, f: Model.Form) std.Io
     try w.writeAll("  $ns: \"");
     try w.writeAll(p.name);
     try w.writeAll("\";\n");
-    var indices: [64]u16 = undefined;
-    const n_keys = @min(f.keys.len, indices.len);
-    for (0..n_keys) |i| indices[i] = @intCast(i);
-    sortKeysAlphabetically(f.keys, indices[0..n_keys]);
-    for (indices[0..n_keys]) |idx| {
+    const indices = Model.sortedKeys(f.keys);
+    for (indices.slice()) |idx| {
         try writeKey(w, f.keys[idx], "  ");
     }
     switch (f.positional) {
@@ -273,6 +301,12 @@ fn writeFormInterface(w: *std.Io.Writer, p: Model.Plugin_, f: Model.Form) std.Io
     try w.writeAll("}\n\n");
 }
 
+/// Emit a discriminated form as a union of per-variant object types.
+/// Each branch repeats `$form`/`$ns`/common keys, overrides the
+/// discriminant key with a `Symbol_<"<when>">` brand, then layers the
+/// variant overlay keys. TS narrows on the discriminant brand: a check
+/// against `track.kind.$sym === "kick"` selects the matching branch
+/// and the rest of the branch's properties become available.
 fn writeDiscriminatedFormType(
     w: *std.Io.Writer,
     p: Model.Plugin_,
@@ -290,11 +324,10 @@ fn writeDiscriminatedFormType(
         try w.writeAll("      $ns: \"");
         try w.writeAll(p.name);
         try w.writeAll("\";\n");
-        var indices: [64]u16 = undefined;
-        const n_keys = @min(f.keys.len, indices.len);
-        for (0..n_keys) |i| indices[i] = @intCast(i);
-        sortKeysAlphabetically(f.keys, indices[0..n_keys]);
-        for (indices[0..n_keys]) |idx| {
+        // Common + discriminant keys, sorted alphabetically. The
+        // discriminant gets its brand narrowed to the variant's `when`.
+        const indices = Model.sortedKeys(f.keys);
+        for (indices.slice()) |idx| {
             const k = f.keys[idx];
             if (std.mem.eql(u8, k.name, d.key_name)) {
                 try writeDiscriminantKey(w, k, v.when, "      ");
@@ -302,11 +335,9 @@ fn writeDiscriminatedFormType(
                 try writeKey(w, k, "      ");
             }
         }
-        var v_indices: [64]u16 = undefined;
-        const n_v = @min(v.keys.len, v_indices.len);
-        for (0..n_v) |i| v_indices[i] = @intCast(i);
-        sortKeysAlphabetically(v.keys, v_indices[0..n_v]);
-        for (v_indices[0..n_v]) |idx| {
+        // Variant overlay keys.
+        const v_indices = Model.sortedKeys(v.keys);
+        for (v_indices.slice()) |idx| {
             try writeKey(w, v.keys[idx], "      ");
         }
         switch (f.positional) {
@@ -399,7 +430,7 @@ fn writeNumericBoundsDoc(
             try w.writeAll(u);
             try w.writeByte(')');
         }
-        if (min.exact_int and @abs(min.value) > 9007199254740992.0) {
+        if (min.exceedsF64Precision()) {
             try w.writeAll(" [exact-int >2^53]");
         }
         try w.writeByte('\n');
@@ -413,7 +444,7 @@ fn writeNumericBoundsDoc(
             try w.writeAll(u);
             try w.writeByte(')');
         }
-        if (max.exact_int and @abs(max.value) > 9007199254740992.0) {
+        if (max.exceedsF64Precision()) {
             try w.writeAll(" [exact-int >2^53]");
         }
         try w.writeByte('\n');
@@ -463,10 +494,26 @@ fn writeCrossRefDoc(
     try w.writeAll(indent);
     try w.writeAll(" * @sjon-cross-ref target=`");
     try w.writeAll(cr.target_form);
-    try w.writeAll("` name-key=`");
-    try w.writeAll(cr.name_key);
-    try w.writeAll("` acyclic=");
-    try w.writeAll(if (cr.acyclic) "true" else "false");
+    // Prose names only what the route can carry. The provider route has
+    // no `name-key` (rejected beside a provider) and no `acyclic` (cycle
+    // edges need per-name declaration sites), so printing the struct's
+    // defaults for them would read as a claim rather than a placeholder.
+    // The structured annotations — `x-sjon-cross-ref` and the IR — keep
+    // the full field set; only the human-facing renderings branch.
+    if (cr.provider) |p| {
+        try w.writeAll("` provider=`");
+        try w.writeAll(p);
+        if (cr.source_key) |sk| {
+            try w.writeAll("` source-key=`");
+            try w.writeAll(sk);
+        }
+        try w.writeByte('`');
+    } else {
+        try w.writeAll("` name-key=`");
+        try w.writeAll(cr.name_key);
+        try w.writeAll("` acyclic=");
+        try w.writeAll(if (cr.acyclic) "true" else "false");
+    }
     if (cr.scope_form) |sf| {
         try w.writeAll(" scope-form=`");
         try w.writeAll(sf);
@@ -600,6 +647,8 @@ fn isIdentCont(c: u8) bool {
     return isIdentStart(c) or (c >= '0' and c <= '9');
 }
 
+/// Apply the `$$`-escape used on the canonical JSON wire so the TS
+/// describes the on-wire object key for a `$`-prefixed user key.
 fn writeDollarEscaped(w: *std.Io.Writer, name: []const u8) std.Io.Writer.Error!void {
     if (name.len > 0 and name[0] == '$') {
         try w.writeByte('$');
@@ -607,12 +656,20 @@ fn writeDollarEscaped(w: *std.Io.Writer, name: []const u8) std.Io.Writer.Error!v
     try w.writeAll(name);
 }
 
+// ---------------------------------------------------------------------------
+// Shape emission — emits a TS type expression.
+// ---------------------------------------------------------------------------
+
 fn writeShape(w: *std.Io.Writer, shape: Model.ValueShape) std.Io.Writer.Error!void {
     switch (shape) {
         .any => try w.writeAll("unknown"),
         .nil => try w.writeAll("null"),
         .boolean => try w.writeAll("boolean"),
         .number => try w.writeAll("number"),
+        // A `:repr`-tagged number renders as its branded GPU alias
+        // (`F32`…`F16`); a plain bounded number stays `number` (min/max are
+        // not expressible in a TS structural type — they're JSON-Schema /
+        // JSDoc concerns).
         .number_bounded => |b| try w.writeAll(if (b.repr) |r| reprTsAlias(r) else "number"),
         .number_i64, .number_u64 => try w.writeAll("bigint"),
         .string => try w.writeAll("string"),
@@ -628,6 +685,7 @@ fn writeShape(w: *std.Io.Writer, shape: Model.ValueShape) std.Io.Writer.Error!vo
         .string_members_rich => |members| try writeRichStringLiteralUnion(w, members),
         .vector => |vs| {
             if (vs.len) |n| {
+                // Fixed-length vector → readonly tuple type.
                 try w.writeAll("readonly [");
                 var i: u16 = 0;
                 while (i < n) : (i += 1) {
@@ -643,6 +701,11 @@ fn writeShape(w: *std.Io.Writer, shape: Model.ValueShape) std.Io.Writer.Error!vo
         },
         .form_any => try w.writeAll("{ readonly $form: string; readonly $ns?: string }"),
         .form_heads => |refs| {
+            // Union of `{$form: "<name>"}` literals. TS narrows on the
+            // `$form` discriminant. In per-plugin mode, cross-plugin
+            // refs use the imported type name (`<Other>_<Name>`) so the
+            // `import type` line at the top of the file actually carries
+            // weight in the consumer's type tree.
             for (refs, 0..) |ref, i| {
                 if (i > 0) try w.writeAll(" | ");
                 const use_imported = if (current_filter) |this|
@@ -659,6 +722,12 @@ fn writeShape(w: *std.Io.Writer, shape: Model.ValueShape) std.Io.Writer.Error!vo
             }
         },
         .form_locals => |forms| {
+            // Inline anonymous union of object literals (one per local form),
+            // plus a trailing open generic branch for the additive global
+            // fallback. TS narrows on the `$form` discriminant; the open
+            // branch makes the slot accept any global form (required-key
+            // enforcement on that branch is SJON-runtime-only — the
+            // open-branch round-trip caveat in SCHEMA_EXPORT.md).
             for (forms) |lf| {
                 try writeInlineLocalForm(w, lf);
                 try w.writeAll(" | ");
@@ -692,6 +761,13 @@ fn writeShape(w: *std.Io.Writer, shape: Model.ValueShape) std.Io.Writer.Error!vo
     }
 }
 
+/// Emit a slot-local form as an inline anonymous object-literal type (no
+/// `export interface NAME` header — locals have no global type name). Mirrors
+/// `writeFormInterface` / `writeDiscriminatedFormType` bodies compactly on one
+/// line. `$ns` is optional (locals are bare-invoked, so the JSON bridge omits
+/// it). A discriminated local emits a parenthesised union of per-variant
+/// branches so TS narrows on the discriminant brand, matching the JSON side's
+/// if/then reuse.
 fn writeInlineLocalForm(w: *std.Io.Writer, f: Model.Form) std.Io.Writer.Error!void {
     if (f.discriminator) |d| {
         try w.writeByte('(');
@@ -700,11 +776,8 @@ fn writeInlineLocalForm(w: *std.Io.Writer, f: Model.Form) std.Io.Writer.Error!vo
             try w.writeAll("{ $form: \"");
             try w.writeAll(f.name);
             try w.writeAll("\"; $ns?: string;");
-            var indices: [64]u16 = undefined;
-            const n_keys = @min(f.keys.len, indices.len);
-            for (0..n_keys) |i| indices[i] = @intCast(i);
-            sortKeysAlphabetically(f.keys, indices[0..n_keys]);
-            for (indices[0..n_keys]) |idx| {
+            const indices = Model.sortedKeys(f.keys);
+            for (indices.slice()) |idx| {
                 const k = f.keys[idx];
                 try w.writeByte(' ');
                 if (std.mem.eql(u8, k.name, d.key_name)) {
@@ -713,11 +786,8 @@ fn writeInlineLocalForm(w: *std.Io.Writer, f: Model.Form) std.Io.Writer.Error!vo
                     try writeInlineKey(w, k);
                 }
             }
-            var v_indices: [64]u16 = undefined;
-            const n_v = @min(v.keys.len, v_indices.len);
-            for (0..n_v) |i| v_indices[i] = @intCast(i);
-            sortKeysAlphabetically(v.keys, v_indices[0..n_v]);
-            for (v_indices[0..n_v]) |idx| {
+            const v_indices = Model.sortedKeys(v.keys);
+            for (v_indices.slice()) |idx| {
                 try w.writeByte(' ');
                 try writeInlineKey(w, v.keys[idx]);
             }
@@ -730,11 +800,8 @@ fn writeInlineLocalForm(w: *std.Io.Writer, f: Model.Form) std.Io.Writer.Error!vo
     try w.writeAll("{ $form: \"");
     try w.writeAll(f.name);
     try w.writeAll("\"; $ns?: string;");
-    var indices: [64]u16 = undefined;
-    const n_keys = @min(f.keys.len, indices.len);
-    for (0..n_keys) |i| indices[i] = @intCast(i);
-    sortKeysAlphabetically(f.keys, indices[0..n_keys]);
-    for (indices[0..n_keys]) |idx| {
+    const indices = Model.sortedKeys(f.keys);
+    for (indices.slice()) |idx| {
         try w.writeByte(' ');
         try writeInlineKey(w, f.keys[idx]);
     }
@@ -751,6 +818,9 @@ fn writeInlineLocalForm(w: *std.Io.Writer, f: Model.Form) std.Io.Writer.Error!vo
     try w.writeAll(" }");
 }
 
+/// Compact single-line key for an inline local-form literal: `name?: T;`
+/// (no JSDoc / indentation — the inline union stays on one line). The value
+/// shape recurses through `writeShape`, so a nested local slot expands too.
 fn writeInlineKey(w: *std.Io.Writer, k: Model.Key) std.Io.Writer.Error!void {
     try writeKeyName(w, k.name);
     if (k.optional) try w.writeByte('?');
@@ -759,6 +829,8 @@ fn writeInlineKey(w: *std.Io.Writer, k: Model.Key) std.Io.Writer.Error!void {
     try w.writeByte(';');
 }
 
+/// Compact discriminant key for an inline local-form variant branch:
+/// `kind: Symbol_<"<when>">;`. Mirrors `writeDiscriminantKey`.
 fn writeInlineDiscriminantKey(w: *std.Io.Writer, k: Model.Key, when: []const u8) std.Io.Writer.Error!void {
     try writeKeyName(w, k.name);
     try w.writeAll(": Symbol_<\"");
@@ -793,6 +865,10 @@ fn writeStringLiteralUnion(w: *std.Io.Writer, names: []const []const u8) std.Io.
     }
 }
 
+/// Rich-member branded union — same structural type as compact, but
+/// receives a JSDoc enrichment block at the consuming key (see
+/// `writeKey`). The TS compiler ignores the JSDoc when computing the
+/// type; editors and language servers surface it as hover content.
 fn writeRichBrandedUnion(w: *std.Io.Writer, brand: []const u8, members: []const Model.Member) std.Io.Writer.Error!void {
     if (members.len == 0) {
         try w.writeAll(brand);
@@ -820,6 +896,9 @@ fn writeRichStringLiteralUnion(w: *std.Io.Writer, members: []const Model.Member)
     }
 }
 
+/// If `shape` carries rich member metadata, return the slice so the
+/// caller can enrich the JSDoc block. Returns `null` for any shape
+/// that doesn't have per-member annotations to surface.
 fn richMembersOf(shape: Model.ValueShape) ?[]const Model.Member {
     return switch (shape) {
         .symbol_members_rich => |m| m,
@@ -828,18 +907,26 @@ fn richMembersOf(shape: Model.ValueShape) ?[]const Model.Member {
     };
 }
 
+// ---------------------------------------------------------------------------
+// Per-plugin barrel — a union of every form in the plugin so consumers
+// can `Sjon<Plugin> = …` and narrow on `$form`.
+// ---------------------------------------------------------------------------
+
 fn writeBarrel(w: *std.Io.Writer, p: Model.Plugin_) std.Io.Writer.Error!void {
     if (p.forms.len == 0) return;
     try w.writeAll("export type Sjon");
     try writePascalCase(w, p.name);
     try w.writeAll(" =");
-    for (p.forms, 0..) |f, i| {
+    for (p.forms) |f| {
         try w.writeAll("\n  | ");
         try writeFormTypeName(w, p.name, f.name);
-        _ = i;
     }
     try w.writeAll(";\n\n");
 }
+
+// ---------------------------------------------------------------------------
+// Naming.
+// ---------------------------------------------------------------------------
 
 fn writeFormTypeName(w: *std.Io.Writer, plugin_name: []const u8, form_name: []const u8) std.Io.Writer.Error!void {
     try writePascalCase(w, plugin_name);
@@ -847,6 +934,8 @@ fn writeFormTypeName(w: *std.Io.Writer, plugin_name: []const u8, form_name: []co
     try writePascalCase(w, form_name);
 }
 
+/// Upper-camel-case a kebab- or snake-case identifier. `fill-rule` →
+/// `FillRule`; `circle` → `Circle`. Non-identifier bytes are dropped.
 fn writePascalCase(w: *std.Io.Writer, name: []const u8) std.Io.Writer.Error!void {
     var upper_next = true;
     for (name) |c| {
@@ -864,21 +953,321 @@ fn writePascalCase(w: *std.Io.Writer, name: []const u8) std.Io.Writer.Error!void
     }
 }
 
-fn sortKeysAlphabetically(keys: []const Model.Key, indices: []u16) void {
-    std.mem.sort(u16, indices, keys, struct {
-        fn lt(ks: []const Model.Key, a: u16, b: u16) bool {
-            return std.mem.order(u8, ks[a].name, ks[b].name) == .lt;
-        }
-    }.lt);
-}
-
 fn printDecimal(w: *std.Io.Writer, n: u32) std.Io.Writer.Error!void {
     var buf: [16]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return error.WriteFailed;
     try w.writeAll(s);
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
 const SchemaExport = @import("SchemaExport.zig");
 const Schema = @import("../Schema.zig");
-const Plugin = @import("../Plugin.zig");
+
+test "emit: empty model produces just the prelude" {
+    const a = testing.allocator;
+    const schema: Schema.Schema = .{ .plugins = &.{} };
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    try testing.expect(std.mem.indexOf(u8, bytes, "Keyword<") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "Symbol_<") != null);
+}
+
+test "emit: single form generates a typed interface" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "test",
+        .forms = &.{
+            .{
+                .name = "row",
+                .keys = &.{
+                    .{ .name = "n", .value_type = .number, .optional = false },
+                    .{ .name = "s", .value_type = .string },
+                },
+            },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    try testing.expect(std.mem.indexOf(u8, bytes, "interface Test_Row") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "$form: \"row\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "$ns: \"test\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "n: number") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "s?: string") != null);
+}
+
+test "emit: open form gets index signature" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "x",
+        .forms = &.{.{ .name = "scene", .open = true }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    try testing.expect(std.mem.indexOf(u8, result.ts_types_bytes.?, "[key: string]: unknown") != null);
+}
+
+test "emit: typed fixed-length vector becomes a readonly tuple" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "x",
+        .forms = &.{.{
+            .name = "f",
+            .keys = &.{.{ .name = "pt", .value_type = .{ .named = .{ .name = "point" } } }},
+        }},
+        .value_kinds = &.{
+            .{ .name = "point", .underlying = .vector, .vector = .{ .len = 2, .element = .{ .name = "number" } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    try testing.expect(std.mem.indexOf(u8, result.ts_types_bytes.?, "readonly [number, number]") != null);
+}
+
+test "emit: :repr-tagged number renders as its branded GPU alias" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "gpu",
+        .forms = &.{.{
+            .name = "f",
+            .keys = &.{.{ .name = "ch", .value_type = .{ .named = .{ .name = "channel" } } }},
+        }},
+        .value_kinds = &.{
+            .{ .name = "channel", .underlying = .number, .repr = .f32 },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    // The branded alias is declared in the prelude…
+    try testing.expect(std.mem.indexOf(u8, bytes, "export type F32 = number & { readonly __sjonRepr?: \"f32\" };") != null);
+    // …and the field uses it instead of bare `number`.
+    try testing.expect(std.mem.indexOf(u8, bytes, "ch?: F32") != null);
+}
+
+test "emit: repr-only kind with no :numeric still brands (u16)" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "gpu",
+        .forms = &.{.{
+            .name = "f",
+            .keys = &.{.{ .name = "w", .value_type = .{ .named = .{ .name = "px" } }, .optional = false }},
+        }},
+        .value_kinds = &.{
+            .{ .name = "px", .underlying = .number, .repr = .u16 },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    try testing.expect(std.mem.indexOf(u8, result.ts_types_bytes.?, "w: U16") != null);
+}
+
+test "emit: symbol member-set becomes branded union" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "x",
+        .forms = &.{.{
+            .name = "f",
+            .keys = &.{.{ .name = "fill", .value_type = .{ .named = .{ .name = "fill-rule" } } }},
+        }},
+        .value_kinds = &.{
+            .{
+                .name = "fill-rule",
+                .underlying = .symbol,
+                .members = .{ .members = &.{ .{ .name = "evenodd" }, .{ .name = "nonzero" } } },
+            },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    try testing.expect(std.mem.indexOf(u8, bytes, "Symbol_<\"evenodd\">") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "Symbol_<\"nonzero\">") != null);
+}
+
+test "emit: rich symbol member-set surfaces JSDoc per member" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "x",
+        .forms = &.{.{
+            .name = "row",
+            .keys = &.{.{ .name = "level", .value_type = .{ .named = .{ .name = "severity" } } }},
+        }},
+        .value_kinds = &.{
+            .{
+                .name = "severity",
+                .underlying = .symbol,
+                .members = .{ .members = &.{
+                    .{ .name = "info", .label = "Info", .description = "Routine status." },
+                    .{ .name = "fatal", .deprecated = true, .deprecation_message = "Use error." },
+                } },
+            },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    // Structural type: branded union with literal names.
+    try testing.expect(std.mem.indexOf(u8, bytes, "Symbol_<\"info\">") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "Symbol_<\"fatal\">") != null);
+    // JSDoc: @member lines with label/description and @deprecated.
+    try testing.expect(std.mem.indexOf(u8, bytes, "@member info — Info: Routine status.") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "@member fatal @deprecated Use error.") != null);
+}
+
+test "emit: rich string member-set surfaces JSDoc per member" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "x",
+        .forms = &.{.{ .name = "row", .keys = &.{.{ .name = "mode", .value_type = .{ .named = .{ .name = "modes" } } }} }},
+        .value_kinds = &.{
+            .{
+                .name = "modes",
+                .underlying = .string,
+                .members = .{ .members = &.{
+                    .{ .name = "auto", .label = "Auto" },
+                } },
+            },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    try testing.expect(std.mem.indexOf(u8, bytes, "mode?: \"auto\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "@member auto — Auto") != null);
+}
+
+test "emit: exclusive group JSDoc lists cardinality and key bundles" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "x",
+        .forms = &.{
+            .{
+                .name = "phrase",
+                .description = "A note sequence.",
+                .keys = &.{
+                    .{ .name = "notes", .value_type = .vector, .optional = true },
+                    .{ .name = "events", .value_type = .vector, .optional = true },
+                },
+                .exclusive_groups = &.{
+                    .{
+                        .cardinality = .exactly_one,
+                        .alternatives = &.{ .{ .keys = &.{"notes"} }, .{ .keys = &.{"events"} } },
+                    },
+                },
+            },
+            .{
+                .name = "tag",
+                .keys = &.{
+                    .{ .name = "color", .value_type = .string, .optional = true },
+                    .{ .name = "shape", .value_type = .string, .optional = true },
+                },
+                .exclusive_groups = &.{
+                    .{
+                        .cardinality = .at_most_one,
+                        .alternatives = &.{ .{ .keys = &.{"color"} }, .{ .keys = &.{"shape"} } },
+                    },
+                },
+            },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    try testing.expect(std.mem.indexOf(u8, bytes, "@sjon-exclusive-group exactly-one [notes, events]") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "@sjon-exclusive-group at-most-one [color, shape]") != null);
+    // Description is preserved alongside the group lines.
+    try testing.expect(std.mem.indexOf(u8, bytes, "A note sequence.") != null);
+}
+
+test "emit: discriminated form becomes a union of per-variant object types" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "kit",
+        .forms = &.{.{
+            .name = "track",
+            .keys = &.{
+                .{ .name = "kind", .value_type = .{ .named = .{ .name = "track-kind" } }, .optional = false },
+                .{ .name = "name", .value_type = .string, .optional = true },
+            },
+            .discriminant_idx = 0,
+            .variants = &.{
+                .{ .when = "kick", .keys = &.{
+                    .{ .name = "step", .value_type = .number, .optional = false },
+                    .{ .name = "volume", .value_type = .number, .optional = true },
+                } },
+                .{ .when = "bass", .keys = &.{
+                    .{ .name = "sequence", .value_type = .vector, .optional = false },
+                } },
+            },
+        }},
+        .value_kinds = &.{
+            .{ .name = "track-kind", .underlying = .symbol, .members = .{ .members = &.{ .{ .name = "kick" }, .{ .name = "bass" } } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    // Discriminated form is a `type` (union), not an `interface`.
+    try testing.expect(std.mem.indexOf(u8, bytes, "export type Kit_Track =") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "export interface Kit_Track") == null);
+    // Per-variant branches narrow the discriminant brand.
+    try testing.expect(std.mem.indexOf(u8, bytes, "kind: Symbol_<\"kick\">") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "kind: Symbol_<\"bass\">") != null);
+    // Variant overlay keys are present in each branch.
+    try testing.expect(std.mem.indexOf(u8, bytes, "step: number") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "sequence: ") != null);
+}
+
+test "emit: positional local forms render as inline $children union" {
+    // Positional locals lower to `positional = .kind{.form_locals}`, so the
+    // `$children` array becomes a typed `Array<…>` of the inline object-literal
+    // union (one branch per local head, `$form` brand + keys) plus the open
+    // global-fallback branch — the same rendering a keyed local slot produces.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "draw",
+        .forms = &.{.{
+            .name = "canvas",
+            .positional = .any, // loader implies `.any` when locals present
+            .local_forms = &.{
+                .{ .name = "circle", .keys = &.{.{ .name = "r", .value_type = .number, .optional = false }} },
+                .{ .name = "rect" },
+            },
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    // `$children` is a typed `Array<…>`, not the widened `unknown[]`.
+    try testing.expect(std.mem.indexOf(u8, bytes, "$children?: Array<") != null);
+    // Each local head brands its `$form` literal in the inline union…
+    try testing.expect(std.mem.indexOf(u8, bytes, "$form: \"circle\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "$form: \"rect\"") != null);
+    // …and the trailing open branch keeps the additive global fallback open.
+    try testing.expect(std.mem.indexOf(u8, bytes, "$form: string") != null);
+}
+
+test "emit: PascalCase converts kebab + snake to camel" {
+    const a = testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+    try writePascalCase(&aw.writer, "fill-rule");
+    try testing.expectEqualStrings("FillRule", aw.written());
+}

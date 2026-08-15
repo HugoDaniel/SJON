@@ -1,0 +1,5 @@
+; `triangle` is neither a positional-local nor a global form → unknown_local_form
+; at the PARENT form's path [bind-group] (the positional slot); the generic
+; unknown_form is suppressed.
+(diagnostics
+  (diagnostic :code unknown_local_form :path [bind-group]))

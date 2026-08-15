@@ -15,6 +15,7 @@
 //
 // Lifetime: pure functions over JS-owned immutable data. No allocator handle.
 
+import { CHILDREN_KEY, FORM_KEY, NS_KEY } from './discriminators.ts';
 import type { SjonValue } from './value.ts';
 
 /** A path into a document: number = positional/vector index, string = kvpair key. */
@@ -143,7 +144,7 @@ export function diffToActions(
   const actions: EditAction[] = [];
   const cur = (current ?? {}) as Record<string, unknown>;
   for (const key of Object.keys(partial)) {
-    if (key === '$form' || key === '$ns' || key === '$children') continue;
+    if (key === FORM_KEY || key === NS_KEY || key === CHILDREN_KEY) continue;
     const next = partial[key];
     if (next === undefined) continue; // leave alone
     const prev = cur[key];

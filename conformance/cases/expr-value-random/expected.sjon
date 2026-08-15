@@ -1,0 +1,13 @@
+(diagnostics)
+(values
+  (value :index 0 :result 3045933958955360)
+  (value :index 1 :result 7661272369888881)
+  (value :index 2 :result 7734270049600866)
+  (value :index 3 :result 0.3381666012719897)
+  (value :index 4 :result 0.8505720982975175)
+  (value :index 5 :result -0.059893570089826875)
+  (value :index 6 :result 3)
+  (value :index 7 :result true)
+  (value :index 8 :result false)
+  (value :index 9 :result true)
+  (value :index 10 :result :b))

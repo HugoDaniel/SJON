@@ -42,6 +42,24 @@ export interface CrossRefIR {
   readonly nameKey?: string;
   readonly acyclic?: boolean;
   readonly scope?: string;
+  /** Provider route (manifest format 1.2): the extractor that turns the
+   * target's `sourceKey` string into the member set. Mutually exclusive
+   * with `nameKey` / `acyclic` — the builder rejects the combination
+   * rather than emitting a manifest the loader would refuse. */
+  readonly provider?: string;
+  /** Provider route: the target key holding the opaque content.
+   * Defaults to `src` when omitted, matching the manifest default. */
+  readonly sourceKey?: string;
+}
+
+/** A `(cross-ref-provider …)` declaration. Name + description only:
+ * `:impl` names a WASM export, and this package builds schemas rather
+ * than shipping executable plugins — the same reason it declares no
+ * expr-funcs. A schema built here that references a provider is
+ * expected to be paired with a plugin that implements it. */
+export interface CrossRefProviderDef {
+  readonly name: string;
+  readonly description?: string;
 }
 
 /**
@@ -99,7 +117,7 @@ export interface NodeDef {
    * Set by `.default(v)` — the default value (a `SjonValue`: literal or `e.*`
    * expr). Emitted as `:default <literal>` into the manifest (`serialize.ts`),
    * making the key optional in input but required in output. Distinct from
-   * `isOptional`. See docs/plans/02 workstream B.
+   * `isOptional`.
    */
   readonly default?: unknown;
 }
@@ -150,4 +168,5 @@ export interface PluginDef {
   readonly description?: string;
   readonly forms: readonly FormDef[];
   readonly namedKinds: readonly NamedKindDef[];
+  readonly crossRefProviders: readonly CrossRefProviderDef[];
 }

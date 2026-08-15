@@ -1,0 +1,83 @@
+; Numeric + string bounds fixture. Exercises every M3 bound surface:
+;
+;   * `score`  — `(number :min 0 :max 100)` (inclusive)
+;   * `ratio`  — `(number :exclusive-min 0 :max 1)`
+;   * `count`  — integer (`:integer true`) with `:min 0`
+;   * `big`    — exact-int `:max 9007199254740993` (> 2^53; triggers
+;                `x-sjon-exact-bound.max` annotation and the
+;                `numeric_bound_exceeds_double_range` info warning)
+;   * `email`  — string with `:format email`
+;   * `slug`   — string with `:min-len 3 :max-len 32 :pattern "^[a-z][a-z0-9-]*$"`
+;   * `uri`    — string with `:format uri`
+;   * `uuid`   — string with `:format uuid`
+;   * `version`— string with `:format semver` (custom format → `x-sjon-format`)
+;   * `path`   — string with `:format path` (custom format → `x-sjon-format`)
+;
+; All bounds carry through to the emitted JSON Schema as native
+; `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`/`minLength`/
+; `maxLength`/`pattern`/`format` keywords; the TS surface annotates them
+; via JSDoc only (TS has no type-level length or numeric narrowing).
+
+(plugin :name bounds :version "1.0.0"
+  (value-kind :name score
+    :description "Inclusive 0..100 range."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 100))
+
+  (value-kind :name ratio
+    :description "Exclusive 0..1 range."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 1 :exclusive-min true))
+
+  (value-kind :name count
+    :description "Non-negative integer."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :integer true))
+
+  (value-kind :name big
+    :description "Integer bounded above by ~10^16 to exercise the >2^53 annotation. (At this magnitude the f64 wire value loses ~3 bits of precision; `x-sjon-exact-bound.max` carries the round-tripped digit string so SJON-aware tooling can recover exact intent.)"
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 99999999999999999 :integer true))
+
+  (value-kind :name email-string
+    :description "RFC-5322 email."
+    :underlying string
+    :string-bounds (string-bounds :format email))
+
+  (value-kind :name slug
+    :description "URL-safe identifier."
+    :underlying string
+    :string-bounds (string-bounds :min-len 3 :max-len 32 :pattern "^[a-z][a-z0-9-]*$"))
+
+  (value-kind :name url
+    :description "Absolute URI."
+    :underlying string
+    :string-bounds (string-bounds :format uri))
+
+  (value-kind :name uuid-string
+    :description "UUID 8-4-4-4-12 form."
+    :underlying string
+    :string-bounds (string-bounds :format uuid))
+
+  (value-kind :name version-tag
+    :description "Semver string — `x-sjon-format` only (not JSON-Schema standard)."
+    :underlying string
+    :string-bounds (string-bounds :format semver))
+
+  (value-kind :name file-path
+    :description "Path string — `x-sjon-format` only."
+    :underlying string
+    :string-bounds (string-bounds :format path))
+
+  (form :name profile
+    :description "User profile carrying one slot per bound flavour."
+    (key :name handle :type slug)
+    (key :name email :type email-string)
+    (key :name homepage :type url :optional true)
+    (key :name uuid :type uuid-string)
+    (key :name release :type version-tag :optional true)
+    (key :name workspace :type file-path :optional true)
+    (key :name score :type score :optional true)
+    (key :name ratio :type ratio :optional true)
+    (key :name visits :type count :optional true)
+    (key :name big-id :type big :optional true)))

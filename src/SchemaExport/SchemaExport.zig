@@ -1,3 +1,15 @@
+//! SJON schema exporter — public surface.
+//!
+//! Walks a `Schema.Schema` and produces a `Model` IR plus the
+//! requested target artifacts (JSON Schema 2020-12, TypeScript `.d.ts`,
+//! or the IR itself). Lossy-mapping decisions live in the per-construct
+//! `loweringFor*` helpers; backends consume the IR mechanically.
+//!
+//! Memory model: every call allocates a fresh arena; `ExportResult.deinit()`
+//! releases it. Strings inside the IR, warnings, and byte buffers all
+//! point into that arena, so the caller does not need to keep `schema`
+//! or any source bytes alive past the call.
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -9,32 +21,57 @@ pub const Model = @import("Model.zig");
 pub const Warnings = @import("Warnings.zig");
 pub const JsonSchema = @import("JsonSchema.zig");
 pub const TsTypes = @import("TsTypes.zig");
+pub const Markdown = @import("Markdown.zig");
 pub const Discriminators = @import("Discriminators.zig");
 
+/// Targets the exporter knows how to emit.
 pub const Target = struct {
     json_schema: bool = true,
     ts_types: bool = true,
     intermediate: bool = false,
+    /// Markdown reference pages (devx C2). Off by default — asked for
+    /// by name, never part of `both`.
+    markdown: bool = false,
 };
 
+/// Layout strategy for multi-plugin schemas. M1 only honours
+/// `aggregated`; the per-plugin layout is M3 (it requires cross-file
+/// `$ref` resolution and is wired then).
 pub const Layout = enum { aggregated, per_plugin };
 
+/// JSON Schema draft. M1 only accepts 2020-12; the option exists so
+/// CLI parsing can return a usage error for other values rather than
+/// silently falling back.
 pub const JsonSchemaDraft = enum { @"2020-12" };
 
+/// All knobs the exporter exposes. Defaults are M1-safe.
 pub const ExportOptions = struct {
     target: Target = .{},
     layout: Layout = .aggregated,
     draft: JsonSchemaDraft = .@"2020-12",
+    /// When true the lowering pass calls every aggregate validator
+    /// (cross-refs, unions, forms, lowering, defaults) and folds their
+    /// diagnostics into the warning stream. Off by default so callers
+    /// who already ran `Host.validateDocument` don't double-pay the
+    /// aggregate cost.
     run_aggregate_validators: bool = false,
 };
 
+/// Owned result of an `exportSchema` call.
 pub const ExportResult = struct {
     arena: ArenaAllocator,
     model: Model.Model,
     json_schema_bytes: ?[]const u8,
     ts_types_bytes: ?[]const u8,
     intermediate_bytes: ?[]const u8,
+    markdown_bytes: ?[]const u8 = null,
     warnings: []const Warnings.Warning,
+    /// Populated when `ExportOptions.layout == .per_plugin`. One artifact
+    /// per plugin in declaration order. The single-buffer aggregated
+    /// fields above stay populated too — they hold a single-document view
+    /// (concatenated `$defs`, unioned `oneOf`); per-plugin emit additionally
+    /// produces sibling-file-friendly artifacts whose `$ref` paths point
+    /// at relative file names rather than into one shared `$defs`.
     per_plugin: ?[]const Model.PerPluginArtifact = null,
 
     pub fn deinit(self: *ExportResult) void {
@@ -48,6 +85,9 @@ pub const ExportResult = struct {
 
 pub const Error = error{OutOfMemory};
 
+/// Lower a `Schema.Schema` into the IR and emit every requested
+/// target. Caller owns the returned `ExportResult` and must call
+/// `deinit()` exactly once.
 pub fn exportSchema(
     gpa: Allocator,
     schema: Schema.Schema,
@@ -65,11 +105,14 @@ pub fn exportSchema(
 
     const model = try lowerSchema(a, schema, &warnings);
 
+    // Dedupe before emit so the artifacts and the in-memory warnings
+    // list agree on the same set.
     const deduped = try dedupeWarnings(a, warnings.items);
 
     var json_schema_bytes: ?[]const u8 = null;
     var ts_types_bytes: ?[]const u8 = null;
     var intermediate_bytes: ?[]const u8 = null;
+    var markdown_bytes: ?[]const u8 = null;
 
     if (options.target.json_schema) {
         json_schema_bytes = try JsonSchema.emit(a, model, deduped);
@@ -79,6 +122,9 @@ pub fn exportSchema(
     }
     if (options.target.intermediate) {
         intermediate_bytes = try emitIntermediate(a, model, deduped);
+    }
+    if (options.target.markdown) {
+        markdown_bytes = try Markdown.emit(a, model, deduped);
     }
 
     var per_plugin: ?[]const Model.PerPluginArtifact = null;
@@ -92,6 +138,7 @@ pub fn exportSchema(
         .json_schema_bytes = json_schema_bytes,
         .ts_types_bytes = ts_types_bytes,
         .intermediate_bytes = intermediate_bytes,
+        .markdown_bytes = markdown_bytes,
         .warnings = deduped,
         .per_plugin = per_plugin,
     };
@@ -120,6 +167,10 @@ fn emitPerPlugin(
                 try emitIntermediateForPlugin(a, model, p, filtered)
             else
                 null,
+            .markdown_bytes = if (target.markdown)
+                try Markdown.emitForPlugin(a, model, p, filtered)
+            else
+                null,
         };
     }
     return out;
@@ -132,6 +183,9 @@ fn filterWarningsForPlugin(
 ) Error![]const Warnings.Warning {
     var out: std.ArrayList(Warnings.Warning) = .empty;
     for (warnings) |w| {
+        // Aggregate warnings without a plugin scope land in every plugin's
+        // artifact so a downstream reader sees them everywhere; otherwise
+        // only the matching plugin gets the warning.
         if (w.plugin_name == null or std.mem.eql(u8, w.plugin_name.?, plugin_name)) {
             try out.append(a, w);
         }
@@ -152,6 +206,13 @@ fn emitIntermediateForPlugin(
     return emitIntermediate(a, single, warnings);
 }
 
+/// Drop adjacent and global duplicates from the warning stream. A kind
+/// referenced from a key gets lowered twice (once inline at the key
+/// site, once in the plugin's value_kinds loop) and emits the same
+/// warning each time. Same with kinds referenced from multiple keys.
+/// Dedupe by `(code, message, plugin, form, key, kind)` tuple — the
+/// warning surface stays informative without becoming a wall of
+/// duplicates.
 fn dedupeWarnings(
     a: Allocator,
     input: []const Warnings.Warning,
@@ -177,6 +238,10 @@ fn optStrEql(a: ?[]const u8, b: ?[]const u8) bool {
     if (a == null or b == null) return false;
     return std.mem.eql(u8, a.?, b.?);
 }
+
+// ---------------------------------------------------------------------------
+// Aggregate-phase forwarding.
+// ---------------------------------------------------------------------------
 
 fn collectAggregateWarnings(
     gpa: Allocator,
@@ -222,14 +287,11 @@ fn foldDiagnostics(
     }
 }
 
-fn freeDiagnostics(gpa: Allocator, diags: []const @import("../Ast.zig").Diagnostic) void {
-    for (diags) |d| {
-        gpa.free(d.message);
-        for (d.path) |p| gpa.free(p);
-        gpa.free(d.path);
-    }
-    gpa.free(diags);
-}
+const freeDiagnostics = @import("../Ast.zig").Diagnostic.freeOwnedSlice;
+
+// ---------------------------------------------------------------------------
+// Schema → Model lowering.
+// ---------------------------------------------------------------------------
 
 fn lowerSchema(
     a: Allocator,
@@ -269,7 +331,128 @@ fn lowerPlugin(
         .version = try a.dupe(u8, plugin.version),
         .forms = forms_out,
         .value_kinds = kinds_out,
+        .expr_funcs = try lowerExprFuncs(a, plugin.expr_funcs),
     };
+}
+
+/// Presentation-lower every expr-func: one `ExprFuncEntry` per source
+/// func, signature text pre-rendered per overload (the mono encoding
+/// becomes a one-signature overload set).
+fn lowerExprFuncs(a: Allocator, src: []const Plugin.ExprFunc) Error![]const Model.ExprFuncEntry {
+    const out = try a.alloc(Model.ExprFuncEntry, src.len);
+    for (src, 0..) |f, i| {
+        var sigs: std.ArrayList([]const u8) = .empty;
+        if (f.signatures) |overloads| {
+            for (overloads) |sig| try sigs.append(a, try renderSignatureText(a, f.name, sig));
+        } else {
+            try sigs.append(a, try renderSignatureText(a, f.name, .{
+                .arity = f.arity,
+                .params = f.params,
+                .param_names = f.param_names,
+                .rest = f.rest,
+                .result = f.result,
+            }));
+        }
+        out[i] = .{
+            .name = try a.dupe(u8, f.name),
+            .description = try a.dupe(u8, f.description),
+            .signatures = try sigs.toOwnedSlice(a),
+        };
+    }
+    return out;
+}
+
+/// Render one signature as `(name p1 p2 …rest) -> result`: typed slots
+/// spell their `ValueType` (named refs keep the user's qualification),
+/// labeled slots prefix `name: `, opaque slots render `_`, a variadic
+/// tail renders `…` (typed when `rest` is). Result omitted when
+/// undeclared.
+fn renderSignatureText(a: Allocator, name: []const u8, sig: Plugin.ExprFunc.Signature) Error![]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.append(a, '(');
+    try buf.appendSlice(a, name);
+    const fixed_count: usize = if (sig.params) |ps| ps.len else switch (sig.arity) {
+        .fixed => |k| k,
+        .at_least => |k| k,
+        .range => |r| r.min,
+    };
+    var i: usize = 0;
+    while (i < fixed_count) : (i += 1) {
+        try buf.append(a, ' ');
+        if (sig.param_names) |names| {
+            if (i < names.len) {
+                try buf.appendSlice(a, names[i]);
+                try buf.appendSlice(a, ": ");
+            }
+        }
+        if (sig.params) |ps| {
+            try appendValueTypeName(&buf, a, ps[i]);
+        } else {
+            try buf.append(a, '_');
+        }
+    }
+    const variadic = sig.rest != null or switch (sig.arity) {
+        .fixed => false,
+        .at_least => true,
+        .range => |r| r.max > r.min,
+    };
+    if (variadic) {
+        try buf.appendSlice(a, " …");
+        if (sig.rest) |r| try appendValueTypeName(&buf, a, r);
+    }
+    try buf.append(a, ')');
+    if (sig.result) |r| {
+        try buf.appendSlice(a, " -> ");
+        try appendValueTypeName(&buf, a, r);
+    }
+    return buf.toOwnedSlice(a);
+}
+
+fn appendValueTypeName(buf: *std.ArrayList(u8), a: Allocator, t: Plugin.ValueType) Error!void {
+    switch (t) {
+        .named => |ref| {
+            if (ref.namespace) |ns| {
+                try buf.appendSlice(a, ns);
+                try buf.append(a, '/');
+            }
+            try buf.appendSlice(a, ref.name);
+        },
+        else => try buf.appendSlice(a, @tagName(t)),
+    }
+}
+
+test "renderSignatureText: typed, labeled, variadic, opaque" {
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Typed + labeled + result.
+    const lerp = try renderSignatureText(a, "lerp", .{
+        .arity = .{ .fixed = 3 },
+        .params = &.{ .number, .number, .number },
+        .param_names = &.{ "a", "b", "t" },
+        .result = .number,
+    });
+    try std.testing.expectEqualStrings("(lerp a: number b: number t: number) -> number", lerp);
+
+    // Opaque fixed arity renders placeholders.
+    const deg = try renderSignatureText(a, "deg", .{ .arity = .{ .fixed = 1 } });
+    try std.testing.expectEqualStrings("(deg _)", deg);
+
+    // Variadic tail with a typed rest.
+    const sum = try renderSignatureText(a, "+", .{
+        .arity = .{ .at_least = 1 },
+        .rest = .number,
+        .result = .number,
+    });
+    try std.testing.expectEqualStrings("(+ _ …number) -> number", sum);
+
+    // Named result keeps the user's qualification.
+    const mk = try renderSignatureText(a, "mk", .{
+        .arity = .{ .fixed = 0 },
+        .result = .{ .named = .{ .name = "point", .namespace = "shapes" } },
+    });
+    try std.testing.expectEqualStrings("(mk) -> shapes/point", mk);
 }
 
 fn lowerForm(
@@ -284,7 +467,7 @@ fn lowerForm(
         keys_out[i] = try lowerKey(a, schema, plugin, form, k, warnings);
     }
 
-    const positional: Model.Positional = switch (form.positional) {
+    var positional: Model.Positional = switch (form.positional) {
         .none => .none,
         .any => .any,
         .kind => |ref| blk: {
@@ -294,8 +477,43 @@ fn lowerForm(
             });
             break :blk .{ .kind = shape };
         },
+        // Positional keyword flags don't constrain a child *value shape*,
+        // so widen to `.any`; the names + metadata ride alongside as the
+        // `x-sjon-positional-flags` annotation (see `positional_flags`).
         .flag_set => .any,
     };
+
+    // Positional slot-local forms (`FormSpec.local_forms`) are the positional
+    // mirror of key-slot locals (see `lowerKey`): inline `(form …)` children
+    // resolve local-first against these specs, then fall back additively to the
+    // global catalog. They override the positional child *shape* to the same
+    // inline anonymous union (`.form_locals`) the keyed carrier uses — each
+    // local lowered via `lowerForm` (a discriminated local keeps its if/then),
+    // recursion bounded by `MAX_LOCAL_FORM_DEPTH` (finite manifest tree). The
+    // registry rides independent of the declared positional variant
+    // (`.any` / head-set `.kind`); a `:positional <head-set>` gate stays
+    // SJON-only (byte-equality on head text, never `$defs`), and the backends'
+    // trailing open branch is the additive global fallback.
+    if (form.local_forms.len > 0) {
+        const locals = try a.alloc(Model.Form, form.local_forms.len);
+        for (form.local_forms, 0..) |lf, i| {
+            locals[i] = try lowerForm(a, schema, plugin, lf, warnings);
+        }
+        positional = .{ .kind = .{ .form_locals = locals } };
+        try warnings.append(a, .{
+            .code = .local_forms_emitted_inline,
+            .severity = .info,
+            .message = try std.fmt.allocPrint(
+                a,
+                "positional slot on form `{s}` declares {d} local form(s) — emitted as an inline union plus an open generic branch for the additive global fallback; local-first/global resolution order is SJON-only",
+                .{ form.name, form.local_forms.len },
+            ),
+            .plugin_name = try a.dupe(u8, plugin.name),
+            .form_name = try a.dupe(u8, form.name),
+            // key_name intentionally null — this is the form's positional slot,
+            // not a keyed slot.
+        });
+    }
 
     const positional_flags: ?[]const Model.PositionalFlag = switch (form.positional) {
         .flag_set => |fs| blk: {
@@ -421,6 +639,12 @@ fn lowerKey(
         .key_name = key.name,
     });
 
+    // Slot-local forms live on the key, not the type: a `:type form` slot
+    // (lowered to `.form_any` above) carrying inline locals is re-shaped to
+    // an inline anonymous union (`.form_locals`). Each local is lowered via
+    // `lowerForm` so a discriminated local still gets its if/then; recursion
+    // is bounded by `MAX_LOCAL_FORM_DEPTH` (finite manifest tree). The
+    // additive global fallback is the backends' trailing open branch.
     if (key.local_forms.len > 0) {
         const locals = try a.alloc(Model.Form, key.local_forms.len);
         for (key.local_forms, 0..) |lf, i| {
@@ -536,6 +760,9 @@ fn resolveNamedShape(
     };
 }
 
+/// Build `"<namespace>/<name>"` (or just `"<name>"` when namespace is
+/// null) into a freshly-allocated buffer. Used so diagnostic prose
+/// echoes the user's surface text.
 fn formatQualified(a: Allocator, name: []const u8, namespace: ?[]const u8) Error![]const u8 {
     if (namespace) |ns| {
         return try std.fmt.allocPrint(a, "{s}/{s}", .{ ns, name });
@@ -552,7 +779,7 @@ fn primitiveShortcut(name: []const u8) ?Model.ValueShape {
     if (std.mem.eql(u8, name, "nil")) return .nil;
     if (std.mem.eql(u8, name, "form")) return .form_any;
     if (std.mem.eql(u8, name, "expr")) return .expr;
-    if (std.mem.eql(u8, name, "vector")) return null;
+    if (std.mem.eql(u8, name, "vector")) return null; // need element type
     return null;
 }
 
@@ -567,11 +794,21 @@ fn lowerValueKind(
         .plugin_name = plugin.name,
         .kind_name = vk.name,
     };
+    // 1) Refinements that completely replace the underlying mapping.
     if (vk.cross_ref) |cr| {
+        // The provider route is unenforceable for one more reason than the
+        // identity one, and it is worth naming: the identity route's member
+        // set is at least *derivable* from a document, while the provider's
+        // is produced by running an extractor the export target has no way
+        // to call.
         try warnings.append(a, .{
             .code = .cross_ref_unenforceable,
             .severity = .warn,
-            .message = try std.fmt.allocPrint(
+            .message = if (cr.provider) |p| try std.fmt.allocPrint(
+                a,
+                "value-kind `{s}` cross-ref: schema validates symbol shape only; the member set is extracted from each target's `:{s}` string by provider `{s}` during validation, so it is not knowable at export time",
+                .{ vk.name, cr.source_key, p },
+            ) else try std.fmt.allocPrint(
                 a,
                 "value-kind `{s}` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
                 .{vk.name},
@@ -582,7 +819,21 @@ fn lowerValueKind(
         try warnings.append(a, .{
             .code = .cross_ref_annotation_only,
             .severity = .info,
-            .message = try std.fmt.allocPrint(
+            // Each route lists the fields that route can carry: `name-key`
+            // and `acyclic` are identity-only (the loader rejects a
+            // non-default `name-key` beside a provider, and cycle edges
+            // need per-name declaration sites the provider route lacks).
+            .message = if (cr.provider) |p| try std.fmt.allocPrint(
+                a,
+                "value-kind `{s}` cross-ref annotation surfaces target-form=`{s}` provider=`{s}` source-key=`{s}` scope-form=`{s}`; none are enforceable by JSON Schema",
+                .{
+                    vk.name,
+                    cr.target_form,
+                    p,
+                    cr.source_key,
+                    if (cr.scope_form) |sf| sf else "",
+                },
+            ) else try std.fmt.allocPrint(
                 a,
                 "value-kind `{s}` cross-ref annotation surfaces target-form=`{s}` name-key=`{s}` acyclic={s} scope-form=`{s}`; none are enforceable by JSON Schema",
                 .{
@@ -609,12 +860,19 @@ fn lowerValueKind(
                 .kind_name = try a.dupe(u8, vk.name),
             });
         }
-        return .{ .cross_ref = .{
-            .target_form = try a.dupe(u8, cr.target_form),
-            .name_key = try a.dupe(u8, cr.name_key),
-            .acyclic = cr.acyclic,
-            .scope_form = if (cr.scope_form) |sf| try a.dupe(u8, sf) else null,
-        } };
+        return .{
+            .cross_ref = .{
+                .target_form = try a.dupe(u8, cr.target_form),
+                .name_key = try a.dupe(u8, cr.name_key),
+                .acyclic = cr.acyclic,
+                .scope_form = if (cr.scope_form) |sf| try a.dupe(u8, sf) else null,
+                // Both or neither: `source_key` carries a default the identity
+                // route never uses, so mirroring it unconditionally would put a
+                // meaningless `"src"` in every identity-route annotation.
+                .provider = if (cr.provider) |p| try a.dupe(u8, p) else null,
+                .source_key = if (cr.provider == null) null else try a.dupe(u8, cr.source_key),
+            },
+        };
     }
     if (vk.union_of) |us| {
         try warnings.append(a, .{
@@ -638,13 +896,14 @@ fn lowerValueKind(
         return .{ .union_of = alts };
     }
 
+    // 2) Underlying-driven mapping.
     return switch (vk.underlying) {
         .number => lowerNumberKind(a, plugin, vk, warnings),
         .string => lowerStringKind(a, plugin, vk, warnings),
         .symbol => lowerSymbolKind(a, plugin, vk, warnings),
         .form => lowerFormKind(a, schema, plugin, vk, warnings),
         .vector => try lowerVectorKind(a, schema, plugin, vk, warnings),
-        .union_of => unreachable,
+        .union_of => unreachable, // handled above
     };
 }
 
@@ -654,6 +913,10 @@ fn lowerNumberKind(
     vk: Plugin.ValueKind,
     warnings: *std.ArrayList(Warnings.Warning),
 ) Error!Model.ValueShape {
+    // Merge `:numeric` and `:repr` into one `NumericBounds`. Either may be
+    // present independently: `:numeric` carries min/max/integer, `:repr`
+    // adds the GPU type tag. A repr-only kind yields a `NumericBounds` with
+    // null min/max and just `repr` set (still a `number_bounded` shape).
     const bounds: ?Model.NumericBounds = if (vk.numeric == null and vk.repr == null)
         null
     else blk: {
@@ -665,6 +928,9 @@ fn lowerNumberKind(
         break :blk b;
     };
 
+    // A `:reject` unit-shape demands bare numbers (units forbidden), so it
+    // exports as a plain number / bounded-number, never the number_with_unit
+    // object shape. Only a non-reject unit emits a unit.
     if (vk.unit) |u| if (!u.reject) {
         try warnings.append(a, .{
             .code = .number_with_unit_emitted_via_prefix_items,
@@ -688,6 +954,9 @@ fn lowerNumberKind(
     };
 
     if (bounds) |b| {
+        // The min/max warning is only meaningful when `:numeric` supplied
+        // actual bounds; a repr-only kind has null min/max and emits just
+        // the `x-sjon-gpu-repr` annotation (no JSON Schema range keywords).
         if (vk.numeric != null) {
             try warnings.append(a, .{
                 .code = .numeric_bounds_emitted_via_min_max,
@@ -725,8 +994,6 @@ fn copyBound(a: Allocator, b: Plugin.ValueKind.NumericBounds.Bound) Error!Model.
     };
 }
 
-const F64_PRECISE_INT_CEILING: f64 = 9007199254740992.0;
-
 fn maybeWarnExactIntOverflow(
     a: Allocator,
     plugin: Plugin.Plugin,
@@ -735,7 +1002,7 @@ fn maybeWarnExactIntOverflow(
     warnings: *std.ArrayList(Warnings.Warning),
 ) Error!void {
     if (bounds.min) |b| {
-        if (b.exact_int and @abs(b.value) > F64_PRECISE_INT_CEILING) {
+        if (b.exceedsF64Precision()) {
             try warnings.append(a, .{
                 .code = .numeric_bound_exceeds_double_range,
                 .severity = .info,
@@ -750,7 +1017,7 @@ fn maybeWarnExactIntOverflow(
         }
     }
     if (bounds.max) |b| {
-        if (b.exact_int and @abs(b.value) > F64_PRECISE_INT_CEILING) {
+        if (b.exceedsF64Precision()) {
             try warnings.append(a, .{
                 .code = .numeric_bound_exceeds_double_range,
                 .severity = .info,
@@ -940,6 +1207,11 @@ fn valueShapePtr(a: Allocator, shape: Model.ValueShape) Error!*const Model.Value
     return p;
 }
 
+// ---------------------------------------------------------------------------
+// Defaults — only literal shapes survive; expression snapshots become a
+// warning + an `expression` IR entry carrying head/namespace/arg_count.
+// ---------------------------------------------------------------------------
+
 fn lowerDefault(
     a: Allocator,
     plugin: Plugin.Plugin,
@@ -982,6 +1254,12 @@ fn lowerDefault(
         },
     };
 }
+
+// ---------------------------------------------------------------------------
+// Intermediate JSON dump — the IR serialised in a self-describing shape.
+// Used for third-party tooling that wants to consume the IR without
+// committing to JSON Schema or TypeScript.
+// ---------------------------------------------------------------------------
 
 fn emitIntermediate(
     a: Allocator,
@@ -1201,6 +1479,13 @@ fn writeShapeJson(w: *std.json.Stringify, shape: Model.ValueShape) std.Io.Writer
             try w.write(cr.acyclic);
             try w.objectField("scope_form");
             if (cr.scope_form) |sf| try w.write(sf) else try w.write(null);
+            // The IR mirror spells absence as an explicit null (unlike the
+            // JSON Schema annotation, which omits the key) — a consumer
+            // reading the IR sees the same field set for every cross-ref.
+            try w.objectField("provider");
+            if (cr.provider) |p| try w.write(p) else try w.write(null);
+            try w.objectField("source_key");
+            if (cr.source_key) |sk| try w.write(sk) else try w.write(null);
             try w.endObject();
         },
         .union_of => |alts| {
@@ -1385,4 +1670,272 @@ fn writeWarningJson(w: *std.json.Stringify, wn: Warnings.Warning) std.Io.Writer.
     try w.endObject();
 }
 
+// ---------------------------------------------------------------------------
+// Tests — exercise lowering against a synthetic plugin.
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
+
+test "lowering: empty schema produces a zero-plugin model" {
+    const a = testing.allocator;
+    const schema: Schema.Schema = .{ .plugins = &.{} };
+    var result = try exportSchema(a, schema, .{});
+    defer result.deinit();
+    try testing.expectEqual(@as(usize, 0), result.model.plugins.len);
+    try testing.expectEqual(@as(usize, 0), result.warnings.len);
+}
+
+test "lowering: primitive key shapes" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "prims",
+        .forms = &.{
+            .{
+                .name = "row",
+                .keys = &.{
+                    .{ .name = "n", .value_type = .number },
+                    .{ .name = "s", .value_type = .string },
+                    .{ .name = "b", .value_type = .boolean },
+                    .{ .name = "v", .value_type = .vector },
+                    .{ .name = "f", .value_type = .form },
+                },
+            },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{});
+    defer result.deinit();
+    try testing.expectEqual(@as(usize, 1), result.model.plugins.len);
+    const form = result.model.plugins[0].forms[0];
+    try testing.expectEqualStrings("row", form.name);
+    try testing.expectEqual(Model.ValueShape.number, form.keys[0].value);
+    try testing.expectEqual(Model.ValueShape.string, form.keys[1].value);
+    try testing.expectEqual(Model.ValueShape.boolean, form.keys[2].value);
+    try testing.expect(form.keys[3].value == .vector);
+    try testing.expectEqual(Model.ValueShape.form_any, form.keys[4].value);
+}
+
+test "lowering: required vs optional via effectiveOptional" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "x",
+        .forms = &.{
+            .{
+                .name = "f",
+                .keys = &.{
+                    .{ .name = "req", .value_type = .string, .optional = false },
+                    .{ .name = "opt", .value_type = .string, .optional = true },
+                    .{ .name = "defaulted", .value_type = .string, .optional = false, .default = .{ .string = "fallback" } },
+                },
+            },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{});
+    defer result.deinit();
+    const keys = result.model.plugins[0].forms[0].keys;
+    try testing.expect(!keys[0].optional);
+    try testing.expect(keys[1].optional);
+    try testing.expect(keys[2].optional); // defaulted ⇒ effectively optional
+}
+
+test "lowering: named ref to a compact symbol member-set" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "x",
+        .forms = &.{
+            .{
+                .name = "f",
+                .keys = &.{.{ .name = "fill", .value_type = .{ .named = .{ .name = "fill-rule" } } }},
+            },
+        },
+        .value_kinds = &.{
+            .{
+                .name = "fill-rule",
+                .underlying = .symbol,
+                .members = .{ .members = &.{ .{ .name = "evenodd" }, .{ .name = "nonzero" } } },
+            },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{});
+    defer result.deinit();
+    const key = result.model.plugins[0].forms[0].keys[0];
+    try testing.expect(key.value == .symbol_members);
+    try testing.expectEqual(@as(usize, 2), key.value.symbol_members.len);
+    try testing.expectEqualStrings("evenodd", key.value.symbol_members[0]);
+    try testing.expectEqualStrings("nonzero", key.value.symbol_members[1]);
+}
+
+test "lowering: typed vector via named element kind" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "x",
+        .forms = &.{.{
+            .name = "f",
+            .keys = &.{.{ .name = "p", .value_type = .{ .named = .{ .name = "point" } } }},
+        }},
+        .value_kinds = &.{
+            .{ .name = "point", .underlying = .vector, .vector = .{ .len = 2, .element = .{ .name = "number" } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{});
+    defer result.deinit();
+    const key = result.model.plugins[0].forms[0].keys[0];
+    try testing.expect(key.value == .vector);
+    try testing.expectEqual(@as(?u16, 2), key.value.vector.len);
+    try testing.expectEqual(Model.ValueShape.number, key.value.vector.element.*);
+}
+
+test "lowering: open form sets the IR's open flag" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "x",
+        .forms = &.{.{ .name = "scene", .open = true }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{});
+    defer result.deinit();
+    try testing.expect(result.model.plugins[0].forms[0].open);
+}
+
+test "lowering: literal defaults survive" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "x",
+        .forms = &.{.{
+            .name = "f",
+            .keys = &.{
+                .{ .name = "s", .value_type = .string, .default = .{ .string = "hi" } },
+                .{ .name = "n", .value_type = .number, .default = .{ .number = 3.5 } },
+                .{ .name = "b", .value_type = .boolean, .default = .{ .boolean = true } },
+                .{ .name = "v", .value_type = .vector, .default = .{ .vector = &.{ .{ .number = 1 }, .{ .number = 2 } } } },
+            },
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{});
+    defer result.deinit();
+    const keys = result.model.plugins[0].forms[0].keys;
+    try testing.expect(keys[0].default.? == .string);
+    try testing.expectEqualStrings("hi", keys[0].default.?.string);
+    try testing.expectEqual(@as(f64, 3.5), keys[1].default.?.number);
+    try testing.expectEqual(true, keys[2].default.?.boolean);
+    try testing.expect(keys[3].default.? == .vector);
+    try testing.expectEqual(@as(usize, 2), keys[3].default.?.vector.len);
+}
+
+test "lowering: head-set resolves plugin per head and emits info warning" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "x",
+        .forms = &.{
+            .{ .name = "circle" },
+            .{ .name = "rect" },
+            .{
+                .name = "badge",
+                .keys = &.{.{ .name = "shape", .value_type = .{ .named = .{ .name = "shape-form" } } }},
+            },
+        },
+        .value_kinds = &.{
+            .{ .name = "shape-form", .underlying = .form, .heads = .{ .names = &.{ "circle", "rect" } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{});
+    defer result.deinit();
+    const badge = result.model.plugins[0].forms[2];
+    const key = badge.keys[0];
+    try testing.expect(key.value == .form_heads);
+    try testing.expectEqual(@as(usize, 2), key.value.form_heads.len);
+    try testing.expectEqualStrings("circle", key.value.form_heads[0].name);
+    try testing.expectEqualStrings("x", key.value.form_heads[0].plugin);
+    try testing.expectEqualStrings("rect", key.value.form_heads[1].name);
+    try testing.expectEqualStrings("x", key.value.form_heads[1].plugin);
+    // The head-set info warning replaces the M1 deferred_construct (warn).
+    var saw_info = false;
+    for (result.warnings) |wn| {
+        if (wn.code == .head_set_emitted_via_oneof_refs and wn.kind_name != null and std.mem.eql(u8, wn.kind_name.?, "shape-form")) {
+            try testing.expectEqual(Warnings.Severity.info, wn.severity);
+            saw_info = true;
+        }
+        if (wn.code == .deferred_construct and wn.kind_name != null and std.mem.eql(u8, wn.kind_name.?, "shape-form")) {
+            return error.UnexpectedDeferredWarning;
+        }
+    }
+    try testing.expect(saw_info);
+}
+
+test "lowering: unit-shape :reject exports as a plain number, not number_with_unit" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "x",
+        .forms = &.{.{
+            .name = "f",
+            .keys = &.{.{ .name = "k", .value_type = .{ .named = .{ .name = "bare" } } }},
+        }},
+        .value_kinds = &.{
+            .{ .name = "bare", .underlying = .number, .unit = .{ .reject = true } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{});
+    defer result.deinit();
+    const key = result.model.plugins[0].forms[0].keys[0];
+    // A reject unit-kind is unitless — it must NOT surface as the
+    // number_with_unit object shape; bare `.number` is the projection.
+    try testing.expect(key.value == .number);
+    // …and it emits no number_with_unit prefixItems warning for this kind.
+    for (result.warnings) |wn| {
+        if (wn.code == .number_with_unit_emitted_via_prefix_items and
+            wn.kind_name != null and std.mem.eql(u8, wn.kind_name.?, "bare"))
+        {
+            return error.UnexpectedUnitWarning;
+        }
+    }
+}
+
+test "lowering: unresolved named ref upgrades to err warning" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "x",
+        .forms = &.{.{
+            .name = "f",
+            .keys = &.{.{ .name = "k", .value_type = .{ .named = .{ .name = "nope" } } }},
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{});
+    defer result.deinit();
+    try testing.expect(result.hasErrors());
+    const key = result.model.plugins[0].forms[0].keys[0];
+    try testing.expect(key.value == .unresolved_named);
+}
+
+test "lowering: deterministic plugin and form ordering matches declaration" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "x",
+        .forms = &.{
+            .{ .name = "alpha" },
+            .{ .name = "beta" },
+            .{ .name = "gamma" },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{});
+    defer result.deinit();
+    const forms = result.model.plugins[0].forms;
+    try testing.expectEqualStrings("alpha", forms[0].name);
+    try testing.expectEqualStrings("beta", forms[1].name);
+    try testing.expectEqualStrings("gamma", forms[2].name);
+}
+
+test {
+    _ = Discriminators;
+    _ = Warnings;
+    _ = Model;
+    _ = JsonSchema;
+    _ = TsTypes;
+}

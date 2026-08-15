@@ -1,0 +1,23 @@
+; Form 0 used to abort the process. `(clamp x lo hi)` handed both bounds
+; to `std.math.clamp`, which asserts `lower <= upper` — and the bounds are
+; runtime author input, so no validator pass could reject the document
+; first. A safe build panicked; `sjon.wasm` trapped and took the instance
+; with it. It is now `error.TypeMismatch`, reported as `expr_type_mismatch`
+; against the form's head, so form 0 produces a diagnostic and no value
+; while its neighbours keep evaluating. That is what this case checks
+; across the hosts: an inverted range costs you one result, not the run —
+; and it says so instead of vanishing.
+;
+; `lerp` is unclamped in both directions (forms 2/3) — t outside [0, 1]
+; extrapolates rather than saturating, so it is not `mix(a, b, saturate(t))`.
+; Form 4 is the ordinary clamp; form 5 is the degenerate-but-legal lo == hi.
+; `min`/`max` are variadic down to one argument (form 8).
+(clamp 5.0 10.0 0.0)
+(lerp 0.0 10.0 0.25)
+(lerp 0.0 10.0 1.5)
+(lerp 0.0 10.0 -0.5)
+(clamp 5.0 0.0 1.0)
+(clamp 5.0 5.0 5.0)
+(min 3.0 1.0 2.0)
+(max 3.0 1.0 2.0)
+(min 5.0)

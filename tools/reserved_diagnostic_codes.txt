@@ -1,0 +1,80 @@
+# Diagnostic codes deliberately exempt from the coverage audit.
+#
+# `Ast.Diagnostic.Code` is wire-stable, so every variant must be either
+# fired by a test / conformance case, or listed here with a reason. This
+# file exists because the previous arrangement was worse: four
+# "codes are constructible" tests in `Host_tests.zig` did nothing but
+# `diagWith(code)` + `expectEqual`, which satisfied the audit's grep
+# without ever running the code on a live diagnostic. Their own comments
+# said so. The audit read as 119/119 while ~9 codes had never fired.
+#
+# An allowlist makes each exemption visible and reviewable. Two rules keep
+# it from rotting into the same crutch:
+#
+#   1. Every entry carries a reason and, where one exists, the work that
+#      removes it.
+#   2. The audit FAILS on a stale entry — a code listed here that has
+#      since gained real coverage must be deleted from this file. The
+#      list can only shrink by accident, never grow by accident.
+#
+# Format: one code per line. `#` starts a comment; blank lines ignored.
+
+# --- Reserved, no emitter anywhere ------------------------------------
+# Declared for a describe-manifest validation path that was never built.
+# Not emitted by any code in the repo. Keeping the variant costs nothing
+# (the enum is append-only and wire-stable, so removing it would be the
+# breaking change), but it must not be counted as tested.
+# Removed from this list by: an emitter + its test, or a deliberate
+# decision to document it as permanently reserved.
+plugin_describe_invalid
+
+# --- Emitted only as hardcoded CLI prose, never as an Ast.Diagnostic ---
+# `sjon check` / `sjon project verify` print these as literal text
+# (e.g. `src/cli/Cli.zig`'s "note: project_documents_outside_root: …"),
+# so the code name reaches the user — and `sjon explain <code>` answers
+# for it — but no `Ast.Diagnostic` carrying it is ever constructed. The
+# corpus cannot reach them and no test fires them.
+#
+# The *behaviour* behind each is now pinned: r1-04 added `Cli_tests.zig`
+# cases driving every `project verify` lockfile path (drift, missing
+# entry, orphan, corrupt, unsupported version) and both discovery
+# advisories, asserting the printed line and the exit code. That is real
+# coverage of the feature — it is not coverage of the enum variant, which
+# is what this audit measures: those tests match prose, not
+# `.lockfile_drift`. Conflating the two is exactly how the
+# constructibility tests justified themselves, so the entries stay.
+# (This corrects the earlier note here, which predicted those fixtures
+# would retire these codes. They don't, and shouldn't.)
+# Removed from this list by: `project verify` / document discovery
+# emitting real `Ast.Diagnostic`s instead of prose — at which point a test
+# can assert on the code itself.
+glob_no_matches
+project_documents_outside_root
+lockfile_drift
+lockfile_missing_entry
+lockfile_orphan
+lockfile_version_unsupported
+lockfile_corrupt
+
+# --- Feature not built in v1; no emitter reaches it -------------------
+# v1 carries no regex engine. `checkStringBoundsValue` says so in its
+# doc comment and returns before any pattern check; declaring `:pattern`
+# raises the advisory `string_pattern_unsupported` at each value site
+# instead (which HAS a corpus case). So there is no code path that can
+# produce `string_pattern_mismatch` — it is reserved for the engine
+# milestone, which appends the regex path without a wire change.
+#
+# It reached this list from the other direction to everything above: it
+# was reported as *covered*, by a test whose entire body was
+# `_ = Ast.Diagnostic.Code.string_pattern_mismatch;`. That is precisely
+# the construct-only shape this file replaced — it survived the cleanup
+# by sitting in `Validator_tests.zig` rather than `Host_tests.zig`.
+# Removed from this list by: a regex engine + the corpus case for it.
+string_pattern_mismatch
+
+# --- Real emitter, no test drives it ----------------------------------
+# `Host.zig` constructs this when a manifest's `:wasm-sha256` disagrees
+# with the bytes on disk. Reaching it needs a fixture package with a
+# deliberately-wrong self-hash.
+# Removed from this list by: that fixture + a Host test.
+plugin_wasm_self_hash_mismatch

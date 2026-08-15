@@ -1,0 +1,5 @@
+; `zzzzzz` is nowhere near any indexed plugin name — the renderer must
+; stay silent rather than suggest noise.
+(use-plugin "zzzzzz")
+
+(circle :r 4)

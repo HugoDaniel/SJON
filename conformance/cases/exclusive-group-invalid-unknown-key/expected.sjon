@@ -1,0 +1,4 @@
+; Pathed at the group, not at the alternative or the missing key.
+(diagnostics
+  (diagnostic :code exclusive_group_invalid :path [route exclusive-group])
+  (diagnostic :code unknown_form :path [route]))

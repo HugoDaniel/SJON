@@ -1,0 +1,15 @@
+; Manifest-phase family, 5 of 6. `(vector-shape …)` declares either a fixed
+; `:len` or a `:min-len`/`:max-len` range, never both — a fixed length
+; already subsumes any range, so declaring both means one of them is dead
+; and the author cannot have meant that.
+;
+; The two are *consistent* here (3 lies inside 1..5), which is deliberate:
+; the rule is not "the bounds contradict each other", it is "these two ways
+; of saying it don't compose". A check that only fired on contradictory
+; bounds would let this document through.
+(plugin :name probe :version "1.0.0"
+  (value-kind :name vv :underlying vector
+    :vector (vector-shape :element number :len 3 :min-len 1 :max-len 5))
+  (form :name pt (key :name v :type vv)))
+
+(pt :v [1 2 3])

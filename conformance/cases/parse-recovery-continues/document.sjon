@@ -1,0 +1,20 @@
+; Collection over abort, across a syntax error. A stray close delimiter sits
+; between two forms that each violate the schema the same way. Both
+; violations must be reported: a host that stopped validating at the first
+; syntax error would emit only the first, and a host that discarded the
+; whole tree would emit neither.
+;
+; A stray `)` is used rather than an unclosed form or an unterminated string
+; because those two swallow the rest of the file into the recovered node —
+; the tail would then be validated *nested*, which pins recovery shape
+; instead of the continuation this case is about.
+;
+; Ordering is part of the contract: `Host.validateDocument` runs parse as
+; its own phase, so the syntax diagnostic precedes both validation
+; diagnostics even though its source position sits between them.
+(plugin :name p :version "1.0.0"
+  (form :name pt (key :name x :type number)))
+
+(pt :x "before")
+)
+(pt :x "after")

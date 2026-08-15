@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code too_many_keywords :severity warning :path [plugin]))

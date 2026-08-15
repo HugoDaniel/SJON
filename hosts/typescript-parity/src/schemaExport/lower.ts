@@ -7,14 +7,13 @@
 // axes (vector / unit / numeric / string-bounds / cross-ref /
 // members / heads) classify into their own `ModelValueShape` branch.
 //
-// Coverage parity note: union-of alternatives now resolve here (via the
+// Coverage parity note: union-of alternatives resolve here (via the
 // scalar-or-ref desugar, `union [<base> symbol]`) — `lowerValueKind` maps
-// each alternative through `resolveNamedShape`, matching the Zig exporter.
-// The TS-parity manifest loader still does not parse the remaining M2
-// constructs (discriminator + variants, exclusive groups, lowering hooks,
-// literal defaults); when those land in `loader.ts` the IR fields already
-// exist (see `model.ts`) and this pass will populate them. For now they
-// stay null/empty.
+// each alternative through `resolveNamedShape`, matching the Zig exporter —
+// and so, now that `loader.ts` parses them, do the discriminator + its
+// variants and the exclusive groups. `lowering` is the one M2 field still
+// pinned null: it declares a host-owned hook this declarative-only port has
+// no registry for, so there is nothing to carry through.
 
 import type {
   Plugin,
@@ -32,6 +31,8 @@ import { effectiveOptional, lookupForm, lookupValueKind } from '../plugin.ts';
 import type {
   Model,
   ModelDefault,
+  ModelDiscriminator,
+  ModelExclusiveGroup,
   ModelForm,
   ModelKey,
   ModelMember,
@@ -45,7 +46,7 @@ import type {
   ModelValueShape,
 } from './model.ts';
 import { makeWarning, type Warning } from './warnings.ts';
-import { assertNever } from './internal.ts';
+import { assertNever } from '../internal.ts';
 
 const F64_PRECISE_INT_CEILING = 2 ** 53;
 
@@ -109,6 +110,32 @@ function lowerForm(ctx: LowerCtx, plugin: Plugin, form: FormSpec): ModelForm {
     default:
       assertNever(form.positional);
   }
+
+  // Positional slot-local forms override the positional child shape to the
+  // same inline anonymous union (`form_locals`) `lowerKey` uses for keyed
+  // locals — each local lowered via `lowerForm` (a discriminated local keeps
+  // its if/then). Rides independent of the declared positional variant
+  // (`any` / head-set `kind`); the head-set gate stays SJON-only. Reuses the
+  // `local_forms_emitted_inline` warning (form-scoped, no key). Mirrors the
+  // Zig `lowerForm` hook.
+  if (form.localForms && form.localForms.length > 0) {
+    positional = {
+      kind: 'kind',
+      shape: {
+        kind: 'form_locals',
+        forms: form.localForms.map((lf) => lowerForm(ctx, plugin, lf)),
+      },
+    };
+    ctx.warnings.push(
+      makeWarning(
+        'local_forms_emitted_inline',
+        'info',
+        `positional slot on form \`${form.name}\` declares ${form.localForms.length} local form(s) — emitted as an inline union plus an open generic branch for the additive global fallback; local-first/global resolution order is SJON-only`,
+        { pluginName: plugin.name, formName: form.name },
+      ),
+    );
+  }
+
   const positionalFlags =
     form.positional.kind === 'flag_set'
       ? form.positional.flags.map((f) => {
@@ -118,14 +145,69 @@ function lowerForm(ctx: LowerCtx, plugin: Plugin, form: FormSpec): ModelForm {
           return out;
         })
       : undefined;
+  // Discriminator snapshot. The backends turn this into allOf+if/then; the
+  // variant keys lower exactly like common keys, so a variant slot keeps its
+  // resolved shape rather than degrading to `any`.
+  let discriminator: ModelDiscriminator | null = null;
+  const didx = form.discriminantIdx;
+  if (didx !== undefined && didx < form.keys.length) {
+    discriminator = {
+      keyName: form.keys[didx]!.name,
+      variants: (form.variants ?? []).map((v) => ({
+        when: v.when,
+        keys: v.keys.map((k) => lowerKey(ctx, plugin, form, k)),
+      })),
+    };
+    ctx.warnings.push(
+      makeWarning(
+        'variants_emitted_via_if_then',
+        'info',
+        `discriminated form \`${form.name}\` — variants emitted as allOf+if/then; source-order (variant keys must follow the discriminant) is not enforced by JSON Schema`,
+        { pluginName: plugin.name, formName: form.name },
+      ),
+    );
+  }
+
+  const sourceGroups = form.exclusiveGroups ?? [];
+  const exclusiveGroups: ModelExclusiveGroup[] = sourceGroups.map((g) => ({
+    cardinality: g.cardinality,
+    alternatives: g.alternatives.map((alt) => alt.keys),
+  }));
+  if (sourceGroups.length > 0) {
+    ctx.warnings.push(
+      makeWarning(
+        'exclusive_group_unenforceable',
+        'info',
+        `form \`${form.name}\` exclusive groups emitted structurally (\`oneOf\` for exactly_one, \`not:{allOf}\` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only`,
+        { pluginName: plugin.name, formName: form.name },
+      ),
+    );
+    // Bundle atomicity is the part JSON Schema cannot express: `required`
+    // per bundle admits a partial bundle whenever a sibling alt is also
+    // satisfiable, which is precisely what `exclusive_bundle_partial`
+    // catches at SJON validate time.
+    if (sourceGroups.some((g) => g.alternatives.some((alt) => alt.keys.length > 1))) {
+      ctx.warnings.push(
+        makeWarning(
+          'multi_key_exclusive_emitted',
+          'info',
+          `form \`${form.name}\` has at least one multi-key bundle in an exclusive group; emitted as \`{required: [<bundle>]}\` per bundle. Bundle atomicity (partial bundles fail) requires SJON-aware runtime validation`,
+          { pluginName: plugin.name, formName: form.name },
+        ),
+      );
+    }
+  }
+
   return {
     name: form.name,
     description: '',
     keys,
     positional,
     open: form.open,
-    discriminator: null,
-    exclusiveGroups: [],
+    discriminator,
+    exclusiveGroups,
+    // A `:lowering` declaration names a host-owned hook; this port has no
+    // hook registry, and its loader does not parse the declaration.
     lowering: null,
     ...(positionalFlags !== undefined ? { positionalFlags } : {}),
   };
@@ -288,21 +370,56 @@ function lowerValueKind(ctx: LowerCtx, plugin: Plugin, vk: ValueKind): ModelValu
     };
   }
   if (vk.crossRef) {
+    // Three warnings, matching `lowerValueKind` in
+    // `src/SchemaExport/SchemaExport.zig` message-for-message. This port
+    // used to push only the `info` one, leaving the `cross_ref_unenforceable`
+    // its own `WarningCode` union declares unreachable — a consumer diffing
+    // the two exporters' warning sets saw a difference that was an omission,
+    // not a decision.
+    const provider = vk.crossRef.provider ?? null;
+    const sourceKey = provider === null ? null : (vk.crossRef.sourceKey ?? 'src');
+    const nameKey = vk.crossRef.nameKey ?? 'name';
+    const acyclic = vk.crossRef.acyclic ?? false;
+    const scopeForm = vk.crossRef.scopeForm ?? null;
+    ctx.warnings.push(
+      makeWarning(
+        'cross_ref_unenforceable',
+        'warn',
+        provider === null
+          ? `value-kind \`${vk.name}\` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator`
+          : `value-kind \`${vk.name}\` cross-ref: schema validates symbol shape only; the member set is extracted from each target's \`:${sourceKey}\` string by provider \`${provider}\` during validation, so it is not knowable at export time`,
+        scope,
+      ),
+    );
     ctx.warnings.push(
       makeWarning(
         'cross_ref_annotation_only',
         'info',
-        `value-kind \`${vk.name}\` — cross-ref recorded as \`x-sjon-cross-ref\` (closed-set membership / acyclic / scope-form unenforceable by JSON Schema)`,
+        provider === null
+          ? `value-kind \`${vk.name}\` cross-ref annotation surfaces target-form=\`${vk.crossRef.target}\` name-key=\`${nameKey}\` acyclic=${acyclic} scope-form=\`${scopeForm ?? ''}\`; none are enforceable by JSON Schema`
+          : `value-kind \`${vk.name}\` cross-ref annotation surfaces target-form=\`${vk.crossRef.target}\` provider=\`${provider}\` source-key=\`${sourceKey}\` scope-form=\`${scopeForm ?? ''}\`; none are enforceable by JSON Schema`,
         scope,
       ),
     );
+    if (acyclic) {
+      ctx.warnings.push(
+        makeWarning(
+          'acyclic_unenforceable',
+          'warn',
+          `value-kind \`${vk.name}\` declares \`:acyclic true\`; cycle detection cannot be enforced by JSON Schema`,
+          scope,
+        ),
+      );
+    }
     return {
       kind: 'cross_ref',
       crossRef: {
         targetForm: vk.crossRef.target,
-        nameKey: vk.crossRef.nameKey ?? 'name',
-        acyclic: vk.crossRef.acyclic ?? false,
-        scopeForm: vk.crossRef.scopeForm ?? null,
+        nameKey,
+        acyclic,
+        scopeForm,
+        provider,
+        sourceKey,
       },
     };
   }

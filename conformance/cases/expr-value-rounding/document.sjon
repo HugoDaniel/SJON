@@ -1,0 +1,21 @@
+; The four roundings plus `sign`, all pinned on negative and half-way
+; inputs — the only inputs on which the four differ from each other.
+;
+; Form 5 is the one that decides a convention: (round 2.5) is 3, not 2.
+; `round` is documented as "half away from zero", so it is C's `round`,
+; not the banker's rounding that IEEE 754 makes the default for every
+; other operation in this evaluator. An author summing rounded values gets
+; a bias away from zero, on purpose. Form 3 is the same rule mirrored:
+; (round -1.5) is -2, not -1.
+;
+; `sign` at exactly zero (form 8) is 0, not 1 — so `sign` is a three-way
+; classifier, not a branchless x < 0 ? -1 : 1.
+(abs -3.5)
+(floor -1.5)
+(ceil -1.5)
+(round -1.5)
+(round 1.5)
+(round 2.5)
+(sign -3.5)
+(sign 2.0)
+(sign 0.0)

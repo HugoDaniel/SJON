@@ -1,0 +1,22 @@
+; Form 0 produces a diagnostic and no value; forms 1..8 still evaluate.
+; Both halves matter. The diagnostic is the point of the case — a runtime
+; domain failure is reported, not swallowed — and the eight surviving
+; values are what proves the report costs one result rather than the run.
+; Had the old `std.math.clamp` assert survived, no index would be here at
+; all.
+;
+; The path is empty because the eval pass anchors at the form's head span
+; rather than at a schema slot: there is no declared path to name, the
+; arguments type-check, and it is the computed values that are out of
+; domain.
+(diagnostics
+  (diagnostic :code expr_type_mismatch :path []))
+(values
+  (value :index 1 :result 2.5)
+  (value :index 2 :result 15)
+  (value :index 3 :result -5)
+  (value :index 4 :result 1)
+  (value :index 5 :result 5)
+  (value :index 6 :result 1)
+  (value :index 7 :result 3)
+  (value :index 8 :result 5))

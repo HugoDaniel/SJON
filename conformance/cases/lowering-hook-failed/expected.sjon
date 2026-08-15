@@ -1,0 +1,6 @@
+; One diagnostic, at the source form's `:lowering` declaration. Notably
+; NOT followed by anything: the invocation is dropped, so no partially
+; lowered `(target …)` reaches validation and `(sugar :n 1)` — which is
+; valid against its own FormSpec — raises nothing further.
+(diagnostics
+  (diagnostic :code lowering_hook_failed :path [sugar lowering]))

@@ -1,0 +1,22 @@
+; Manifest-phase family, 6 of 6. An `(alt :keys …)` names `nosuch`, which is
+; not a declared key of `route`.
+;
+; The group's alternatives are key *references*; an unresolvable one makes
+; the group's cardinality unenforceable — `at-most-one` over an alternative
+; that can never be present degenerates to no constraint at all. Rejecting
+; at load is what stops the group from silently weakening.
+;
+; `exclusive_group_invalid` covers four distinct malformations (fewer than
+; two alternatives, an unknown key, naming the discriminant, and a key
+; shared across two groups). Only the unknown-key one is pinned here; the
+; rest are Zig-side, since a case per malformation would pin the same
+; emitter four times.
+(plugin :name routes :version "1.0.0"
+  (form :name route
+    (key :name from :type symbol :optional true)
+    (key :name at :type symbol :optional true)
+    (exclusive-group :cardinality at-most-one
+      (alt :keys [from])
+      (alt :keys [nosuch]))))
+
+(route :from a)

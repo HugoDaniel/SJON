@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "double",
+      "version": "1.0.0",
+      "forms": [],
+      "value_kinds": []
+    }
+  ],
+  "warnings": []
+}

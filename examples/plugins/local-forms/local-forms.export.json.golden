@@ -1,0 +1,161 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "local-forms",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "canvas",
+          "description": "A drawing canvas; its :shape slot scopes its own forms.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "shape",
+              "optional": false,
+              "description": "Slot-local: circle | rect | group (plus any global form).",
+              "value": {
+                "kind": "form_locals",
+                "forms": [
+                  {
+                    "name": "circle",
+                    "description": "Slot-local circle — shadows the global circle.",
+                    "open": false,
+                    "positional": "none",
+                    "keys": [
+                      {
+                        "name": "r",
+                        "optional": false,
+                        "description": "",
+                        "value": {
+                          "kind": "number"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "name": "rect",
+                    "description": "Slot-local rectangle (local-only — invisible globally).",
+                    "open": false,
+                    "positional": "none",
+                    "keys": [
+                      {
+                        "name": "w",
+                        "optional": false,
+                        "description": "",
+                        "value": {
+                          "kind": "number"
+                        }
+                      },
+                      {
+                        "name": "h",
+                        "optional": false,
+                        "description": "",
+                        "value": {
+                          "kind": "number"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "name": "group",
+                    "description": "Slot-local group; its :child slot nests a local dot.",
+                    "open": false,
+                    "positional": "none",
+                    "keys": [
+                      {
+                        "name": "child",
+                        "optional": false,
+                        "description": "",
+                        "value": {
+                          "kind": "form_locals",
+                          "forms": [
+                            {
+                              "name": "dot",
+                              "description": "",
+                              "open": false,
+                              "positional": "none",
+                              "keys": []
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "line",
+          "description": "A global form (declared at top level, no local slot).",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "from",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "vector",
+                "len": null,
+                "element": {
+                  "kind": "any"
+                }
+              }
+            },
+            {
+              "name": "to",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "vector",
+                "len": null,
+                "element": {
+                  "kind": "any"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "circle",
+          "description": "Global circle — shadowed by the local circle inside canvas.:shape.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "radius",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "number"
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": []
+    }
+  ],
+  "warnings": [
+    {
+      "code": "local_forms_emitted_inline",
+      "severity": "info",
+      "message": "slot `:child` on form `group` declares 1 local form(s) — emitted as an inline union plus an open generic branch for the additive global fallback; local-first/global resolution order is SJON-only",
+      "plugin_name": "local-forms",
+      "form_name": "group",
+      "key_name": "child"
+    },
+    {
+      "code": "local_forms_emitted_inline",
+      "severity": "info",
+      "message": "slot `:shape` on form `canvas` declares 3 local form(s) — emitted as an inline union plus an open generic branch for the additive global fallback; local-first/global resolution order is SJON-only",
+      "plugin_name": "local-forms",
+      "form_name": "canvas",
+      "key_name": "shape"
+    }
+  ]
+}

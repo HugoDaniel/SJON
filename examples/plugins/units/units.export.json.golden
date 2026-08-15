@@ -1,0 +1,139 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "units",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "shape",
+          "description": "Geometry with bounded angle + free-form duration + sized distance.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "rotation",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "number_with_unit",
+                "required": true,
+                "allowed": [
+                  "deg",
+                  "rad",
+                  "turn"
+                ],
+                "bounds": {
+                  "min": {
+                    "value": 0,
+                    "unit": "deg"
+                  },
+                  "max": {
+                    "value": 360,
+                    "unit": "deg"
+                  }
+                }
+              }
+            },
+            {
+              "name": "decay",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "number_with_unit",
+                "required": false,
+                "allowed": []
+              }
+            },
+            {
+              "name": "radius",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "number_with_unit",
+                "required": true,
+                "allowed": [
+                  "mm",
+                  "cm",
+                  "m",
+                  "km"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": [
+        {
+          "name": "angle",
+          "description": "Plane angle in degrees, radians, or turns. 0..360deg inclusive.",
+          "shape": {
+            "kind": "number_with_unit",
+            "required": true,
+            "allowed": [
+              "deg",
+              "rad",
+              "turn"
+            ],
+            "bounds": {
+              "min": {
+                "value": 0,
+                "unit": "deg"
+              },
+              "max": {
+                "value": 360,
+                "unit": "deg"
+              }
+            }
+          }
+        },
+        {
+          "name": "duration",
+          "description": "Non-negative duration. Any unit suffix is acceptable.",
+          "shape": {
+            "kind": "number_with_unit",
+            "required": false,
+            "allowed": []
+          }
+        },
+        {
+          "name": "distance",
+          "description": "Distance in metric SI prefixes.",
+          "shape": {
+            "kind": "number_with_unit",
+            "required": true,
+            "allowed": [
+              "mm",
+              "cm",
+              "m",
+              "km"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "code": "number_with_unit_emitted_via_prefix_items",
+      "severity": "info",
+      "message": "value-kind `angle` emitted as JSON Schema object with `$num` prefixItems [magnitude, unit] (required=true, allowed-units=3); SJON-aware tooling reads the canonical form via the JSON bridge",
+      "plugin_name": "units",
+      "kind_name": "angle"
+    },
+    {
+      "code": "number_with_unit_emitted_via_prefix_items",
+      "severity": "info",
+      "message": "value-kind `duration` emitted as JSON Schema object with `$num` prefixItems [magnitude, unit] (required=false, allowed-units=0); SJON-aware tooling reads the canonical form via the JSON bridge",
+      "plugin_name": "units",
+      "kind_name": "duration"
+    },
+    {
+      "code": "number_with_unit_emitted_via_prefix_items",
+      "severity": "info",
+      "message": "value-kind `distance` emitted as JSON Schema object with `$num` prefixItems [magnitude, unit] (required=true, allowed-units=4); SJON-aware tooling reads the canonical form via the JSON bridge",
+      "plugin_name": "units",
+      "kind_name": "distance"
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+; Provider-route executable family, 3 of 7 — the poisoned bucket, and
+; the case with the most to say.
+;
+; A real provider refuses a source it cannot parse. The fixture makes
+; that reachable from a source a human can read: a line spelling
+; `!malformed` (nothing else about it is special) makes `lines` return a
+; structured-error frame instead of names.
+;
+; So the member set for `lines/shader` cannot be computed — and the two
+; references below cannot be *checked*, which is a different thing from
+; being wrong. The bucket is poisoned: one `cross_ref_extraction_failed`
+; at the source, and silence at every reference into it. The alternative
+; — an empty member set — would report `not_cross_ref` twice here and
+; N times in a real document, blaming the author for the provider's
+; refusal and burying the one diagnostic that matters.
+;
+; That rule is what makes the feature safe for hosts that cannot run
+; providers at all: see `cross-ref-provider-unavailable`, which reaches
+; the same silence by the other door.
+(use-plugin "lines")
+
+(shader :name main :src "u_time\n!malformed")
+
+(bind :uniform u_time)
+(bind :uniform u_res)

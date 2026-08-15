@@ -1,3 +1,46 @@
+//! Dispatch `:impl "wasm:<export>"` plugin functions across all three
+//! host shapes:
+//!
+//!   * **wasm32 build (`sjon.wasm` running under Web / Rust hosts)** —
+//!     uses the `env.sjon_host_invoke_plugin` import so the host adapter
+//!     (browser `WebAssembly.Instance`, Rust wasmtime) does the per-call
+//!     alloc/copy/call/free dance against its own plugin pool.
+//!   * **native Zig + `-Dplugin-exec=true` + non-null `runtime`** —
+//!     dispatches into the local `PluginRuntime` (`src/PluginRuntime.zig`)
+//!     which owns a wasmtime engine + per-plugin store via
+//!     `src/runtimes/wasmtime.zig`. Activated by Host.zig in commit 5
+//!     of the native-parity milestone.
+//!   * **everything else** (native with the option off, or the option on
+//!     but no runtime was constructed) — returns
+//!     `error.PluginFuncNotImplemented`, matching the historical
+//!     "Zig native stays declarative-only" behavior.
+//!
+//! Wire format of the request payload (wasm32 host import path):
+//!
+//!   [u32 plugin_name_len][plugin_name utf-8]
+//!   [u32 export_name_len][export_name utf-8]
+//!   [u32 args_count][value][value]…           (PluginValueCodec.encodeArgs)
+//!
+//! Wire format of the response in BOTH paths:
+//!
+//!   [u32 ok][u32 len][payload]
+//!     ok=1 → payload is one `PluginValueCodec.decodeValue` value
+//!     ok=0 → payload is `[u32 code_len][code][u32 detail_len][detail]`
+//!            with synthetic `_internal_trap` / `_alloc` codes
+//!            distinguishing host-synthesized failures from plugin-
+//!            reported `(code, detail)` pairs.
+//!
+//! The native path doesn't go through the wire protocol's "wrap plugin
+//! name + export name" prefix (that prefix is only needed when the
+//! wasm32 build needs to tell its host which plugin to dispatch into —
+//! the native runtime can be passed the plugin name directly). Both
+//! paths share the same response framing so the failure-decoding logic
+//! is the same; only the call-site prefix and trap-mapping differ.
+//!
+//! Plugin instance lifetime is per-host-load (instances live as long as
+//! the `SjonHost` / `sjon_host::SjonHost` / `Host` that loaded them).
+//! Hot reload is out of scope for ABI v2 (see §19).
+
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
@@ -11,15 +54,46 @@ const wasm_allocator = std.heap.wasm_allocator;
 const is_wasm32 = builtin.target.cpu.arch == .wasm32;
 const native_plugin_exec = !is_wasm32 and build_options.plugin_exec;
 
+/// Whether this wasm artifact's embedder supplies the plugin-invoke
+/// import. True for `sjon.wasm`, whose hosts (`hosts/web/SjonHost.ts`,
+/// the Rust wasmtime host) provide it; false for `sjon-lsp.wasm`, which
+/// the playground instantiates with **no imports at all**.
+///
+/// Declaring an unserviceable import is not a harmless extra symbol —
+/// `WebAssembly.instantiate(mod, {})` throws on it, so an artifact that
+/// declares one it cannot be given simply fails to load. When this is
+/// false the wasm path stays declarative-only, exactly like a native
+/// build without `-Dplugin-exec`.
+const wasm_plugin_host = is_wasm32 and build_options.wasm_plugin_host;
+
+/// Lazy import of the PluginRuntime — only resolved on native builds
+/// that opted into executable-plugin support. Keeps the WASM build
+/// from transitively linking libwasmtime.
 const PluginRuntime = if (native_plugin_exec) @import("PluginRuntime.zig") else opaque {};
 
-const imports = if (is_wasm32) struct {
+/// Host-supplied import. Returns a pointer to a framed buffer allocated
+/// via `sjon_alloc`; this module frees it after read. Wrapped in a
+/// conditional struct so native builds never declare an unresolved
+/// external symbol.
+const imports = if (wasm_plugin_host) struct {
     pub extern "env" fn sjon_host_invoke_plugin(req_ptr: u32, req_len: u32) callconv(.c) ?[*]u8;
 } else struct {};
 
+/// Synthetic error codes the host uses to disambiguate its own failures
+/// from plugin-reported `(code, detail)` pairs. Leading underscore is
+/// reserved per the spec (plugins MUST NOT emit codes starting with `_`).
 pub const TRAP_CODE = "_internal_trap";
 pub const ALLOC_CODE = "_alloc";
 
+/// Captured structured-failure detail from the most recent invoke that
+/// returned a `PluginFuncFailed` / `PluginFuncTrapped` / `PluginFuncResultType`
+/// / `PluginFuncAllocFailed` error. `Expr.Error` is a closed enum and
+/// can't carry payload data; host wrappers read this state when one of
+/// those errors surfaces from `Expr.eval` to format the diagnostic.
+///
+/// Fixed-size buffers because (a) the storage outlives any per-call
+/// arena, (b) bounded length keeps WASM memory predictable, (c) the
+/// detail message is for human consumption — long enough is enough.
 pub const LastFailure = struct {
     code_buf: [128]u8 = undefined,
     detail_buf: [512]u8 = undefined,
@@ -51,10 +125,17 @@ fn recordFailure(code: []const u8, detail: []const u8) void {
     last_failure.detail_len = detail_n;
 }
 
+/// Read the most recently captured failure code/detail. Cleared at the
+/// start of every `invoke` call.
 pub fn lastFailure() *const LastFailure {
     return &last_failure;
 }
 
+/// Dispatch a `:impl "wasm:<export>"` plugin function. Routes to one of
+/// the three paths documented in the module header — `runtime` is the
+/// opaque `*PluginRuntime` pointer threaded through `Expr.eval` from
+/// the host (null when the host didn't construct one or when the build
+/// has `plugin_exec=false`).
 pub fn invoke(
     a: Allocator,
     runtime: ?*anyopaque,
@@ -64,11 +145,29 @@ pub fn invoke(
     args: []const Expr.Value,
 ) Expr.Error!Expr.Value {
     if (comptime is_wasm32) {
-        return invokeViaHostImport(a, plugin_name, export_name, declared_result, args);
+        // WASM build: hand off to the host import. The wasm32 path
+        // ignores `runtime` (host owns its own plugin pool) — Zig
+        // doesn't flag unused function parameters so no explicit
+        // discard needed.
+        //
+        // Written as an `if` *expression* so the untaken branch is never
+        // analyzed: an early `return` guard would leave the call below
+        // reachable to the compiler, which is enough to emit the extern
+        // and put the import back in an artifact that cannot service it.
+        return if (comptime wasm_plugin_host)
+            invokeViaHostImport(a, plugin_name, export_name, declared_result, args)
+        else
+            error.PluginFuncNotImplemented;
     }
     if (comptime !native_plugin_exec) {
+        // Native build without `-Dplugin-exec`: stay declarative-only.
         return error.PluginFuncNotImplemented;
     }
+    // Native build with `-Dplugin-exec=true`: dispatch through the
+    // PluginRuntime if the host gave us one. A null runtime here means
+    // either (a) the host hasn't wired up the runtime yet (commit 4)
+    // or (b) the test/CLI path bypassed the host plumbing — in either
+    // case we keep the historical "declarative-only" behavior.
     const rt_opaque = runtime orelse return error.PluginFuncNotImplemented;
     const rt: *PluginRuntime = @ptrCast(@alignCast(rt_opaque));
     return invokeViaNativeRuntime(a, rt, plugin_name, export_name, declared_result, args);
@@ -91,6 +190,9 @@ fn invokeViaHostImport(
     try request.appendSlice(a, export_name);
     PluginValueCodec.encodeArgs(a, &request, args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        // A plugin arg nested past the codec cap fails gracefully rather
+        // than overflowing the host stack in encodeValue.
+        error.DepthExceeded => return error.DepthExceeded,
     };
 
     const req_buf = try wasm_allocator.alloc(u8, request.items.len);
@@ -116,6 +218,10 @@ fn invokeViaHostImport(
     return decodeResponseFrame(a, ok, payload, declared_result);
 }
 
+/// Native runtime dispatch. Encodes args with the existing wire codec,
+/// calls `PluginRuntime.invoke`, and feeds the framed response through
+/// the same `decodeResponseFrame` helper the wasm32 path uses — wire
+/// format is identical because the runtime mirrors the §11 sequence.
 fn invokeViaNativeRuntime(
     a: Allocator,
     rt: *PluginRuntime,
@@ -130,6 +236,9 @@ fn invokeViaNativeRuntime(
     defer request.deinit(a);
     PluginValueCodec.encodeArgs(a, &request, args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        // A plugin arg nested past the codec cap fails gracefully rather
+        // than overflowing the host stack in encodeValue.
+        error.DepthExceeded => return error.DepthExceeded,
     };
 
     const frame = rt.invoke(a, plugin_name, export_name, request.items) catch |err| switch (err) {
@@ -159,6 +268,10 @@ fn invokeViaNativeRuntime(
     return decodeResponseFrame(a, ok, payload, declared_result);
 }
 
+/// Common post-call decoding: ok=0 → structured-error (with synthetic
+/// `_internal_trap` / `_alloc` codes for host-synthesized failures);
+/// ok=1 → decode the value and check `declared_result`. Identical wire
+/// format means the native and wasm32 paths share this tail.
 fn decodeResponseFrame(
     a: Allocator,
     ok: u32,
@@ -213,6 +326,11 @@ fn matchesType(value: Expr.Value, expected: Plugin.ValueType) bool {
         .boolean => value == .boolean,
         .nil => value == .nil,
         .vector => value == .vector,
+        // .form / .expr are AST-level types and cannot appear as runtime
+        // Expr.Value variants; .named refers to a plugin-defined value
+        // kind which the codec can't produce either. A manifest declaring
+        // any of these as :result is a static error; here we reject the
+        // mismatch so the user sees a clear plugin_func_result_type.
         .form, .expr, .named => false,
     };
 }

@@ -1,0 +1,248 @@
+; WebGPU render-pipeline sketch.
+;
+; This is intentionally not a full WebGPU schema. It is a compact example
+; of how SJON can mix:
+;
+;   - schema vocabulary: closed enums, typed keys, and form head-sets
+;   - S-expression authoring: nested clauses that read like the API shape
+;   - diagnostics: typo / wrong-type / missing-reference errors at spans
+;   - computed values: safe expressions in value position
+;   - transformation: a host-owned lowering hook for JS descriptor output
+;
+; The lowering hook named below is a contract a WebGPU host binds to code that
+; turns `(render-pipeline ...)` into a descriptor for
+; `device.createRenderPipeline(...)`. A worked reference hook —
+; `webgpu/render-pipeline-v1` in `src/Lowering_test_hooks.zig` — is registered
+; by a test that runs this very file through lower+validate, so the example
+; stays executable instead of drifting into documentation-only rot.
+
+(plugin :name webgpu :version "0.1.0"
+  (value-kind :name byte-count
+    :description "Non-negative integer byte size."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :integer true))
+
+  (value-kind :name sample-count
+    :description "Positive integer sample count."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :integer true))
+
+  (value-kind :name shader-module-name
+    :description "Reference to a declared (shader-module :name ...)."
+    :underlying symbol
+    :cross-ref (cross-ref :target shader-module))
+
+  (value-kind :name layout-mode
+    :underlying symbol
+    :members (member-set :values [auto]))
+
+  (value-kind :name entry-point
+    :description "WGSL entry-point symbol."
+    :underlying symbol)
+
+  (value-kind :name primitive-topology
+    :underlying symbol
+    :members (member-set :values [
+      triangle-list triangle-strip
+      line-list line-strip
+      point-list
+    ]))
+
+  (value-kind :name cull-mode
+    :underlying symbol
+    :members (member-set :values [none front back]))
+
+  (value-kind :name vertex-step-mode
+    :underlying symbol
+    :members (member-set :values [vertex instance]))
+
+  (value-kind :name vertex-format
+    :underlying symbol
+    :members (member-set :values [float32x2 float32x3 float32x4 unorm8x4]))
+
+  (value-kind :name color-format
+    :underlying symbol
+    :members (member-set :values [bgra8unorm rgba8unorm rgba16float]))
+
+  (value-kind :name depth-format
+    :underlying symbol
+    :members (member-set :values [depth24plus depth32float]))
+
+  (value-kind :name compare-func
+    :underlying symbol
+    :members (member-set :values [
+      never less equal less-equal
+      greater not-equal greater-equal always
+    ]))
+
+  (value-kind :name program-item
+    :underlying form
+    :heads (head-set :names [shader-module render-pipeline]))
+
+  (value-kind :name pipeline-section
+    :underlying form
+    :heads (head-set :names [layout vertex fragment primitive depth-stencil]))
+
+  (value-kind :name vertex-section
+    :underlying form
+    :heads (head-set :names [module entry buffers]))
+
+  (value-kind :name fragment-section
+    :underlying form
+    :heads (head-set :names [module entry targets]))
+
+  (value-kind :name primitive-section
+    :underlying form
+    :heads (head-set :names [topology cull]))
+
+  (value-kind :name vertex-buffer-form
+    :underlying form
+    :heads (head-set :names [buffer]))
+
+  (value-kind :name vertex-attribute-form
+    :underlying form
+    :heads (head-set :names [attribute]))
+
+  (value-kind :name color-target-form
+    :underlying form
+    :heads (head-set :names [target]))
+
+  (form :name program
+    :description "One document root containing declarations and pipelines."
+    :positional program-item)
+
+  (form :name shader-module
+    :description "A named WGSL module. The source is opaque text to SJON."
+    (key :name name :type symbol)
+    (key :name source :type string :optional true))
+
+  (form :name render-pipeline
+    :description "Surface form lowered by the WebGPU host."
+    :positional pipeline-section
+    :lowering (lowering :hook webgpu/render-pipeline-v1
+      :produces [gpu-render-pipeline-descriptor])
+    (key :name label :type string :optional true)
+    (key :name sample-count :type sample-count :default 1))
+
+  (form :name gpu-render-pipeline-descriptor
+    :description "Terminal lowered form representing the JS descriptor."
+    :open true)
+
+  (form :name layout
+    :positional layout-mode)
+
+  (form :name vertex
+    :positional vertex-section)
+
+  (form :name fragment
+    :positional fragment-section)
+
+  (form :name primitive
+    :positional primitive-section)
+
+  (form :name depth-stencil
+    (key :name format :type depth-format :default depth24plus)
+    (key :name write :type boolean :default true)
+    (key :name compare :type compare-func :default less))
+
+  (form :name module
+    :positional shader-module-name)
+
+  (form :name entry
+    :positional entry-point)
+
+  (form :name buffers
+    :positional vertex-buffer-form)
+
+  (form :name buffer
+    :positional vertex-attribute-form
+    (key :name array-stride :type byte-count)
+    (key :name step-mode :type vertex-step-mode :default vertex))
+
+  (form :name attribute
+    (key :name location :type byte-count)
+    (key :name format :type vertex-format)
+    (key :name offset :type byte-count))
+
+  (form :name targets
+    :positional color-target-form)
+
+  (form :name target
+    (key :name format :type color-format))
+
+  (form :name topology
+    :positional primitive-topology)
+
+  (form :name cull
+    :positional cull-mode))
+
+(program
+  (shader-module :name shader
+    :source """@vertex
+fn vs_main(@location(0) position: vec3f) -> @builtin(position) vec4f {
+  return vec4f(position, 1.0);
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4f {
+  return vec4f(1.0, 0.3, 0.1, 1.0);
+}
+""")
+
+  (render-pipeline :label "hello-triangle" :sample-count (* 2 2)
+    (layout auto)
+    (vertex
+      (module shader)
+      (entry vs_main)
+      (buffers
+        (buffer :array-stride (* 3 4) :step-mode vertex
+          (attribute :location 0 :format float32x3 :offset 0))))
+    (fragment
+      (module shader)
+      (entry fs_main)
+      (targets
+        (target :format bgra8unorm)))
+    (primitive
+      (topology triangle-list)
+      (cull back))
+    (depth-stencil)))
+
+; Diagnostic sketches:
+;
+;   (module missing-shader)          ; not_cross_ref
+;   (topology triangles)             ; not_member
+;   (buffer :array-stride "12")      ; wrong_underlying
+;   (render-pipeline (compute ...))  ; not_head_member (+ unknown_form)
+;
+; Computed values in the valid pipeline:
+;
+;   :sample-count (* 2 2)  => 4
+;   :array-stride (* 3 4)  => 12
+;   (depth-stencil)        => effective defaults:
+;                             :format depth24plus
+;                             :write true
+;                             :compare less
+;
+; A host lowering pass can use those effective values to produce a JS-ish
+; descriptor equivalent to:
+;
+;   {
+;     layout: "auto",
+;     vertex: {
+;       module: shader,
+;       entryPoint: "vs_main",
+;       buffers: [{
+;         arrayStride: 12,
+;         stepMode: "vertex",
+;         attributes: [{ shaderLocation: 0, format: "float32x3", offset: 0 }]
+;       }]
+;     },
+;     fragment: {
+;       module: shader,
+;       entryPoint: "fs_main",
+;       targets: [{ format: "bgra8unorm" }]
+;     },
+;     primitive: { topology: "triangle-list", cullMode: "back" },
+;     depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
+;     multisample: { count: 4 }
+;   }

@@ -1,0 +1,7 @@
+; A negative base with an integer exponent: `pow64`'s `checkint` selects the
+; sign host-independently (odd exponent -> negative via sign_bias, even ->
+; positive). A non-integer exponent on a negative base is NaN — covered by the
+; inline IEEE-754 matrix in `trig.zig`, not pinnable as a finite `{d}`. Pinned
+; decimals are the canonical `{d}` rendering.
+(pow -2.0 3.0)
+(pow -2.0 2.0)

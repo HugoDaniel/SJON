@@ -1,0 +1,5 @@
+; Example usage of the `audio` plugin. Exercises both arms of the
+; `note-or-event` union: bare note symbols (`E4`/`G4`/…) and `(n …)` /
+; `(rest)` form events.
+
+(phrase :notes [E4 G4 A4 (rest) B4 _])

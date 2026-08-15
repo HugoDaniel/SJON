@@ -1,0 +1,10 @@
+; Labeled-call family, 4 of 4. Every label given is valid and unique; `:t`
+; is simply absent. Labels are not optional-by-omission — a declared
+; parameter list is a complete signature, so a well-formed subset of it is
+; still an incomplete call.
+;
+; This is the case the other three deliberately do not also produce: they
+; each stop at the malformed label rather than going on to report the call
+; as incomplete, so this code needs a document whose labels are otherwise
+; clean to fire at all.
+(lerp :from 0 :to 10)

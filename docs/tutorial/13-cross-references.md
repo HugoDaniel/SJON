@@ -340,6 +340,139 @@ Most cross-references are not acyclic. This rule only matters when the
 plugin docs explicitly say the kind or key participates in acyclic
 checking.
 
+## Names Inside A String
+
+Everything above assumes the name is written in your document as a
+symbol: `(phrase :name p0)` puts `p0` where the validator can read it.
+Plenty of names are not written that way. The uniforms of a shader are
+inside the shader source. The columns of a table are inside the DDL.
+The capture groups of a regex are inside the regex.
+
+A plugin can still make those names referenceable, by declaring a
+**provider**: a named extractor that reads one string and reports the
+names in it. The author-facing summary says so:
+
+```text
+(shader ...)
+  :name symbol required
+  :code string required     ; the provider reads this
+
+(bind ...)
+  :uniform uniform-ref optional
+
+uniforms:    provider, names out of a shader source
+uniform-ref: symbol, cross-reference to (shader ...),
+             provider uniforms, source key code
+```
+
+Read the last two lines together: the target form is still `(shader
+...)`, but the member set no longer comes from a name key on that form.
+It comes from running `uniforms` over each shader's `:code` string.
+
+This validates:
+
+```sjon
+(shader :name blur :code """
+uniform float u_time;
+uniform vec2 u_resolution;
+""")
+
+(bind :uniform u_time)
+(bind :uniform u_resolution)
+```
+
+Registry:
+
+```text
+shader names:    (unused - this route ignores :name)
+extracted names: u_time, u_resolution
+bind references: u_time, u_resolution
+```
+
+Note what is *not* in that registry. `blur` is a shader name, not a
+uniform name, and `:name` plays no part on this route. The legal values
+are exactly what the provider found.
+
+This does not validate:
+
+```sjon
+(shader :name blur :code """
+uniform float u_time;
+""")
+
+(bind :uniform u_tim)
+```
+
+Likely diagnostic: `not_cross_ref` - the same code as any other missed
+reference, because from the reference side nothing has changed. Repair
+the same way, by matching a name that exists:
+
+```sjon
+(bind :uniform u_time)
+```
+
+Your side of the deal is unchanged: write a symbol, and it either is a
+member or it is not. What changed is where the member set came from.
+
+### The Provider Only Sees Your String
+
+This is the rule worth memorising, because it is what keeps validation
+predictable:
+
+```text
+A provider is handed the string in your document,
+and nothing else.
+```
+
+Not the rest of your document. Not the schema. Not your filesystem, the
+network, or the clock. So a provider can tell you that `u_time` is
+declared inside the source you wrote; it can never tell you that a file
+exists on disk or that a column exists in a live database. Those are
+facts about the world, not about your document, and validating them
+would mean two hosts could disagree about the same file.
+
+The practical consequence: if a name is not in the string, no
+configuration will make the reference resolve. Add it to the source.
+
+### Two Diagnostics You Only See On This Route
+
+```sjon
+(shader :name blur :code "not a shader {{{")
+(bind :uniform u_time)
+```
+
+Likely diagnostic: `cross_ref_extraction_failed`, reported **on the
+`:code` string**, not on the reference. The provider ran and rejected
+its input, so nobody knows what the legal uniform names were. Repair by
+fixing the source string the provider could not read.
+
+Notice where the diagnostic did *not* appear. `(bind :uniform u_time)`
+is silent, on purpose. Reporting `not_cross_ref` there would mean
+claiming `u_time` is absent from a member set that was never computed.
+On this route the references go unchecked when the extraction fails -
+neither accepted nor rejected.
+
+The other one is not about your document at all:
+
+```text
+cross_ref_provider_unavailable
+```
+
+It means the host you are running could not execute the provider - the
+browser playground, for instance, cannot run plugin code at all. Same
+place (the source string), same silence at the references, but the
+repair is on the host side, not in your file. In an editor it usually
+arrives as a hint rather than an error, because nothing you wrote is
+wrong. If you see it in a build that is supposed to check these names,
+check that the plugin's executable half is actually installed.
+
+### Go-To-Definition Lands On The Whole String
+
+An extracted name has no span of its own. SJON never parsed that shader
+source; it received a list of names. So "go to definition" on `u_time`
+takes you to the `:code` string that produced it, not to the line inside
+it. That is a limit of the route, not a bug in the editor.
+
 ## Diagnostic Cheat Sheet
 
 | Diagnostic | What it usually means | Repair |
@@ -349,6 +482,8 @@ checking.
 | `cross_ref_outside_scope` | A scoped reference appears outside its required enclosing form. | Put the declaration and reference inside that scope form. |
 | `cyclic_cross_ref` | An acyclic reference chain loops back on itself. | Remove or change one edge in the cycle. |
 | `wrong_underlying` | The declaration or reference is not the expected value shape, often string vs symbol. | Match the plugin's declared type. |
+| `cross_ref_extraction_failed` | A provider ran over a source string and rejected it, so that source contributed no names. | Fix the string the diagnostic points at; the references into it stay unchecked until it parses. |
+| `cross_ref_provider_unavailable` | The host could not run the provider at all. | Nothing in the document is wrong - check the host, or accept that these names go unchecked here. |
 
 You may also see schema setup diagnostics such as
 `unknown_cross_ref_target`, `ambiguous_cross_ref_target`,
@@ -367,6 +502,9 @@ When a cross-reference fails, do this mechanically:
 5. Check exact symbol spelling and case.
 6. If the name exists twice, rename one declaration.
 7. If the kind is acyclic, draw the arrows and remove the loop.
+8. If the kind names a provider, the list in step 4 is what the
+   provider extracted from the source string, so read the source
+   instead of looking for declarations.
 
 ## Exercises
 
@@ -506,6 +644,51 @@ Likely diagnostic: `cyclic_cross_ref`. Repair by breaking the loop:
 (phrase :name p1)
 ```
 
+### Provider-Backed Reference
+
+Assume `uniform-ref` reads its names from a `(shader ...)`'s `:code`
+string through the `uniforms` provider:
+
+```sjon
+(shader :name blur :code """
+uniform float u_time;
+""")
+
+(bind :uniform u_resolution)
+```
+
+Likely diagnostic: `not_cross_ref`. The source declares one uniform and
+it is not that one. Repair by referencing a name the source contains:
+
+```sjon
+(bind :uniform u_time)
+```
+
+Or by adding it to the source, which is where this route's declarations
+live:
+
+```sjon
+(shader :name blur :code """
+uniform float u_time;
+uniform vec2 u_resolution;
+""")
+
+(bind :uniform u_resolution)
+```
+
+### Unreadable Provider Source
+
+```sjon
+(shader :name blur :code "not a shader {{{")
+
+(bind :uniform u_time)
+```
+
+Likely diagnostic: `cross_ref_extraction_failed`, on the `:code` string.
+Predict the second diagnostic too - there isn't one. `(bind :uniform
+u_time)` is not reported, because the member set was never computed.
+Repair the source, and the reference becomes checkable again.
+
 ## Mastery Check
 
 - What are the declaration side and reference side of a cross-reference?
@@ -516,5 +699,8 @@ Likely diagnostic: `cyclic_cross_ref`. Repair by breaking the loop:
 - What does lexical scope allow two sibling `(piece ...)` forms to do?
 - What is the first repair to try for `cross_ref_outside_scope`?
 - When does `cyclic_cross_ref` matter?
+- Where does a provider-backed kind get its legal names from?
+- Why are the references silent when `cross_ref_extraction_failed`
+  fires?
 
 Next: [Diagnostics-Driven Repair](14-diagnostics-driven-repair.md).

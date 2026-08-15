@@ -1,0 +1,7 @@
+; Parse phase first (path is empty — a top-level stray delimiter belongs to
+; no form), then one `wrong_underlying` per surviving `(pt …)`. Two, not
+; one: validation did not stop at the syntax error.
+(diagnostics
+  (diagnostic :code unspecified :path [])
+  (diagnostic :code wrong_underlying :path [pt x])
+  (diagnostic :code wrong_underlying :path [pt x]))

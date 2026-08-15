@@ -1,0 +1,24 @@
+{
+  "file": "examples/llm/flows/05-not-member-enum/attempt-1.sjon",
+  "project_file": null,
+  "diagnostics": [
+    {
+      "phase": "validation",
+      "code": "not_member",
+      "severity": "error",
+      "message": "form `circle` keyword `:fill` expects `fill-rule`, got `diagonal` (allowed: `nonzero`, `evenodd`)",
+      "span": {
+        "start": 293,
+        "end": 301,
+        "line": 9,
+        "column": 25
+      },
+      "path": [
+        "circle",
+        "fill"
+      ],
+      "declaration_span": null,
+      "docs": "https://hugodaniel.com/pages/sjon/errors/not_member"
+    }
+  ]
+}

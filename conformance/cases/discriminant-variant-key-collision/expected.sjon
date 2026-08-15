@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code variant_key_collision :path [probe track variant]))

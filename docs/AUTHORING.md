@@ -11,6 +11,19 @@ plugin authoring. For any of those, see [`LANGUAGE.md`](LANGUAGE.md)
 (the spec) or [`examples/plugins/README.md`](../examples/plugins/README.md)
 (plugin-side material).
 
+The fastest first five minutes is the REPL — a calculator that knows
+your vocabulary once a project loads:
+
+```console
+$ sjon repl
+sjon repl — core vocabulary only, no project loaded (try :help, :quit exits)
+sjon> (+ 1 (* 2 3))
+7.0
+sjon> (clamp 12 0 10)
+10.0
+sjon> :quit
+```
+
 ---
 
 ## 1. What SJON looks like
@@ -540,7 +553,7 @@ Available with no plugins beyond `core`:
 | `(- x …)` | 1+ | Negation (one arg) or left-fold subtraction (two+). |
 | `(* x …)` | 0+ | Product. `(*)` is `1`. |
 | `(/ x y …)` | 2+ | Left-fold division. Division by zero is an error. |
-| `(mod x y)` | 2 | Floating-point remainder. |
+| `(mod x y)` | 2 | Floored remainder; the result takes the divisor's sign (as GLSL `mod` / Python `%`). |
 
 #### Comparison
 
@@ -864,6 +877,47 @@ The key insight: a value kind is the plugin's way of saying
 don't define them as an author — you write values that satisfy
 them.
 
+### Cross-references whose names come from inside a string
+
+`(play :phrase intro)` above works because `intro` is written as a
+symbol somewhere the validator can see it — `(phrase :name intro)`. But
+plenty of names you want to reference are not written in SJON at all.
+The uniforms of a shader live inside a shader; the capture groups of a
+regex live inside the regex.
+
+A plugin can bridge that with a **provider**: it declares an extractor,
+and the host hands it the opaque string so it can say what names are in
+there. From your side nothing new is happening — you write a symbol and
+it is either a member or it isn't:
+
+```sjon
+(shader :name blur
+  :src """
+  uniform float u_time;
+  uniform vec2  u_resolution;
+  """)
+
+(bind :uniform u_time)       ; ✓ the provider found it in :src
+(bind :uniform u_resulution) ; ✗ not_cross_ref — and the fix is offered
+```
+
+Two things are worth knowing, because they look like bugs otherwise.
+
+**Go-to-definition lands on the whole string.** `u_time` has no span of
+its own — SJON never parsed that GLSL, it only received a list of names
+— so the definition of every extracted name is the `:src` string that
+produced it.
+
+**Some hosts can't run providers, and say so instead of guessing.** The
+browser playground, for one: it cannot execute plugin code at all. When
+that happens you get a single diagnostic on the `:src` string —
+"provider `lines` was not run, so `shader` names from this source are
+unchecked" — and *no* diagnostics on the references. They are unchecked,
+not accepted and not rejected, and a host that reported `u_resulution`
+there would be claiming to know a member set it never computed. In an
+editor this arrives as a hint rather than an error, because nothing in
+your file is wrong.
+
 ---
 
 ## 12. Common patterns
@@ -934,6 +988,35 @@ declared but could not be evaluated by the active host.
 (badge :shape (rect :w 4 :h 4))                  ; ✓
 (badge :shape (triangle :side 4))                ; ✗ head not allowed in this slot
 ```
+
+### Positional slot-local forms
+
+A form can name its own one-off child forms inline — scoped to that form,
+invisible everywhere else. A positional child then resolves *that* form's
+local first, so a local head may reuse a name that means something else
+globally:
+
+```sjon
+; `entry` here is bind-group's OWN local (needs :binding); it shadows any
+; global (entry …). Unlisted heads fall through to the global catalog; a
+; head that's neither local nor global is unknown_local_form on the
+; (bind-group …) node itself.
+(bind-group
+  (entry :binding 0))                            ; ✓ the local entry
+(bind-group (slot :binding 0))                   ; ✗ unknown_local_form
+```
+
+Declared with inline `(form …)` children directly under the parent form —
+no `:positional` needed, since inline locals imply it:
+
+```sjon
+(form :name bind-group
+  (form :name entry (key :name binding :type number :optional false)))
+```
+
+Add a `head-set` on `:positional` to close the slot to exactly those
+heads. Full semantics: LANGUAGE.md §6.3.1 and portable-manifest-v1.md
+§5.2.
 
 ### Embedding multi-line code
 
@@ -1032,6 +1115,56 @@ A defensive convention for portable documents:
 For documents authored against one known host (the common case),
 bare everywhere is still the right default. This pattern is for
 the "ship across many hosts" scenario.
+
+---
+
+## 12.b Testing your schema
+
+SJON itself is pinned by a conformance corpus: hundreds of small
+documents, each with an `expected.sjon` naming exactly the diagnostics
+it must produce. `sjon plugin test` hands you the same discipline for
+your own schema — no new assertion syntax, the corpus format verbatim.
+
+Beside your manifest, make a `tests/` directory of pairs:
+
+```
+myplugin/
+  plugin.sjon
+  tests/
+    clean.sjon
+    clean.expected.sjon
+    missing-status.sjon
+    missing-status.expected.sjon
+```
+
+Each `<case>.sjon` is a document validated against your manifest
+(plus the core vocabulary). Each `<case>.expected.sjon` asserts its
+diagnostic stream, in order:
+
+```sjon
+; missing-status.expected.sjon — the document omits :status, and that
+; is exactly what we expect it to be told.
+(diagnostics
+  (diagnostic :code missing_required_key :path [post]))
+```
+
+A clean document asserts the empty stream — `(diagnostics)`. Severity
+defaults to `err`; assert a warning with `:severity warning`.
+
+Run it (red first, like any test loop):
+
+```console
+$ sjon plugin test myplugin/plugin.sjon
+ok  clean
+FAIL missing-status — diagnostic 0 code mismatch: expected unknown_form, got missing_required_key
+
+1 passed, 1 failed
+```
+
+Fix either the schema or the expectation until green. `--dir=PATH`
+points somewhere other than `tests/`. Because expectations pin `(code,
+severity, path)` — not message prose — they survive wording changes,
+exactly like the corpus itself.
 
 ---
 
@@ -1179,6 +1312,10 @@ string instead.
 - [`examples/plugins/README.md`](../examples/plugins/README.md) —
   if you've crossed over into wanting to **define** your own
   forms, expression functions, or value kinds, start there.
+- [`examples/llm/`](../examples/llm/) — SJON packaged for a model:
+  a paste-into-context `PRIMER.md`, nine worked write→validate→repair
+  flows, and a token-efficiency receipt versus JSON + JSON Schema. All
+  goldens are gated by `zig build llm-pack-verify`.
 - [`manifests/meta.sjon`](../manifests/meta.sjon) — the meta-schema
   for portable plugin manifests, written in SJON. Hosts can load
   these manifests to provide validation and tooling vocabulary;

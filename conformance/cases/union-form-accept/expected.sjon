@@ -1,0 +1,3 @@
+; `(n E4)` matches the `event` alternative's head-set, so the union accepts
+; it — clean on both the tree and binary validation paths.
+(diagnostics)

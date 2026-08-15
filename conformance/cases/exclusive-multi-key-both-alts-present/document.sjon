@@ -1,0 +1,19 @@
+; The negative direction of `exclusive-multi-key-exactly-one`, which uses
+; this exact schema to show the `:from`+`:to` bundle accepted. Here the
+; author supplies that bundle AND `:at`, so two alternatives of the group
+; are live at once.
+;
+; A group is about the alternatives, not the keys: each key is
+; `:optional true` on its own, so nothing here is individually wrong. The
+; diagnostic exists precisely because per-key checks cannot see the
+; constraint.
+(plugin :name routes :version "1.0.0"
+  (form :name route
+    (key :name from :type symbol :optional true)
+    (key :name to :type symbol :optional true)
+    (key :name at :type symbol :optional true)
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [from to])
+      (alt :keys [at]))))
+
+(route :from a :to b :at c)

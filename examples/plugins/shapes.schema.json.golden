@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 1,
+  "x-sjon-export-warnings": [
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `shape-form` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin": "shapes",
+      "kind": "shape-form"
+    }
+  ],
+  "$defs": {
+    "form.shapes.canvas": {
+      "type": "object",
+      "description": "Drawing surface. Positional children are shapes.",
+      "properties": {
+        "$form": {
+          "const": "canvas"
+        },
+        "$ns": {
+          "const": "shapes"
+        },
+        "bg": {
+          "description": "Named background colour (\"black\", \"#202028\", …).",
+          "type": "string"
+        },
+        "h": {
+          "type": "number"
+        },
+        "w": {
+          "type": "number"
+        },
+        "$children": {
+          "type": "array"
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "additionalProperties": false
+    },
+    "form.shapes.circle": {
+      "type": "object",
+      "description": "Filled circle at :center with given :radius.",
+      "properties": {
+        "$form": {
+          "const": "circle"
+        },
+        "$ns": {
+          "const": "shapes"
+        },
+        "center": {
+          "type": "array",
+          "items": {}
+        },
+        "fill": {
+          "description": "Optional :evenodd or :nonzero fill rule.",
+          "enum": [
+            {
+              "$sym": "evenodd"
+            },
+            {
+              "$sym": "nonzero"
+            }
+          ]
+        },
+        "radius": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "additionalProperties": false
+    },
+    "form.shapes.rect": {
+      "type": "object",
+      "description": "Axis-aligned rectangle from :origin spanning :size.",
+      "properties": {
+        "$form": {
+          "const": "rect"
+        },
+        "$ns": {
+          "const": "shapes"
+        },
+        "origin": {
+          "type": "array",
+          "items": {}
+        },
+        "size": {
+          "type": "array",
+          "items": {}
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "additionalProperties": false
+    },
+    "form.shapes.group": {
+      "type": "object",
+      "description": "Named container of shapes; positional children are shapes.",
+      "properties": {
+        "$form": {
+          "const": "group"
+        },
+        "$ns": {
+          "const": "shapes"
+        },
+        "name": {
+          "type": "string"
+        },
+        "$children": {
+          "type": "array"
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "additionalProperties": false
+    },
+    "form.shapes.scene": {
+      "type": "object",
+      "description": "Top-level scene. `open = true` so authors can attach ad-hoc metadata keywords without the validator complaining.",
+      "properties": {
+        "$form": {
+          "const": "scene"
+        },
+        "$ns": {
+          "const": "shapes"
+        },
+        "title": {
+          "type": "string"
+        },
+        "$children": {
+          "type": "array"
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "additionalProperties": true
+    },
+    "form.shapes.badge": {
+      "type": "object",
+      "description": "Tiny labelled mark. `:shape` is HeadSet-pinned: only `(circle …)` or `(rect …)` are accepted as the focal form.",
+      "properties": {
+        "$form": {
+          "const": "badge"
+        },
+        "$ns": {
+          "const": "shapes"
+        },
+        "label": {
+          "type": "string"
+        },
+        "shape": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/form.shapes.circle"
+            },
+            {
+              "$ref": "#/$defs/form.shapes.rect"
+            }
+          ],
+          "x-sjon-head-set": [
+            "circle",
+            "rect"
+          ]
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.shapes.canvas"
+    },
+    {
+      "$ref": "#/$defs/form.shapes.circle"
+    },
+    {
+      "$ref": "#/$defs/form.shapes.rect"
+    },
+    {
+      "$ref": "#/$defs/form.shapes.group"
+    },
+    {
+      "$ref": "#/$defs/form.shapes.scene"
+    },
+    {
+      "$ref": "#/$defs/form.shapes.badge"
+    }
+  ]
+}

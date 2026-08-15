@@ -1,0 +1,342 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "audio",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "phrase",
+          "description": "A note sequence — named (a reusable definition) or anonymous (inline).",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "name",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            },
+            {
+              "name": "notes",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "vector",
+                "len": null,
+                "element": {
+                  "kind": "union_of",
+                  "alternatives": [
+                    {
+                      "name": "note-or-rest",
+                      "shape": {
+                        "kind": "symbol_members",
+                        "names": [
+                          "E4",
+                          "G4",
+                          "A4",
+                          "B4",
+                          "_"
+                        ]
+                      }
+                    },
+                    {
+                      "name": "event",
+                      "shape": {
+                        "kind": "form_heads",
+                        "refs": [
+                          {
+                            "plugin": "audio",
+                            "name": "n"
+                          },
+                          {
+                            "plugin": "audio",
+                            "name": "rest"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "track",
+          "description": "A phrase slot filled inline or by reference to a named phrase.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "lead",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "union_of",
+                "alternatives": [
+                  {
+                    "name": "phrase-inline",
+                    "shape": {
+                      "kind": "form_heads",
+                      "refs": [
+                        {
+                          "plugin": "audio",
+                          "name": "phrase"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "name": "phrase-ref",
+                    "shape": {
+                      "kind": "cross_ref",
+                      "target_form": "phrase",
+                      "name_key": "name",
+                      "acyclic": false,
+                      "scope_form": null,
+                      "provider": null,
+                      "source_key": null
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "n",
+          "description": "A pitched note event.",
+          "open": false,
+          "positional": "any",
+          "keys": []
+        },
+        {
+          "name": "rest",
+          "description": "A rest event.",
+          "open": false,
+          "positional": "any",
+          "keys": []
+        }
+      ],
+      "value_kinds": [
+        {
+          "name": "note-or-rest",
+          "description": "Pitch class or the rest mark `_`.",
+          "shape": {
+            "kind": "symbol_members",
+            "names": [
+              "E4",
+              "G4",
+              "A4",
+              "B4",
+              "_"
+            ]
+          }
+        },
+        {
+          "name": "event",
+          "description": "A note or rest form (the `(n …)` / `(rest)` head-set).",
+          "shape": {
+            "kind": "form_heads",
+            "refs": [
+              {
+                "plugin": "audio",
+                "name": "n"
+              },
+              {
+                "plugin": "audio",
+                "name": "rest"
+              }
+            ]
+          }
+        },
+        {
+          "name": "note-or-event",
+          "description": "Either a bare note symbol or an event form.",
+          "shape": {
+            "kind": "union_of",
+            "alternatives": [
+              {
+                "name": "note-or-rest",
+                "shape": {
+                  "kind": "symbol_members",
+                  "names": [
+                    "E4",
+                    "G4",
+                    "A4",
+                    "B4",
+                    "_"
+                  ]
+                }
+              },
+              {
+                "name": "event",
+                "shape": {
+                  "kind": "form_heads",
+                  "refs": [
+                    {
+                      "plugin": "audio",
+                      "name": "n"
+                    },
+                    {
+                      "plugin": "audio",
+                      "name": "rest"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "notes-vec",
+          "description": "",
+          "shape": {
+            "kind": "vector",
+            "len": null,
+            "element": {
+              "kind": "union_of",
+              "alternatives": [
+                {
+                  "name": "note-or-rest",
+                  "shape": {
+                    "kind": "symbol_members",
+                    "names": [
+                      "E4",
+                      "G4",
+                      "A4",
+                      "B4",
+                      "_"
+                    ]
+                  }
+                },
+                {
+                  "name": "event",
+                  "shape": {
+                    "kind": "form_heads",
+                    "refs": [
+                      {
+                        "plugin": "audio",
+                        "name": "n"
+                      },
+                      {
+                        "plugin": "audio",
+                        "name": "rest"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "phrase-inline",
+          "description": "An inline `(phrase …)` form.",
+          "shape": {
+            "kind": "form_heads",
+            "refs": [
+              {
+                "plugin": "audio",
+                "name": "phrase"
+              }
+            ]
+          }
+        },
+        {
+          "name": "phrase-ref",
+          "description": "A bare symbol naming a `(phrase :name …)` definition.",
+          "shape": {
+            "kind": "cross_ref",
+            "target_form": "phrase",
+            "name_key": "name",
+            "acyclic": false,
+            "scope_form": null,
+            "provider": null,
+            "source_key": null
+          }
+        },
+        {
+          "name": "phrase-or-ref",
+          "description": "Either an inline phrase or a reference to a named one.",
+          "shape": {
+            "kind": "union_of",
+            "alternatives": [
+              {
+                "name": "phrase-inline",
+                "shape": {
+                  "kind": "form_heads",
+                  "refs": [
+                    {
+                      "plugin": "audio",
+                      "name": "phrase"
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "phrase-ref",
+                "shape": {
+                  "kind": "cross_ref",
+                  "target_form": "phrase",
+                  "name_key": "name",
+                  "acyclic": false,
+                  "scope_form": null,
+                  "provider": null,
+                  "source_key": null
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "code": "union_emitted_via_anyof",
+      "severity": "info",
+      "message": "value-kind `note-or-event` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`",
+      "plugin_name": "audio",
+      "kind_name": "note-or-event"
+    },
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `event` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin_name": "audio",
+      "kind_name": "event"
+    },
+    {
+      "code": "union_emitted_via_anyof",
+      "severity": "info",
+      "message": "value-kind `phrase-or-ref` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`",
+      "plugin_name": "audio",
+      "kind_name": "phrase-or-ref"
+    },
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `phrase-inline` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin_name": "audio",
+      "kind_name": "phrase-inline"
+    },
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `phrase-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin_name": "audio",
+      "kind_name": "phrase-ref"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `phrase-ref` cross-ref annotation surfaces target-form=`phrase` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "plugin_name": "audio",
+      "kind_name": "phrase-ref"
+    }
+  ]
+}

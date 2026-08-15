@@ -14,6 +14,7 @@
 
 import type {
   CrossRefIR,
+  CrossRefProviderDef,
   FormDef,
   NamedKindDef,
   NodeDef,
@@ -174,7 +175,14 @@ export function serializePlugin(plugin: PluginDef): string {
   // `s.formOf` element isn't emitted twice (once top-level, once hoisted).
   for (const f of plugin.forms) registry.seedForm(f.head);
   const formBlocks = plugin.forms.map((f) => serializeForm(f, registry));
-  return assemble(plugin.name, plugin.version, plugin.description, registry, formBlocks);
+  return assemble(
+    plugin.name,
+    plugin.version,
+    plugin.description,
+    registry,
+    formBlocks,
+    plugin.crossRefProviders,
+  );
 }
 
 /** Serialize a single form as a self-contained one-form plugin (its `$ns`). */
@@ -194,10 +202,15 @@ function assemble(
   description: string | undefined,
   registry: KindRegistry,
   formBlocks: readonly string[],
+  providers: readonly CrossRefProviderDef[] = [],
 ): string {
   const lines: string[] = [];
   const header = `(plugin :name ${atom(name)} :version ${quote(version)}`;
   lines.push(description ? `${header} :description ${quote(description)}` : header);
+  // Providers first: a `(cross-ref :provider …)` below reads better when
+  // the name it cites has already been introduced. Resolution is by name,
+  // so order is free — this is for the human.
+  for (const p of providers) lines.push(indent(crossRefProvider(p)));
   for (const kind of registry.emitted()) lines.push(indent(serializeValueKind(kind)));
   // Inner `(form …)` blocks pulled in by nested `s.formOf` slots. Re-serializing
   // here only re-hits dedup (declareForm already hoisted their value-kinds), so
@@ -320,6 +333,14 @@ function crossRef(cr: CrossRefIR): string {
   if (cr.nameKey !== undefined) parts.push(`:name-key ${atom(cr.nameKey)}`);
   if (cr.acyclic) parts.push(':acyclic true');
   if (cr.scope !== undefined) parts.push(`:scope ${atom(cr.scope)}`);
+  if (cr.provider !== undefined) parts.push(`:provider ${atom(cr.provider)}`);
+  if (cr.sourceKey !== undefined) parts.push(`:source-key ${atom(cr.sourceKey)}`);
+  return `${parts.join(' ')})`;
+}
+
+function crossRefProvider(p: CrossRefProviderDef): string {
+  const parts: string[] = [`(cross-ref-provider :name ${atom(p.name)}`];
+  if (p.description !== undefined) parts.push(`:description ${quote(p.description)}`);
   return `${parts.join(' ')})`;
 }
 

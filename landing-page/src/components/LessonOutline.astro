@@ -1,0 +1,109 @@
+---
+// The 15-lesson tutorial table of contents on the landing page.
+// Driven by src/lib/lessons.ts so the order, title, gloss, and route
+// stay in sync with the sidebar nav and route generation.
+//
+// Visual: a soft card listing each lesson as a numbered row. Hover
+// slides a coral marker in from the left and tints the title; the
+// row stays readable rather than fully inverting.
+
+import { LESSONS } from '../lib/lessons';
+import { path } from '../lib/url';
+---
+
+<div class="outline card card--main">
+    <div class="card__deck">
+        <ol class="outline-list">
+            {LESSONS.map((l) => (
+                <li>
+                    <a href={path(l.route)}>
+                        <span class="num">{String(l.num).padStart(2, '0')}</span>
+                        <span class="row">
+                            <span class="t">{l.title}</span>
+                            <span class="gloss">{l.gloss}</span>
+                        </span>
+                        <span class="chev" aria-hidden="true">&rsaquo;</span>
+                    </a>
+                </li>
+            ))}
+        </ol>
+    </div>
+</div>
+
+<style>
+    .outline { margin: var(--space-3) 0; }
+    .outline-list {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+    }
+    .outline-list {
+        margin-top: calc(var(--card-stripes-h) + var(--space-2));
+    }
+    .outline-list li + li {
+        border-top: 1px solid var(--rule-mute);
+    }
+    .outline-list a {
+        position: relative;
+        display: grid;
+        grid-template-columns: 3.25rem 1fr auto;
+        column-gap: var(--space-3);
+        align-items: center;
+        padding: 12px 18px;
+        text-decoration: none;
+        color: var(--ink);
+        background: var(--surface);
+        transition: background 0.12s ease, color 0.12s ease, padding-left 0.12s ease;
+    }
+    .outline-list a::before {
+        content: '';
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 0;
+        background: var(--accent);
+        transition: width 0.15s ease;
+    }
+    .outline-list a:hover {
+        background: var(--surface-mute);
+        padding-left: 22px;
+    }
+    .outline-list a:hover::before { width: 4px; }
+    .outline-list a:hover .t { color: var(--accent); }
+    .outline-list a:hover .chev { color: var(--accent); transform: translateX(3px); }
+
+    .num {
+        font-family: var(--mono);
+        font-size: 14px;
+        font-weight: 500;
+        color: var(--ink-soft);
+        align-self: start;
+        padding-top: 3px;
+    }
+    .row {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+    }
+    .t {
+        font-family: var(--body);
+        font-weight: 600;
+        font-size: 15px;
+        color: var(--ink);
+        transition: color 0.12s ease;
+    }
+    .gloss {
+        font-family: var(--body);
+        color: var(--ink-soft);
+        font-size: 13.5px;
+        line-height: 1.45;
+    }
+    .chev {
+        font-family: var(--display);
+        font-size: 18px;
+        color: var(--ink-soft);
+        line-height: 1;
+        transition: color 0.12s ease, transform 0.12s ease;
+    }
+</style>

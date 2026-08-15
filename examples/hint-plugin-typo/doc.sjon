@@ -1,0 +1,5 @@
+; `shaeps` is one transposition away from the project's `shapes` —
+; the rich renderer's unresolved_plugin hint should suggest it.
+(use-plugin "shaeps")
+
+(circle :r 4)

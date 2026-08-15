@@ -1,0 +1,3 @@
+; Attributed to the call itself: no single argument is at fault.
+(diagnostics
+  (diagnostic :code expr_mixed_args :path [lerp]))

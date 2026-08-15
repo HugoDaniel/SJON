@@ -1,0 +1,13 @@
+; Division by zero is a reported runtime failure — not a silent drop, and
+; not a NaN or an infinity. Both `/` and `mod` guard it, and both surface
+; as `expr_type_mismatch`: the bucket `Host.evalExpr` has mapped
+; `DivisionByZero` into since it was written, reused here rather than
+; appending a new wire code for a case the message already names exactly
+; ("division by zero while evaluating `(/ …)`").
+;
+; Form 2 is the surviving neighbour. Two failures cost two results, not
+; the run — the same property `expr-value-interpolation` pins for an
+; inverted `clamp` range.
+(/ 1.0 0.0)
+(mod 1.0 0.0)
+(/ 10.0 4.0)

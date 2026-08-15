@@ -1,0 +1,124 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "scalar-or-ref",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "dispatch",
+          "description": "A compute dispatch sized on three axes; each axis is a literal or a named reference.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "x",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "union_of",
+                "alternatives": [
+                  {
+                    "name": "dim-value",
+                    "shape": {
+                      "kind": "number"
+                    }
+                  },
+                  {
+                    "name": "symbol",
+                    "shape": {
+                      "kind": "symbol"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "name": "y",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "union_of",
+                "alternatives": [
+                  {
+                    "name": "dim-value",
+                    "shape": {
+                      "kind": "number"
+                    }
+                  },
+                  {
+                    "name": "symbol",
+                    "shape": {
+                      "kind": "symbol"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "name": "z",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "union_of",
+                "alternatives": [
+                  {
+                    "name": "dim-value",
+                    "shape": {
+                      "kind": "number"
+                    }
+                  },
+                  {
+                    "name": "symbol",
+                    "shape": {
+                      "kind": "symbol"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": [
+        {
+          "name": "dim-value",
+          "description": "A literal workgroup dimension.",
+          "shape": {
+            "kind": "number"
+          }
+        },
+        {
+          "name": "dim",
+          "description": "A workgroup dimension: a literal count, or a symbol referencing a named constant.",
+          "shape": {
+            "kind": "union_of",
+            "alternatives": [
+              {
+                "name": "dim-value",
+                "shape": {
+                  "kind": "number"
+                }
+              },
+              {
+                "name": "symbol",
+                "shape": {
+                  "kind": "symbol"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "code": "union_emitted_via_anyof",
+      "severity": "info",
+      "message": "value-kind `dim` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`",
+      "plugin_name": "scalar-or-ref",
+      "kind_name": "dim"
+    }
+  ]
+}

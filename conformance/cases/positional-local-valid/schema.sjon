@@ -1,0 +1,23 @@
+; Positional slot-local forms: a form's POSITIONAL slot declares inline
+; (form …) children directly under the parent (form …). A form-shaped
+; positional value resolves local-first — a local shadows a same-named
+; global, falls back additively to the global catalog, and a head matching
+; neither is `unknown_local_form` at the PARENT form's path (the positional
+; slot). This is the scoping PNGine's `bind-group` needs so `entry` can be a
+; positional local without colliding with the global shader-entry `entry`.
+;
+; `bind-group` positional locals: `entry` (needs :binding) SHADOWS the global
+; `entry` (needs :at); `buffer` is local-only; `group` nests BOTH carriers — a
+; positional-local `leaf` and a key-local `badge` on `:tag`. `pass` is a
+; global form reachable by the additive fallback. Inline locals with no
+; explicit `:positional` imply `.any`.
+(plugin :name plf-test :version "1.0.0"
+  (form :name bind-group
+    (form :name entry (key :name binding :type number :optional false))
+    (form :name buffer (key :name slot :type number :optional false))
+    (form :name group
+      (form :name leaf)
+      (key :name tag :type form
+        (form :name badge))))
+  (form :name pass)
+  (form :name entry (key :name at :type symbol :optional false)))

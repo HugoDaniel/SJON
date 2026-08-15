@@ -1,12 +1,12 @@
 [package]
 name = "sjon-host"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.92"
 resolver = "3"
 description = "Rust host wrapping sjon.wasm — validate_document(source, options) for SJON multi-plugin documents"
 license = "CC0-1.0"
-repository = "https://github.com/hugodaniel/sjon"
+repository = "https://github.com/HugoDaniel/SJON"
 publish = false
 
 [dependencies]
@@ -15,6 +15,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 thiserror = "2"
+
+# build.rs reads conformance/classifier.json (the single-source case
+# classifier) to emit per-fixture tests — same data the two TS hosts read.
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"

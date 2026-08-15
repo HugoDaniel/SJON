@@ -1,0 +1,34 @@
+; SJON — embedding multi-line WGSL via triple-quoted raw strings.
+;
+; Body bytes between `"""…"""` are taken verbatim: no escape processing,
+; no newline stripping. To keep content clean, place the opening `"""`
+; on the same line as the first byte of content. Closing on its own line
+; means the body ends in a literal `\n`, which is harmless for WGSL.
+;
+; The host is responsible for interpreting the string payload as WGSL —
+; SJON itself stores it as opaque UTF-8 bytes.
+
+(shader-module :name "hello-triangle"
+  :source """@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var pos = array<vec2f, 3>(
+    vec2(0.0, 0.5),
+    vec2(-0.5, -0.5),
+    vec2(0.5, -0.5),
+  );
+  return vec4f(pos[i], 0.0, 1.0);
+}
+
+@fragment
+fn fs() -> @location(0) vec4f {
+  return vec4f(1.0, 0.0, 0.0, 1.0);
+}
+""")
+
+(shader-module :name "fullscreen-uv"
+  :source """@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let uv = pos.xy / vec2f(640.0, 480.0);
+  return vec4f(uv, 0.5, 1.0);
+}
+""")

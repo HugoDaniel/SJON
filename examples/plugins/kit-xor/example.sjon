@@ -1,0 +1,10 @@
+; Example usage of the `kit-xor` plugin. The exactly-one group on
+; `(phrase …)` is satisfied by supplying exactly `:notes`; the
+; at-most-one group on `(tag …)` is satisfied here by leaving both
+; `:color` and `:shape` off, but the alternative would be to set
+; exactly one.
+
+(phrase :name verse :notes [C4 E4 G4])
+(phrase :name chorus :events [tick tock])
+(tag :name section)
+(tag :name accent :color "red")

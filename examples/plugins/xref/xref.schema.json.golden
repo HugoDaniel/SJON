@@ -1,0 +1,315 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 1,
+  "x-sjon-export-warnings": [
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `node-acyclic` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin": "xref",
+      "kind": "node-acyclic"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `node-acyclic` cross-ref annotation surfaces target-form=`node` name-key=`id` acyclic=true scope-form=``; none are enforceable by JSON Schema",
+      "plugin": "xref",
+      "kind": "node-acyclic"
+    },
+    {
+      "code": "acyclic_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `node-acyclic` declares `:acyclic true`; cycle detection cannot be enforced by JSON Schema",
+      "plugin": "xref",
+      "kind": "node-acyclic"
+    },
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `node-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin": "xref",
+      "kind": "node-ref"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `node-ref` cross-ref annotation surfaces target-form=`node` name-key=`id` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "plugin": "xref",
+      "kind": "node-ref"
+    },
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `phrase-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin": "xref",
+      "kind": "phrase-ref"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `phrase-ref` cross-ref annotation surfaces target-form=`phrase` name-key=`name` acyclic=false scope-form=`piece`; none are enforceable by JSON Schema",
+      "plugin": "xref",
+      "kind": "phrase-ref"
+    },
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `uniform-ref` cross-ref: schema validates symbol shape only; the member set is extracted from each target's `:code` string by provider `uniforms` during validation, so it is not knowable at export time",
+      "plugin": "xref",
+      "kind": "uniform-ref"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `uniform-ref` cross-ref annotation surfaces target-form=`shader` provider=`uniforms` source-key=`code` scope-form=``; none are enforceable by JSON Schema",
+      "plugin": "xref",
+      "kind": "uniform-ref"
+    }
+  ],
+  "$defs": {
+    "form.xref.node": {
+      "type": "object",
+      "description": "Named graph node. Referenced by `:edge`.",
+      "properties": {
+        "$form": {
+          "const": "node"
+        },
+        "$ns": {
+          "const": "xref"
+        },
+        "id": {
+          "description": "Stable identifier within the document.",
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "label": {
+          "type": "string"
+        },
+        "parent": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false,
+          "x-sjon-cross-ref": {
+            "target-form": "node",
+            "name-key": "id",
+            "acyclic": true
+          }
+        }
+      },
+      "required": [
+        "$form",
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "form.xref.phrase": {
+      "type": "object",
+      "description": "Composable phrase. Referenced by `:phrase-ref` (scope-form scoped to a parent `(piece …)`).",
+      "properties": {
+        "$form": {
+          "const": "phrase"
+        },
+        "$ns": {
+          "const": "xref"
+        },
+        "body": {
+          "type": "string"
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "$form",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "form.xref.piece": {
+      "type": "object",
+      "description": "Scope-form root for nested `(phrase …)` registries.",
+      "properties": {
+        "$form": {
+          "const": "piece"
+        },
+        "$ns": {
+          "const": "xref"
+        },
+        "title": {
+          "type": "string"
+        },
+        "$children": {
+          "type": "array"
+        }
+      },
+      "required": [
+        "$form",
+        "title"
+      ],
+      "additionalProperties": false
+    },
+    "form.xref.shader": {
+      "type": "object",
+      "description": "Opaque source blob. Its `:code` string is the member set for `:uniform-ref`, read by the `uniforms` provider.",
+      "properties": {
+        "$form": {
+          "const": "shader"
+        },
+        "$ns": {
+          "const": "xref"
+        },
+        "code": {
+          "type": "string"
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "$form",
+        "name",
+        "code"
+      ],
+      "additionalProperties": false
+    },
+    "form.xref.edge": {
+      "type": "object",
+      "description": "Directed edge between two `(node …)` declarations.",
+      "properties": {
+        "$form": {
+          "const": "edge"
+        },
+        "$ns": {
+          "const": "xref"
+        },
+        "from": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false,
+          "x-sjon-cross-ref": {
+            "target-form": "node",
+            "name-key": "id",
+            "acyclic": false
+          }
+        },
+        "phrase": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false,
+          "x-sjon-cross-ref": {
+            "target-form": "phrase",
+            "name-key": "name",
+            "acyclic": false,
+            "scope-form": "piece"
+          }
+        },
+        "to": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false,
+          "x-sjon-cross-ref": {
+            "target-form": "node",
+            "name-key": "id",
+            "acyclic": true
+          }
+        },
+        "uniform": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false,
+          "x-sjon-cross-ref": {
+            "target-form": "shader",
+            "name-key": "name",
+            "acyclic": false,
+            "provider": "uniforms",
+            "source-key": "code"
+          }
+        }
+      },
+      "required": [
+        "$form",
+        "from",
+        "to"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.xref.node"
+    },
+    {
+      "$ref": "#/$defs/form.xref.phrase"
+    },
+    {
+      "$ref": "#/$defs/form.xref.piece"
+    },
+    {
+      "$ref": "#/$defs/form.xref.shader"
+    },
+    {
+      "$ref": "#/$defs/form.xref.edge"
+    }
+  ]
+}

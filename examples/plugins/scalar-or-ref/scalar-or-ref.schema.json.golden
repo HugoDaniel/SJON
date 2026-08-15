@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 1,
+  "x-sjon-export-warnings": [
+    {
+      "code": "union_emitted_via_anyof",
+      "severity": "info",
+      "message": "value-kind `dim` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`",
+      "plugin": "scalar-or-ref",
+      "kind": "dim"
+    }
+  ],
+  "$defs": {
+    "form.scalar-or-ref.dispatch": {
+      "type": "object",
+      "description": "A compute dispatch sized on three axes; each axis is a literal or a named reference.",
+      "properties": {
+        "$form": {
+          "const": "dispatch"
+        },
+        "$ns": {
+          "const": "scalar-or-ref"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "dim-value",
+            "symbol"
+          ]
+        },
+        "y": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "dim-value",
+            "symbol"
+          ]
+        },
+        "z": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "dim-value",
+            "symbol"
+          ]
+        }
+      },
+      "required": [
+        "$form",
+        "x",
+        "y"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.scalar-or-ref.dispatch"
+    }
+  ]
+}

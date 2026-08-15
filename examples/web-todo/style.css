@@ -1,0 +1,153 @@
+:root {
+  color-scheme: light dark;
+  --bg: #fafaf7;
+  --fg: #16161a;
+  --muted: #6a6a72;
+  --accent: #2266dd;
+  --line: #d8d8d4;
+  --done-line: #b5b5b0;
+  --error-bg: #ffe6e1;
+  --error-fg: #8a1f10;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16161a;
+    --fg: #ececec;
+    --muted: #8a8a90;
+    --accent: #7aa8ff;
+    --line: #2a2a30;
+    --done-line: #44444a;
+    --error-bg: #4a1f1a;
+    --error-fg: #ffd0c8;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+main#root {
+  max-width: 560px;
+  margin: 4rem auto 6rem;
+  padding: 0 1.5rem;
+}
+
+.boot {
+  color: var(--muted);
+  font-style: italic;
+}
+
+h1 {
+  font-size: 1.4rem;
+  margin: 0 0 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+h1 .sub {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.new-todo {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.new-todo input[type=text] {
+  flex: 1;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.new-todo button {
+  padding: 0.5rem 0.9rem;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--accent);
+  color: white;
+  font: inherit;
+  cursor: pointer;
+}
+
+.filters {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.filters button {
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.filters button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+ul.todos {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 1.5rem;
+  border-top: 1px solid var(--line);
+}
+
+ul.todos li {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+ul.todos li.done span.text {
+  color: var(--done-line);
+  text-decoration: line-through;
+}
+
+ul.todos span.text {
+  flex: 1;
+}
+
+ul.todos button.remove {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+  padding: 0.2rem 0.4rem;
+}
+ul.todos button.remove:hover { color: var(--error-fg); }
+
+.counter {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.error-pill {
+  margin-top: 1rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--error-bg);
+  color: var(--error-fg);
+  border-radius: 4px;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+}

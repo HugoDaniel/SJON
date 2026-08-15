@@ -1,0 +1,30 @@
+{
+  "file": "examples/llm/flows/06-discriminated-union/attempt-2.sjon",
+  "project_file": null,
+  "diagnostics": [
+    {
+      "phase": "validation",
+      "code": "unknown_key",
+      "severity": "error",
+      "message": "unknown keyword `:sequence` in form `track` (variant `:when kick`)",
+      "span": {
+        "start": 464,
+        "end": 473,
+        "line": 14,
+        "column": 28
+      },
+      "path": [
+        "track",
+        "sequence"
+      ],
+      "declaration_span": null,
+      "docs": "https://hugodaniel.com/pages/sjon/errors/unknown_key",
+      "hints": [
+        {
+          "kind": "help",
+          "text": "See `sjon explain unknown_key`. Discriminated forms reject variant keys that appear before the discriminant kvpair."
+        }
+      ]
+    }
+  ]
+}

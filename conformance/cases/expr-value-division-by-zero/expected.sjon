@@ -1,0 +1,9 @@
+; Two diagnostics, one per failing form, both with an empty path — the
+; eval pass anchors at the form's head span, and there is no declared
+; schema slot to name: the arguments type-check and it is the computed
+; divisor that is out of domain.
+(diagnostics
+  (diagnostic :code expr_type_mismatch :path [])
+  (diagnostic :code expr_type_mismatch :path []))
+(values
+  (value :index 2 :result 2.5))

@@ -1,0 +1,3 @@
+(diagnostics
+  (diagnostic :code plugin_wasm_self_hash_malformed :path [plugin])
+  (diagnostic :code unknown_form :path [pt]))

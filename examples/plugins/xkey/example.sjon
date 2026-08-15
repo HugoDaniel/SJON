@@ -1,0 +1,11 @@
+; Example usage of the `xkey` plugin. Multi-key bundles: every key in
+; the bundle must appear together. `(route :from a :to b)` satisfies
+; the `(from + to)` bundle; `(route :at waypoint)` satisfies the `at`
+; alternative. `(tag …)` may use the `(prefix + suffix)` bundle, the
+; `literal` alternative, or neither.
+
+(route :name main :from origin :to destination)
+(route :name detour :at waypoint)
+(tag :name banner :prefix "*** " :suffix " ***")
+(tag :name plain :literal "hello")
+(tag :name empty)

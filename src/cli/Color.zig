@@ -1,6 +1,29 @@
+//! ANSI color/style table.
+//!
+//! A `Style` enum plus a stateless `Styler` that writes SGR escapes
+//! when `enabled`. Policy resolution (`--color=auto|always|never`,
+//! `NO_COLOR` / `SJON_NO_COLOR`, TTY detection) lives in `Cli.zig`
+//! (`resolveColor`); this module just accepts the resolved boolean.
+//!
+//! The codes follow the standard 16-color ANSI subset — no 256-color
+//! or truecolor escapes. That's deliberate: rich format output
+//! prioritizes legibility under any terminal, and we lose nothing by
+//! sticking with the common floor.
+//!
+//! Usage:
+//!
+//! ```zig
+//! const styler = Color.Styler{ .enabled = true };
+//! try styler.write(writer, .red);
+//! try writer.writeAll("error");
+//! try styler.write(writer, .reset);
+//! ```
+
 const std = @import("std");
 const Writer = std.Io.Writer;
 
+/// ANSI style tags. Append-only; reordering changes binary output of
+/// every existing call site.
 pub const Style = enum {
     reset,
     bold,
@@ -17,21 +40,29 @@ pub const Style = enum {
     bright_blue,
 };
 
+/// Stateless styler. `enabled = false` makes every `write` a no-op.
 pub const Styler = struct {
     enabled: bool,
 
-    pub fn write(self: Styler, out: *Writer, style: Style) !void {
+    /// Write the SGR escape for `style` to `out`. No-op when
+    /// `self.enabled` is false. Always followed by user content; pair
+    /// each non-`reset` write with a `reset` to avoid bleeding style
+    /// into surrounding output.
+    pub fn write(self: Styler, out: *Writer, style: Style) Writer.Error!void {
         if (!self.enabled) return;
         try out.writeAll(sgr(style));
     }
 
-    pub fn writeStyled(self: Styler, out: *Writer, style: Style, text: []const u8) !void {
+    /// Write `text` wrapped in `style` + `reset`. Convenience for the
+    /// common "color one short token" pattern.
+    pub fn writeStyled(self: Styler, out: *Writer, style: Style, text: []const u8) Writer.Error!void {
         try self.write(out, style);
         try out.writeAll(text);
         try self.write(out, .reset);
     }
 };
 
+/// Map a Style to its SGR escape sequence.
 fn sgr(style: Style) []const u8 {
     return switch (style) {
         .reset => "\x1b[0m",
@@ -50,36 +81,24 @@ fn sgr(style: Style) []const u8 {
     };
 }
 
-pub const Policy = enum { auto, always, never };
-
-pub fn resolve(
-    policy: Policy,
-    is_tty: bool,
-    env_get: *const fn (name: []const u8) ?[]const u8,
-) bool {
-    return switch (policy) {
-        .always => true,
-        .never => false,
-        .auto => blk: {
-            if (!is_tty) break :blk false;
-            if (env_get("NO_COLOR")) |v| if (v.len > 0) break :blk false;
-            if (env_get("SJON_NO_COLOR")) |v| if (v.len > 0) break :blk false;
-            break :blk true;
-        },
-    };
-}
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 
-fn noEnv(_: []const u8) ?[]const u8 {
-    return null;
+test "Color.Styler: write is no-op when disabled" {
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer buf.deinit();
+    const s: Styler = .{ .enabled = false };
+    try s.write(&buf.writer, .red);
+    try testing.expectEqual(@as(usize, 0), buf.written().len);
 }
 
-fn allEnv(_: []const u8) ?[]const u8 {
-    return "1";
-}
-
-fn onlyNoColor(name: []const u8) ?[]const u8 {
-    if (std.mem.eql(u8, name, "NO_COLOR")) return "1";
-    return null;
+test "Color.Styler: writeStyled wraps in reset when enabled" {
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer buf.deinit();
+    const s: Styler = .{ .enabled = true };
+    try s.writeStyled(&buf.writer, .red, "X");
+    try testing.expectEqualStrings("\x1b[31mX\x1b[0m", buf.written());
 }

@@ -1,0 +1,21 @@
+{
+  "about": "Single source of truth for conformance case CLASSIFICATION — how a conformance/cases/<name>/ dir maps to a runner, and which families a wasm host skips. Consumers: hosts/conformance-shared/index.ts (both TS hosts, transitively) and hosts/rust/build.rs (parsed at build time via serde_json). The Zig runner (src/conformance_tests.zig) is the REFERENCE and classifies natively — it mirrors this file rather than reading it. Editing a family/marker/precedence here must keep those three consumers in agreement (the classifier audits + build.rs dead-family check are the drift net).",
+  "markers": {
+    "legacy": "schema.sjon",
+    "query": "query.sjon",
+    "inline": "document.sjon"
+  },
+  "precedence": ["legacy", "query", "inline"],
+  "wasmHostSkipFamilies": [
+    {
+      "label": "lowering-*",
+      "match": { "type": "prefix", "value": "lowering-" },
+      "reason": "exercises the Zig-side lowering registry + test/identity-v1 hook; a wasm host (web/rust) drives sjon.wasm, which has no Zig-side registry (mirrors the plugin-exec skip shape)"
+    },
+    {
+      "label": "too-many-keys",
+      "match": { "type": "exact", "value": "too-many-keys" },
+      "reason": "validateDocument drops the errored plugin from the schema, so (big …) becomes unknown_form on top of the manifest-phase too_many_keys; the legacy pre-compose path keeps the truncated plugin"
+    }
+  ]
+}

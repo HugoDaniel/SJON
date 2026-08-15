@@ -1,10 +1,19 @@
 {
   "name": "@sjon/schema",
-  "version": "1.0.0",
-  "private": true,
+  "version": "1.1.0",
   "type": "module",
   "description": "Fluent, host-independent schema authoring + Zod-style inference for SJON. Pure TS, zero runtime deps.",
-  "license": "SEE ../../LICENSE",
+  "license": "CC0-1.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HugoDaniel/SJON.git",
+    "directory": "hosts/schema"
+  },
+  "homepage": "https://hugodaniel.com/pages/sjon",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": ["src"],
   "engines": {
     "node": ">=20"
   },

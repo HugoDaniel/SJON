@@ -1,0 +1,3 @@
+; Warning only, and nothing after it: the plugin loaded, so `pt` is known.
+(diagnostics
+  (diagnostic :code license_unrecognized :severity warning :path [plugin]))

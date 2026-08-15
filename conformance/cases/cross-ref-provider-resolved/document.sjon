@@ -1,0 +1,19 @@
+; Provider-route executable family, 1 of 7 — the happy path, and the
+; only case in the family whose point is that *nothing* is diagnosed.
+;
+; `(shader …)` carries an opaque string. On the identity route a
+; cross-ref would read one symbol off each instance's `:name`; here the
+; validator instead hands `:src` to the `lines` provider, and every name
+; that comes back is registered as a member of `lines/shader`. So the two
+; references below resolve against names that exist nowhere in the
+; document's own syntax — they are inside the blob, and only the provider
+; can see them.
+;
+; `:name main` is still just a key on the form: the provider route does
+; not read it, and it is here to show that it does not.
+(use-plugin "lines")
+
+(shader :name main :src "u_time\nu_res")
+
+(bind :uniform u_time)
+(bind :uniform u_res)

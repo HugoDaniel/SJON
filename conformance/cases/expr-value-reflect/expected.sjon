@@ -1,0 +1,13 @@
+; `normalize [3 4]` is 0.6000000000000001, not 0.6: the division by the
+; computed hypotenuse rounds up in the last place. That is exactly the
+; kind of digit this corpus exists to hold identical between the native
+; build and both WASM artifacts.
+(diagnostics)
+(values
+  (value :index 0 :result [1 1])
+  (value :index 1 :result [1 7])
+  (value :index 2 :result [0.6000000000000001 0.8])
+  (value :index 3 :result 5)
+  (value :index 4 :result 5)
+  (value :index 5 :result 32)
+  (value :index 6 :result [0 0 1]))

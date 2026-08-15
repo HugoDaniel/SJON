@@ -1,0 +1,4 @@
+; Attributed to the form, not to `[track kind]`: the key that is missing has
+; no span of its own.
+(diagnostics
+  (diagnostic :code missing_discriminant_key :path [track]))

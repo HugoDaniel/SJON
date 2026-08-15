@@ -1,0 +1,31 @@
+; A `union_of {form-alt, cross_ref-alt}` slot accepts BOTH an inline
+; `(phrase …)` form and a bare symbol referencing a `(phrase :name …)`
+; definition — the two spellings plan 11's extract/inline refactors convert
+; between. The union tries `phrase-inline` (a `(phrase …)` head-set) first,
+; then `phrase-ref` (a cross-ref to a named `phrase`); first match wins, so
+; both a reference and an inline form validate clean on both the tree and
+; binary paths. Grounds the `union{form, cross_ref}` shape the LSP refactors
+; require — every other cross-ref slot in the corpus is symbol-only.
+(plugin :name song :version "1.0.0"
+  (value-kind :name phrase-inline
+    :description "An inline `(phrase …)` form."
+    :underlying form
+    :heads (head-set :names [phrase]))
+  (value-kind :name phrase-ref
+    :description "A bare symbol naming a `(phrase :name …)` definition."
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase))
+  (value-kind :name phrase-or-ref
+    :description "Either an inline phrase or a reference to a named one."
+    :underlying union
+    :union (union-shape :alternatives [phrase-inline phrase-ref]))
+  (form :name phrase
+    :description "A phrase — named (a definition) or anonymous (inline)."
+    (key :name name :type symbol :optional true)
+    (key :name len :type number :optional true))
+  (form :name track
+    (key :name lead :type phrase-or-ref)))
+
+(phrase :name intro :len 4)
+(track :lead intro)
+(track :lead (phrase :len 8))

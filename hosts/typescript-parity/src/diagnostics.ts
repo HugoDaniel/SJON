@@ -62,6 +62,23 @@ export type DiagnosticCode =
   | 'acyclic_without_self_edge'
   | 'unknown_cross_ref_scope'
   | 'ambiguous_cross_ref_scope'
+  // Provider-route cross-refs (manifest format 1.2). The first three are
+  // schema-aggregate-time, like their identity-route twins above, and this
+  // host emits them.
+  | 'unknown_cross_ref_provider'
+  | 'ambiguous_cross_ref_provider'
+  | 'cross_ref_source_key_unknown'
+  // The last two are validate-time and this host never emits them: they
+  // report on *running* an extractor, which needs the executable plugin
+  // ABI the TS-parity port deliberately doesn't implement. They are listed
+  // so the union stays a complete mirror of `Ast.Diagnostic.Code` — a host
+  // reading someone else's diagnostics still has to name them.
+  | 'cross_ref_extraction_failed'
+  | 'cross_ref_provider_unavailable'
+  // Schema-aggregate-time again, and this host emits it: two value-kinds
+  // cross-referencing one target with differing specs. Detecting the
+  // collapse needs only the declarations, not a running extractor.
+  | 'cross_ref_target_collapse'
   // Parser-emitted diagnostic. Fires when a pure-integer literal
   // exceeds the u64 (or, with a leading `-`, the i64) range so the
   // exact AST tag the Zig parser would emit isn't representable. The
@@ -126,15 +143,41 @@ export type DiagnosticCode =
   | 'string_pattern_mismatch'
   | 'string_pattern_unsupported'
   | 'string_bounds_invalid'
-  // Multi-key exclusive-group bundle diagnostics. Validate-time:
-  // `exclusive_bundle_partial` fires when a `(alt :keys [a b])`-style
-  // bundle has some-but-not-all keys present and no sibling alt is
-  // fully present to win the group. Manifest-load-time:
-  // `exclusive_bundle_collision` fires when one key name appears in
-  // two alternatives of the same group (the cross-group case still
-  // emits `exclusive_group_invalid`).
+  // Exclusive-group family. Validate-time: `exclusive_bundle_partial`
+  // fires when a `(alt :keys [a b])`-style bundle has some-but-not-all
+  // keys present and no sibling alt is fully present to win the group.
+  // Manifest-load-time: `exclusive_bundle_collision` fires when one key
+  // name appears in two alternatives of the *same* group, and
+  // `exclusive_group_invalid` covers every other malformed declaration —
+  // fewer than two alts, an alt naming an undeclared key or the
+  // discriminant, or one key shared across two groups on the same scope.
+  // `mutually_exclusive_keys_present` fires when two alternatives of one
+  // group are both fully present; `required_one_of_missing` when an
+  // `exactly-one` group has none. Both are pathed at the form, once per
+  // group — a group is about its alternatives, not its keys.
+  | 'mutually_exclusive_keys_present'
+  | 'required_one_of_missing'
   | 'exclusive_bundle_partial'
   | 'exclusive_bundle_collision'
+  | 'exclusive_group_invalid'
+  // Discriminated-form family. Validate-time: `missing_discriminant_key`
+  // when a closed discriminated form carries no discriminant kvpair, so no
+  // variant can be selected — one emit, in place of the pile of
+  // missing-variant-key diagnostics that would otherwise follow.
+  // Schema-aggregate-time (emitted by
+  // `validateForms` in plugin.ts): `discriminant_not_closed_enum` when the
+  // discriminant key's type is not a symbol value-kind with a non-empty
+  // `:members`, `unknown_discriminant_value` for a `(variant :when …)` whose
+  // value is not one of those members, `variant_key_collision` when one key
+  // name is declared in two scopes of the same form.
+  | 'missing_discriminant_key'
+  | 'discriminant_not_closed_enum'
+  | 'unknown_discriminant_value'
+  | 'variant_key_collision'
+  // Schema-aggregate-time: a `:union` alternative that is itself a union.
+  // Rejected outright so union dispatch stays a flat loop. Emitted by
+  // `validateUnions` in plugin.ts.
+  | 'nested_union'
   // v1.1 manifest-metadata diagnostics. All emitted by the manifest
   // loader; mirror src/ManifestLoader.zig + src/Ast.zig.
   // `plugin_wasm_self_hash_malformed` is err-severity (well-formedness);
@@ -144,7 +187,24 @@ export type DiagnosticCode =
   | 'plugin_wasm_self_hash_malformed'
   | 'license_unrecognized'
   | 'too_many_keywords'
-  | 'sjon_format_unsupported';
+  | 'sjon_format_unsupported'
+  // Pattern-query-time diagnostic (emitted by the PatternQuery walker, not
+  // the validator): a `fast` / `slow` combinator expanded the query window
+  // past the 2^53 tick ceiling. The offending combinator contributes no
+  // haps; the rest of the pattern is queried normally. Mirrors
+  // `src/PatternQuery.zig:emitTickOverflow`.
+  | 'pattern_tick_overflow'
+  // Pattern-compile-time diagnostics for `(pure …)` expression leaves
+  // (emitted by `PatternQuery.compileTree`'s cycle-0 dry-run, tree path
+  // only): the expression failed to evaluate (`_eval_failed`: unbound name,
+  // div-by-zero, arity, budget), or evaluated to a value no hap can carry
+  // (`_result_invalid`: a form — usually a misspelled function name — or a
+  // vector / date / time). The leaf degrades to silence. A later-cycle
+  // failure is instead a silent counted drop, not a diagnostic. ts-parity
+  // has no Expr evaluator, so it never emits these — Web + Rust (via the
+  // shared sjon.wasm) cover them; they are listed for wire-protocol parity.
+  | 'pattern_value_eval_failed'
+  | 'pattern_value_result_invalid';
 
 export interface Diagnostic {
   readonly code: DiagnosticCode;

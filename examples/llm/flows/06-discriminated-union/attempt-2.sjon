@@ -1,0 +1,14 @@
+(plugin :name tracks :version "1.0.0"
+  (value-kind :name kind-tag
+    :underlying symbol
+    :members (member-set :values [kick bass]))
+  (form :name track
+    :discriminant kind
+    (key :name kind :type kind-tag :optional false)
+    (key :name name :type symbol :optional true)
+    (variant :when kick
+      (key :name step :type number :optional true))
+    (variant :when bass
+      (key :name sequence :type any :optional true))))
+
+(track :kind kick :name k1 :sequence [a b])

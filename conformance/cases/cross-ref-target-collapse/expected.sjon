@@ -1,0 +1,7 @@
+; Pathed at the *loser* — the kind whose declaration is inert — with the
+; same `[<plugin> <kind> cross-ref]` shape and `{0,0}` span as the rest
+; of the schema-aggregate cross-ref family.
+(diagnostics
+  (diagnostic :code cross_ref_target_collapse
+              :severity warning
+              :path [probe uniform-name cross-ref]))

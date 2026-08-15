@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 1,
+  "x-sjon-export-warnings": [
+    {
+      "code": "rich_members_emitted_with_annotations",
+      "severity": "info",
+      "message": "value-kind `severity` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations",
+      "plugin": "enum-rich",
+      "kind": "severity"
+    }
+  ],
+  "$defs": {
+    "form.enum-rich.log": {
+      "type": "object",
+      "description": "One log record.",
+      "properties": {
+        "$form": {
+          "const": "log"
+        },
+        "$ns": {
+          "const": "enum-rich"
+        },
+        "level": {
+          "description": "Severity tag.",
+          "oneOf": [
+            {
+              "const": {
+                "$sym": "info"
+              },
+              "title": "Info",
+              "description": "Routine status; safe to ignore in production."
+            },
+            {
+              "const": {
+                "$sym": "warn"
+              },
+              "title": "Warning",
+              "description": "Caution-worthy; investigate when the budget allows."
+            },
+            {
+              "const": {
+                "$sym": "error"
+              },
+              "title": "Error",
+              "description": "Failure path; the host couldn't complete the request."
+            },
+            {
+              "const": {
+                "$sym": "fatal"
+              },
+              "title": "Fatal",
+              "description": "Unrecoverable; the host is about to halt.",
+              "deprecated": true,
+              "x-sjon-deprecation-message": "Use `error` instead — fatality is signalled out-of-band by the exit code."
+            }
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "$form",
+        "level",
+        "message"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.enum-rich.log"
+    }
+  ]
+}

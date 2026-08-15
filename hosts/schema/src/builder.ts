@@ -29,6 +29,7 @@ import type {
 } from './infer.ts';
 import type {
   CrossRefIR,
+  CrossRefProviderDef,
   FormDef,
   FormKeyDef,
   NamedKindDef,
@@ -39,7 +40,7 @@ import type {
   StringBoundsIR,
 } from './shape.ts';
 import { resolveFormDef } from './shape.ts';
-import { isFormObject } from './internal.ts';
+import { assertNever, isFormObject } from './internal.ts';
 import {
   type ParseOptions,
   type SafeEditResult,
@@ -422,6 +423,11 @@ interface PluginInit {
   readonly description?: string;
   readonly forms?: readonly AnyFormNodeLike[];
   readonly kinds?: Readonly<Record<string, AnyNode>>;
+  /** `(cross-ref-provider …)` declarations. A schema that references a
+   * provider must also declare it, or the aggregate pass answers
+   * `unknown_cross_ref_provider`. Declaration only — the implementation
+   * ships with the plugin, not with the schema. */
+  readonly providers?: Readonly<Record<string, string | undefined>>;
 }
 
 type AnyFormNodeLike = { readonly _def: FormDef };
@@ -432,11 +438,18 @@ function pluginNode(name: string, init: PluginInit): PluginNode {
     def: { ...(n as AnyNode)._def, suggestedKind: kindName, explicitKind: true },
   }));
   const forms: FormDef[] = (init.forms ?? []).map((f) => ({ ...f._def, ns: name }));
+  const crossRefProviders: CrossRefProviderDef[] = Object.entries(init.providers ?? {}).map(
+    ([providerName, description]) => ({
+      name: providerName,
+      ...(description !== undefined ? { description } : {}),
+    }),
+  );
   const def: PluginDef = {
     name,
     version: init.version ?? '1.0.0',
     forms,
     namedKinds,
+    crossRefProviders,
     ...(init.description !== undefined ? { description: init.description } : {}),
   };
   const manifest = (): string => serializePlugin(def);
@@ -556,15 +569,53 @@ export function formOf<NS extends string, Head extends string, Sh extends ShapeR
   }) as unknown as FormFieldNode<NS, Head, Sh>;
 }
 
+/**
+ * A symbol slot narrowed to names the *document* supplies.
+ *
+ * Two routes, mutually exclusive. Identity (`nameKey`, the default) reads
+ * a symbol out of each target instance. Provider (`provider` +
+ * `sourceKey`) reads an opaque *string* out of each instance and lets a
+ * declared extractor name the members inside it — for embedded GLSL, DDL,
+ * or a regex.
+ *
+ * The exclusions throw here rather than emitting a manifest the loader
+ * would reject with `invalid_manifest`: a builder's job is to make the
+ * illegal state unconstructible, and the stack trace at the call site
+ * beats a diagnostic three layers down.
+ */
 export const crossRef = <Target extends string>(
   target: Target,
-  options?: { readonly nameKey?: string; readonly acyclic?: boolean; readonly scope?: string },
+  options?: {
+    readonly nameKey?: string;
+    readonly acyclic?: boolean;
+    readonly scope?: string;
+    readonly provider?: string;
+    readonly sourceKey?: string;
+  },
 ): Node<CrossRef<Target>> => {
+  if (options?.provider !== undefined) {
+    if (options.nameKey !== undefined) {
+      throw new Error(
+        'SJON schema: crossRef `provider` and `nameKey` are exclusive extraction routes — pick one.',
+      );
+    }
+    if (options.acyclic === true) {
+      throw new Error(
+        'SJON schema: crossRef `acyclic` is identity-route only — extracted names share one source span, so cycle edges are undefined.',
+      );
+    }
+  } else if (options?.sourceKey !== undefined) {
+    throw new Error(
+      'SJON schema: crossRef `sourceKey` needs a `provider` — nothing reads it on the identity route.',
+    );
+  }
   const crossRef: CrossRefIR = {
     target,
     ...(options?.nameKey !== undefined ? { nameKey: options.nameKey } : {}),
     ...(options?.acyclic !== undefined ? { acyclic: options.acyclic } : {}),
     ...(options?.scope !== undefined ? { scope: options.scope } : {}),
+    ...(options?.provider !== undefined ? { provider: options.provider } : {}),
+    ...(options?.sourceKey !== undefined ? { sourceKey: options.sourceKey } : {}),
   };
   return leaf({ shape: { kind: 'cross_ref', crossRef }, isOptional: false });
 };
@@ -573,8 +624,39 @@ export const crossRef = <Target extends string>(
 /** An explicitly-named value-kind (`s.kind("score", s.number().min(0).max(100))`). */
 export const kind = <N extends AnyNode>(name: string, node: N): N => {
   const def: NodeDef = { ...node._def, suggestedKind: name, explicitKind: true };
-  return leaf<N['_out'], N['_in']>(def) as unknown as N;
+  return rebuildNode(def) as unknown as N;
 };
+
+/**
+ * Rebuild a node from a (possibly modified) def through the factory that owns
+ * its shape, so shape-specific refinement methods (`.min`, `.max`, `.pattern`,
+ * …) survive. A bare `leaf` strips them — the phantom `kind` used to return,
+ * whose `.min` threw at call time. Exhaustive over `ShapeIR` so a future
+ * method-carrying factory can't be silently forgotten here.
+ */
+function rebuildNode(def: NodeDef): AnyNode {
+  const shapeKind = def.shape.kind;
+  switch (shapeKind) {
+    case 'number':
+      return numberNode(def) as unknown as AnyNode;
+    case 'string':
+      return stringNode(def) as unknown as AnyNode;
+    case 'any':
+    case 'nil':
+    case 'boolean':
+    case 'symbol':
+    case 'symbol_members':
+    case 'string_members':
+    case 'vector':
+    case 'expr':
+    case 'form_any':
+    case 'form':
+    case 'cross_ref':
+      return leaf(def);
+    default:
+      return assertNever(shapeKind);
+  }
+}
 
 /** A `(form …)`. `ns` (the data form's `$ns`) defaults to the form head. */
 export const form = <Head extends string, Sh extends ShapeRecord, NS extends string = Head>(

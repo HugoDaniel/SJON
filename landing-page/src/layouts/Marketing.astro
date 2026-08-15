@@ -1,0 +1,193 @@
+---
+// Marketing layout — single shell for the landing page.
+//
+// Loads system-tokens.css (which pulls @sakun/system.css for the pixel
+// fonts) and paints a calm cream menu bar + a stamp-shadow footer.
+// The lesson layout still uses tokens.css so the tutorial keeps its
+// own paper aesthetic.
+
+import '../styles/system-tokens.css';
+import { path } from '../lib/url';
+import { FIRST_LESSON } from '../lib/lessons';
+
+interface Props {
+  title?: string;
+  description?: string;
+}
+
+const {
+  title = 'SJON: the DSL you don’t have to write',
+  description = 'Most domain tools eventually grow their own config language. SJON saves you that work: a small embeddable data language where the schema is the contract, validated the same in Zig, JS, and Rust, with diagnostics precise enough for an agent to act on.',
+} = Astro.props;
+
+const currentPath = Astro.url.pathname.replace(/\/$/, '') || '/';
+const navItems = [
+  { href: '/compare', label: 'Compare' },
+  { href: '/playground', label: 'Playground' },
+  { href: FIRST_LESSON.route, label: 'Tutorial' },
+  { href: 'https://git.hugodaniel.com/releases/sjon', label: 'Source', external: true },
+];
+
+function isCurrent(href: string) {
+  const target = path(href).replace(/\/$/, '') || '/';
+  return currentPath === target || currentPath.startsWith(`${target}/`);
+}
+---
+
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <meta name="generator" content={Astro.generator} />
+    <link rel="icon" type="image/svg+xml" href={path('/favicon.svg')} />
+</head>
+<body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+
+    <nav class="topbar" aria-label="Site">
+        <a class="brand" href={path('/')}>
+            <span class="brand-mark" aria-hidden="true"></span>
+            <span class="brand-name">sjon</span>
+        </a>
+        <ul class="nav">
+            {navItems.map((item) => (
+                <li>
+                    <a
+                        href={item.external ? item.href : path(item.href)}
+                        aria-current={!item.external && isCurrent(item.href) ? 'page' : undefined}
+                        rel={item.external ? 'external' : undefined}
+                    >
+                        {item.label}
+                    </a>
+                </li>
+            ))}
+        </ul>
+        <span class="version" aria-hidden="true">v1.0.0</span>
+    </nav>
+
+    <main id="main-content" tabindex="-1">
+        <slot />
+    </main>
+
+    <footer class="site-footer">
+        <span>SJON 1.0. A stable little language, plainly documented.</span>
+        <span class="muted">v1.0.0 · <abbr title="Creative Commons Zero 1.0 Universal">CC0-1.0</abbr> · <a href="https://git.hugodaniel.com/releases/sjon" rel="external">git.hugodaniel.com/releases/sjon</a></span>
+    </footer>
+</body>
+</html>
+
+<style>
+    /* Top navigation — a cream bar that floats over the paper texture
+     * with a hairline ink underline. No striped Mac stripes; just a
+     * coral pip on the brand to nod at the heritage. */
+    .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        height: var(--topbar-height);
+        padding: 0 var(--space-4);
+        display: flex;
+        align-items: center;
+        gap: var(--space-4);
+        background: rgba(237, 230, 227, 0.92);
+        backdrop-filter: saturate(180%) blur(8px);
+        -webkit-backdrop-filter: saturate(180%) blur(8px);
+        border-bottom: 1px solid var(--ink);
+        font-family: var(--body);
+        font-size: 14px;
+    }
+    .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        text-decoration: none;
+        color: var(--ink);
+        font-family: var(--display);
+        font-size: 15px;
+        letter-spacing: 0;
+    }
+    .brand:hover { color: var(--ink); }
+    .brand:hover .brand-mark { background: var(--accent-cool); }
+    .brand-mark {
+        display: inline-block;
+        width: 12px; height: 12px;
+        background: var(--accent);
+        border: 1px solid var(--ink);
+        border-radius: 3px;
+        transition: background 0.15s ease;
+    }
+    .brand-name { line-height: 1; }
+
+    .nav {
+        display: flex;
+        gap: var(--space-3);
+        margin: 0;
+        padding: 0;
+        list-style: none;
+    }
+    .nav a {
+        text-decoration: none;
+        color: var(--ink);
+        font-family: var(--body);
+        font-weight: 500;
+        font-size: 14px;
+        padding: 4px 8px;
+        border-radius: 4px;
+    }
+    .nav a:hover {
+        color: var(--accent);
+        background: rgba(240, 100, 73, 0.10);
+    }
+    .nav a[aria-current="page"] {
+        color: var(--ink);
+        background: var(--surface);
+    }
+
+    .version {
+        margin-left: auto;
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--ink-soft);
+        padding: 2px 8px;
+        border: 1px solid var(--rule-mute);
+        border-radius: var(--radius-pill);
+    }
+
+    main {
+        display: block;
+        padding: var(--space-4) 0 var(--space-5);
+    }
+
+    /* Footer — a single line on cream paper with a coral underline
+     * stripe; matches the dingbats divider in feel. */
+    .site-footer {
+        max-width: var(--landing-width);
+        margin: var(--space-5) auto var(--space-4);
+        padding: var(--space-3) var(--space-3) var(--space-3);
+        font-family: var(--body);
+        font-size: 13.5px;
+        color: var(--ink);
+        display: flex;
+        justify-content: space-between;
+        gap: var(--space-3);
+        flex-wrap: wrap;
+        border-top: 2px solid var(--accent);
+    }
+    .site-footer .muted { color: var(--ink-soft); }
+    .site-footer a {
+        text-decoration: underline;
+        text-decoration-color: var(--accent);
+        color: var(--ink);
+    }
+    .site-footer a:hover { color: var(--accent); }
+
+    @media (max-width: 600px) {
+        .topbar { gap: var(--space-2); padding: 0 var(--space-2); }
+        .nav { gap: 4px; }
+        .nav a { font-size: 13px; padding: 4px 5px; }
+        .version { display: none; }
+    }
+</style>

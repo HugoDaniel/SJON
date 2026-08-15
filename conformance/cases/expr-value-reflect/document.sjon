@@ -1,0 +1,20 @@
+; `reflect` follows WGSL: I − 2·dot(I, N)·N, with N required to be
+; unit-length and *not* normalized for you. Form 0 is the textbook
+; reading — a ray coming down onto a floor whose normal is +Y bounces
+; back up, [1 −1] → [1 1].
+;
+; Form 1 is the same I against the same direction with |N| = 2, and it
+; is the reason this case exists: the result is [1 7]. Not a reflection,
+; not an error, not clamped — the formula scales by |N|² and returns a
+; vector pointing somewhere the geometry does not. `applyReflect` says
+; "caller must supply unit-length N. We do not auto-normalize", and this
+; pins what that costs an author who forgets. Any future change that
+; starts normalizing (or starts rejecting non-unit N) has to edit this
+; file, which is the point.
+(reflect [1.0 -1.0] [0.0 1.0])
+(reflect [1.0 -1.0] [0.0 2.0])
+(normalize [3.0 4.0])
+(length [3.0 4.0])
+(distance [1.0 2.0] [4.0 6.0])
+(dot [1.0 2.0 3.0] [4.0 5.0 6.0])
+(cross [1.0 0.0 0.0] [0.0 1.0 0.0])

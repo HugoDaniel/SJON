@@ -1,0 +1,14 @@
+; Rich-diagnostics demo: a misspelled key on a closed form trips
+; `unknown_key`, and the rich format suggests the nearest declared key.
+;
+;   sjon validate --format=rich --no-project examples/unknown-key-typo.sjon
+;
+; This file is also the receipt behind the landing page's "errors a
+; model can repair" card, and its schema is mirrored by the LLM pack's
+; examples/llm/flows/01-unknown-key/ — keep the three in sync.
+(plugin :name demo :version "1.0.0"
+  (form :name camera
+    (key :name mode :type symbol :optional true)
+    (key :name zoom :type number :optional true)))
+
+(camera :mode ortho :zom 2)

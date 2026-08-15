@@ -16,15 +16,18 @@
 //     unit-bearing numbers, JSDoc `@minimum`/`@maximum`/`@minLength`/
 //     `@maxLength`/`@pattern`/`@format`/`@sjon-cross-ref` annotations
 //
-// What this port does NOT yet emit byte-identically:
-//
-//   * Discriminator-aware union per variant (Zig's
-//     `writeDiscriminatedFormType`) — the IR's `discriminator` field
-//     stays null because the TS-parity loader doesn't yet parse it.
-//   * Exclusive-group JSDoc on the form interface — same reason.
+// Discriminated forms and exclusive groups are emitted here too, now that
+// `loader.ts` parses them: a discriminated form becomes a per-variant union
+// (`writeDiscriminatedFormType`) and every group adds a
+// `@sjon-exclusive-group` JSDoc line. On the `kit` / `kit-xor` fixtures the
+// output is byte-identical to the Zig goldens except for the JSDoc a
+// `:description` produces — the one manifest field this port's loader still
+// does not read. `test/schemaExport.test.ts` asserts exactly that.
 
 import type {
   Model,
+  ModelCrossRef,
+  ModelDiscriminator,
   ModelForm,
   ModelKey,
   ModelMember,
@@ -36,7 +39,7 @@ import type {
 } from './model.ts';
 import type { Warning } from './warnings.ts';
 import type { Repr } from '../plugin.ts';
-import { assertNever } from './internal.ts';
+import { assertNever } from '../internal.ts';
 
 // Branded TS alias for a GPU representation tag. The aliases are defined
 // in BRAND_PRELUDE; this maps the `Repr` union to the alias name so a
@@ -145,6 +148,10 @@ function collectCrossPluginRefsFromForm(
   for (const k of form.keys) {
     collectCrossPluginRefsFromShape(k.value, thisPlugin, seen);
   }
+  // Variant keys emit into the same file and so need the same imports.
+  for (const v of form.discriminator?.variants ?? []) {
+    for (const k of v.keys) collectCrossPluginRefsFromShape(k.value, thisPlugin, seen);
+  }
   if (form.positional.kind === 'kind') {
     collectCrossPluginRefsFromShape(form.positional.shape, thisPlugin, seen);
   }
@@ -177,32 +184,90 @@ function collectCrossPluginRefsFromShape(
 }
 
 function writeForm(plugin: ModelPlugin, form: ModelForm, ctx: EmitContext): string {
-  let out = writeFormDoc(form);
-  out += `export interface ${formTypeName(plugin.name, form.name)} {\n`;
+  const doc = writeFormDoc(form);
+  return form.discriminator
+    ? doc + writeDiscriminatedFormType(plugin, form, form.discriminator, ctx)
+    : doc + writeFormInterface(plugin, form, ctx);
+}
+
+function writeFormInterface(plugin: ModelPlugin, form: ModelForm, ctx: EmitContext): string {
+  let out = `export interface ${formTypeName(plugin.name, form.name)} {\n`;
   out += `  $form: "${form.name}";\n`;
   out += `  $ns: "${plugin.name}";\n`;
   // Sort keys alphabetically (mirrors Zig's sortKeysAlphabetically).
-  const sortedKeys = [...form.keys].sort((a, b) => a.name.localeCompare(b.name));
-  for (const k of sortedKeys) {
+  for (const k of sortKeys(form.keys)) {
     out += writeKey(k, '  ', ctx);
   }
-  switch (form.positional.kind) {
-    case 'none':
-      break;
-    case 'any':
-      out += '  $children?: unknown[];\n';
-      break;
-    case 'kind':
-      out += `  $children?: Array<${writeShape(form.positional.shape, ctx)}>;\n`;
-      break;
-    default:
-      assertNever(form.positional);
-  }
+  out += writeChildren(form, '  ', ctx);
   if (form.open) {
     out += '  [key: string]: unknown;\n';
   }
   out += '}\n\n';
   return out;
+}
+
+/**
+ * A discriminated form is a `type` union, one branch per variant, not an
+ * `interface`: the discriminant is branded to the variant's `:when`, so TS
+ * narrows the branch — and with it the variant-only keys — from the value of
+ * one property. An interface with every variant key optional would type-check
+ * a document mixing two variants, which is the thing the discriminant exists
+ * to forbid. Mirrors `writeDiscriminatedFormType` in
+ * `src/SchemaExport/TsTypes.zig`.
+ */
+function writeDiscriminatedFormType(
+  plugin: ModelPlugin,
+  form: ModelForm,
+  disc: ModelDiscriminator,
+  ctx: EmitContext,
+): string {
+  let out = `export type ${formTypeName(plugin.name, form.name)} =`;
+  for (const v of disc.variants) {
+    out += '\n  | {\n';
+    out += `      $form: "${form.name}";\n`;
+    out += `      $ns: "${plugin.name}";\n`;
+    for (const k of sortKeys(form.keys)) {
+      out +=
+        k.name === disc.keyName
+          ? writeDiscriminantKey(k, v.when, '      ')
+          : writeKey(k, '      ', ctx);
+    }
+    for (const vk of sortKeys(v.keys)) {
+      out += writeKey(vk, '      ', ctx);
+    }
+    out += writeChildren(form, '      ', ctx);
+    if (form.open) out += '      [key: string]: unknown;\n';
+    out += '    }';
+  }
+  return `${out};\n\n`;
+}
+
+function sortKeys(keys: readonly ModelKey[]): ModelKey[] {
+  return [...keys].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** The `$children` line for a form's positional slot, shared by the interface
+ *  and per-variant-branch emitters (the positional is form-level — a variant
+ *  overlays keys, never children). */
+function writeChildren(form: ModelForm, indent: string, ctx: EmitContext): string {
+  switch (form.positional.kind) {
+    case 'none':
+      return '';
+    case 'any':
+      return `${indent}$children?: unknown[];\n`;
+    case 'kind':
+      return `${indent}$children?: Array<${writeShape(form.positional.shape, ctx)}>;\n`;
+    default:
+      return assertNever(form.positional);
+  }
+}
+
+/** The discriminant key inside a variant branch: narrowed to that branch's
+ *  `:when` rather than the whole member set, which is what makes the union
+ *  discriminate. */
+function writeDiscriminantKey(key: ModelKey, when: string, indent: string): string {
+  const doc = key.description ? `${indent}/** ${key.description} */\n` : '';
+  return `${doc}${indent}${escapeIdentifier(key.name)}: Symbol_<"${when}">;\n`;
 }
 
 function writeFormDoc(form: ModelForm): string {
@@ -309,8 +374,16 @@ function buildKeyJSDoc(key: ModelKey): string {
   }
   const cr = crossRefOf(key.value);
   if (cr) {
+    // Prose names only what the route can carry: `name-key` and `acyclic`
+    // are identity-only (the loader rejects the first beside a provider,
+    // and cycle edges need per-name declaration sites extracted names
+    // don't have). Mirrors `writeCrossRefDoc` in `TsTypes.zig`.
+    const route =
+      cr.provider === null
+        ? `name-key=${cr.nameKey} acyclic=${cr.acyclic}`
+        : `provider=${cr.provider} source-key=${cr.sourceKey}`;
     lines.push(
-      `@sjon-cross-ref target=${cr.targetForm} name-key=${cr.nameKey} acyclic=${cr.acyclic}` +
+      `@sjon-cross-ref target=${cr.targetForm} ${route}` +
         (cr.scopeForm ? ` scope-form=${cr.scopeForm}` : ''),
     );
   }
@@ -438,12 +511,7 @@ function stringBoundsOf(shape: ModelValueShape): ModelStringBounds | null {
   return null;
 }
 
-function crossRefOf(shape: ModelValueShape): {
-  targetForm: string;
-  nameKey: string;
-  acyclic: boolean;
-  scopeForm: string | null;
-} | null {
+function crossRefOf(shape: ModelValueShape): ModelCrossRef | null {
   if (shape.kind === 'cross_ref') return shape.crossRef;
   return null;
 }

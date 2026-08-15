@@ -1,0 +1,18 @@
+; The miss: `u_tim` is one letter short of the extracted `u_time`, so
+; the last bind fires `not_cross_ref` — the same code and the same
+; `[bind, uniform]` slot path an identity-route miss produces, because
+; from the reference side nothing is different.
+;
+; The message names `:src`, not `:name`, and that is the repair route:
+; the legal names live *inside the string*, so either reference one that
+; is already there or add a `var<uniform>` declaration to the WGSL.
+; Adding `(shader :name u_tim …)` registers nothing — it declares a
+; shader, not a uniform.
+(use-plugin "uniforms")
+
+(shader :name sky :src """@group(0) @binding(0) var<uniform> u_time: f32;
+@group(0) @binding(1) var<uniform> u_resolution: vec2f;
+""")
+
+(bind :uniform u_resolution :group 0 :binding 1)
+(bind :uniform u_tim :group 0 :binding 0)

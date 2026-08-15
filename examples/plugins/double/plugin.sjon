@@ -1,0 +1,11 @@
+; Minimal v1 executable-plugin manifest — one expr-func `(double n)` whose
+; body is supplied by the paired `double.wasm` binary's `double` export.
+; Used by host-side conformance (cases 100-…) and by `host.test.ts` +
+; `tests/host.rs` to exercise the ABI end-to-end with a tiny artifact.
+
+(plugin :name double :version "1.0.0"
+  (expr-func :name double
+    :arity (fixed 1)
+    :params [number]
+    :result number
+    :impl "wasm:double"))

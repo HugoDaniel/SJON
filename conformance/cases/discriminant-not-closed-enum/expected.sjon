@@ -1,0 +1,5 @@
+; Schema-phase diagnostics are pathed by plugin, not by document position:
+; `[<plugin> <form> discriminant]`. Exactly one — the document is never
+; validated against a schema that failed to compile.
+(diagnostics
+  (diagnostic :code discriminant_not_closed_enum :path [probe track discriminant]))

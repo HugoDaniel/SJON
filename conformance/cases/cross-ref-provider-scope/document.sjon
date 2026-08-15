@@ -1,0 +1,29 @@
+; Provider-route executable family, 5 of 7 — `:scope` composes.
+;
+; Each `(pass …)` opens its own registry, so the two shaders' extracted
+; names do not see each other even though both went through the same
+; provider. Three things are pinned at once:
+;
+;   * within a pass, a reference to that pass's extracted name resolves;
+;   * across passes it does not — `u_b` is a real name in the *other*
+;     pass, which is precisely the mistake scoping exists to catch, and
+;     it reads as an ordinary `not_cross_ref`;
+;   * outside every pass there is no registry to consult at all, which is
+;     `cross_ref_outside_scope` rather than a miss.
+;
+; The extraction table itself is scope-blind — it is content-addressed by
+; `(provider, source)` — so the scoping happens entirely at registration.
+; Two passes carrying the *same* source would share one extraction and
+; still land in two registries.
+(use-plugin "lines")
+
+(pass
+  (shader :name a :src "u_a")
+  (bind :uniform u_a)
+  (bind :uniform u_b))
+
+(pass
+  (shader :name b :src "u_b")
+  (bind :uniform u_b))
+
+(bind :uniform u_a)

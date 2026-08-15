@@ -1,0 +1,13 @@
+; `nth` and `count` — the two list readers outside the higher-order
+; binder forms, and the only core functions that turn a vector back into
+; a scalar without arithmetic.
+;
+; `nth` is 0-indexed (form 0 reads the first element, form 1 the last),
+; and an out-of-range index is a runtime error rather than a nil: form 2
+; produces a diagnostic and no value, which is why no `:index 2` entry
+; follows. `count` of an empty vector is 0, not an error.
+(nth [10 20 30] 0)
+(nth [10 20 30] 2)
+(nth [10 20 30] 9)
+(count [1 2 3 4])
+(count [])

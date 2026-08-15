@@ -1,0 +1,26 @@
+; The provider is *declared* and nothing else: no `:impl`, and no
+; sibling `lines.wasm` for the resolver to pair with this manifest.
+; Declaration-only is legal — it is exactly what `(expr-func …)` allows,
+; and it is how a manifest describes a vocabulary whose implementation
+; ships elsewhere.
+;
+; Every host therefore agrees it cannot extract, whatever its runtime
+; support: there is nothing to run. That is what makes
+; `cross_ref_provider_unavailable` reachable from the corpus without
+; depending on a host-local build flag — the same profile as
+; `default-materialize-expression-failure`, which declares an
+; `:impl`-less expr-func and replays everywhere.
+(plugin :name lines :version "1.0.0" :sjon "1.2"
+  (cross-ref-provider :name lines
+    :description "One name per non-empty line.")
+
+  (form :name shader
+    (key :name name :type symbol :optional false)
+    (key :name src :type string :optional false))
+
+  (value-kind :name uniform-name
+    :underlying symbol
+    :cross-ref (cross-ref :target shader :provider lines))
+
+  (form :name bind
+    (key :name uniform :type uniform-name :optional false)))

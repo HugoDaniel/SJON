@@ -1,0 +1,23 @@
+{
+  "file": "examples/llm/flows/06-discriminated-union/attempt-1.sjon",
+  "project_file": null,
+  "diagnostics": [
+    {
+      "phase": "validation",
+      "code": "missing_discriminant_key",
+      "severity": "error",
+      "message": "form `track` is missing required discriminant `:kind`",
+      "span": {
+        "start": 438,
+        "end": 443,
+        "line": 14,
+        "column": 2
+      },
+      "path": [
+        "track"
+      ],
+      "declaration_span": null,
+      "docs": "https://hugodaniel.com/pages/sjon/errors/missing_discriminant_key"
+    }
+  ]
+}

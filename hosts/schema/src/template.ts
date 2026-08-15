@@ -1,9 +1,9 @@
 // Tagged template — `sjon\`…\`` produces SJON *text* with typed,
 // serialize-by-type holes. This is the deliberately-limited "tagged template"
 // approach (the user's `` sx`(+ 1 ${x})` ``), kept as an *escape hatch*, not
-// the core surface — see docs/plans/02 for why a *parsing* template was
-// rejected (it would re-implement a front-end we already own, and a parse
-// result is opaque to TS anyway).
+// the core surface. A *parsing* template was rejected: it would
+// re-implement a front-end we already own, and a parse result is opaque
+// to TS anyway.
 //
 // What makes this variant safe and worthwhile:
 //   * It produces text, runs no parser → works on every backend.

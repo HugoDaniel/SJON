@@ -1,0 +1,20 @@
+; Schema-compile family, 2 of 4. The discriminant IS a closed enum here —
+; `kind-tag` admits `kick` and `bass` — and the variant is declared for
+; `bogus`, which is neither. The variant could therefore never be selected
+; by any document, so the schema is rejected rather than silently carrying a
+; branch that is dead by construction.
+;
+; This is the check `discriminant-not-closed-enum` never reaches: without a
+; closed enum there is no membership to test, which is why that case stops
+; at one diagnostic instead of also reporting its variant.
+(plugin :name probe :version "1.0.0"
+  (value-kind :name kind-tag
+    :underlying symbol
+    :members (member-set :values [kick bass]))
+  (form :name track
+    :discriminant kind
+    (key :name kind :type kind-tag :optional true)
+    (variant :when bogus
+      (key :name step :type number :optional true))))
+
+(track :kind kick)

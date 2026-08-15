@@ -1,0 +1,17 @@
+; Same manifest as `cross-ref-provider-resolved` — tree-scoped, so both
+; shaders below register into one registry.
+(plugin :name lines :version "1.0.0" :sjon "1.2"
+  (cross-ref-provider :name lines
+    :description "One name per non-empty line."
+    :impl "wasm:extract_lines")
+
+  (form :name shader
+    (key :name name :type symbol :optional false)
+    (key :name src :type string :optional false))
+
+  (value-kind :name uniform-name
+    :underlying symbol
+    :cross-ref (cross-ref :target shader :provider lines))
+
+  (form :name bind
+    (key :name uniform :type uniform-name :optional false)))

@@ -1,0 +1,5 @@
+; `group` (a positional-local) carries a key-local `badge` on its `:tag` slot —
+; the two carriers compose. `nope` misses there → unknown_local_form at the
+; nested key-local slot [bind-group group tag].
+(diagnostics
+  (diagnostic :code unknown_local_form :path [bind-group group tag]))

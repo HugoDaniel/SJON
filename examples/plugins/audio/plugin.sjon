@@ -1,0 +1,65 @@
+; Audio plugin — exercises the `union_of` value-kind twice over. The
+; `notes` key on `(phrase …)` is a vector of `note-or-event`, a union of
+; `note-or-rest` (a closed symbol member-set) and `event` (a form-as-slot
+; pinned to the `n` and `rest` heads). The `lead` key on `(track …)` is a
+; `phrase-or-ref` — a union of `phrase-inline` (an inline `(phrase …)` form)
+; and `phrase-ref` (a cross-ref symbol naming a `(phrase :name …)`) — so the
+; same slot accepts either an inline phrase or a reference to a named one.
+; That `union{form, cross_ref}` shape is what plan 11's extract/inline LSP
+; refactors convert between.
+;
+; First-match dispatch order is preserved as `x-sjon-union-alternatives`
+; in the JSON Schema annotation. Modelled on `audio_union_plugin`
+; (src/Validator_tests.zig:3175-3206).
+
+(plugin :name audio :version "1.0.0"
+  (value-kind :name note-or-rest
+    :description "Pitch class or the rest mark `_`."
+    :underlying symbol
+    :members (member-set :values [E4 G4 A4 B4 _]))
+
+  (value-kind :name event
+    :description "A note or rest form (the `(n …)` / `(rest)` head-set)."
+    :underlying form
+    :heads (head-set :names [n rest]))
+
+  (value-kind :name note-or-event
+    :description "Either a bare note symbol or an event form."
+    :underlying union
+    :union (union-shape :alternatives [note-or-rest event]))
+
+  (value-kind :name notes-vec
+    :underlying vector
+    :vector (vector-shape :element note-or-event))
+
+  (value-kind :name phrase-inline
+    :description "An inline `(phrase …)` form."
+    :underlying form
+    :heads (head-set :names [phrase]))
+
+  (value-kind :name phrase-ref
+    :description "A bare symbol naming a `(phrase :name …)` definition."
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase))
+
+  (value-kind :name phrase-or-ref
+    :description "Either an inline phrase or a reference to a named one."
+    :underlying union
+    :union (union-shape :alternatives [phrase-inline phrase-ref]))
+
+  (form :name phrase
+    :description "A note sequence — named (a reusable definition) or anonymous (inline)."
+    (key :name name :type symbol :optional true)
+    (key :name notes :type notes-vec))
+
+  (form :name track
+    :description "A phrase slot filled inline or by reference to a named phrase."
+    (key :name lead :type phrase-or-ref))
+
+  (form :name n
+    :description "A pitched note event."
+    :positional any)
+
+  (form :name rest
+    :description "A rest event."
+    :positional any))

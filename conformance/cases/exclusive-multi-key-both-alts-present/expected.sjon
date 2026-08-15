@@ -1,0 +1,3 @@
+; One diagnostic for the group, at the form — not one per colliding key.
+(diagnostics
+  (diagnostic :code mutually_exclusive_keys_present :path [route]))

@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "pair-a",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "palette",
+          "description": "Named palette holding one cross-plugin form per slot.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "name",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            },
+            {
+              "name": "primary",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "form_heads",
+                "refs": [
+                  {
+                    "plugin": "pair-b",
+                    "name": "color"
+                  },
+                  {
+                    "plugin": "pair-b",
+                    "name": "gradient"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "accent",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "form_heads",
+                "refs": [
+                  {
+                    "plugin": "pair-b",
+                    "name": "color"
+                  },
+                  {
+                    "plugin": "pair-b",
+                    "name": "gradient"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": [
+        {
+          "name": "swatch-form",
+          "description": "Either a colour or a gradient — both declared in `pair-b`.",
+          "shape": {
+            "kind": "form_heads",
+            "refs": [
+              {
+                "plugin": "pair-b",
+                "name": "color"
+              },
+              {
+                "plugin": "pair-b",
+                "name": "gradient"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `swatch-form` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin_name": "pair-a",
+      "kind_name": "swatch-form"
+    }
+  ]
+}

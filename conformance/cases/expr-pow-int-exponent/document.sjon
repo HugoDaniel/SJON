@@ -1,0 +1,7 @@
+; Integer exponents now also flow through `pow64`'s log_inline + exp_inline
+; (musl has no integer-exponent fast path), and still land exactly on the
+; representable result. This path was already host-stable under `std.math.pow`
+; (pure repeated squaring); pinning it guards the new routing against drift.
+; Pinned decimals are the canonical `{d}` rendering.
+(pow 2.0 10.0)
+(pow 3.0 4.0)

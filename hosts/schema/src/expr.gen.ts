@@ -46,7 +46,7 @@ export const mul = (...xs: NumLike[]): SjonExpr<number> => make('*', xs);
 /** Division (left-fold). */
 export const div = (a: NumLike, b: NumLike, ...xs: NumLike[]): SjonExpr<number> => make('/', [a, b, ...xs]);
 
-/** Floating-point remainder. */
+/** Floored remainder; the result takes the divisor's sign (as GLSL mod / Python %). */
 export const mod = (x: NumLike, y: NumLike): SjonExpr<number> => make('mod', [x, y]);
 
 export const lt = (a: NumLike, b: NumLike): SjonExpr<boolean> => make('<', [a, b]);

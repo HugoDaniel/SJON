@@ -1,0 +1,5 @@
+; `(track :lead intro)` matches the `phrase-ref` cross-ref alternative (the
+; `(phrase :name intro …)` definition registered it), and
+; `(track :lead (phrase :len 8))` matches the `phrase-inline` head-set
+; alternative — both spellings accepted, clean on both validation paths.
+(diagnostics)

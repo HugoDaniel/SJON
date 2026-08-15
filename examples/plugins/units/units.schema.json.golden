@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 1,
+  "x-sjon-export-warnings": [
+    {
+      "code": "number_with_unit_emitted_via_prefix_items",
+      "severity": "info",
+      "message": "value-kind `angle` emitted as JSON Schema object with `$num` prefixItems [magnitude, unit] (required=true, allowed-units=3); SJON-aware tooling reads the canonical form via the JSON bridge",
+      "plugin": "units",
+      "kind": "angle"
+    },
+    {
+      "code": "number_with_unit_emitted_via_prefix_items",
+      "severity": "info",
+      "message": "value-kind `duration` emitted as JSON Schema object with `$num` prefixItems [magnitude, unit] (required=false, allowed-units=0); SJON-aware tooling reads the canonical form via the JSON bridge",
+      "plugin": "units",
+      "kind": "duration"
+    },
+    {
+      "code": "number_with_unit_emitted_via_prefix_items",
+      "severity": "info",
+      "message": "value-kind `distance` emitted as JSON Schema object with `$num` prefixItems [magnitude, unit] (required=true, allowed-units=4); SJON-aware tooling reads the canonical form via the JSON bridge",
+      "plugin": "units",
+      "kind": "distance"
+    }
+  ],
+  "$defs": {
+    "form.units.shape": {
+      "type": "object",
+      "description": "Geometry with bounded angle + free-form duration + sized distance.",
+      "properties": {
+        "$form": {
+          "const": "shape"
+        },
+        "$ns": {
+          "const": "units"
+        },
+        "decay": {
+          "type": "object",
+          "properties": {
+            "$num": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string",
+                  "minLength": 1
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2,
+              "items": false
+            }
+          },
+          "required": [
+            "$num"
+          ],
+          "additionalProperties": false,
+          "x-sjon-unit": {
+            "required": false,
+            "allowed": []
+          }
+        },
+        "radius": {
+          "type": "object",
+          "properties": {
+            "$num": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string",
+                  "enum": [
+                    "mm",
+                    "cm",
+                    "m",
+                    "km"
+                  ]
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2,
+              "items": false
+            }
+          },
+          "required": [
+            "$num"
+          ],
+          "additionalProperties": false,
+          "x-sjon-unit": {
+            "required": true,
+            "allowed": [
+              "mm",
+              "cm",
+              "m",
+              "km"
+            ]
+          }
+        },
+        "rotation": {
+          "type": "object",
+          "properties": {
+            "$num": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 360
+                },
+                {
+                  "type": "string",
+                  "enum": [
+                    "deg",
+                    "rad",
+                    "turn"
+                  ]
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2,
+              "items": false
+            }
+          },
+          "required": [
+            "$num"
+          ],
+          "additionalProperties": false,
+          "x-sjon-unit": {
+            "required": true,
+            "allowed": [
+              "deg",
+              "rad",
+              "turn"
+            ]
+          }
+        }
+      },
+      "required": [
+        "$form",
+        "rotation",
+        "radius"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.units.shape"
+    }
+  ]
+}

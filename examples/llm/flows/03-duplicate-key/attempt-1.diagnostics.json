@@ -1,0 +1,24 @@
+{
+  "file": "examples/llm/flows/03-duplicate-key/attempt-1.sjon",
+  "project_file": null,
+  "diagnostics": [
+    {
+      "phase": "validation",
+      "code": "duplicate_key",
+      "severity": "error",
+      "message": "duplicate keyword `:title` in form `scene`",
+      "span": {
+        "start": 126,
+        "end": 132,
+        "line": 5,
+        "column": 19
+      },
+      "path": [
+        "scene",
+        "title"
+      ],
+      "declaration_span": null,
+      "docs": "https://hugodaniel.com/pages/sjon/errors/duplicate_key"
+    }
+  ]
+}

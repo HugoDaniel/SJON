@@ -1,0 +1,5 @@
+; In-set head `entry` + local content satisfied → clean. The head-set admitted
+; the head AND the local `entry` (needs :binding) validated it, shadowing the
+; global `entry` (needs :at). An out-of-set head would be `not_head_member`
+; (covered by the not-head-member case).
+(diagnostics)

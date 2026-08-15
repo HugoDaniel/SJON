@@ -1,10 +1,19 @@
 {
-  "name": "@sjon/wasm-consumer-example",
-  "version": "1.0.0",
-  "private": true,
+  "name": "@sjon/web",
+  "version": "1.1.0",
   "type": "module",
-  "description": "Reference Node.js consumer of sjon.wasm + sjon-binary.wasm. Tested under `node --test`.",
-  "license": "SEE ../LICENSE",
+  "description": "SJON validating host for Node and the browser: SjonHost, SjonEncoder, SjonReader over sjon.wasm + sjon-binary.wasm.",
+  "license": "CC0-1.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HugoDaniel/SJON.git",
+    "directory": "hosts/web"
+  },
+  "homepage": "https://hugodaniel.com/pages/sjon",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": ["*.ts", "!*.test.ts", "!demo.ts"],
   "engines": {
     "node": ">=20"
   },

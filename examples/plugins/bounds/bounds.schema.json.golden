@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 1,
+  "x-sjon-export-warnings": [
+    {
+      "code": "string_bounds_emitted_via_keywords",
+      "severity": "info",
+      "message": "value-kind `slug` string bounds emitted via `minLength`/`maxLength`/`pattern`/`format`; codepoint-vs-UTF16 length and SJON-deferred regex semantics carry their own caveats",
+      "plugin": "bounds",
+      "kind": "slug"
+    },
+    {
+      "code": "string_bounds_emitted_via_keywords",
+      "severity": "info",
+      "message": "value-kind `email-string` string bounds emitted via `minLength`/`maxLength`/`pattern`/`format`; codepoint-vs-UTF16 length and SJON-deferred regex semantics carry their own caveats",
+      "plugin": "bounds",
+      "kind": "email-string"
+    },
+    {
+      "code": "string_bounds_emitted_via_keywords",
+      "severity": "info",
+      "message": "value-kind `url` string bounds emitted via `minLength`/`maxLength`/`pattern`/`format`; codepoint-vs-UTF16 length and SJON-deferred regex semantics carry their own caveats",
+      "plugin": "bounds",
+      "kind": "url"
+    },
+    {
+      "code": "string_bounds_emitted_via_keywords",
+      "severity": "info",
+      "message": "value-kind `uuid-string` string bounds emitted via `minLength`/`maxLength`/`pattern`/`format`; codepoint-vs-UTF16 length and SJON-deferred regex semantics carry their own caveats",
+      "plugin": "bounds",
+      "kind": "uuid-string"
+    },
+    {
+      "code": "string_bounds_emitted_via_keywords",
+      "severity": "info",
+      "message": "value-kind `version-tag` string bounds emitted via `minLength`/`maxLength`/`pattern`/`format`; codepoint-vs-UTF16 length and SJON-deferred regex semantics carry their own caveats",
+      "plugin": "bounds",
+      "kind": "version-tag"
+    },
+    {
+      "code": "string_bounds_emitted_via_keywords",
+      "severity": "info",
+      "message": "value-kind `file-path` string bounds emitted via `minLength`/`maxLength`/`pattern`/`format`; codepoint-vs-UTF16 length and SJON-deferred regex semantics carry their own caveats",
+      "plugin": "bounds",
+      "kind": "file-path"
+    },
+    {
+      "code": "numeric_bounds_emitted_via_min_max",
+      "severity": "info",
+      "message": "value-kind `score` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=false); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values",
+      "plugin": "bounds",
+      "kind": "score"
+    },
+    {
+      "code": "numeric_bounds_emitted_via_min_max",
+      "severity": "info",
+      "message": "value-kind `ratio` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=false); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values",
+      "plugin": "bounds",
+      "kind": "ratio"
+    },
+    {
+      "code": "numeric_bounds_emitted_via_min_max",
+      "severity": "info",
+      "message": "value-kind `count` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values",
+      "plugin": "bounds",
+      "kind": "count"
+    },
+    {
+      "code": "numeric_bounds_emitted_via_min_max",
+      "severity": "info",
+      "message": "value-kind `big` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values",
+      "plugin": "bounds",
+      "kind": "big"
+    },
+    {
+      "code": "numeric_bound_exceeds_double_range",
+      "severity": "info",
+      "message": "value-kind `big` max bound 100000000000000000 exceeds 2^53; non-bigint JSON Schema validators may lose precision — see `x-sjon-exact-bound.max`",
+      "plugin": "bounds",
+      "kind": "big"
+    }
+  ],
+  "$defs": {
+    "form.bounds.profile": {
+      "type": "object",
+      "description": "User profile carrying one slot per bound flavour.",
+      "properties": {
+        "$form": {
+          "const": "profile"
+        },
+        "$ns": {
+          "const": "bounds"
+        },
+        "big-id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000000000000000,
+          "x-sjon-exact-bound": {
+            "max": "100000000000000000"
+          }
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "x-sjon-length-unit": "codepoint"
+        },
+        "handle": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 32,
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "x-sjon-pattern-engine": "deferred-in-sjon-runtime",
+          "x-sjon-length-unit": "codepoint"
+        },
+        "homepage": {
+          "type": "string",
+          "format": "uri",
+          "x-sjon-length-unit": "codepoint"
+        },
+        "ratio": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "release": {
+          "type": "string",
+          "x-sjon-format": "semver",
+          "x-sjon-length-unit": "codepoint"
+        },
+        "score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "uuid": {
+          "type": "string",
+          "format": "uuid",
+          "x-sjon-length-unit": "codepoint"
+        },
+        "visits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "workspace": {
+          "type": "string",
+          "x-sjon-format": "path",
+          "x-sjon-length-unit": "codepoint"
+        }
+      },
+      "required": [
+        "$form",
+        "handle",
+        "email",
+        "uuid"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.bounds.profile"
+    }
+  ]
+}

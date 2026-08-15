@@ -1,0 +1,24 @@
+{
+  "file": "examples/llm/flows/10-cross-ref-provider/attempt-1.sjon",
+  "project_file": "examples/llm/flows/10-cross-ref-provider/sjon-project.sjon",
+  "diagnostics": [
+    {
+      "phase": "validation",
+      "code": "not_cross_ref",
+      "severity": "error",
+      "message": "form `fill` keyword `:swatch` expects `swatch-name`, got `dust` (no `(paint/palette :colors …)` source provides this name)",
+      "span": {
+        "start": 131,
+        "end": 135,
+        "line": 8,
+        "column": 30
+      },
+      "path": [
+        "fill",
+        "swatch"
+      ],
+      "declaration_span": null,
+      "docs": "https://hugodaniel.com/pages/sjon/errors/not_cross_ref"
+    }
+  ]
+}

@@ -1,0 +1,77 @@
+---
+// Static SJON snippet rendered as a card with the triple-stripe top.
+// The optional `label` becomes a small mono filename kicker just below
+// the stripes; the bare variant skips card chrome entirely (used
+// inline inside prose). Pass `code` to get Clojure-grammar highlighting
+// via Shiki; the slot fallback exists for un-highlighted literal text.
+
+import { highlight } from '../lib/highlight';
+
+interface Props {
+  label?: string;
+  bare?: boolean;
+  code?: string;
+}
+const { label, bare = false, code } = Astro.props;
+const html = code ? await highlight(code) : null;
+---
+
+<figure class:list={['snippet', { 'card': !bare, 'is-bare': bare }]}>
+    {!bare ? (
+        <div class="card__deck">
+            <div class="card__panel snippet-panel">
+                {label && <p class="card__filename">{label}</p>}
+                {html ? <div class="snippet-code" set:html={html} /> : <pre><code><slot /></code></pre>}
+            </div>
+        </div>
+    ) : (
+        html ? <div class="snippet-code" set:html={html} /> : <pre><code><slot /></code></pre>
+    )}
+</figure>
+
+<style>
+    .snippet {
+        margin: var(--space-3) 0;
+    }
+    .snippet-panel {
+        padding: var(--space-3) 0 0;
+        background: transparent;
+    }
+    .snippet .card__filename {
+        padding: 0 var(--space-4);
+    }
+    .snippet pre,
+    .snippet :global(pre) {
+        background: var(--surface-mute);
+        margin: var(--space-2) 0 0;
+        padding: var(--space-3) var(--space-4);
+        overflow-x: auto;
+        line-height: 1.65;
+        font-size: 15.5px;
+        font-family: var(--mono);
+        font-weight: 500;
+        font-variant-ligatures: none;
+        white-space: pre;
+        color: var(--ink);
+        -webkit-font-smoothing: antialiased;
+        border-top: 1px solid var(--rule-mute);
+    }
+    .snippet :global(code) {
+        font-family: inherit;
+        font-size: inherit;
+        line-height: inherit;
+    }
+    .snippet.is-bare {
+        background: transparent;
+        border: 0;
+        box-shadow: none;
+        padding: 0;
+    }
+    .snippet.is-bare pre,
+    .snippet.is-bare :global(pre) {
+        padding: 0;
+        margin: 0;
+        border-top: 0;
+        background: transparent;
+    }
+</style>

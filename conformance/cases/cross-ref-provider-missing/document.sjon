@@ -1,0 +1,18 @@
+; Provider-route executable family, 2 of 7 — a reference outside the
+; extracted set.
+;
+; This is the case the whole feature exists for: `u_tim` is a typo for a
+; name that only appears inside an opaque string, so no static schema
+; could have caught it and no identity-route cross-ref could have either.
+; The extracted member set is `{u_time, u_res}` and the reference is
+; checked against it exactly like a declared name would be — same
+; `not_cross_ref`, same slot path.
+;
+; The second reference resolves, so the miss is the miss and not the
+; whole registry having failed to build.
+(use-plugin "lines")
+
+(shader :name main :src "u_time\nu_res")
+
+(bind :uniform u_tim)
+(bind :uniform u_res)

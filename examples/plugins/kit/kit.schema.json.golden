@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 1,
+  "x-sjon-export-warnings": [
+    {
+      "code": "variants_emitted_via_if_then",
+      "severity": "info",
+      "message": "discriminated form `track` — variants emitted as allOf+if/then; source-order (variant keys must follow the discriminant) is not enforced by JSON Schema",
+      "plugin": "kit",
+      "form": "track"
+    }
+  ],
+  "$defs": {
+    "form.kit.track": {
+      "type": "object",
+      "description": "One drum-machine row. `:kind` selects the variant overlay.",
+      "properties": {
+        "$form": {
+          "const": "track"
+        },
+        "$ns": {
+          "const": "kit"
+        },
+        "from": {
+          "description": "Bar offset; defaults to 0.",
+          "type": "number"
+        },
+        "kind": {
+          "description": "Selects the per-row overlay.",
+          "enum": [
+            {
+              "$sym": "kick"
+            },
+            {
+              "$sym": "bass"
+            },
+            {
+              "$sym": "hat"
+            }
+          ]
+        },
+        "name": {
+          "description": "Row identifier, unique within the kit.",
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "$form",
+        "name",
+        "kind"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": {
+                  "$sym": "kick"
+                }
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "downbeat-volume": {
+                "type": "number"
+              },
+              "step": {
+                "description": "Subdivision (1/16, 1/8, …).",
+                "type": "number"
+              },
+              "volume": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "step"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": {
+                  "$sym": "bass"
+                }
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "gain": {
+                "type": "number"
+              },
+              "sequence": {
+                "description": "Note sequence per bar.",
+                "type": "array",
+                "items": {}
+              }
+            },
+            "required": [
+              "sequence"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": {
+                  "$sym": "hat"
+                }
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "pattern": {
+                "description": "Pattern macro (open / closed / half).",
+                "type": "object",
+                "properties": {
+                  "$sym": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "$sym"
+                ],
+                "additionalProperties": false
+              },
+              "swing": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "pattern"
+            ]
+          }
+        }
+      ],
+      "unevaluatedProperties": false,
+      "x-sjon-discriminant": {
+        "key": "kind",
+        "variants": [
+          {
+            "when": "kick",
+            "keys": [
+              "step",
+              "volume",
+              "downbeat-volume"
+            ]
+          },
+          {
+            "when": "bass",
+            "keys": [
+              "sequence",
+              "gain"
+            ]
+          },
+          {
+            "when": "hat",
+            "keys": [
+              "pattern",
+              "swing"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.kit.track"
+    }
+  ]
+}

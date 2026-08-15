@@ -1,0 +1,31 @@
+; The fixture provider, portable route. `lines` splits its source on
+; newlines and calls every non-empty line a name — boring on purpose,
+; because what this family pins is the *seam* (declare, pin, extract,
+; register, resolve, fail, be absent) and not GLSL parsing.
+;
+; The sibling `lines.wasm` is built from
+; `conformance/fixtures/lines_provider.zig` by `zig build plugin-fixtures`
+; and committed, so a host with no Zig toolchain can still run the case.
+; `conformance/fixtures/lines_plugin.zig` wires the same extractor as a
+; native `impl`, and its tests drive these same documents — so the two
+; routes are compared, not merely both present.
+;
+; `:sjon "1.2"` is the manifest format that introduced
+; `(cross-ref-provider …)` and `(cross-ref :provider/:source-key …)`.
+; A host that predates it refuses the whole manifest with
+; `sjon_format_unsupported` rather than silently ignoring the vocabulary.
+(plugin :name lines :version "1.0.0" :sjon "1.2"
+  (cross-ref-provider :name lines
+    :description "One name per non-empty line."
+    :impl "wasm:extract_lines")
+
+  (form :name shader
+    (key :name name :type symbol :optional false)
+    (key :name src :type string :optional false))
+
+  (value-kind :name uniform-name
+    :underlying symbol
+    :cross-ref (cross-ref :target shader :provider lines))
+
+  (form :name bind
+    (key :name uniform :type uniform-name :optional false)))

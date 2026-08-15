@@ -1,0 +1,98 @@
+# shapes
+
+## Forms
+
+### `(canvas …)`
+
+Drawing surface. Positional children are shapes.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:w` | `number` | no | — | — |
+| `:h` | `number` | no | — | — |
+| `:bg` | `string` | no | — | Named background colour ("black", "#202028", …). |
+
+Positional children: any.
+
+### `(circle …)`
+
+Filled circle at :center with given :radius.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:center` | `vector<any>` | no | — | — |
+| `:radius` | `number` | no | — | — |
+| `:fill` | `symbol enum` | no | — | one of: `evenodd`, `nonzero`<br>Optional :evenodd or :nonzero fill rule. |
+
+### `(rect …)`
+
+Axis-aligned rectangle from :origin spanning :size.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:origin` | `vector<any>` | no | — | — |
+| `:size` | `vector<any>` | no | — | — |
+
+### `(group …)`
+
+Named container of shapes; positional children are shapes.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:name` | `string` | no | — | — |
+
+Positional children: any.
+
+### `(scene …)`
+
+Top-level scene. `open = true` so authors can attach ad-hoc metadata keywords without the validator complaining.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:title` | `string` | no | — | — |
+
+Positional children: any.
+
+Open form: unknown keys are accepted.
+
+### `(badge …)`
+
+Tiny labelled mark. `:shape` is HeadSet-pinned: only `(circle …)` or `(rect …)` are accepted as the focal form.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:label` | `string` | no | — | — |
+| `:shape` | `form: (circle …) \| (rect …)` | no | — | — |
+
+## Value kinds
+
+### length
+
+Non-negative scalar in canvas units.
+
+Type: `number`.
+
+### point
+
+[x y] vector in canvas coordinates.
+
+Type: `vector<any>`.
+
+### fill-rule
+
+SVG-style fill rule. One of `evenodd` or `nonzero`.
+
+Type: `symbol enum` — one of: `evenodd`, `nonzero`.
+
+### shape-form
+
+Form-as-slot: `(circle …)` or `(rect …)`. Used by `(badge :shape …)` to pin the focal element's identity.
+
+Type: `form: (circle …) | (rect …)`.
+
+## Expression functions
+
+| Function | Signature | Description |
+| --- | --- | --- |
+| `golden` | `(golden)` | Golden ratio (placeholder). Declared so the validator recognises it; evaluator dispatch lands with v0.3 plugin hooks. |
+| `deg` | `(deg _)` | Degrees → radians. Declared; not yet evaluable. |

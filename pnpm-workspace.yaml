@@ -3,3 +3,5 @@ packages:
   - "hosts/highlight"
   - "hosts/web"
   - "hosts/typescript-parity"
+  - "editors/vscode"
+  - "landing-page"

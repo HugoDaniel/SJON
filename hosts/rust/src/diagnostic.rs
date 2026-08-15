@@ -218,9 +218,10 @@ pub struct PerPluginArtifact {
 }
 
 /// Layout discriminator on `ExportSchemaResult`. `Aggregated` ↔
-/// `aggregated`, `PerPlugin` ↔ `per_plugin`.
+/// `aggregated`, `PerPlugin` ↔ `per-plugin` (kebab, matching the
+/// request-side `ExportLayoutOption` and the Zig envelope literal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum ExportLayout {
     /// Single-file aggregated artifacts (`AggregatedArtifacts`).

@@ -162,7 +162,7 @@ export interface ExportSchemaPerPluginEntry extends ExportSchemaArtifacts {
 }
 
 export interface ExportSchemaResult {
-  readonly layout: 'aggregated' | 'per_plugin';
+  readonly layout: 'aggregated' | 'per-plugin';
   readonly hostDiagnostics: readonly HostDiagnostic[];
   readonly loadedPlugins: readonly PluginSummary[];
   readonly warnings: readonly ExportSchemaWarning[];

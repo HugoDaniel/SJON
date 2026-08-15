@@ -1,0 +1,25 @@
+; The inverse trig family and the two angle-unit conversions. `sin`/`cos`/
+; `tan` were pinned when `src/trig.zig` was vendored to make them
+; host-independent; their inverses were added to the same table and never
+; got a fixture, so nothing held their digits between the native build and
+; the two WASM artifacts.
+;
+; Form 1 is the one to watch: (acos 0.5) is 1.0471975511965979, and pi/3
+; correctly rounded is 1.0471975511965976. The implementation is three ulp
+; off the true value — which is fine and normal for a software inverse
+; cosine, and is exactly why the digits have to be written down rather than
+; recomputed by whoever reads this next.
+;
+; Forms 3/4/5 walk `atan2` out of the first quadrant, where the sign
+; handling lives: same |y| and |x|, three different answers, and (atan2 0
+; -1) lands exactly on +pi rather than -pi.
+(asin 0.5)
+(acos 0.5)
+(atan 1.0)
+(atan2 1.0 1.0)
+(atan2 1.0 -1.0)
+(atan2 0.0 -1.0)
+(radians 180.0)
+(degrees 3.141592653589793)
+(pi)
+(tau)

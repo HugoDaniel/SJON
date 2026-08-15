@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 1,
+  "$defs": {
+    "form.demo.camera": {
+      "type": "object",
+      "properties": {
+        "$form": {
+          "const": "camera"
+        },
+        "$ns": {
+          "const": "demo"
+        },
+        "mode": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "zoom": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.demo.camera"
+    }
+  ]
+}

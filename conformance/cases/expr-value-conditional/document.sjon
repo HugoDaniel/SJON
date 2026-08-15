@@ -1,0 +1,23 @@
+; `if` and `cond` are the two lazy special forms with a value, and both
+; have a defined answer for "no branch matched" that nothing else in the
+; corpus states.
+;
+; Form 2 is a two-arg `if` with a false test: the value is nil, not an
+; error and not the untaken branch. Form 7 is the same story for `cond`
+; with every test false. So both forms are total, and a document that
+; leans on them gets a nil it has to handle rather than a missing result.
+;
+; Forms 3-5 pin truthiness, which `Value.isTruthy` defines as "everything
+; except `false` and `nil`". So (if 0 1 2) is 1 and (if "" 1 2) is 1 —
+; zero, the empty string and the empty vector are all truthy, and a C or
+; JavaScript reflex about any of them is wrong here. Form 6 is the only
+; non-boolean that is falsy.
+(if true 1 2)
+(if false 1 2)
+(if false 1)
+(if 0 1 2)
+(if "" 1 2)
+(if [] 1 2)
+(if nil 1 2)
+(cond false 1 true 2)
+(cond false 1)

@@ -1,3 +1,12 @@
+//! GENERATED FILE — do not edit by hand.
+//!
+//! Source of truth: manifests/meta.sjon. Regenerate with:
+//!     zig build gen-meta-schema -- --regen
+//!
+//! `zig build test` byte-compares this file against a fresh
+//! generation, so editing meta.sjon without regenerating — or
+//! hand-editing this file — fails CI. See tools/gen_meta_schema.zig.
+
 const Plugin = @import("Plugin.zig");
 const Schema = @import("Schema.zig");
 const std = @import("std");
@@ -11,8 +20,9 @@ const value_kinds = [_]Plugin.ValueKind{
     .{ .name = "sha256-hash", .underlying = .string, .description = "Hex digest of the shape `sha256-<64 lowercase hex chars>`." },
     .{ .name = "spdx-id", .underlying = .string, .description = "SPDX license identifier (e.g. CC0-1.0, Apache-2.0). Free-form strings accepted with a warning." },
     .{ .name = "type-list", .underlying = .vector, .description = "Vector of type references (primitive names or value-kind names).", .vector = .{ .element = .{ .name = "type-ref" } } },
-    .{ .name = "plugin-decl", .underlying = .form, .description = "A declaration sub-form inside (plugin …).", .heads = .{ .names = &.{ "value-kind", "form", "expr-func" } } },
+    .{ .name = "plugin-decl", .underlying = .form, .description = "A declaration sub-form inside (plugin …).", .heads = .{ .names = &.{ "value-kind", "form", "expr-func", "cross-ref-provider" } } },
     .{ .name = "key-decl", .underlying = .form, .description = "A (key …) | (variant …) | (exclusive-group …) sub-form.", .heads = .{ .names = &.{ "key", "variant", "exclusive-group" } } },
+    .{ .name = "form-child-decl", .underlying = .form, .description = "A (key …) | (variant …) | (exclusive-group …) | (form …) sub-form inside (form …).", .heads = .{ .names = &.{ "key", "variant", "exclusive-group", "form" } } },
     .{ .name = "key-local-decl", .underlying = .form, .description = "An inline slot-local (form …) sub-form inside (key …).", .heads = .{ .names = &.{"form"} } },
     .{ .name = "alt-decl", .underlying = .form, .description = "An (alt …) sub-form inside (exclusive-group …).", .heads = .{ .names = &.{"alt"} } },
     .{ .name = "signature-spec", .underlying = .form, .description = "A (signature …) sub-form for multi-signature expr-func.", .heads = .{ .names = &.{"signature"} } },
@@ -119,11 +129,13 @@ const forms = [_]Plugin.FormSpec{
         .{ .name = "name-key", .value_type = .symbol },
         .{ .name = "acyclic", .value_type = .boolean },
         .{ .name = "scope", .value_type = .symbol },
+        .{ .name = "provider", .value_type = .symbol },
+        .{ .name = "source-key", .value_type = .symbol },
     } },
     .{ .name = "union-shape", .description = "Pins alternative kind names on a :union underlying.", .keys = &.{
         .{ .name = "alternatives", .value_type = .{ .named = .{ .name = "type-list" } }, .optional = false },
     } },
-    .{ .name = "form", .description = "Declares a data-form constructor (e.g. (scene …)).", .positional = .{ .kind = .{ .name = "key-decl" } }, .keys = &.{
+    .{ .name = "form", .description = "Declares a data-form constructor (e.g. (scene …)).", .positional = .{ .kind = .{ .name = "form-child-decl" } }, .keys = &.{
         .{ .name = "name", .value_type = .symbol, .optional = false },
         .{ .name = "description", .value_type = .string },
         .{ .name = "positional", .value_type = .{ .named = .{ .name = "positional-ref" } } },
@@ -149,6 +161,11 @@ const forms = [_]Plugin.FormSpec{
         .{ .name = "param-names", .value_type = .{ .named = .{ .name = "symbol-list" } } },
         .{ .name = "rest", .value_type = .{ .named = .{ .name = "type-ref" } } },
         .{ .name = "result", .value_type = .{ .named = .{ .name = "type-ref" } } },
+        .{ .name = "description", .value_type = .string },
+        .{ .name = "impl", .value_type = .{ .named = .{ .name = "binding-ref" } } },
+    } },
+    .{ .name = "cross-ref-provider", .description = "Declares a pure name-extractor backing a provider-route cross-ref.", .keys = &.{
+        .{ .name = "name", .value_type = .symbol, .optional = false },
         .{ .name = "description", .value_type = .string },
         .{ .name = "impl", .value_type = .{ .named = .{ .name = "binding-ref" } } },
     } },

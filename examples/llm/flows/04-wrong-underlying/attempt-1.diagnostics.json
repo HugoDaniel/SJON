@@ -1,0 +1,24 @@
+{
+  "file": "examples/llm/flows/04-wrong-underlying/attempt-1.sjon",
+  "project_file": null,
+  "diagnostics": [
+    {
+      "phase": "validation",
+      "code": "wrong_underlying",
+      "severity": "error",
+      "message": "form `scene` keyword `:bpm` expects number, got string",
+      "span": {
+        "start": 124,
+        "end": 129,
+        "line": 5,
+        "column": 13
+      },
+      "path": [
+        "scene",
+        "bpm"
+      ],
+      "declaration_span": null,
+      "docs": "https://hugodaniel.com/pages/sjon/errors/wrong_underlying"
+    }
+  ]
+}

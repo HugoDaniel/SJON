@@ -1,0 +1,20 @@
+[
+  {
+    "instancePath": "",
+    "schemaPath": "#/$defs/form.demo.camera/additionalProperties",
+    "keyword": "additionalProperties",
+    "params": {
+      "additionalProperty": "zom"
+    },
+    "message": "must NOT have additional properties"
+  },
+  {
+    "instancePath": "",
+    "schemaPath": "#/oneOf",
+    "keyword": "oneOf",
+    "params": {
+      "passingSchemas": null
+    },
+    "message": "must match exactly one schema in oneOf"
+  }
+]

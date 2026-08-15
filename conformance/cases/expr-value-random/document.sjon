@@ -1,0 +1,30 @@
+; The seeded-random family is the one place in the evaluator where
+; "deterministic" is the entire feature. Every one of these is a pure
+; function of (seed, key, …) over a vendored SplitMix64, with no hidden
+; state and no platform entropy — which is a claim the corpus is the only
+; thing that can actually check, because it replays these exact digits
+; through the native build, `sjon.wasm` under Node, and `sjon.wasm` under
+; wasmtime.
+;
+; Forms 0-2 pin `hash` itself, and pin that both inputs matter: changing
+; the key (form 1) and changing the seed (form 2) each move the result to
+; somewhere unrelated. Forms 3/4 are `rand01` over the same two hashes, so
+; the two layers are pinned independently — a change to the hash and a
+; compensating change to the float derivation cannot cancel out unnoticed.
+;
+; Forms 6-9 are the derived generators at one shared (seed, key), so they
+; are all reading the same underlying draw: `rand-int` lands on 3 in
+; [1, 6], `rand-choice` picks :b out of three, and `rand-bool` at that
+; draw is true at p = 0.5. Forms 8/9 pin the two saturating ends —
+; p = 0 is never true and p = 1 always is, whatever the draw was.
+(hash 1 0)
+(hash 1 1)
+(hash 2 0)
+(rand01 1 0)
+(rand01 1 1)
+(rand-range 7 3 -1.0 1.0)
+(rand-int 7 3 1 6)
+(rand-bool 7 3 0.5)
+(rand-bool 7 3 0.0)
+(rand-bool 7 3 1.0)
+(rand-choice 7 3 [:a :b :c])

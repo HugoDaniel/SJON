@@ -50,6 +50,8 @@ Stable codes you are likely to see while authoring:
 | `duplicate_cross_ref_target` | Rename one of the two declarations or remove the duplicate. |
 | `cyclic_cross_ref` | Break the cycle in the chain (typically a `:parent`-style key). |
 | `cross_ref_outside_scope` | Move the reference inside the enclosing scope form, or declare the name in the right scope. |
+| `cross_ref_extraction_failed` | Fix the source string the diagnostic points at - a provider read it and rejected it, so the names inside are unknown. |
+| `cross_ref_provider_unavailable` | Nothing in the document to repair: this host cannot run the provider, so those names go unchecked here. |
 | `missing_discriminant_key` | Add the discriminant key (e.g. `:kind`) to the form. |
 | `unknown_key` (with discriminant-first hint) | Reorder so the discriminant key precedes any variant-only key. |
 | `mutually_exclusive_keys_present` | Remove all but one alternative from the group the message names. |

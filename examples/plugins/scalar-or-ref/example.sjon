@@ -1,0 +1,10 @@
+; Example usage of the `scalar-or-ref` plugin. The dispatch is sized with a
+; mix of literals and a symbolic reference, exercising both alternatives of
+; the desugared `union [dim-value symbol]`:
+;
+;   * :x — 64, a literal count (the scalar / `dim-value` alternative).
+;   * :y — WORKGROUP_SIZE, a bare symbol (the `symbol` / reference
+;     alternative; it resolves downstream, e.g. to a host-supplied constant).
+;   * :z — 1, another literal.
+
+(dispatch :x 64 :y WORKGROUP_SIZE :z 1)
