@@ -22,6 +22,10 @@ export interface NumericBoundsIR {
   readonly exclusiveMin?: boolean;
   readonly exclusiveMax?: boolean;
   readonly integer?: boolean;
+  /** Divisor for `:multiple-of` (manifest format 1.3). Positive: a
+   *  non-positive divisor is refused by the loader, so the builder refuses
+   *  it first. */
+  readonly multipleOf?: number;
 }
 
 /** Length/pattern/format refinement. Lowers to `(string-bounds …)`. */
@@ -38,7 +42,17 @@ export interface StringBoundsIR {
  * Lowers to `:underlying symbol :cross-ref (cross-ref …)`.
  */
 export interface CrossRefIR {
-  readonly target: string;
+  /** Every target form, in declaration order; never empty. More than one
+   * declares that the listed forms share **one namespace** — a name from
+   * any of them satisfies a reference, and a name from two of them is
+   * `duplicate_cross_ref_target`. `:acyclic` and `provider` are rejected
+   * on a group; see `crossRef` in `builder.ts`.
+   *
+   * The order is preserved on the way out (so a schema serializes as it
+   * was written) but carries no meaning: an engine keys the namespace on
+   * this list as a *set*, so `['a','b']` and `['b','a']` declare the same
+   * one. */
+  readonly targets: readonly string[];
   readonly nameKey?: string;
   readonly acyclic?: boolean;
   readonly scope?: string;

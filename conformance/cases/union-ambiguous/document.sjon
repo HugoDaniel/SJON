@@ -1,0 +1,37 @@
+; A union over two cross-ref kinds pointing at *different* target forms.
+; Both `(render-pipeline :name same)` and `(compute-pipeline :name same)`
+; are legal — duplicate detection is per-target, and these are two
+; targets, so neither bucket sees a collision. That is exactly why
+; nothing else catches the reference below: `(dispatch :pipeline same)`
+; resolves two ways, and which one it means is decided by the order the
+; alternatives were declared in.
+;
+; `union_ambiguous` is a `warning`. The union's rule is unchanged and the
+; document still validates — first match still wins, so `same` here is
+; the render pipeline. What the warning reports is that a *second*
+; reading exists and order is doing work the author never chose.
+(plugin :name gfx :version "1.0.0"
+  (value-kind :name render-pipeline-ref
+    :description "A symbol naming a `(render-pipeline :name …)`."
+    :underlying symbol
+    :cross-ref (cross-ref :target render-pipeline))
+  (value-kind :name compute-pipeline-ref
+    :description "A symbol naming a `(compute-pipeline :name …)`."
+    :underlying symbol
+    :cross-ref (cross-ref :target compute-pipeline))
+  (value-kind :name pipeline-ref
+    :description "Either kind of pipeline, tried in this order."
+    :underlying union
+    :union (union-shape :alternatives [render-pipeline-ref compute-pipeline-ref]))
+
+  (form :name render-pipeline
+    (key :name name :type symbol))
+  (form :name compute-pipeline
+    (key :name name :type symbol))
+  (form :name dispatch
+    (key :name pipeline :type pipeline-ref)))
+
+(render-pipeline  :name same)
+(compute-pipeline :name same)
+
+(dispatch :pipeline same)

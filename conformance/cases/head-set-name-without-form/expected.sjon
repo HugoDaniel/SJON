@@ -1,0 +1,6 @@
+; One diagnostic, from the descent — not from the head-set. `ghost` is a
+; member of `:names`, so narrowing admitted it; the slot then had no form of
+; that name to validate against. Attributed to the slot
+; ([bind-group-layout entry]), which is the scope the lookup missed in.
+(diagnostics
+  (diagnostic :code unknown_local_form :path [bind-group-layout entry]))

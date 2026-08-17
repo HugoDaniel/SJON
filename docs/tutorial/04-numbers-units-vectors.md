@@ -17,6 +17,16 @@ A number can carry an opaque unit suffix:
 1.5e2hz
 ```
 
+A hyphen may join two letter runs inside one unit:
+
+```sjon
+2d-array
+5ms-per-frame
+```
+
+but only when a **letter** follows the hyphen. `1em-2` is two values —
+`1em` and `-2` — not one number with the unit `em-2`.
+
 SJON preserves the suffix but does not interpret it. The host or plugin
 decides what `b`, `deg`, `ms`, or `%` means.
 
@@ -29,6 +39,21 @@ digit or sign:
 1em       ; number 1 with unit em
 1e-9ms    ; exponent plus unit ms
 ```
+
+Underscores group digits and are stripped before parsing, and a `0x`
+prefix writes an integer in hexadecimal:
+
+```sjon
+1_000_000     ; the number 1000000
+0xFF          ; the number 255
+0Xff          ; the same number — case is free
+0xFFFF_FFFF   ; 4294967295, grouped
+-0x10         ; -16
+```
+
+Hex is an *integer* spelling: no fraction, no exponent, no unit. The
+token stops at the first byte that isn't a hex digit, so `0xFFms` is
+the number `0xFF` followed by the symbol `ms`.
 
 Vectors are ordered lists:
 
@@ -75,7 +100,54 @@ Classify the unit behavior:
 4. `60_000ms`
 5. `50%`
 
+Predict the lexing. How many values is each of these?
+
+1. `2d-array`
+2. `1em-2`
+3. `90deg5px`
+4. `5-3`
+
+The second is the one to remember: **two**. A hyphen continues a unit
+only before a letter, so `1em-2` is `1em` then `-2`. The first is one
+value (letter after the hyphen), the third is two (a digit ends a unit),
+and the fourth is two (no unit involved at all — that is subtraction's
+spelling).
+
+Predict the value. Each of these is a number — say which one:
+
+1. `0xFF`
+2. `0x10`
+3. `10x`
+4. `0xFFms`
+
+The third is the one worth pausing on. `x` only starts a hex prefix
+right after a lone `0`; everywhere else it is an ordinary unit letter,
+so `10x` is the number `10` with unit `x`. That gate is what keeps every
+pre-hex document reading exactly as it did.
+
 Repair the values:
+
+```sjon
+(mask :bits 0x)
+```
+
+A `0x` prefix with no hex digit after it is a parse error, not the
+number zero. Finish the literal:
+
+```sjon
+(mask :bits 0xFF)
+```
+
+```sjon
+(mask :bits 0xGG)
+```
+
+`G` is not a hex digit. Hex digits are `0`–`9` and `a`–`f` (either
+case):
+
+```sjon
+(mask :bits 0xFF)
+```
 
 ```sjon
 (circle :center [160] :radius 32)
@@ -134,5 +206,9 @@ diagnostics if your value falls outside the declared range.
 - What is the difference between `1e9` and `1em`?
 - Is `[0 0 1 1]` the same shape as `[[0 0] [1 1]]`?
 - Can vector elements be forms?
+- Why is `10x` not a hex literal?
+- What does `sjon fmt` print for `0xFF`, and why?
+- `2d-array` is one value and `1em-2` is two. What single rule decides
+  both?
 
 Next: [Forms and Keyword Pairing](05-forms-and-keyword-pairing.md).

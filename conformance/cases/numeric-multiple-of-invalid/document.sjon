@@ -1,0 +1,34 @@
+; Two load-time verdicts on `:multiple-of`, and the difference between them
+; is the point.
+;
+; `:multiple-of 0` is an **error**. The check divides by this value, and the
+; alternative reading — "every number is a multiple of 0" — is not one anyone
+; wants a schema to state.
+;
+; `:multiple-of -8` is an **error** too, and for a second reason on top of
+; that one: it divides exactly what `8` divides, so allowing it buys nothing,
+; and JSON Schema 2020-12 requires `multipleOf` to be strictly positive — so a
+; host that accepted it exported a schema no validator will compile. Both
+; signs share one arm and one message.
+;
+; `:multiple-of 0.25` is a **warning**, not an error. It is meaningful and it
+; works; it is only approximate, because divisibility is exact in integer
+; space and a fractional divisor falls back to a floating-point remainder
+; against a tolerance. Rejecting it would forbid a working schema, so the
+; author is told instead. The bound is still stored and still checked.
+;
+; No document body: both diagnostics come from the manifest phase, and adding
+; a usage would only pile `unknown_form` on top once the errored plugin is
+; dropped from the schema.
+(plugin :name gfx :version "1.0.0" :sjon "1.3"
+  (value-kind :name zero-divisor
+    :underlying number
+    :numeric (numeric-bounds :multiple-of 0))
+
+  (value-kind :name negative-divisor
+    :underlying number
+    :numeric (numeric-bounds :multiple-of -8))
+
+  (value-kind :name quarter
+    :underlying number
+    :numeric (numeric-bounds :multiple-of 0.25)))

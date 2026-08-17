@@ -1419,7 +1419,7 @@ test "OOM: Host.preloadSchema converges over a multi-source manifest set" {
 const cross_ref_oom_plugin: sjon.Plugin.Plugin = .{
     .name = "dangler",
     .value_kinds = &.{
-        .{ .name = "ref-kind", .underlying = .symbol, .cross_ref = .{ .target_form = "ghost" } },
+        .{ .name = "ref-kind", .underlying = .symbol, .cross_ref = .{ .targets = &.{"ghost"} } },
     },
 };
 
@@ -1632,6 +1632,269 @@ test "OOM: EffectiveDocument.render converges splicing defaults into source" {
             // Non-vacuous: both defaults were actually spliced in.
             try testing.expect(std.mem.indexOf(u8, text, ":title") != null);
             try testing.expect(std.mem.indexOf(u8, text, ":fps 60") != null);
+            return;
+        }
+    }
+    return error.OomLoopDidNotConverge;
+}
+
+// ---------------------------------------------------------------------------
+// 30. The `docs/plans/asks/` surfaces — every grammar addition the nine asks
+//     made, on one manifest and one document.
+//
+// These features shipped with tree/binary parity tests, corpus cases and
+// four hosts, and with no OOM coverage at all: the whole series moved
+// `oom_tests.zig` by one line, and that line was a field rename. Each of
+// them allocates on a path that did not exist before — head-set entries,
+// a `:requires` list, a member's numeric spelling, a joined cross-ref
+// bucket key, one `RegCapture` per registration — and a partial allocation
+// on any of those is a leak the testing allocator can see only if something
+// drives it.
+// ---------------------------------------------------------------------------
+
+/// Every ask's declaration surface at once: S1's per-head counts, S5's
+/// `:requires`, S6's `:ref`, S8's `:multiple-of`, S2's digit-leading
+/// members, and S4b's target group. One manifest, so one convergence loop
+/// covers all six load paths.
+const asks_manifest_source: [:0]const u8 =
+    \\(plugin :name gpu :version "1.0.0" :sjon "1.3"
+    \\  (value-kind :name stage :underlying form
+    \\    :heads (head-set (head :name vertex :min 1 :max 1) (head :name constant :max 4)))
+    \\  (value-kind :name dim :underlying symbol
+    \\    :members (member-set :values [1d 2d 2d-array]))
+    \\  (value-kind :name aligned :underlying number
+    \\    :numeric (numeric-bounds :min 0 :integer true :multiple-of 256))
+    \\  (value-kind :name pipeline-name :underlying symbol
+    \\    :cross-ref (cross-ref :target render-pipeline))
+    \\  (value-kind :name any-pipeline :underlying symbol
+    \\    :cross-ref (cross-ref :target [render-pipeline compute-pipeline]))
+    \\  (value-kind :name count-or-ref :underlying scalar-or-ref
+    \\    :scalar-or-ref (scalar-or-ref-shape :base number :ref pipeline-name))
+    \\  (form :name vertex (key :name entry :type symbol))
+    \\  (form :name constant (key :name name :type symbol))
+    \\  (form :name render-pipeline :positional stage
+    \\    (key :name name :type symbol)
+    \\    (key :name dim :type dim :optional true)
+    \\    (key :name offset :type aligned :optional true)
+    \\    (key :name budget :type count-or-ref :optional true))
+    \\  (form :name compute-pipeline (key :name name :type symbol))
+    \\  (form :name dispatch
+    \\    (key :name pipeline :type any-pipeline)
+    \\    (key :name tag  :type symbol :optional true)
+    \\    (key :name mode :type symbol :optional true :requires [tag])))
+;
+
+/// A document that reaches every *validate*-side path the manifest above
+/// declares: the head counters on both walkers, the group's registration
+/// and lookup, a digit-leading member match, a divisibility check, and the
+/// dependent-key sweep.
+const asks_document_source: [:0]const u8 =
+    \\(render-pipeline :name blit :dim 2d-array :offset 512 :budget 4
+    \\  (vertex :entry vs)
+    \\  (constant :name gamma))
+    \\(compute-pipeline :name reduce)
+    \\(dispatch :pipeline reduce :mode fast :tag main)
+;
+
+test "OOM: ManifestLoader.load converges over every asks-series grammar addition" {
+    var tree = try Parser.parse(testing.allocator, asks_manifest_source);
+    defer tree.deinit();
+
+    var fail_index: usize = 0;
+    while (fail_index < MAX_FAIL_INDEX) : (fail_index += 1) {
+        var failing = makeFailing(fail_index);
+        const a = failing.allocator();
+
+        const result = sjon.ManifestLoader.load(a, tree);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var r = try result;
+            defer r.deinit();
+            // Non-vacuous: the manifest is clean, so every path above ran to
+            // completion rather than bailing into a diagnostic.
+            try testing.expect(!r.hasErrors());
+            return;
+        }
+    }
+    return error.OomLoopDidNotConverge;
+}
+
+/// The rejecting twin. Every new load-time refusal the series added
+/// `allocPrint`s a message and builds a semantic path, which is a second
+/// allocation pair per diagnostic — the shape where a partial failure
+/// leaks the first half.
+const asks_invalid_manifest_source: [:0]const u8 =
+    \\(plugin :name bad :version "1.0.0" :sjon "1.3"
+    \\  (value-kind :name empty-heads :underlying form
+    \\    :heads (head-set (head :name a :min 3 :max 1)))
+    \\  (value-kind :name dup-members :underlying symbol
+    \\    :members (member-set :values [2d 2.0d]))
+    \\  (value-kind :name bad-divisor :underlying number
+    \\    :numeric (numeric-bounds :multiple-of -8))
+    \\  (value-kind :name self-ref :underlying scalar-or-ref
+    \\    :scalar-or-ref (scalar-or-ref-shape :base number :ref number))
+    \\  (value-kind :name empty-group :underlying symbol
+    \\    :cross-ref (cross-ref :target []))
+    \\  (value-kind :name cyclic-group :underlying symbol
+    \\    :cross-ref (cross-ref :target [a b] :acyclic true))
+    \\  (form :name a (key :name name :type symbol))
+    \\  (form :name b (key :name name :type symbol))
+    \\  (form :name needs-ghost
+    \\    (key :name x :type number :optional true :requires [ghost])))
+;
+
+test "OOM: ManifestLoader.load converges over the asks series' refusals" {
+    var tree = try Parser.parse(testing.allocator, asks_invalid_manifest_source);
+    defer tree.deinit();
+
+    var fail_index: usize = 0;
+    while (fail_index < MAX_FAIL_INDEX) : (fail_index += 1) {
+        var failing = makeFailing(fail_index);
+        const a = failing.allocator();
+
+        const result = sjon.ManifestLoader.load(a, tree);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var r = try result;
+            defer r.deinit();
+            // Non-vacuous the other way: seven refusals, so seven
+            // message+path allocation pairs were driven to completion.
+            try testing.expect(r.hasErrors());
+            try testing.expect(r.diagnostics.len >= 7);
+            return;
+        }
+    }
+    return error.OomLoopDidNotConverge;
+}
+
+test "OOM: validateForest converges over the asks series' validate paths" {
+    // Loads the manifest with the testing allocator (the loader has its own
+    // convergence test above) so the failing allocator drives the validator:
+    // the cross-ref index build, the group's bucket key, the per-registration
+    // capture state, the head counters, and the dependent-key sweep.
+    const a0 = testing.allocator;
+    var manifest_tree = try Parser.parse(a0, asks_manifest_source);
+    defer manifest_tree.deinit();
+    var loaded = try sjon.ManifestLoader.load(a0, manifest_tree);
+    defer loaded.deinit();
+    try testing.expect(!loaded.hasErrors());
+    const schema = Schema.Schema.init(&.{loaded.plugin});
+
+    var doc = try Parser.parse(a0, asks_document_source);
+    defer doc.deinit();
+    const trees = [_]Ast.Tree{doc};
+
+    var fail_index: usize = 0;
+    while (fail_index < MAX_FAIL_INDEX) : (fail_index += 1) {
+        var failing = makeFailing(fail_index);
+        const a = failing.allocator();
+
+        const result = Validator.validateForest(a, &trees, schema);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var r = try result;
+            defer r.deinit(a);
+            // Non-vacuous: the document is clean, and the group bucket
+            // really was populated by both target forms.
+            for (r.results) |per_tree| {
+                for (per_tree.diagnostics) |d| {
+                    if (d.severity == .err) return error.TestUnexpectedResult;
+                }
+            }
+            const bucket = "gpu/compute-pipeline gpu/render-pipeline";
+            try testing.expect(r.cross_ref_index.contains(.tree(0), bucket, "blit"));
+            try testing.expect(r.cross_ref_index.contains(.tree(0), bucket, "reduce"));
+            return;
+        }
+    }
+    return error.OomLoopDidNotConverge;
+}
+
+test "OOM: validateBinary converges over the asks series' validate paths" {
+    // The binary walker is a separate implementation of the same six
+    // features (`CLAUDE.md`'s dual-path rule), and the one that allocates
+    // `RegCapture` per registration on the index arena.
+    const a0 = testing.allocator;
+    var manifest_tree = try Parser.parse(a0, asks_manifest_source);
+    defer manifest_tree.deinit();
+    var loaded = try sjon.ManifestLoader.load(a0, manifest_tree);
+    defer loaded.deinit();
+    const schema = Schema.Schema.init(&.{loaded.plugin});
+
+    var doc = try Parser.parse(a0, asks_document_source);
+    defer doc.deinit();
+    const bin = try Binary.toBinary(a0, doc, .{});
+    defer bin.deinit();
+
+    var fail_index: usize = 0;
+    while (fail_index < MAX_FAIL_INDEX) : (fail_index += 1) {
+        var failing = makeFailing(fail_index);
+        const a = failing.allocator();
+
+        const result = Validator.validateBinary(a, bin.data, schema);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var r = try result;
+            defer r.deinit();
+            for (r.diagnostics) |d| {
+                if (d.severity == .err) return error.TestUnexpectedResult;
+            }
+            return;
+        }
+    }
+    return error.OomLoopDidNotConverge;
+}
+
+/// One namespace declared twice, in opposite orders — the shape that
+/// makes `crossRefBucketKey` allocate its per-target scaffolding, sort it,
+/// de-duplicate it, join it, and then `describe` both specs for the
+/// collapse message.
+const asks_collapse_manifest_source: [:0]const u8 =
+    \\(plugin :name gl :version "1.0.0" :sjon "1.3"
+    \\  (value-kind :name by-name :underlying symbol
+    \\    :cross-ref (cross-ref :target [shader kernel]))
+    \\  (value-kind :name by-alias :underlying symbol
+    \\    :cross-ref (cross-ref :target [kernel shader] :name-key alias))
+    \\  (form :name shader (key :name name :type symbol) (key :name alias :type symbol))
+    \\  (form :name kernel (key :name name :type symbol) (key :name alias :type symbol)))
+;
+
+test "OOM: validateCrossRefs converges building and reporting a group bucket" {
+    const a0 = testing.allocator;
+    var manifest_tree = try Parser.parse(a0, asks_collapse_manifest_source);
+    defer manifest_tree.deinit();
+    var loaded = try sjon.ManifestLoader.load(a0, manifest_tree);
+    defer loaded.deinit();
+    try testing.expect(!loaded.hasErrors());
+    const schema = Schema.Schema.init(&.{loaded.plugin});
+
+    var fail_index: usize = 0;
+    while (fail_index < MAX_FAIL_INDEX) : (fail_index += 1) {
+        var failing = makeFailing(fail_index);
+        const a = failing.allocator();
+
+        const result = schema.validateCrossRefs(a);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            const diags = try result;
+            defer {
+                for (diags) |d| {
+                    a.free(d.message);
+                    for (d.path) |seg| a.free(seg);
+                    a.free(d.path);
+                }
+                a.free(diags);
+            }
+            // Non-vacuous: the two spellings are one bucket, so the collapse
+            // warning fired — which is what allocated the joined key twice
+            // and both spec descriptions.
+            try testing.expectEqual(@as(usize, 1), diags.len);
+            try testing.expectEqual(Ast.Diagnostic.Code.cross_ref_target_collapse, diags[0].code);
             return;
         }
     }

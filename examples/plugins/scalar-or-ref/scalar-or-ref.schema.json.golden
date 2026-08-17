@@ -8,9 +8,63 @@
       "message": "value-kind `dim` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`",
       "plugin": "scalar-or-ref",
       "kind": "dim"
+    },
+    {
+      "code": "union_emitted_via_anyof",
+      "severity": "info",
+      "message": "value-kind `checked-dim` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`",
+      "plugin": "scalar-or-ref",
+      "kind": "checked-dim"
+    },
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `define-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin": "scalar-or-ref",
+      "kind": "define-ref"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `define-ref` cross-ref annotation surfaces target-form=`define` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "plugin": "scalar-or-ref",
+      "kind": "define-ref"
     }
   ],
   "$defs": {
+    "form.scalar-or-ref.define": {
+      "type": "object",
+      "description": "A named constant a dimension may reference.",
+      "properties": {
+        "$form": {
+          "const": "define"
+        },
+        "$ns": {
+          "const": "scalar-or-ref"
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "$form",
+        "name",
+        "value"
+      ],
+      "additionalProperties": false
+    },
     "form.scalar-or-ref.dispatch": {
       "type": "object",
       "description": "A compute dispatch sized on three axes; each axis is a literal or a named reference.",
@@ -97,11 +151,90 @@
         "y"
       ],
       "additionalProperties": false
+    },
+    "form.scalar-or-ref.checked-dispatch": {
+      "type": "object",
+      "description": "As (dispatch …), but every axis reference is checked against a (define …).",
+      "properties": {
+        "$form": {
+          "const": "checked-dispatch"
+        },
+        "$ns": {
+          "const": "scalar-or-ref"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "dim-value",
+            "define-ref"
+          ]
+        },
+        "y": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "dim-value",
+            "define-ref"
+          ]
+        }
+      },
+      "required": [
+        "$form",
+        "x"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
     {
+      "$ref": "#/$defs/form.scalar-or-ref.define"
+    },
+    {
       "$ref": "#/$defs/form.scalar-or-ref.dispatch"
+    },
+    {
+      "$ref": "#/$defs/form.scalar-or-ref.checked-dispatch"
     }
   ]
 }

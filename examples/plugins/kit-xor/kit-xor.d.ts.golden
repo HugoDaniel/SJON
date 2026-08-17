@@ -49,7 +49,27 @@ export interface KitXor_Tag {
   shape?: string;
 }
 
+/** A point on a phrase. The offset and length are measured FROM :target, so neither means anything without it. */
+export interface KitXor_Anchor {
+  $form: "anchor";
+  $ns: "kit-xor";
+  /**
+   * Extent from :offset.
+   * @sjon-requires target
+   */
+  length?: number;
+  name: Symbol_;
+  /**
+   * Distance from :target.
+   * @sjon-requires target
+   */
+  offset?: number;
+  /** The phrase this anchor is measured against. */
+  target?: Symbol_;
+}
+
 export type SjonKitXor =
   | KitXor_Phrase
-  | KitXor_Tag;
+  | KitXor_Tag
+  | KitXor_Anchor;
 

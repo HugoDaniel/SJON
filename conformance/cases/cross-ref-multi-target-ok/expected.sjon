@@ -1,0 +1,3 @@
+; Clean: both targets feed one namespace, and the narrower single-target
+; slot still resolves its own.
+(diagnostics)

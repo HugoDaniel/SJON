@@ -40,6 +40,7 @@ import type {
   ModelValueShape,
   ModelVariant,
 } from './model.ts';
+import { isBoundedRef } from './model.ts';
 import type { Warning } from './warnings.ts';
 import { assertNever, isRecord } from '../internal.ts';
 
@@ -128,12 +129,16 @@ function buildForm(
     case 'any':
       properties['$children'] = { type: 'array' };
       break;
-    case 'kind':
-      properties['$children'] = {
+    case 'kind': {
+      const children: Record<string, unknown> = {
         type: 'array',
         items: buildShape(form.positional.shape, formCtx),
       };
+      const bounds = buildChildrenBounds(form.positional.shape, formCtx);
+      if (bounds) children['allOf'] = bounds;
+      properties['$children'] = children;
       break;
+    }
     default:
       assertNever(form.positional);
   }
@@ -142,6 +147,18 @@ function buildForm(
     if (!k.optional) required.push(escapeFieldName(k.name));
   }
   const out: Record<string, unknown> = { type: 'object', properties, required };
+  // `dependentRequired` is 2020-12's exact encoding of `:requires`. Emitted
+  // only when some key declares one, so a dependency-free schema serializes
+  // byte-identically to before. Mirrors the Zig writer's placement — right
+  // after `required`, before the discriminated-form `allOf`.
+  const dependentRequired: Record<string, string[]> = {};
+  for (const k of form.keys) {
+    if (k.requires.length === 0) continue;
+    dependentRequired[escapeFieldName(k.name)] = k.requires.map(escapeFieldName);
+  }
+  if (Object.keys(dependentRequired).length > 0) {
+    out['dependentRequired'] = dependentRequired;
+  }
 
   // Discriminated forms compose per-variant overlays via `allOf` of
   // `if`/`then`; exclusive groups join the same chain as `oneOf`
@@ -301,6 +318,44 @@ function serializeDefault(def: NonNullable<ModelKey['default']>): unknown {
   }
 }
 
+/**
+ * Per-head positional counts for a `$children` array: one `contains` +
+ * `minContains` / `maxContains` per bounded head, gathered in an `allOf`
+ * beside `items`.
+ *
+ * **Not** `minItems` / `maxItems` — those bound the array's *total*
+ * length, a different claim: `:min 1 :max 1` on `vertex` says nothing
+ * about how many `constant` children there are. `contains` counts the
+ * elements matching one subschema, which is the per-head question.
+ *
+ * `minContains: 0` is emitted explicitly for a ceiling-only head:
+ * without it, `contains` would additionally demand at least one match,
+ * turning "at most one fragment" into "exactly one".
+ *
+ * Returns null when nothing is bounded, so an all-unbounded head-set
+ * emits no `allOf` and stays byte-identical. Mirrors Zig's
+ * `writeChildrenBounds`.
+ */
+function buildChildrenBounds(
+  shape: ModelValueShape,
+  ctx: EmitContext,
+): readonly Record<string, unknown>[] | null {
+  if (shape.kind !== 'form_heads') return null;
+  const bounded = shape.heads.filter(isBoundedRef);
+  if (bounded.length === 0) return null;
+  return bounded.map((head) => {
+    const entry: Record<string, unknown> = {
+      contains:
+        ctx.filterPlugin && head.plugin && head.plugin !== ctx.filterPlugin
+          ? { $ref: `./${head.plugin}.schema.json#/$defs/form.${head.plugin}.${head.name}` }
+          : { $ref: `#/$defs/form.${head.plugin || ''}.${head.name}` },
+      minContains: head.min ?? 0,
+    };
+    if (head.max !== undefined) entry['maxContains'] = head.max;
+    return entry;
+  });
+}
+
 function buildShape(shape: ModelValueShape, ctx: EmitContext): unknown {
   switch (shape.kind) {
     case 'any':
@@ -422,11 +477,23 @@ function buildShape(shape: ModelValueShape, ctx: EmitContext): unknown {
       // rule (`JsonSchema.zig`), which this port used to break for
       // `scope-form` alone. `name-key` / `acyclic` stay unconditional on
       // both routes, so the annotation keeps a stable field set.
-      const anno: Record<string, unknown> = {
-        'target-form': shape.crossRef.targetForm,
-        'name-key': shape.crossRef.nameKey,
-        acyclic: shape.crossRef.acyclic,
-      };
+      // One target keeps `target-form`, byte-identically; a group gets
+      // `target-forms`, an array — following `scope-form`'s
+      // omit-when-inapplicable rule, so a consumer that only understands
+      // the singular key finds it *absent* on a group rather than reading a
+      // group as a single target it cannot represent.
+      const anno: Record<string, unknown> =
+        shape.crossRef.targets.length === 1
+          ? {
+              'target-form': shape.crossRef.targets[0]!,
+              'name-key': shape.crossRef.nameKey,
+              acyclic: shape.crossRef.acyclic,
+            }
+          : {
+              'target-forms': [...shape.crossRef.targets],
+              'name-key': shape.crossRef.nameKey,
+              acyclic: shape.crossRef.acyclic,
+            };
       if (shape.crossRef.scopeForm !== null) anno['scope-form'] = shape.crossRef.scopeForm;
       if (shape.crossRef.provider !== null) anno['provider'] = shape.crossRef.provider;
       if (shape.crossRef.sourceKey !== null) anno['source-key'] = shape.crossRef.sourceKey;
@@ -467,6 +534,10 @@ function applyBound(target: Record<string, unknown>, b: ModelNumericBounds) {
     if (b.exclusiveMax) target['exclusiveMaximum'] = b.max.value;
     else target['maximum'] = b.max.value;
   }
+  // Exact semantic match rather than an annotation: 2020-12's `multipleOf`
+  // is "division by this keyword's value results in an integer", which is
+  // the claim `:multiple-of` makes.
+  if (b.multipleOf) target['multipleOf'] = b.multipleOf.value;
   if ((b.min && b.min.exactIntDigits) || (b.max && b.max.exactIntDigits)) {
     const annotation: Record<string, string> = {};
     if (b.min?.exactIntDigits) annotation['min'] = b.min.exactIntDigits;
@@ -520,9 +591,18 @@ function buildStringWithBounds(b: ModelStringBounds): Record<string, unknown> {
   return out;
 }
 
+/// A digit-leading member is the exception on both underlyings: a document
+/// writes it as a unit-bearing number, so the JSON bridge encodes it as
+/// `{"$num": [magnitude, unit]}` and that is what gets pinned. A `$sym`
+/// const there would reject a document the validator accepts.
 function buildRichMember(m: ModelMember, underlying: 'symbol' | 'string'): Record<string, unknown> {
   const out: Record<string, unknown> = {
-    const: underlying === 'symbol' ? { $sym: m.name } : m.name,
+    const:
+      m.numericSpelling !== undefined
+        ? { $num: [m.numericSpelling.magnitude, m.numericSpelling.unit] }
+        : underlying === 'symbol'
+          ? { $sym: m.name }
+          : m.name,
   };
   if (m.label) out['title'] = m.label;
   if (m.description) out['description'] = m.description;

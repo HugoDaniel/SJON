@@ -24,7 +24,7 @@ import type {
   StringBoundsIR,
 } from './shape.ts';
 import { resolveFormDef } from './shape.ts';
-import { assertNever } from './internal.ts';
+import { assertNever, isDigitLeadingMember } from './internal.ts';
 import { serializeValue } from './value.ts';
 import type { SjonValue } from './value.ts';
 
@@ -280,7 +280,13 @@ function refinementOf(shape: ShapeIR): string {
       return shape.bounds ? `:numeric ${numericBounds(shape.bounds)}` : '';
     case 'string':
       return shape.bounds ? `:string-bounds ${stringBounds(shape.bounds)}` : '';
+    // `symbol_members` gets `memberAtom`, not `atom`: a digit-leading spelling
+    // (`2d`) fails `SYMBOL_RE`, and quoting it would declare the *string*
+    // `"2d"` — which `member-name` rejects, so the manifest would not load.
+    // `string_members` keeps `atom`; its spellings are symbol-shaped or the
+    // manifest grammar cannot carry them either way.
     case 'symbol_members':
+      return `:members (member-set :values [${shape.members.map(memberAtom).join(' ')}])`;
     case 'string_members':
       return `:members (member-set :values [${shape.members.map(atom).join(' ')}])`;
     case 'vector': {
@@ -316,6 +322,7 @@ function numericBounds(b: NumericBoundsIR): string {
   if (b.exclusiveMin) parts.push(':exclusive-min true');
   if (b.exclusiveMax) parts.push(':exclusive-max true');
   if (b.integer) parts.push(':integer true');
+  if (b.multipleOf !== undefined) parts.push(`:multiple-of ${String(b.multipleOf)}`);
   return `${parts.join(' ')})`;
 }
 
@@ -329,7 +336,12 @@ function stringBounds(b: StringBoundsIR): string {
 }
 
 function crossRef(cr: CrossRefIR): string {
-  const parts: string[] = [`(cross-ref :target ${atom(cr.target)}`];
+  // One target keeps the bare `:target phrase` spelling, so every schema
+  // written before groups serializes byte-identically. A group writes the
+  // vector, which the loader normalises back to the same list.
+  const target =
+    cr.targets.length === 1 ? atom(cr.targets[0]!) : `[${cr.targets.map(atom).join(' ')}]`;
+  const parts: string[] = [`(cross-ref :target ${target}`];
   if (cr.nameKey !== undefined) parts.push(`:name-key ${atom(cr.nameKey)}`);
   if (cr.acyclic) parts.push(':acyclic true');
   if (cr.scope !== undefined) parts.push(`:scope ${atom(cr.scope)}`);
@@ -402,6 +414,16 @@ function atom(text: string): string {
   return SYMBOL_RE.test(text) ? text : quote(text);
 }
 
+/**
+ * A `member-name`: a bare symbol, or a digit-leading spelling written bare so
+ * it lexes as the unit-bearing number the engine matches against.
+ * `s.symbolMembers` has already validated and canonicalised both shapes, so
+ * anything reaching here is emittable as-is.
+ */
+function memberAtom(text: string): string {
+  return isDigitLeadingMember(text) ? text : atom(text);
+}
+
 function quote(text: string): string {
   return JSON.stringify(text);
 }
@@ -437,7 +459,7 @@ function generatedName(shape: ShapeIR): string {
     case 'form':
       return `${resolveFormDef(shape).head}-form`;
     case 'cross_ref':
-      return `ref-${slugText(shape.crossRef.target)}`;
+      return `ref-${shape.crossRef.targets.map(slugText).join('-')}`;
     // Builtins never hoist, so they never need a generated name; keep the prior
     // structural fallback explicit so a new ShapeIR variant trips `assertNever`.
     case 'any':

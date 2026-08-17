@@ -54,6 +54,26 @@
     :underlying number
     :unit (unit-shape :reject true))
 
+  ; --- hex literals: the mask idiom --------------------------------------
+  ;
+  ; Nothing in this kind is new — it is `:repr u32` plus `:unit :reject`,
+  ; both already above. It is here because a mask is the slot where the
+  ; *author's* spelling matters: `0xFFFFFFFF` says "all 32 bits" in a way
+  ; `4294967295` does not, and hex is an integer literal so it flows through
+  ; `:repr` unchanged.
+  ;
+  ; It is also the slot where hex used to fail *silently*. `0xFF` lexed as
+  ; the number zero carrying the unit `xFF`, so `:reject` caught it — for
+  ; the wrong reason, reporting a unit where the author saw a mask, and only
+  ; because this kind opts in. A plain `:type number` slot took the zero
+  ; without a word. Both are fixed at the lexer, so `:reject` is back to
+  ; meaning what it says.
+  (value-kind :name u32-mask
+    :description "A 32-bit write/sample mask. Write it in hex — 0xFFFFFFFF, 0xF — the way the WebGPU spec does."
+    :underlying number
+    :repr (repr-shape :type u32)
+    :unit (unit-shape :reject true))
+
   (form :name vertex
     :description "One mesh vertex: a 2..4-component position plus an optional u16 tint channel."
     (key :name position :type attribute :optional false)
@@ -63,4 +83,9 @@
     :description "A draw call: f32 line width, u32 base vertex, and a bare LOD bias."
     (key :name line-width :type scalar :optional false)
     (key :name base-vertex :type vertex-index :optional false)
-    (key :name lod-bias :type raw-uniform :optional true)))
+    (key :name lod-bias :type raw-uniform :optional true))
+
+  (form :name target
+    :description "A colour target's masks, written in hex."
+    (key :name write-mask :type u32-mask :optional true)
+    (key :name sample-mask :type u32-mask :optional true)))

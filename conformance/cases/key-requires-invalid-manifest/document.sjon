@@ -1,0 +1,38 @@
+; The load-time rejections. Every one of these is a `:requires` that cannot
+; mean anything useful, so the manifest is refused rather than loaded into a
+; rule that never fires or can never be satisfied.
+;
+;   self       — `:a` requires itself; satisfied by its own presence.
+;   unknown    — names a key this form does not declare (a typo, or a base
+;                key reaching into a variant).
+;   always     — requires a key that is already `:optional false`. That key
+;                is always present, so the dependency is dead weight.
+;   grouped    — requires a key in the same exclusive group. The group says
+;                "at most one of these"; the dependency says "both".
+;   cycle      — `:x` requires `:y` and `:y` requires `:x`. Satisfiable only
+;                by writing both or neither, which is an exclusive-group
+;                bundle spelled worse.
+;
+; No document body: these are all manifest-phase, and a usage would only
+; stack `unknown_form` on top once the errored plugin leaves the schema.
+(plugin :name gfx :version "1.0.0" :sjon "1.3"
+  (form :name self
+    (key :name a :type number :optional true :requires [a]))
+
+  (form :name unknown
+    (key :name a :type number :optional true :requires [nope]))
+
+  (form :name always
+    (key :name a :type number :optional true :requires [b])
+    (key :name b :type symbol :optional false))
+
+  (form :name grouped
+    (key :name a :type number :optional true :requires [b])
+    (key :name b :type symbol :optional true)
+    (exclusive-group :cardinality at-most-one
+      (alt :keys [a])
+      (alt :keys [b])))
+
+  (form :name cycle
+    (key :name x :type number :optional true :requires [y])
+    (key :name y :type number :optional true :requires [x])))

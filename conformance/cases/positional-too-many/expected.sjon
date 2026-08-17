@@ -1,0 +1,9 @@
+; One diagnostic, on the child that crosses the ceiling — the line to
+; delete — not on the parent. Its path is that child's own positional
+; step, which for a form child is its head.
+;
+; One report per crossing, too, not one per child past the ceiling: the
+; emit fires on the transition from `max` to `max + 1`, so a form five
+; children over its bound still reports once, naming the real count.
+(diagnostics
+  (diagnostic :code positional_too_many :severity err :path [render-pipeline fragment]))

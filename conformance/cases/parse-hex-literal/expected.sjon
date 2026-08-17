@@ -1,0 +1,4 @@
+; Clean. Every literal lands exactly on its degenerate bound, so every
+; host read the hex spelling as the integer it denotes — and none of them
+; read it as zero.
+(diagnostics)

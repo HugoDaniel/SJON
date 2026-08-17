@@ -1,0 +1,36 @@
+; Load-time rejections of the rich `:heads` spelling. Three separate
+; kinds so each condition is reported once against its own kind name.
+;
+;   `mixed`      — `:names` and `(head …)` in one `(head-set …)`. The two
+;                  spellings are exclusive, exactly as `(member-set …)`'s
+;                  `:values` and `(member …)` are.
+;   `duplicated` — the same `:name` twice. A head-set is a *set*; two
+;                  entries for one head means two answers to "how many".
+;   `backwards`  — `:min` above `:max`. An empty range admits nothing, so
+;                  no document could ever satisfy the slot.
+(plugin :name gfx :version "1.0.0"
+  (form :name vertex)
+  (form :name fragment)
+
+  (value-kind :name mixed
+    :underlying form
+    :heads (head-set
+      :names [vertex]
+      (head :name fragment)))
+
+  (value-kind :name duplicated
+    :underlying form
+    :heads (head-set
+      (head :name vertex :max 1)
+      (head :name vertex :max 2)))
+
+  (value-kind :name backwards
+    :underlying form
+    :heads (head-set
+      (head :name vertex :min 3 :max 1))))
+
+; A no-op literal, not a `(vertex)`: a plugin whose manifest failed to
+; load is dropped entirely, so any data form would cascade into an
+; `unknown_form` that has nothing to do with what this case is about.
+; Same reason `member-rich-and-values-conflict` ends in a bare `42`.
+42

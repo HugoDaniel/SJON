@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 1,
+  "x-sjon-export-warnings": [
+    {
+      "code": "rich_members_emitted_with_annotations",
+      "severity": "info",
+      "message": "value-kind `texture-dimension` member-set carries digit-leading spellings — emitted as per-member `oneOf`, with each digit-leading member pinned to its `$num` wire shape rather than `$sym`",
+      "plugin": "dimensions",
+      "kind": "texture-dimension"
+    },
+    {
+      "code": "rich_members_emitted_with_annotations",
+      "severity": "info",
+      "message": "value-kind `view-dimension` member-set carries rich metadata and digit-leading spellings — emitted as per-member `oneOf` with title/description/deprecated annotations and `$num` wire shapes",
+      "plugin": "dimensions",
+      "kind": "view-dimension"
+    }
+  ],
+  "$defs": {
+    "form.dimensions.texture": {
+      "type": "object",
+      "description": "A texture and the view it is sampled through.",
+      "properties": {
+        "$form": {
+          "const": "texture"
+        },
+        "$ns": {
+          "const": "dimensions"
+        },
+        "dimension": {
+          "oneOf": [
+            {
+              "const": {
+                "$num": [
+                  1,
+                  "d"
+                ]
+              }
+            },
+            {
+              "const": {
+                "$num": [
+                  2,
+                  "d"
+                ]
+              }
+            },
+            {
+              "const": {
+                "$num": [
+                  3,
+                  "d"
+                ]
+              }
+            }
+          ]
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "view": {
+          "oneOf": [
+            {
+              "const": {
+                "$num": [
+                  1,
+                  "d"
+                ]
+              }
+            },
+            {
+              "const": {
+                "$num": [
+                  2,
+                  "d"
+                ]
+              },
+              "title": "2D",
+              "description": "The default view dimension."
+            },
+            {
+              "const": {
+                "$num": [
+                  2,
+                  "d-array"
+                ]
+              },
+              "description": "A hyphenated digit-leading spelling — one token only because a `-` may join two letter runs inside a unit."
+            },
+            {
+              "const": {
+                "$sym": "cube"
+              }
+            },
+            {
+              "const": {
+                "$sym": "cube-array"
+              }
+            },
+            {
+              "const": {
+                "$num": [
+                  3,
+                  "d"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "$form",
+        "name"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.dimensions.texture"
+    }
+  ]
+}

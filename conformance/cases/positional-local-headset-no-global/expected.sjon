@@ -1,0 +1,4 @@
+; Clean. `storage-texture` is admitted by the head-set (byte-equality against
+; `:names`) and then validated against the slot-local form of the same name.
+; Neither step consulted a global catalog, and no global form exists.
+(diagnostics)

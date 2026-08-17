@@ -20,6 +20,7 @@ function boundsForm() {
       score: s.kind('score', s.number().min(0).max(100)).optional(),
       ratio: s.kind('ratio', s.number().gt(0).max(1)).optional(),
       count: s.kind('count', s.number().min(0).int()).optional(),
+      offset: s.kind('aligned', s.number().min(0).int().multipleOf(256)).optional(),
     },
     'bounds',
   );
@@ -43,6 +44,11 @@ test('numeric value-kinds carry their numeric-bounds', () => {
   assert.match(
     m,
     /\(value-kind :name count :underlying number :numeric \(numeric-bounds :min 0 :integer true\)\)/,
+  );
+  // `:multiple-of` last, matching the loader's key order in the spec.
+  assert.match(
+    m,
+    /\(value-kind :name aligned :underlying number :numeric \(numeric-bounds :min 0 :integer true :multiple-of 256\)\)/,
   );
 });
 

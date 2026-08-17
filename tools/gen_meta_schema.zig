@@ -219,6 +219,10 @@ fn emitValueKind(w: *Writer, vk: Plugin.ValueKind) Writer.Error!void {
                 try w.writeAll(", .description = ");
                 try emitString(w, m.description);
             }
+            // The meta-plugin declares no digit-leading member, and this
+            // emitter has no arm for one. Bail rather than drop it
+            // silently — the file's standing rule for uncovered shapes.
+            if (m.numeric_spelling != null) panicVk("declares a digit-leading member", vk.name);
             if (m.deprecated) try w.writeAll(", .deprecated = true");
             if (m.deprecation_message.len != 0) {
                 try w.writeAll(", .deprecation_message = ");
@@ -236,11 +240,18 @@ fn emitValueKind(w: *Writer, vk: Plugin.ValueKind) Writer.Error!void {
         try w.writeAll(" }");
     }
     if (vk.heads) |hs| {
-        try w.writeAll(", .heads = .{ .names = &.{");
-        for (hs.names, 0..) |nm, i| {
+        try w.writeAll(", .heads = .{ .heads = &.{");
+        for (hs.heads, 0..) |h, i| {
             if (i != 0) try w.writeByte(',');
-            try w.writeByte(' ');
-            try emitString(w, nm);
+            try w.writeAll(" .{ .name = ");
+            try emitString(w, h.name);
+            if (h.min != 0) try w.print(", .min = {d}", .{h.min});
+            if (h.max) |mx| try w.print(", .max = {d}", .{mx});
+            if (h.description.len != 0) {
+                try w.writeAll(", .description = ");
+                try emitString(w, h.description);
+            }
+            try w.writeAll(" }");
         }
         try w.writeAll(" } }");
     }
@@ -305,6 +316,15 @@ fn emitKey(w: *Writer, k: Plugin.KeySpec) Writer.Error!void {
     // KeySpec.optional defaults to true; emit only the non-default.
     if (!k.optional) try w.writeAll(", .optional = false");
     if (k.walk_opaque) try w.writeAll(", .walk_opaque = true");
+    if (k.requires.len != 0) {
+        try w.writeAll(", .requires = &.{");
+        for (k.requires, 0..) |r, i| {
+            if (i != 0) try w.writeAll(",");
+            try w.writeAll(" ");
+            try emitString(w, r);
+        }
+        try w.writeAll(" }");
+    }
     if (k.description.len != 0) {
         try w.writeAll(", .description = ");
         try emitString(w, k.description);

@@ -21,10 +21,19 @@
 //!   `(` `)` `[` `]`
 //!   `:keyword` — `:`-prefixed identifier (`:foo`, `:p+s`)
 //!   number — integer or float, optional leading `-`, optional `e[±]NN`,
-//!            optional unit suffix (one or more ASCII letters, or a single
-//!            `%`). Examples: `4b`, `90deg`, `50%`, `250ms`, `1.5e2hz`.
+//!            optional unit suffix (one or more ASCII letters, optionally
+//!            joined by hyphens, or a single `%`). Examples: `4b`, `90deg`,
+//!            `50%`, `250ms`, `1.5e2hz`, `2d-array`. A hyphen continues the
+//!            unit only when the next byte is a letter, so `1em-2` is still
+//!            `1em` then `-2`.
 //!            `e` / `E` is exponent only when the next char is digit / sign;
 //!            otherwise it starts the unit (so `1em` lexes as one token).
+//!            A `0x` / `0X` prefix — and only when the numeric portion so
+//!            far is exactly `0`, optionally signed — opens a **hex
+//!            integer**: `[0-9a-fA-F_]+`, no exponent, no fraction, no
+//!            unit. `0xFF`, `-0x10`, `0xFFFF_FFFF`. A prefix with no digit
+//!            after it is `.invalid`, not the number zero with unit `x`.
+//!            `10x` and `0.5x` are untouched — still unit `x`.
 //!   string — double-quoted with `\n \t \r \" \\ \u{NNNN}` escapes
 //!   raw_string — triple-quoted `"""…"""`, body taken verbatim (no escape
 //!                processing, no newline stripping, no dedent). Backslash
@@ -168,9 +177,22 @@ const State = enum {
     /// Accumulating a unit suffix after the numeric portion. Entered from
     /// `.number_int`, `.number_dot`, `.number_frac`, or `.number_exp` when
     /// the next char is an ASCII letter; consumes letters until a non-letter
-    /// terminates the token. `%` is handled inline as a one-char unit; it
-    /// is not part of this state's loop.
+    /// terminates the token — except a `-` immediately followed by a
+    /// letter, which joins two letter runs inside one unit (`2d-array`).
+    /// `%` is handled inline as a one-char unit; it is not part of this
+    /// state's loop.
     number_unit,
+    /// Just consumed a `0x` / `0X` prefix. The next byte MUST be a hex
+    /// digit; anything else yields `.invalid` spanning the prefix. A
+    /// prefix with no digits is a typo, and reading it as the number zero
+    /// with unit `x` is precisely the silent failure hex literals exist
+    /// to remove.
+    hex_first_digit,
+    /// Inside a hex literal's digit run. Consumes `[0-9a-fA-F_]` and
+    /// terminates the token on anything else — no exponent, no fraction,
+    /// no unit suffix. Hex is an *integer* literal, so `0xFFms` is the
+    /// number `0xFF` followed by the symbol `ms`.
+    hex_body,
     string_body,
     string_escape,
     /// Inside `"""…"""`. Body bytes pass through verbatim — no escape
@@ -347,10 +369,47 @@ pub fn next(self: *Lexer) Token {
                         else => continue :state .number_unit,
                     }
                 },
-                'a'...'d', 'f'...'z', 'A'...'D', 'F'...'Z' => continue :state .number_unit,
+                'x', 'X' => {
+                    // Hex prefix — but only on the literal `0x` / `-0x`
+                    // shape. Anywhere else `x` is an ordinary unit letter,
+                    // so `10x` and `1_x` keep lexing as they always have.
+                    // Carved out of the letter range below because Zig
+                    // switch prongs may not overlap; `e` / `E` is carved
+                    // out the same way, one arm up.
+                    if (isBareZero(self.source, start, self.index)) {
+                        self.index += 1;
+                        continue :state .hex_first_digit;
+                    }
+                    continue :state .number_unit;
+                },
+                'a'...'d', 'f'...'w', 'y', 'z', 'A'...'D', 'F'...'W', 'Y', 'Z' => continue :state .number_unit,
                 '%' => {
                     self.index += 1;
                     return mk(.number, start, self.index);
+                },
+                else => return mk(.number, start, self.index),
+            }
+        },
+
+        .hex_first_digit => {
+            switch (self.source[self.index]) {
+                '0'...'9', 'a'...'f', 'A'...'F' => {
+                    self.index += 1;
+                    continue :state .hex_body;
+                },
+                // `0x`, `0X`, `0x_F`, `0xGG` — the prefix stands alone.
+                // The token spans just the prefix, so the bytes after it
+                // lex normally (`GG` becomes a symbol) and the parser's
+                // `.invalid` branch owns the one diagnostic.
+                else => return mk(.invalid, start, self.index),
+            }
+        },
+
+        .hex_body => {
+            switch (self.source[self.index]) {
+                '0'...'9', 'a'...'f', 'A'...'F', '_' => {
+                    self.index += 1;
+                    continue :state .hex_body;
                 },
                 else => return mk(.number, start, self.index),
             }
@@ -435,6 +494,31 @@ pub fn next(self: *Lexer) Token {
                 'a'...'z', 'A'...'Z' => {
                     self.index += 1;
                     continue :state .number_unit;
+                },
+                // A hyphen joins two letter runs inside one unit
+                // (`2d-array`, `5ms-per-frame`) and does nothing else: it
+                // continues the unit ONLY when the next byte is a letter.
+                //
+                // That narrowness is the whole rule. `1em-2` still lexes as
+                // `1em` then `-2`, rather than becoming a unit with a
+                // trailing hyphen; `2d-` still ends at `2d`. And a hyphen
+                // can never be the *first* byte this state sees — entry
+                // requires a letter — so `5-3` and `(- 1 2)` never reach
+                // here at all.
+                //
+                // Digits are deliberately NOT admitted. Allowing them
+                // would fuse inputs that split today, which is a change to
+                // how existing bytes read rather than a widening.
+                //
+                // `index + 1` is in bounds: the source is sentinel-
+                // terminated, and the sentinel byte is not a letter, so it
+                // terminates the token naturally.
+                '-' => switch (self.source[self.index + 1]) {
+                    'a'...'z', 'A'...'Z' => {
+                        self.index += 2;
+                        continue :state .number_unit;
+                    },
+                    else => return mk(.number, start, self.index),
                 },
                 else => return mk(.number, start, self.index),
             }
@@ -614,6 +698,19 @@ const reserved_symbols = std.StaticStringMap(Token.Tag).initComptime(.{
 fn classifySymbol(source: []const u8, start: u32, end: u32) Token {
     const tag = reserved_symbols.get(source[start..end]) orelse .symbol;
     return mk(tag, start, end);
+}
+
+/// True iff the numeric portion consumed so far — `source[start..cursor]` —
+/// is exactly `0`, optionally signed. Gates the hex prefix: only `0x` and
+/// `-0x` open a hex literal, so `10x` stays a unit-bearing number, `0_x`
+/// stays one (the `_` is part of the numeric portion), and `0.5x` never
+/// reaches this state at all.
+///
+/// Pre: `source[cursor]` is `x` or `X` (the caller is on the prefix byte).
+fn isBareZero(source: [:0]const u8, start: u32, cursor: u32) bool {
+    std.debug.assert(source[cursor] == 'x' or source[cursor] == 'X');
+    const consumed = source[start..cursor];
+    return std.mem.eql(u8, consumed, "0") or std.mem.eql(u8, consumed, "-0");
 }
 
 /// True iff `source[start..cursor]` is exactly four ASCII digits and the
@@ -1742,28 +1839,168 @@ test "leading `+` digits stay one symbol — no implicit number sign" {
     try testing.expectEqual(Token.Tag.eof, lex.next().tag);
 }
 
-test "`0x` lexes as number-with-unit, not hex prefix" {
-    // SJON has no hex literal grammar; `0x` is a digit-then-letter
-    // sequence, which the unit suffix grammar consumes wholesale. The
-    // result is one `.number` token spanning `0x` (value 0, unit "x").
-    // Pin actual behaviour: the parser will accept the token and
-    // interpret it as a unit number — it does NOT reject `0x...` as
-    // malformed. A consumer that wants hex must wrap the document.
+test "bare `0x` prefix is invalid, not the number zero with unit `x`" {
+    // Replaces "`0x` lexes as number-with-unit, not hex prefix", which
+    // pinned the pre-hex reading: one `.number` token spanning `0x`,
+    // value 0, unit "x". Now that `0x` is a prefix, a prefix with no
+    // digits is a typo — and the old reading was the silent-zero failure
+    // hex literals exist to remove. The token spans just the prefix; the
+    // parser's `.invalid` branch owns the diagnostic.
     var lex = Lexer.init("0x");
     const t = lex.next();
-    try testing.expectEqual(Token.Tag.number, t.tag);
+    try testing.expectEqual(Token.Tag.invalid, t.tag);
     try testing.expectEqualStrings("0x", t.slice("0x"));
     try testing.expectEqual(Token.Tag.eof, lex.next().tag);
 }
 
-test "`0xFF` chains into the unit suffix as `xFF`" {
-    // Same path as above — once `x` enters `.number_unit`, the loop
-    // accepts ASCII letters/digits-after-letters per the unit alphabet.
-    // Confirm `0xFF` is still one token, not two.
+test "`0xFF` is one hex number token" {
+    // Replaces "`0xFF` chains into the unit suffix as `xFF`". The old
+    // test's comment claimed the unit loop accepts "letters/digits-after-
+    // letters"; it never did — `.number_unit` took letters only, which is
+    // why `0x1F` used to lex as TWO tokens (`0x`, then `1F`). Both
+    // spellings are now one hex number.
     var lex = Lexer.init("0xFF");
     const t = lex.next();
     try testing.expectEqual(Token.Tag.number, t.tag);
     try testing.expectEqualStrings("0xFF", t.slice("0xFF"));
+    try testing.expectEqual(Token.Tag.eof, lex.next().tag);
+
+    var lex2 = Lexer.init("0x1F");
+    const t2 = lex2.next();
+    try testing.expectEqual(Token.Tag.number, t2.tag);
+    try testing.expectEqualStrings("0x1F", t2.slice("0x1F"));
+    try testing.expectEqual(Token.Tag.eof, lex2.next().tag);
+}
+
+test "hex literals: case, sign, and digit-group underscores are all one token" {
+    const cases = [_][:0]const u8{ "0Xff", "0xFFFF_FFFF", "-0x10", "0xdeadBEEF", "0X0" };
+    for (cases) |src| {
+        var lex = Lexer.init(src);
+        const t = lex.next();
+        try testing.expectEqual(Token.Tag.number, t.tag);
+        try testing.expectEqualStrings(src, t.slice(src));
+        try testing.expectEqual(Token.Tag.eof, lex.next().tag);
+    }
+}
+
+test "hex literal terminates at the first non-hex byte — no unit, no exponent" {
+    // `ms` is not a unit here: the hex body ends the token, so the letters
+    // after it lex as their own symbol. This is the rule that makes hex an
+    // *integer* literal rather than a fourth numeric shape with a suffix.
+    var lex = Lexer.init("0xFFms");
+    const t = lex.next();
+    try testing.expectEqual(Token.Tag.number, t.tag);
+    try testing.expectEqualStrings("0xFF", t.slice("0xFFms"));
+    const t2 = lex.next();
+    try testing.expectEqual(Token.Tag.symbol, t2.tag);
+    try testing.expectEqualStrings("ms", t2.slice("0xFFms"));
+
+    // `p` is not a hex exponent either — `0xFFp2` is `0xFF` then `p2`,
+    // which is a symbol (digits are symbol-body continuation chars).
+    var lex2 = Lexer.init("0xFFp2");
+    try testing.expectEqualStrings("0xFF", lex2.next().slice("0xFFp2"));
+    try testing.expectEqual(Token.Tag.symbol, lex2.next().tag);
+}
+
+test "hex prefix followed by a non-digit: `0x_F` and `0xGG` are invalid prefixes" {
+    // A leading `_` right after the prefix is rejected — grouping needs a
+    // digit to group. Same for a non-hex letter. In both cases the
+    // `.invalid` token covers only `0x`, so the tail lexes normally and
+    // one typo yields one diagnostic.
+    var lex = Lexer.init("0x_F");
+    const t = lex.next();
+    try testing.expectEqual(Token.Tag.invalid, t.tag);
+    try testing.expectEqualStrings("0x", t.slice("0x_F"));
+    try testing.expectEqual(Token.Tag.symbol, lex.next().tag);
+
+    var lex2 = Lexer.init("0xGG");
+    const t2 = lex2.next();
+    try testing.expectEqual(Token.Tag.invalid, t2.tag);
+    try testing.expectEqualStrings("0x", t2.slice("0xGG"));
+    const t3 = lex2.next();
+    try testing.expectEqual(Token.Tag.symbol, t3.tag);
+    try testing.expectEqualStrings("GG", t3.slice("0xGG"));
+}
+
+test "a hyphen joins two letter runs inside one unit" {
+    // `2d-array` is the spelling this exists for — `GPUTextureViewDimension`
+    // has a member no bare symbol and no single-run unit can express.
+    const cases = [_][:0]const u8{ "2d-array", "5ms-per-frame", "1a-b-c", "2d-Array" };
+    for (cases) |src| {
+        var lex = Lexer.init(src);
+        const t = lex.next();
+        try testing.expectEqual(Token.Tag.number, t.tag);
+        try testing.expectEqualStrings(src, t.slice(src));
+        try testing.expectEqual(Token.Tag.eof, lex.next().tag);
+    }
+}
+
+test "a hyphen continues the unit ONLY before a letter" {
+    // The narrowness is the rule. Each of these terminates at the hyphen,
+    // so no existing input reads differently than it did before hyphens
+    // were admitted at all.
+
+    // `1em-2` — a naive "hyphens allowed after the first letter" rule would
+    // make this `1em-` plus `2`, i.e. a unit with a trailing hyphen.
+    var lex = Lexer.init("1em-2");
+    try testing.expectEqualStrings("1em", lex.next().slice("1em-2"));
+    const t = lex.next();
+    try testing.expectEqual(Token.Tag.number, t.tag);
+    try testing.expectEqualStrings("-2", t.slice("1em-2"));
+
+    // A trailing hyphen at end of input.
+    var lex2 = Lexer.init("2d-");
+    try testing.expectEqualStrings("2d", lex2.next().slice("2d-"));
+    try testing.expectEqual(Token.Tag.symbol, lex2.next().tag);
+
+    // Two hyphens in a row: the first sees `-`, not a letter.
+    var lex3 = Lexer.init("2d--a");
+    try testing.expectEqualStrings("2d", lex3.next().slice("2d--a"));
+
+    // A digit after the hyphen — digits are not admitted into the unit.
+    var lex4 = Lexer.init("2d-3d");
+    try testing.expectEqualStrings("2d", lex4.next().slice("2d-3d"));
+    try testing.expectEqualStrings("-3d", lex4.next().slice("2d-3d"));
+}
+
+test "hyphens in the unit leave subtraction and hex alone" {
+    // A `-` reaching `.number_unit` always has a letter before it — entry
+    // requires one — so arithmetic never sees this state.
+    var lex = Lexer.init("5-3");
+    try testing.expectEqualStrings("5", lex.next().slice("5-3"));
+    try testing.expectEqualStrings("-3", lex.next().slice("5-3"));
+
+    var lex2 = Lexer.init("(- 1 2)");
+    try testing.expectEqual(Token.Tag.lparen, lex2.next().tag);
+    const minus = lex2.next();
+    try testing.expectEqual(Token.Tag.symbol, minus.tag);
+    try testing.expectEqualStrings("-", minus.slice("(- 1 2)"));
+
+    // Hex terminates on `-` in its own state, which never joins.
+    var lex3 = Lexer.init("0xFF-a");
+    try testing.expectEqualStrings("0xFF", lex3.next().slice("0xFF-a"));
+    try testing.expectEqual(Token.Tag.symbol, lex3.next().tag);
+
+    // And a date literal still wins its lookahead in `.number_int`, which
+    // runs before any unit state.
+    var lex4 = Lexer.init("2026-05-19");
+    const d = lex4.next();
+    try testing.expectEqual(Token.Tag.date, d.tag);
+    try testing.expectEqualStrings("2026-05-19", d.slice("2026-05-19"));
+}
+
+test "the hex prefix is gated on a bare zero — `10x`, `0_x`, `0.5x`, `1e3` unchanged" {
+    // `x` is an ordinary unit letter everywhere except after a lone `0`.
+    // These four are the neighbours the gate exists to protect; each is
+    // one `.number` token spanning the whole input, exactly as before.
+    const cases = [_][:0]const u8{ "10x", "0_x", "0.5x", "1e3", "1X" };
+    for (cases) |src| {
+        var lex = Lexer.init(src);
+        const t = lex.next();
+        try testing.expectEqual(Token.Tag.number, t.tag);
+        try testing.expectEqualStrings(src, t.slice(src));
+        try testing.expectEqual(Token.Tag.eof, lex.next().tag);
+    }
 }
 
 test "max-finite f64 exponent `1e308` lexes as one number" {

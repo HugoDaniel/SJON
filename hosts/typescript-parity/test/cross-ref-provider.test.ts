@@ -15,7 +15,7 @@ import assert from 'node:assert';
 
 import { parse } from '../src/parser.ts';
 import { loadManifest } from '../src/loader.ts';
-import { validateCrossRefs } from '../src/plugin.ts';
+import { crossRefBucketKey, validateCrossRefs } from '../src/plugin.ts';
 import type { Schema } from '../src/plugin.ts';
 import type { Diagnostic } from '../src/diagnostics.ts';
 
@@ -358,4 +358,57 @@ test('collapse: distinct targets never collapse', () => {
     `(plugin :name gl :version "1.0.0" ${COLLAPSE_SHADER_FORM} (form :name buffer (key :name name :type symbol :optional false) (key :name src :type string :optional false)) (cross-ref-provider :name uniforms) (value-kind :name shader-name :underlying symbol :cross-ref (cross-ref :target shader)) (value-kind :name buffer-field :underlying symbol :cross-ref (cross-ref :provider uniforms :target buffer)))`,
   );
   assert.deepStrictEqual(validateCrossRefs(schema), []);
+});
+
+// ── target groups: the bucket key is a set ───────────────────────────────
+//
+// `crossRefBucketKey` is the shared identity of a namespace, so it has to
+// ignore the order the author listed the targets in. Mirrors the three Zig
+// tests beside `Schema.crossRefBucketKey`.
+
+test('group: the written order does not fork the bucket', () => {
+  const { schema } = schemaOf(
+    '(plugin :name gl :version "1.0.0" :sjon "1.3"' +
+      ' (form :name shader (key :name name :type symbol :optional false))' +
+      ' (form :name kernel (key :name name :type symbol :optional false))' +
+      ' (value-kind :name forwards :underlying symbol :cross-ref (cross-ref :target [shader kernel]))' +
+      ' (value-kind :name backwards :underlying symbol :cross-ref (cross-ref :target [kernel shader])))',
+  );
+  assert.strictEqual(
+    crossRefBucketKey(schema, schema.plugins[0]!.valueKinds[0]!.crossRef!),
+    'gl/kernel gl/shader',
+  );
+  assert.strictEqual(
+    crossRefBucketKey(schema, schema.plugins[0]!.valueKinds[0]!.crossRef!),
+    crossRefBucketKey(schema, schema.plugins[0]!.valueKinds[1]!.crossRef!),
+  );
+});
+
+test('group: one form under two spellings is one target', () => {
+  // The loader's repeat check compares spellings, so this list reaches the
+  // key as two entries naming one form.
+  const { schema } = schemaOf(
+    '(plugin :name gl :version "1.0.0" :sjon "1.3"' +
+      ' (form :name shader (key :name name :type symbol :optional false))' +
+      ' (value-kind :name both :underlying symbol :cross-ref (cross-ref :target [shader gl/shader])))',
+  );
+  assert.strictEqual(
+    crossRefBucketKey(schema, schema.plugins[0]!.valueKinds[0]!.crossRef!),
+    'gl/shader',
+  );
+});
+
+test('group: one group spelled two ways still collapses', () => {
+  const { schema } = schemaOf(
+    '(plugin :name gl :version "1.0.0" :sjon "1.3"' +
+      ' (form :name shader (key :name name :type symbol :optional false) (key :name alias :type symbol :optional false))' +
+      ' (form :name kernel (key :name name :type symbol :optional false) (key :name alias :type symbol :optional false))' +
+      ' (value-kind :name by-name :underlying symbol :cross-ref (cross-ref :target [shader kernel]))' +
+      ' (value-kind :name by-alias :underlying symbol :cross-ref (cross-ref :target [kernel shader] :name-key alias)))',
+  );
+  const diags = validateCrossRefs(schema);
+  assert.strictEqual(diags.length, 1);
+  assert.strictEqual(diags[0]?.code, 'cross_ref_target_collapse');
+  assert.deepStrictEqual(diags[0]?.path, ['gl', 'by-alias', 'cross-ref']);
+  assert.ok(diags[0]?.message.includes('the target group'));
 });

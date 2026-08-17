@@ -1228,6 +1228,49 @@ test "number: 2^54 prints as exact integer (number_i64 path skips 2^53 guard)" {
     try expectPrint("18014398509481984", "18014398509481984\n");
 }
 
+// A hex literal prints as decimal, and that is a decision rather than an
+// oversight — pinned here so it is not re-litigated as a bug. The printer
+// formats from the *value* and has no access to the source, so keeping the
+// hex spelling would need a new carrier: either a wire-format bump for a
+// pair of tags, or a tree-side side table that drifts the moment anything
+// builds a tree without going through the parser (`TreeBuilder`,
+// `Json.fromJson`, `Edit`). SJON already normalizes every other numeric
+// spelling — `1_000` → `1000`, `1e3` → `1000` — and the value is what the
+// document means. If this ever proves intolerable, the tag pair is the
+// honest fix and is a deliberate, version-gated change.
+test "number: hex prints as decimal — spellings do not round-trip, values do" {
+    try expectPrint("0xFF", "255\n");
+    try expectPrint("0x0", "0\n");
+    try expectPrint("-0x10", "-16\n");
+    try expectPrint("0xFFFF_FFFF", "4294967295\n");
+    // Case is not preserved either, for the same reason.
+    try expectPrint("0Xff", "255\n");
+    // The exact-integer tags carry the full width through print.
+    try expectPrint("0xFFFFFFFFFFFFFFFF", "18446744073709551615\n");
+}
+
+test "number: a hyphenated unit round-trips byte-identically" {
+    // The printer writes the unit slice verbatim, so a hyphen inside it
+    // survives. Worth pinning because it is the one thing that could have
+    // needed a printer change when the lexer learned to join letter runs —
+    // and because a member spelled `2d-array` that reprinted as `2d -array`
+    // would silently split one atom into two.
+    try expectPrint("2d-array", "2d-array\n");
+    try expectPrint("5ms-per-frame", "5ms-per-frame\n");
+    try expectPrint("(texture :view 2d-array)", "(texture :view 2d-array)\n");
+    // And the neighbour the rule protects: `1em-2` is two values in, so it
+    // is two roots out — one per line, which is what makes the split
+    // visible in formatted output rather than silently rejoined.
+    try expectPrint("1em-2", "1em\n-2\n");
+}
+
+test "number: reprinting hex output is idempotent" {
+    // The second pass sees decimal, so it must be a fixed point — this is
+    // what makes `sjon fmt` safe to run twice on a document with masks.
+    try expectPrint("(target :write-mask 0xFFFFFFFF)", "(target :write-mask 4294967295)\n");
+    try expectPrint("(target :write-mask 4294967295)", "(target :write-mask 4294967295)\n");
+}
+
 test "wrap_at = 0 forces every form to break" {
     // Aggressive: even a 6-byte form must break when wrap_at is 0.
     try expectPrintOpts("(a b)", .{ .wrap_at = 0 },

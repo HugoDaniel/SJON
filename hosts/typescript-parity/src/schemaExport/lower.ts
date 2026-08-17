@@ -246,6 +246,7 @@ function lowerKey(ctx: LowerCtx, plugin: Plugin, form: FormSpec, key: KeySpec): 
     description: '',
     value,
     default: lowerKeyDefault(key.default),
+    requires: key.requires ?? [],
   };
 }
 
@@ -396,8 +397,8 @@ function lowerValueKind(ctx: LowerCtx, plugin: Plugin, vk: ValueKind): ModelValu
         'cross_ref_annotation_only',
         'info',
         provider === null
-          ? `value-kind \`${vk.name}\` cross-ref annotation surfaces target-form=\`${vk.crossRef.target}\` name-key=\`${nameKey}\` acyclic=${acyclic} scope-form=\`${scopeForm ?? ''}\`; none are enforceable by JSON Schema`
-          : `value-kind \`${vk.name}\` cross-ref annotation surfaces target-form=\`${vk.crossRef.target}\` provider=\`${provider}\` source-key=\`${sourceKey}\` scope-form=\`${scopeForm ?? ''}\`; none are enforceable by JSON Schema`,
+          ? `value-kind \`${vk.name}\` cross-ref annotation surfaces target-form=\`${vk.crossRef.targets.join(' | ')}\` name-key=\`${nameKey}\` acyclic=${acyclic} scope-form=\`${scopeForm ?? ''}\`; none are enforceable by JSON Schema`
+          : `value-kind \`${vk.name}\` cross-ref annotation surfaces target-form=\`${vk.crossRef.targets.join(' | ')}\` provider=\`${provider}\` source-key=\`${sourceKey}\` scope-form=\`${scopeForm ?? ''}\`; none are enforceable by JSON Schema`,
         scope,
       ),
     );
@@ -414,7 +415,7 @@ function lowerValueKind(ctx: LowerCtx, plugin: Plugin, vk: ValueKind): ModelValu
     return {
       kind: 'cross_ref',
       crossRef: {
-        targetForm: vk.crossRef.target,
+        targets: vk.crossRef.targets,
         nameKey,
         acyclic,
         scopeForm,
@@ -424,11 +425,17 @@ function lowerValueKind(ctx: LowerCtx, plugin: Plugin, vk: ValueKind): ModelValu
     };
   }
   if (vk.heads && vk.heads.length > 0) {
-    const heads = vk.heads.map((name) => {
-      const hit = lookupForm(ctx.schema, name, null);
+    const heads = vk.heads.map((entry) => {
+      const hit = lookupForm(ctx.schema, entry.name, null);
       const owner =
         hit.kind === 'found' ? (findOwningPlugin(ctx.schema, hit.value) ?? plugin.name) : '';
-      return { plugin: owner, name };
+      const ref: { plugin: string; name: string; min?: number; max?: number } = {
+        plugin: owner,
+        name: entry.name,
+      };
+      if (entry.min !== undefined) ref.min = entry.min;
+      if (entry.max !== undefined) ref.max = entry.max;
+      return ref;
     });
     ctx.warnings.push(
       makeWarning(
@@ -441,15 +448,24 @@ function lowerValueKind(ctx: LowerCtx, plugin: Plugin, vk: ValueKind): ModelValu
     return { kind: 'form_heads', heads };
   }
   if (vk.members && vk.members.length > 0) {
-    const isRich = vk.members.some(
+    const isAnnotated = vk.members.some(
       (m) => m.label || m.description || m.deprecated || m.deprecationMessage,
     );
-    if (isRich) {
+    // A digit-leading spelling forces the rich shape whether or not it
+    // carries annotations: it is written as a unit-bearing number, so the
+    // compact `enum` of `$sym` entries cannot express it and would reject
+    // a document the validator accepts.
+    const isNumeric = vk.members.some((m) => m.numericSpelling !== undefined);
+    if (isAnnotated || isNumeric) {
       ctx.warnings.push(
         makeWarning(
           'rich_members_emitted_with_annotations',
           'info',
-          `value-kind \`${vk.name}\` — rich member-set emitted as \`oneOf\` of \`const\`-pinned objects with title/description/deprecated annotations`,
+          isNumeric && isAnnotated
+            ? `value-kind \`${vk.name}\` — rich member-set emitted as \`oneOf\` of \`const\`-pinned objects with title/description/deprecated annotations and \`$num\` wire shapes`
+            : isNumeric
+              ? `value-kind \`${vk.name}\` — member-set carries digit-leading spellings; emitted as \`oneOf\`, with each digit-leading member pinned to its \`$num\` wire shape rather than \`$sym\``
+              : `value-kind \`${vk.name}\` — rich member-set emitted as \`oneOf\` of \`const\`-pinned objects with title/description/deprecated annotations`,
           scope,
         ),
       );
@@ -459,6 +475,11 @@ function lowerValueKind(ctx: LowerCtx, plugin: Plugin, vk: ValueKind): ModelValu
         description: m.description ?? '',
         deprecated: m.deprecated ?? false,
         deprecationMessage: m.deprecationMessage ?? '',
+        ...(m.numericSpelling !== undefined
+          ? {
+              numericSpelling: { magnitude: m.numericSpelling.value, unit: m.numericSpelling.unit },
+            }
+          : {}),
       }));
       return vk.underlying === 'string'
         ? { kind: 'string_members_rich', members }
@@ -631,6 +652,7 @@ function lowerNumericBounds(
     exclusiveMin: src.exclusiveMin,
     exclusiveMax: src.exclusiveMax,
     integer: src.integer,
+    multipleOf: src.multipleOf ? lowerBound(ctx, src.multipleOf, scope) : null,
     // `:repr` is merged in by the caller (lowerValueKind) — `:numeric` and
     // `:repr` are orthogonal axes that both land on ModelNumericBounds.
     repr: null,
@@ -646,6 +668,7 @@ function emptyNumericBounds(): ModelNumericBounds {
     exclusiveMin: false,
     exclusiveMax: false,
     integer: false,
+    multipleOf: null,
     repr: null,
   };
 }

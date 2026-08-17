@@ -1,0 +1,37 @@
+; A head-set that bounds each head it admits. `(head :name …)` is the
+; rich spelling of `:heads` — the only one that can carry a count — and
+; it is mutually exclusive with the compact `:names [a b c]`.
+;
+;   vertex    exactly one   (:min 1 :max 1)
+;   fragment  at most one   (:max 1, floor defaults to 0)
+;   constant  any number    (no bound at all)
+;
+; The bounds apply at `render-pipeline`'s `:positional` slot, which is
+; the only place a head has a population to count. The same
+; `pipeline-section` kind on a `(key …)` slot would carry them inertly.
+(plugin :name gfx :version "1.0.0"
+  (value-kind :name pipeline-section
+    :description "One section of a render pipeline."
+    :underlying form
+    :heads (head-set
+      (head :name vertex   :min 1 :max 1 :description "The vertex stage. Exactly one.")
+      (head :name fragment :max 1        :description "The fragment stage. At most one.")
+      (head :name constant               :description "Pipeline-overridable constant. Any number.")))
+
+  (form :name vertex
+    (key :name entry :type symbol))
+  (form :name fragment
+    (key :name entry :type symbol))
+  (form :name constant
+    (key :name name  :type symbol)
+    (key :name value :type number))
+
+  (form :name render-pipeline
+    :positional pipeline-section
+    (key :name name :type symbol)))
+
+(render-pipeline :name main
+  (vertex   :entry vs_main)
+  (fragment :entry fs_main)
+  (constant :name gamma    :value 2.2)
+  (constant :name exposure :value 1.0))

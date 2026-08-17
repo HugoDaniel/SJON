@@ -4,6 +4,13 @@
 ;   * `:cross-ref :target … :acyclic true`— acyclic flag
 ;   * `:cross-ref :target … :scope-form …`— scope-form scoped
 ;   * `:cross-ref :provider … :source-key …` — provider route
+;   * `:cross-ref :target [a b]`          — target group (one namespace)
+;
+; Plus one shape that is about how cross-refs *compose*: a union over two
+; cross-ref kinds with different targets, which is where `union_ambiguous`
+; lives. Read it beside the target group directly below it — the two are
+; the same question answered two ways, and the bottom of this file is the
+; clearest place in the repo to see the difference.
 ;
 ; All four variants produce identical wire shapes on the JSON Schema
 ; side (a `{$sym: string}` object); the difference lands in the
@@ -70,9 +77,71 @@
     :underlying symbol
     :cross-ref (cross-ref :target shader :provider uniforms :source-key code))
 
+  ; Two targets, one slot. A union over two cross-ref kinds is how a slot
+  ; says "either kind of pipeline" — and it is the one composition where
+  ; declaration order becomes semantics. Duplicate names are caught per
+  ; target, so a `(render-pipeline :name p)` and a
+  ; `(compute-pipeline :name p)` are each alone in their own namespace and
+  ; neither is a duplicate; a reference to `p` then resolves in both, and
+  ; only the order below decides which. That is `union_ambiguous`, a
+  ; warning — the document still validates and first match still wins.
+  ;
+  ; On the export side this is the only place two `CrossRef<…>` types meet
+  ; in one union: JSON Schema renders the `anyOf` of both `{$sym: string}`
+  ; branches, and TS renders `CrossRef<"render-pipeline"> |
+  ; CrossRef<"compute-pipeline">` — the two targets survive into the type.
+  (form :name render-pipeline
+    :description "A raster pipeline. One half of the ambiguous pair."
+    (key :name name :type symbol))
+
+  (form :name compute-pipeline
+    :description "A compute pipeline. The other half."
+    (key :name name :type symbol))
+
+  (value-kind :name render-pipeline-ref
+    :description "Cross-ref to a `(render-pipeline …)`."
+    :underlying symbol
+    :cross-ref (cross-ref :target render-pipeline))
+
+  (value-kind :name compute-pipeline-ref
+    :description "Cross-ref to a `(compute-pipeline …)`."
+    :underlying symbol
+    :cross-ref (cross-ref :target compute-pipeline))
+
+  (value-kind :name pipeline-ref
+    :description "Either pipeline. Tried in this order — render first."
+    :underlying union
+    :union (union-shape :alternatives [render-pipeline-ref compute-pipeline-ref]))
+
+  ; The same two targets, one namespace. Where the union above keeps two
+  ; registries and lets declaration order pick between them, this keeps
+  ; ONE — so `(render-pipeline :name p)` beside `(compute-pipeline :name p)`
+  ; is `duplicate_cross_ref_target` at the declarations, and there is no
+  ; ambiguity left for a reference to inherit. That is the trade: the union
+  ; accepts the collision and warns per reference; the group refuses the
+  ; collision and says nothing per reference.
+  ;
+  ; Two things a group cannot carry, both rejected at load: `:acyclic`
+  ; (cycle edges are one form's self-referential keys, and `self` is not
+  ; well defined across a group) and `:provider` (an extracted member set
+  ; is collected per target form — declare one cross-ref per target).
+  ;
+  ; On the export side it lands as one slot, not two branches: JSON Schema
+  ; emits a single `{$sym: string}` whose annotation carries `target-forms`
+  ; (plural, an array) instead of `target-form`, and TS still emits
+  ; `CrossRef<"render-pipeline"> | CrossRef<"compute-pipeline">` — the
+  ; union of brands is the honest type either way, since a name really may
+  ; come from either form.
+  (value-kind :name pipeline-group-ref
+    :description "Either pipeline, in one namespace — a name defined by both is a duplicate."
+    :underlying symbol
+    :cross-ref (cross-ref :target [render-pipeline compute-pipeline]))
+
   (form :name edge
     :description "Directed edge between two `(node …)` declarations."
     (key :name from :type node-ref)
     (key :name to :type node-acyclic)
     (key :name phrase :type phrase-ref :optional true)
-    (key :name uniform :type uniform-ref :optional true)))
+    (key :name uniform :type uniform-ref :optional true)
+    (key :name pipeline :type pipeline-ref :optional true)
+    (key :name group-pipeline :type pipeline-group-ref :optional true)))

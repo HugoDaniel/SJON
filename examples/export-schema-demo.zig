@@ -59,6 +59,10 @@ pub fn main(init: std.process.Init) !u8 {
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/kit-xor/plugin.sjon", "examples/plugins/kit-xor/kit-xor", &any_diff, .{});
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/audio/plugin.sjon", "examples/plugins/audio/audio", &any_diff, .{});
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/enum-rich/plugin.sjon", "examples/plugins/enum-rich/enum-rich", &any_diff, .{});
+    // Digit-leading member spellings (`1d`, `2d`) — the one member shape
+    // whose wire encoding is `$num` rather than `$sym`, so the JSON-Schema
+    // and `.d.ts` goldens are where that is visible.
+    try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/dimensions/plugin.sjon", "examples/plugins/dimensions/dimensions", &any_diff, .{ .markdown = true });
 
     // --- M3 fixtures (one per construct), manifest-loaded ---
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/bounds/plugin.sjon", "examples/plugins/bounds/bounds", &any_diff, .{});
@@ -67,6 +71,7 @@ pub fn main(init: std.process.Init) !u8 {
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/xkey/plugin.sjon", "examples/plugins/xkey/xkey", &any_diff, .{});
     // Slot-local forms — inline anonymous union (form_locals) on canvas.:shape.
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/local-forms/plugin.sjon", "examples/plugins/local-forms/local-forms", &any_diff, .{});
+    try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/head-counts/plugin.sjon", "examples/plugins/head-counts/head-counts", &any_diff, .{ .markdown = true });
     // --- Value-kind refinements: GPU repr + variable-arity vectors + unit
     //     reject (gpu), and the scalar-or-ref shorthand. ---
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/gpu/plugin.sjon", "examples/plugins/gpu/gpu", &any_diff, .{});

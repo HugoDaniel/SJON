@@ -2436,7 +2436,7 @@ test "lowerOneForm: cross-ref miss on sugar form does NOT suppress the hook" {
         .name = try a.dupe(u8, "target-ref"),
         .underlying = .symbol,
         .cross_ref = .{
-            .target_form = try a.dupe(u8, "target"),
+            .targets = try Plugin.ValueKind.CrossRef.dupeOne(a, "target"),
             .name_key = try a.dupe(u8, "name"),
         },
     };

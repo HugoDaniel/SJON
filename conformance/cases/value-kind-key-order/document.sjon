@@ -1,0 +1,19 @@
+; Key order inside a form is not significant, and a diagnostic must not
+; depend on it. Two of a value-kind's shapes — `:members` and `:heads` —
+; are built while the kvpair loop that reads `:name` is still running, so
+; spelling `:members` first used to report "value-kind ``" with the path
+; `/members` instead of `mode/members`. Only on the reference
+; implementation: `hosts/typescript-parity` read `:name` in its own pass
+; from the start, so this is the one shape where the port was ahead and
+; no case existed to say so.
+;
+; The `(member-set)` is empty on purpose — it is the cheapest declaration
+; that reports against its kind's name. What this case pins is the path.
+;
+; A bare literal stands in for a document body: the plugin failed to
+; load, so the host drops it entirely, and any `(mode …)` here would add
+; an `unknown_form` cascade that says nothing about key order.
+(plugin :name p :version "1.0.0"
+  (value-kind :members (member-set) :name mode :underlying symbol))
+
+42

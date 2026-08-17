@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code not_cross_ref :path [dispatch pipeline]))

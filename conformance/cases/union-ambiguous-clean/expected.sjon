@@ -1,0 +1,9 @@
+; Clean. `blit` and `reduce` each exist in exactly one target, so each
+; reference has one reading. `auto` exists in *both* pipeline targets,
+; but `mode`'s union tries the `auto-mode` member set first and it wins —
+; the slot denotes the sentinel, not a pipeline, so alternative order
+; decided nothing about which entity is meant and nothing warns.
+;
+; The pair to `union-ambiguous`: same schema shape, no collision that
+; reaches a reference.
+(diagnostics)

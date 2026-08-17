@@ -1,0 +1,23 @@
+; Matching is on the value's parsed `(magnitude, unit)` pair, not on its
+; text. Two reasons: the binary walker has no source text to compare
+; against, so a text rule could not be dual-path at all — and the pair is
+; the better rule anyway, since it decides these four cases correctly with
+; no special-casing.
+;
+;   * `2d`   — matches.
+;   * `2.0d` — matches. Same magnitude, same unit.
+;   * `02d`  — matches. The leading zero is not part of the identity.
+;   * `2`    — does NOT match: no unit, so it is not a spelling at all.
+;              `wrong_underlying`, exactly as before this feature existed.
+;   * `2.5d` — does NOT match: a fractional magnitude is not an integer
+;              key, so it cannot round into `2d`.
+(plugin :name gpu :version "1.0.0" :sjon "1.3"
+  (value-kind :name texture-dimension :underlying symbol
+    :members (member-set :values [1d 2d 3d]))
+  (form :name texture (key :name dimension :type texture-dimension)))
+
+(texture :dimension 2d)
+(texture :dimension 2.0d)
+(texture :dimension 02d)
+(texture :dimension 2)
+(texture :dimension 2.5d)

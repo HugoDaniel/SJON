@@ -247,6 +247,12 @@ $ printf '(scene  :w   800 :h 600)\n' | sjon fmt -
 (scene :w 800 :h 600)
 ```
 
+Number *spellings* are normalized to one decimal form, because the printer
+formats from the decoded value and never sees the source: `1_000` and `1e3`
+both come back as `1000`, and `0xFF` as `255` (LANGUAGE.md §4.2). Values
+round-trip; spellings do not. If you keep hex masks in a formatted file, the
+comment beside them is what survives.
+
 ### From a bare code to an explanation
 
 Diagnostics carry a stable snake_case code (the same one your editor shows in

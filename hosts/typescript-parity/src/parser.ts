@@ -7,12 +7,13 @@
 //
 // STRUCTURAL RECOVERY. `Parser.zig`'s contract — "trees always exist
 // after parse (possibly partial); collection over abort"
-// (docs/LANGUAGE.md §4.3) — is honoured here for the three *structural* deviations,
+// (docs/LANGUAGE.md §4.3) — is honoured here for the four *structural* deviations,
 // each emitting an `unspecified` diagnostic and continuing:
 //
 //   * a form left open at end of input   (closed at `source.length`)
 //   * a vector left open at end of input (ditto)
 //   * a close delimiter at top level     (skipped)
+//   * a `0x` prefix with no hex digit    (skipped, yields no node)
 //
 // This is not full parity with `Parser.zig`, which recovers from every
 // deviation. The remaining sites — an unterminated string, an invalid
@@ -53,11 +54,34 @@ export function parse(source: string, diagOut?: Diagnostic[]): readonly Node[] {
       p.skipWhitespace();
       continue;
     }
+    // A malformed `0x` prefix yields no node, so it is drained here rather
+    // than inside `parseNode` — the same shape as the stray close above.
+    if (p.skipInvalidHexPrefix()) {
+      p.skipWhitespace();
+      continue;
+    }
     out.push(p.parseNode());
     p.skipWhitespace();
   }
   if (diagOut) diagOut.push(...p.diagnostics);
   return out;
+}
+
+function isHexDigit(c: string | undefined): boolean {
+  if (c === undefined) return false;
+  return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+function isAsciiDigit(c: string | undefined): boolean {
+  if (c === undefined) return false;
+  return c >= '0' && c <= '9';
+}
+
+/** The unit alphabet: ASCII letters only. `-` joins two runs but is not
+ *  itself a unit byte, and digits are deliberately excluded. */
+function isUnitLetter(c: string | undefined): boolean {
+  if (c === undefined) return false;
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
 }
 
 /** How a child node is named within its parent: a kvpair key, or a
@@ -235,6 +259,7 @@ class Parser {
         this.pos++;
         break;
       }
+      if (this.skipInvalidHexPrefix()) continue;
       this.pendingStep = { step: String(positionals), viaKvpair: false };
       const ch = this.parseNode();
       if (ch.tag === 'keyword') {
@@ -243,6 +268,12 @@ class Parser {
         // positional keyword flag (no v0.1 corpus case exercises this,
         // but we mirror the rule for fidelity).
         this.skipWhitespace();
+        // Drain before the lookahead, not after: a malformed `0x` starts
+        // with a digit, so it would otherwise read as "a value follows"
+        // and `:k` would pair with whatever came after the typo. In Zig
+        // the `.invalid` token is simply absent, so `(a :x 0x)` leaves
+        // `:x` as a positional flag.
+        while (this.skipInvalidHexPrefix()) this.skipWhitespace();
         if (!this.atEnd() && this.src[this.pos] !== ')' && this.src[this.pos] !== ':') {
           this.pendingStep = { step: ch.name, viaKvpair: true };
           const value = this.parseNode();
@@ -291,6 +322,7 @@ class Parser {
         this.pos++;
         break;
       }
+      if (this.skipInvalidHexPrefix()) continue;
       this.pendingStep = { step: String(elements.length), viaKvpair: false };
       elements.push(this.parseNode());
     }
@@ -360,51 +392,65 @@ class Parser {
     if (timeLen !== null) {
       return this.parseTimeLiteral(start, timeLen);
     }
-    if (this.src[this.pos] === '-') this.pos++;
-    while (
-      !this.atEnd() &&
-      ((this.src[this.pos]! >= '0' && this.src[this.pos]! <= '9') ||
-        this.src[this.pos] === '.' ||
-        this.src[this.pos] === 'e' ||
-        this.src[this.pos] === 'E' ||
-        this.src[this.pos] === '+' ||
-        this.src[this.pos] === '-')
-    ) {
-      this.pos++;
+    // Hex integer lookahead — mirrors the Zig lexer's `0x` prefix states.
+    // An integer literal with no unit, no fraction, and no exponent, so it
+    // is read whole here rather than falling through to the decimal scan,
+    // whose unit branch would take `xFF` as a unit and leave the value 0.
+    if (this.matchHexLookahead(start)) {
+      return this.parseHexLiteral(start);
     }
-    const numericEnd = this.pos;
-    // Unit suffix: letters or `%` attached without whitespace. The Zig
-    // lexer has finer-grained rules for `e`/`E` disambiguation against
-    // exponents (see `Lexer.zig` `number_unit`); the corpus inputs
-    // exercised here (`5deg`, `5ms`) sit clear of that overlap.
-    let unit: string | undefined;
-    if (!this.atEnd()) {
-      const c = this.src[this.pos]!;
-      if (c === '%' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
-        const unitStart = this.pos;
-        while (!this.atEnd()) {
-          const u = this.src[this.pos]!;
-          if (
-            u === '(' ||
-            u === ')' ||
-            u === '[' ||
-            u === ']' ||
-            u === ' ' ||
-            u === '\t' ||
-            u === '\n' ||
-            u === '\r' ||
-            u === ',' ||
-            u === ';' ||
-            u === '"' ||
-            u === ':'
-          )
-            break;
-          this.pos++;
-        }
-        unit = this.src.slice(unitStart, this.pos);
+    // Numeric portion, mirroring the Zig lexer's states rather than
+    // sweeping every plausible byte: digits and `_` grouping, an optional
+    // fraction, and an exponent only when `e`/`E` is followed by a digit
+    // or a sign.
+    //
+    // That last rule used to be a documented approximation ("the corpus
+    // inputs exercised here sit clear of that overlap"). It is load-bearing
+    // now: a digit-leading member's *unit* is part of its identity, so
+    // reading `1em` as `1e` with unit `m` would silently miss the member
+    // `1em`. Same for `_`, which the permissive sweep never consumed —
+    // `1_000ms` used to come out as the value 1 with no unit at all.
+    if (this.src[this.pos] === '-') this.pos++;
+    this.skipDigitRun();
+    if (this.src[this.pos] === '.') {
+      this.pos++;
+      this.skipDigitRun();
+    }
+    if (this.src[this.pos] === 'e' || this.src[this.pos] === 'E') {
+      let j = this.pos + 1;
+      if (this.src[j] === '+' || this.src[j] === '-') j++;
+      if (isAsciiDigit(this.src[j])) {
+        this.pos = j;
+        this.skipDigitRun();
       }
     }
-    const text = this.src.slice(start, numericEnd);
+    const numericEnd = this.pos;
+    // Unit suffix: a single `%`, or one or more ASCII letters with `-`
+    // continuing only before another letter (`2d-array`). Mirrors
+    // `Lexer.zig`'s `.number_unit` state, hyphen rule included — a `-`
+    // before anything else ends the token, so `1em-2` is `1em` then `-2`.
+    let unit: string | undefined;
+    const first = this.src[this.pos];
+    if (first === '%') {
+      this.pos++;
+      unit = '%';
+    } else if (isUnitLetter(first)) {
+      const unitStart = this.pos;
+      while (!this.atEnd()) {
+        const u = this.src[this.pos]!;
+        if (isUnitLetter(u)) {
+          this.pos++;
+          continue;
+        }
+        if (u === '-' && isUnitLetter(this.src[this.pos + 1])) {
+          this.pos += 2;
+          continue;
+        }
+        break;
+      }
+      unit = this.src.slice(unitStart, this.pos);
+    }
+    const text = this.src.slice(start, numericEnd).replaceAll('_', '');
     const value = Number.parseFloat(text);
     if (Number.isNaN(value)) {
       throw new ParseError(`invalid number literal '${text}'`, start);
@@ -444,6 +490,81 @@ class Parser {
     if (unit !== undefined) return { tag: 'number', value, unit, span };
     if (integerBits !== undefined) return { tag: 'number', value, integerBits, span };
     return { tag: 'number', value, span };
+  }
+
+  /** Consume a run of ASCII digits and `_` grouping separators. */
+  skipDigitRun(): void {
+    while (!this.atEnd() && (isAsciiDigit(this.src[this.pos]) || this.src[this.pos] === '_')) {
+      this.pos++;
+    }
+  }
+
+  /** Returns true iff the input at `start` opens a well-formed hex
+   *  literal: an optional `-`, then exactly one `0`, then `x` / `X`, then
+   *  at least one hex digit.
+   *
+   *  The "exactly one `0`" part is the Zig lexer's bare-zero gate
+   *  (`Lexer.isBareZero`): `x` is an ordinary unit letter everywhere else,
+   *  so `10x`, `00x`, and `0_x` keep their unit. */
+  matchHexLookahead(start: number): boolean {
+    const i = this.src[start] === '-' ? start + 1 : start;
+    if (this.src[i] !== '0') return false;
+    const p = this.src[i + 1];
+    if (p !== 'x' && p !== 'X') return false;
+    return isHexDigit(this.src[i + 2]);
+  }
+
+  /** Materialize a hex integer. Walks the same i64 → u64 → f64 ladder as
+   *  the decimal path in `parseNumber`, including its
+   *  `number_overflow_exact_integer` diagnostic, so the two spellings
+   *  reach the same node shape. `BigInt` reads the digits exactly and
+   *  `Number()` rounds once, matching the Zig parser's `parseInt` at base
+   *  16 and its hex-float fallback. */
+  parseHexLiteral(start: number): Node {
+    const negative = this.src[start] === '-';
+    this.pos = negative ? start + 3 : start + 2; // past `[-]0x`
+    while (isHexDigit(this.src[this.pos]) || this.src[this.pos] === '_') this.pos++;
+    const span: Span = { start, end: this.pos };
+    const digits = this.src.slice(negative ? start + 3 : start + 2, this.pos).replaceAll('_', '');
+    const magnitude = BigInt(`0x${digits}`);
+    const big = negative ? -magnitude : magnitude;
+    const value = Number(big);
+
+    const fitsU64 = !negative && big < 1n << 64n;
+    const fitsI64 = negative && big >= -(1n << 63n);
+    if (!fitsU64 && !fitsI64) {
+      this.diagnostics.push({
+        code: 'number_overflow_exact_integer',
+        message: 'integer literal exceeds u64 range; storing as approximate f64',
+        path: [],
+        span,
+        severity: 'err',
+      });
+      return { tag: 'number', value, span };
+    }
+    return { tag: 'number', value, integerBits: big, span };
+  }
+
+  /** A `0x` / `0X` prefix with no hex digit after it. In Zig this is an
+   *  `.invalid` token that never reaches the tree — one diagnostic, no
+   *  node — so this is the fourth structural-recovery site (see the
+   *  module header): record, consume the two prefix bytes, and let the
+   *  caller carry on. The tail lexes normally, so `0xGG` leaves `GG` as an
+   *  ordinary symbol.
+   *
+   *  Returns true when a prefix was consumed. Callers that are about to
+   *  parse a node drain it first — a *recovered* prefix must not be
+   *  mistaken for the start of a value. */
+  skipInvalidHexPrefix(): boolean {
+    const start = this.pos;
+    const i = this.src[start] === '-' ? start + 1 : start;
+    if (this.src[i] !== '0') return false;
+    const p = this.src[i + 1];
+    if (p !== 'x' && p !== 'X') return false;
+    if (isHexDigit(this.src[i + 2])) return false; // a well-formed literal
+    this.pos = i + 2;
+    this.recordSyntax('invalid token', start, this.pos);
+    return true;
   }
 
   /** Returns true iff the input starting at `start` matches the strict

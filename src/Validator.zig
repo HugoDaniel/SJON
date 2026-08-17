@@ -1158,11 +1158,34 @@ pub const CrossRefSpec = struct {
     source_key: []const u8 = "src",
 };
 
-/// Walk every plugin's value-kinds and collect `canonical_target → CrossRefSpec`,
-/// where `canonical_target` is the schema-resolved `<plugin>/<form>` name
-/// produced by `Schema.canonicalFormName`. Shared by both Tree and Binary
-/// forest paths so the schema iteration is not duplicated. First-wins if
-/// multiple cross-refs share a target.
+/// One registration a form's instances owe the registry: which bucket to
+/// register into, under which spec.
+///
+/// The two are the same string for a single-target cross-ref — a form's
+/// names go in its own bucket — and differ only for a group, whose
+/// members' names all land in the group's synthetic bucket
+/// (`Schema.crossRefBucketKey`). Carrying the bucket explicitly is what
+/// keeps every *other* registry operation single-bucket: `contains`,
+/// `lookup`, `isPoisoned`, `iterateNames`, `registerSite`, and the LSP
+/// consumers are untouched by groups.
+pub const CrossRefRegistration = struct {
+    bucket: []const u8,
+    spec: CrossRefSpec,
+};
+
+/// Walk every plugin's value-kinds and collect
+/// `canonical_target → []CrossRefRegistration`, where `canonical_target`
+/// is the schema-resolved `<plugin>/<form>` name produced by
+/// `Schema.canonicalFormName`. Shared by both Tree and Binary forest paths
+/// so the schema iteration is not duplicated.
+///
+/// **One-to-many, and first-wins per bucket.** A form can owe more than
+/// one registration: its own bucket (from a single-target cross-ref) plus
+/// one per group that lists it. Within a bucket the first cross-ref still
+/// wins, exactly as before — so for a schema with no groups every list has
+/// at most one entry and the behaviour is what it always was.
+/// `Schema.checkTargetCollapse` replays this same first-wins rule to warn
+/// about the losers, and keys on the same bucket for that reason.
 ///
 /// Keys live on `index_a` and ride the index arena's lifetime — they're
 /// the same strings used to register and look up `CrossRefIndex` entries,
@@ -1172,13 +1195,13 @@ pub const CrossRefSpec = struct {
 fn collectCrossRefTargets(
     index_a: Allocator,
     schema: Schema.Schema,
-) Allocator.Error!std.StringHashMapUnmanaged(CrossRefSpec) {
-    var targets: std.StringHashMapUnmanaged(CrossRefSpec) = .empty;
+) Allocator.Error!std.StringHashMapUnmanaged(std.ArrayListUnmanaged(CrossRefRegistration)) {
+    var targets: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(CrossRefRegistration)) = .empty;
     errdefer targets.deinit(index_a);
     for (schema.plugins) |*plugin| {
         for (plugin.value_kinds) |*kind| {
             const cr = kind.cross_ref orelse continue;
-            const canonical = (try schema.canonicalFormName(index_a, cr.target_form)) orelse continue;
+            const bucket = (try schema.crossRefBucketKey(index_a, cr)) orelse continue;
             const scope_canonical: ?[]const u8 = if (cr.scope_form) |sf|
                 try schema.canonicalFormName(index_a, sf)
             else
@@ -1192,13 +1215,28 @@ fn collectCrossRefTargets(
                 (try schema.canonicalProviderName(index_a, pv)) orelse continue
             else
                 null;
-            const gop = try targets.getOrPut(index_a, canonical);
-            if (!gop.found_existing) gop.value_ptr.* = .{
+            const spec: CrossRefSpec = .{
                 .name_key = cr.name_key,
                 .scope_form = scope_canonical,
                 .provider = provider_canonical,
                 .source_key = cr.source_key,
             };
+            // Every listed target feeds the same bucket. `crossRefBucketKey`
+            // is all-or-nothing, so reaching here means each entry resolves.
+            for (cr.targets) |t| {
+                const canonical = (try schema.canonicalFormName(index_a, t)) orelse unreachable;
+                const gop = try targets.getOrPut(index_a, canonical);
+                if (!gop.found_existing) gop.value_ptr.* = .empty;
+                // First-wins *per bucket*: a second cross-ref into a bucket
+                // this form already feeds contributes nothing (and
+                // `Schema.checkTargetCollapse` warns about it). A different
+                // bucket is a different namespace and gets its own entry.
+                for (gop.value_ptr.items) |existing| {
+                    if (std.mem.eql(u8, existing.bucket, bucket)) break;
+                } else {
+                    try gop.value_ptr.append(index_a, .{ .bucket = bucket, .spec = spec });
+                }
+            }
         }
     }
     return targets;
@@ -1209,14 +1247,16 @@ fn collectCrossRefTargets(
 /// scope boundaries in O(1).
 fn collectScopeHeads(
     index_a: Allocator,
-    targets: *const std.StringHashMapUnmanaged(CrossRefSpec),
+    targets: *const std.StringHashMapUnmanaged(std.ArrayListUnmanaged(CrossRefRegistration)),
 ) Allocator.Error!std.StringHashMapUnmanaged(void) {
     var heads: std.StringHashMapUnmanaged(void) = .empty;
     errdefer heads.deinit(index_a);
     var it = targets.iterator();
     while (it.next()) |e| {
-        if (e.value_ptr.scope_form) |sf| {
-            try heads.put(index_a, sf, {});
+        for (e.value_ptr.items) |reg| {
+            if (reg.spec.scope_form) |sf| {
+                try heads.put(index_a, sf, {});
+            }
         }
     }
     return heads;
@@ -1412,15 +1452,15 @@ pub fn collectExtractionRequests(
                     .form => {
                         const hdr = tree.formHeader(idx);
                         if (try canonicalFormNameBuf(gpa, &canon_buf, schema, hdr.head, hdr.namespace)) |canon| {
-                            if (targets.get(canon)) |spec| request: {
-                                const provider = spec.provider orelse break :request;
-                                const source = sourceTextOf(tree, hdr, spec.source_key) orelse break :request;
+                            if (targets.get(canon)) |regs| for (regs.items) |reg| request: {
+                                const provider = reg.spec.provider orelse break :request;
+                                const source = sourceTextOf(tree, hdr, reg.spec.source_key) orelse break :request;
                                 const key: ExtractionKey = .{ .provider = provider, .source = source.text };
                                 const gop = try seen.getOrPut(a, key);
                                 if (gop.found_existing) break :request;
                                 gop.value_ptr.* = {};
                                 try items.append(a, key);
-                            }
+                            };
                         }
                         var ci: usize = hdr.children.len;
                         while (ci > 0) : (ci -= 1) try stack.append(gpa, hdr.children[ci - 1]);
@@ -1456,9 +1496,13 @@ fn declaresProviderRoute(schema: Schema.Schema) bool {
 /// True when at least one *collected* target takes the provider route —
 /// i.e. its `:provider` also resolved. Distinct from
 /// `declaresProviderRoute`, which cannot know that yet.
-fn anyProviderRoute(targets: *const std.StringHashMapUnmanaged(CrossRefSpec)) bool {
+fn anyProviderRoute(
+    targets: *const std.StringHashMapUnmanaged(std.ArrayListUnmanaged(CrossRefRegistration)),
+) bool {
     var it = targets.valueIterator();
-    while (it.next()) |spec| if (spec.provider != null) return true;
+    while (it.next()) |regs| {
+        for (regs.items) |reg| if (reg.spec.provider != null) return true;
+    }
     return false;
 }
 
@@ -1624,7 +1668,7 @@ fn dispatchExtractionValue(
     schema: Schema.Schema,
     cursor: *BinaryCursor.Cursor,
     view: BinaryCursor.NodeView,
-    targets: *const std.StringHashMapUnmanaged(CrossRefSpec),
+    targets: *const std.StringHashMapUnmanaged(std.ArrayListUnmanaged(CrossRefRegistration)),
     frames: *std.ArrayList(ExtractionFrame),
 ) Error!void {
     switch (view.kind) {
@@ -1633,9 +1677,20 @@ fn dispatchExtractionValue(
             var provider: ?[]const u8 = null;
             var source_key: []const u8 = "";
             if (try canonicalFormNameBuf(gpa, canon_buf, schema, fv.head, fv.namespace)) |canon| {
-                if (targets.get(canon)) |spec| {
-                    provider = spec.provider;
-                    source_key = spec.source_key;
+                if (targets.get(canon)) |regs| {
+                    // A form owes **at most one** provider-route
+                    // registration, which is what lets this frame carry one
+                    // provider instead of a list: `:provider` is rejected at
+                    // load beside more than one target, and two single-target
+                    // provider kinds on one form share a bucket, where
+                    // first-wins drops the second. The assert states the
+                    // invariant the frame's shape depends on.
+                    for (regs.items) |reg| {
+                        if (reg.spec.provider == null) continue;
+                        std.debug.assert(provider == null);
+                        provider = reg.spec.provider;
+                        source_key = reg.spec.source_key;
+                    }
                 }
             }
             try frames.append(gpa, .{ .form = .{
@@ -1678,8 +1733,8 @@ const DiscoveryFixture = struct {
         };
     }
 
-    const provider_route: Plugin.ValueKind.CrossRef = .{ .target_form = "shader", .provider = "lines" };
-    const identity_route: Plugin.ValueKind.CrossRef = .{ .target_form = "shader" };
+    const provider_route: Plugin.ValueKind.CrossRef = .{ .targets = &.{"shader"}, .provider = "lines" };
+    const identity_route: Plugin.ValueKind.CrossRef = .{ .targets = &.{"shader"} };
 };
 
 test "extraction discovery: one request per distinct (provider, source) pair" {
@@ -1759,7 +1814,7 @@ test "extraction discovery: an unresolvable :provider requests nothing" {
     // `validateCrossRefs` has already said `unknown_cross_ref_provider`
     // here. Discovery declining is what stops the index pass falling back
     // to `:name` and inventing a member set out of a schema error.
-    const p = DiscoveryFixture.plugin(.{ .target_form = "shader", .provider = "nope" });
+    const p = DiscoveryFixture.plugin(.{ .targets = &.{"shader"}, .provider = "nope" });
     const schema = Schema.Schema.init(&.{p});
 
     var tree = try Parser.parse(gpa, "(shader :name a :src \"u_one\")");
@@ -1963,28 +2018,32 @@ fn buildCrossRefIndexForest(
                     const hdr = tree.formHeader(idx);
                     const canonical = try canonicalFormNameBuf(gpa, &canon_buf, schema, hdr.head, hdr.namespace);
                     if (canonical) |canon| {
-                        // Register this form (if a cross-ref target).
+                        // Register this form into every bucket it feeds: its
+                        // own (from a single-target cross-ref) and one per
+                        // group that lists it. One entry for every schema
+                        // written before groups existed.
                         if (targets.getEntry(canon)) |entry| {
-                            const spec = entry.value_ptr.*;
-                            const reg_scope = if (spec.scope_form) |sf|
-                                findNearestScope(scope_stack.items, sf) orelse tree_scope
-                            else
-                                tree_scope;
-                            try registerCrossRefInstance(
-                                index_a,
-                                tree_a,
-                                &index,
-                                &cycle_ctx,
-                                tree,
-                                t_idx,
-                                reg_scope,
-                                idx,
-                                hdr,
-                                entry.key_ptr.*,
-                                spec,
-                                &diags_lists[t],
-                                tree_options,
-                            );
+                            for (entry.value_ptr.items) |reg| {
+                                const reg_scope = if (reg.spec.scope_form) |sf|
+                                    findNearestScope(scope_stack.items, sf) orelse tree_scope
+                                else
+                                    tree_scope;
+                                try registerCrossRefInstance(
+                                    index_a,
+                                    tree_a,
+                                    &index,
+                                    &cycle_ctx,
+                                    tree,
+                                    t_idx,
+                                    reg_scope,
+                                    idx,
+                                    hdr,
+                                    reg.bucket,
+                                    reg.spec,
+                                    &diags_lists[t],
+                                    tree_options,
+                                );
+                            }
                         }
                         // Open a new lexical scope when this form's canonical
                         // name is a `:scope` head somewhere in the schema.
@@ -2619,53 +2678,54 @@ const IndexFrame = union(enum) {
     vector_iter: VectorIndexFrame,
 };
 
-const FormIndexFrame = struct {
-    head: []const u8,
-    /// Canonical `<plugin>/<form>` name for this form, resolved via
-    /// `Schema.lookupForm` when the frame was pushed. Non-null only when
-    /// the head resolves cleanly (single matching plugin) AND that
-    /// canonical name is a cross-ref target. Used as the registry outer
-    /// key when registering at iter exhaustion. Null frames descend
-    /// without registering.
-    canonical_target: ?[]const u8,
-    /// `name_key` non-null when this form is an *identity-route*
-    /// registration target. Exactly one of `name_key` / `provider` is
-    /// non-null whenever `canonical_target` is — the routes are exclusive
-    /// and the loader enforces it.
-    name_key: ?[]const u8,
-    /// Provider route: canonical `<plugin>/<provider>` whose extractor
-    /// supplies this form's names.
-    provider: ?[]const u8 = null,
-    /// Provider route: the key whose *string* value is handed to the
-    /// extractor. Non-null exactly when `provider` is.
-    source_key: ?[]const u8 = null,
-    form_span: Ast.Span,
-    iter: BinaryCursor.ChildIter,
-    /// Captured during iteration when the matching `:name-key` kvpair is
-    /// found and its value is symbol-typed. Registered at iter exhaustion.
+/// What one registration captured while its form's children streamed past.
+///
+/// One of these per entry in `FormIndexFrame.regs`, because the cursor is
+/// monotonic: by the time the frame is exhausted and registration happens,
+/// the bytes holding the name are behind us. A form feeding two buckets
+/// under two different `:name-key`s therefore needs two captures, and a
+/// single shared slot could only serve the first.
+const RegCapture = struct {
+    /// Scope this registration lives under, resolved at frame push against
+    /// the spec's `:scope` (if any) using the active scope stack. For
+    /// tree-scoped specs — the default — it is the buffer's `tree_scope`.
+    scope: ScopeId,
+    /// Captured when the matching `:name-key` kvpair is found and its value
+    /// is symbol-typed. Registered at iter exhaustion.
     captured_name: ?[]const u8 = null,
     captured_span: Ast.Span = ZERO_SPAN,
     /// True after the first `name_key`-matching kvpair is consumed —
-    /// subsequent matches are ignored (mirrors Tree path's first-wins on
-    /// duplicate `:name` kvpairs).
+    /// subsequent matches are ignored (mirrors the Tree path's first-wins
+    /// on duplicate `:name` kvpairs).
     saw_name_kvpair: bool = false,
-    /// Provider route's counterpart to `captured_name`: the source string
-    /// handed to the extractor, captured mid-iteration because the cursor
-    /// is monotonic — by the time the frame is exhausted the bytes are
-    /// already behind us. Same first-wins tolerance via
-    /// `saw_source_kvpair`.
+    /// Provider route's counterpart to `captured_name`.
     captured_source: ?[]const u8 = null,
     captured_source_span: Ast.Span = ZERO_SPAN,
     saw_source_kvpair: bool = false,
+};
+
+const FormIndexFrame = struct {
+    head: []const u8,
+    /// Every bucket this form's instances feed, borrowed from the target
+    /// map (index-arena lifetime, so valid for the whole pass). Empty for
+    /// a form that is no cross-ref's target — which is most forms — and
+    /// those frames descend without registering, exactly as a null
+    /// `canonical_target` used to.
+    ///
+    /// One entry for every schema written before multi-target cross-refs;
+    /// more only when a form is both a single-target kind's target and a
+    /// member of a group (or of several groups).
+    regs: []const CrossRefRegistration,
+    /// Parallel to `regs`, one `RegCapture` each. Allocated on the index
+    /// arena at push time and only when `regs.len > 0`, so a non-target
+    /// form allocates nothing.
+    caps: []RegCapture,
+    form_span: Ast.Span,
+    iter: BinaryCursor.ChildIter,
     /// Non-null when this form's canonical name matches a `CycleCtx` spec
     /// (i.e., is a target of an `:acyclic true` cross-ref). Symbol values
     /// on declared edge keys are appended to `captured_edges`.
     acyclic_spec_idx: ?u32 = null,
-    /// Scope this form's registration lives under. Set at frame push,
-    /// resolved against the cross-ref spec's `:scope` (if any) using
-    /// the active scope stack — for tree-scoped specs (the default)
-    /// this is just the buffer's `tree_scope`.
-    scope: ScopeId,
     /// True when this form opened a new lexical scope (its canonical
     /// name is in `scope_heads`); the binary-path index-build loop pops
     /// the parallel `scope_stack` when the frame is exhausted.
@@ -2739,7 +2799,7 @@ fn buildCrossRefIndexBinary(
         scope_stack.clearRetainingCapacity();
 
         while (try root_iter.next()) |root_view| {
-            try dispatchIndexValue(gpa, &canon_buf, schema, &cursor, root_view, &targets, &scope_heads, &cycle_ctx, &frames, &scope_stack, t_idx, tree_scope);
+            try dispatchIndexValue(gpa, index_a, &canon_buf, schema, &cursor, root_view, &targets, &scope_heads, &cycle_ctx, &frames, &scope_stack, t_idx, tree_scope);
 
             var step: u32 = 0;
             while (frames.items.len > 0) {
@@ -2755,42 +2815,43 @@ fn buildCrossRefIndexBinary(
                             // Drain trailing comments. Then register the
                             // captured name (if any) on the way out.
                             _ = try fi.iter.next();
-                            if (fi.canonical_target) |canon| {
-                                if (fi.provider) |pv| {
+                            // One registration per bucket this form feeds.
+                            for (fi.regs, fi.caps) |reg, cap| {
+                                if (reg.spec.provider) |pv| {
                                     // Provider route. A frame with no
                                     // captured source is an instance
                                     // discovery never requested either, so
                                     // it stays silent — same tolerance the
                                     // identity route gives a missing
                                     // `:name-key`.
-                                    if (fi.captured_source) |src| try registerExtractedNames(
+                                    if (cap.captured_source) |src| try registerExtractedNames(
                                         index_a,
                                         tree_a,
                                         &index,
                                         t_idx,
-                                        fi.scope,
+                                        cap.scope,
                                         .invalid,
                                         fi.form_span,
-                                        canon,
+                                        reg.bucket,
                                         pv,
                                         src,
-                                        fi.captured_source_span,
+                                        cap.captured_source_span,
                                         &diags_lists[b],
                                         extractions,
                                     );
-                                } else if (fi.captured_name) |nt| {
+                                } else if (cap.captured_name) |nt| {
                                     try registerCrossRefBinary(
                                         index_a,
                                         tree_a,
                                         &index,
                                         &cycle_ctx,
                                         fi.acyclic_spec_idx,
-                                        canon,
+                                        reg.bucket,
                                         nt,
-                                        fi.captured_span,
+                                        cap.captured_span,
                                         fi.form_span,
                                         t_idx,
-                                        fi.scope,
+                                        cap.scope,
                                         fi.captured_edges.items,
                                         &diags_lists[b],
                                     );
@@ -2802,38 +2863,50 @@ fn buildCrossRefIndexBinary(
                         }
 
                         const entry = (try fi.iter.next()) orelse unreachable;
-                        const matches_name = fi.name_key != null and
-                            !fi.saw_name_kvpair and
-                            entry.kind == .keyword and
-                            std.mem.eql(u8, entry.key.?, fi.name_key.?);
-                        const matches_source = fi.source_key != null and
-                            !fi.saw_source_kvpair and
-                            entry.kind == .keyword and
-                            std.mem.eql(u8, entry.key.?, fi.source_key.?);
-
-                        if (matches_source) {
-                            fi.saw_source_kvpair = true;
-                            if (entry.value.kind == .string) {
-                                fi.captured_source = try BinaryCursor.readString(&cursor, entry.value);
-                                fi.captured_source_span = entry.value.span orelse ZERO_SPAN;
-                                continue;
+                        // Capture for every registration this child feeds.
+                        // The read happens at most once however many
+                        // registrations match, because the cursor is
+                        // monotonic — a second `readSymbol` on the same node
+                        // would desync it. Registrations sharing a
+                        // `:name-key` therefore share the bytes.
+                        var read_name: ?[]const u8 = null;
+                        var read_source: ?[]const u8 = null;
+                        var captured_any = false;
+                        for (fi.regs, fi.caps) |reg, *cap| {
+                            if (entry.kind != .keyword) break;
+                            const key = entry.key.?;
+                            if (reg.spec.provider != null) {
+                                if (cap.saw_source_kvpair) continue;
+                                if (!std.mem.eql(u8, key, reg.spec.source_key)) continue;
+                                cap.saw_source_kvpair = true;
+                                // Non-string `:source-key` value: silent
+                                // skip, and the cursor still gets consumed
+                                // below so forms nested inside it are indexed.
+                                if (entry.value.kind != .string) continue;
+                                if (read_source == null) {
+                                    read_source = try BinaryCursor.readString(&cursor, entry.value);
+                                }
+                                cap.captured_source = read_source;
+                                cap.captured_source_span = entry.value.span orelse ZERO_SPAN;
+                                captured_any = true;
+                            } else {
+                                if (cap.saw_name_kvpair) continue;
+                                if (!std.mem.eql(u8, key, reg.spec.name_key)) continue;
+                                cap.saw_name_kvpair = true;
+                                // Non-symbol `:name-key` value: same
+                                // tolerance as above.
+                                if (entry.value.kind != .symbol) continue;
+                                if (read_name == null) {
+                                    read_name = try BinaryCursor.readSymbol(&cursor, entry.value);
+                                }
+                                cap.captured_name = read_name;
+                                cap.captured_span = entry.value.span orelse ZERO_SPAN;
+                                captured_any = true;
                             }
-                            // Non-string `:source-key` value: silent skip,
-                            // but fall through so the cursor is consumed and
-                            // any forms nested inside it still get indexed.
                         }
-
-                        if (matches_name) {
-                            fi.saw_name_kvpair = true;
-                            if (entry.value.kind == .symbol) {
-                                fi.captured_name = try BinaryCursor.readSymbol(&cursor, entry.value);
-                                fi.captured_span = entry.value.span orelse ZERO_SPAN;
-                                continue;
-                            }
-                            // Non-symbol :name-key value: silent skip but
-                            // still consume the cursor (and recurse — a
-                            // form value contains forms we should index).
-                        }
+                        // Consumed by a capture: the value's bytes are read,
+                        // so it must not also be descended into.
+                        if (captured_any) continue;
 
                         if (fi.acyclic_spec_idx) |spec_idx| {
                             if (entry.kind == .keyword) {
@@ -2855,7 +2928,7 @@ fn buildCrossRefIndexBinary(
                         // `dispatchIndexValue` may push a new frame and
                         // realloc `frames.items`, invalidating `fi`. We've
                         // already finished mutating fi above.
-                        try dispatchIndexValue(gpa, &canon_buf, schema, &cursor, entry.value, &targets, &scope_heads, &cycle_ctx, &frames, &scope_stack, t_idx, tree_scope);
+                        try dispatchIndexValue(gpa, index_a, &canon_buf, schema, &cursor, entry.value, &targets, &scope_heads, &cycle_ctx, &frames, &scope_stack, t_idx, tree_scope);
                     },
                     .vector_iter => {
                         const vi = &frames.items[top].vector_iter;
@@ -2879,7 +2952,7 @@ fn buildCrossRefIndexBinary(
                             // normally so nested forms still get indexed;
                             // the validator emits the type error elsewhere.
                         }
-                        try dispatchIndexValue(gpa, &canon_buf, schema, &cursor, ev, &targets, &scope_heads, &cycle_ctx, &frames, &scope_stack, t_idx, tree_scope);
+                        try dispatchIndexValue(gpa, index_a, &canon_buf, schema, &cursor, ev, &targets, &scope_heads, &cycle_ctx, &frames, &scope_stack, t_idx, tree_scope);
                     },
                 }
             }
@@ -2910,7 +2983,7 @@ test "budget: the cross-index walk trips its own step and frame ceilings" {
     // so a core-only schema would never enter the loop at all.
     const plugin: Plugin.Plugin = .{
         .name = "demo",
-        .value_kinds = &.{.{ .name = "phrase-name", .underlying = .symbol, .cross_ref = .{ .target_form = "phrase" } }},
+        .value_kinds = &.{.{ .name = "phrase-name", .underlying = .symbol, .cross_ref = .{ .targets = &.{"phrase"} } }},
         .forms = &.{
             .{ .name = "phrase", .keys = &.{.{ .name = "name", .value_type = .symbol }} },
             .{ .name = "ref", .keys = &.{.{ .name = "k", .value_type = .{ .named = .{ .name = "phrase-name" } } }} },
@@ -2993,16 +3066,18 @@ fn captureBinaryEdge(
 ///
 /// For form views, the head is canonicalised via `Schema.lookupForm` and
 /// matched against the registry's canonical targets. The form frame
-/// stores the canonical name (borrowed from `targets`'s index-arena
-/// key, which outlives the frame) so registration can use it without
-/// recomputing.
+/// borrows the matching registrations (whose bucket keys live on the index
+/// arena, outliving the frame) so registration needs no recomputation, and
+/// allocates their capture slots on `index_a` — the frame stack is popped
+/// without freeing, so a per-frame allocation has to ride the arena.
 fn dispatchIndexValue(
     gpa: Allocator,
+    index_a: Allocator,
     canon_buf: *std.ArrayList(u8),
     schema: Schema.Schema,
     cursor: *BinaryCursor.Cursor,
     view: BinaryCursor.NodeView,
-    targets: *const std.StringHashMapUnmanaged(CrossRefSpec),
+    targets: *const std.StringHashMapUnmanaged(std.ArrayListUnmanaged(CrossRefRegistration)),
     scope_heads: *const std.StringHashMapUnmanaged(void),
     cycle_ctx: *const CycleCtx,
     frames: *std.ArrayList(IndexFrame),
@@ -3015,33 +3090,27 @@ fn dispatchIndexValue(
             const fv = try BinaryCursor.readForm(cursor, view);
             const form_pos: u32 = @intCast(cursor.pos);
             const canon_slice = try canonicalFormNameBuf(gpa, canon_buf, schema, fv.head, fv.namespace);
-            var canonical_target: ?[]const u8 = null;
-            var name_key: ?[]const u8 = null;
-            var provider: ?[]const u8 = null;
-            var source_key: ?[]const u8 = null;
+            var regs: []const CrossRefRegistration = &.{};
+            var caps: []RegCapture = &.{};
             var spec_idx: ?u32 = null;
-            var reg_scope: ScopeId = tree_scope;
             var opened_scope: bool = false;
             if (canon_slice) |c| {
                 if (targets.getEntry(c)) |entry| {
-                    // `entry.key_ptr.*` is the index-arena-owned canonical
-                    // key, valid for the lifetime of this index pass.
-                    canonical_target = entry.key_ptr.*;
-                    const spec = entry.value_ptr.*;
-                    // The routes are exclusive, and `name_key` keeps its
-                    // default spelling on a provider-route spec — so
-                    // leaving it set here would have this frame register
-                    // an identity name *and* an extracted set.
-                    if (spec.provider) |pv| {
-                        provider = pv;
-                        source_key = spec.source_key;
-                    } else {
-                        name_key = spec.name_key;
+                    // Borrowed: the registrations and their bucket keys live
+                    // on the index arena, valid for the whole pass.
+                    regs = entry.value_ptr.items;
+                    // One capture slot per registration, resolved-scope
+                    // included. Nothing is allocated for a form that is no
+                    // cross-ref's target, which is most of them.
+                    caps = try index_a.alloc(RegCapture, regs.len);
+                    for (regs, caps) |reg, *cap| {
+                        cap.* = .{
+                            .scope = if (reg.spec.scope_form) |sf|
+                                findNearestScope(scope_stack.items, sf) orelse tree_scope
+                            else
+                                tree_scope,
+                        };
                     }
-                    reg_scope = if (spec.scope_form) |sf|
-                        findNearestScope(scope_stack.items, sf) orelse tree_scope
-                    else
-                        tree_scope;
                 }
                 spec_idx = cycle_ctx.specForCanonical(c);
                 if (scope_heads.getEntry(c)) |sh_entry| {
@@ -3054,14 +3123,11 @@ fn dispatchIndexValue(
             }
             try frames.append(gpa, .{ .form_iter = .{
                 .head = fv.head,
-                .canonical_target = canonical_target,
-                .name_key = name_key,
-                .provider = provider,
-                .source_key = source_key,
+                .regs = regs,
+                .caps = caps,
                 .form_span = view.span orelse ZERO_SPAN,
                 .iter = fv.children,
                 .acyclic_spec_idx = spec_idx,
-                .scope = reg_scope,
                 .opened_scope = opened_scope,
             } });
         },
@@ -3686,8 +3752,7 @@ fn validateFormHead(
                                     // now required for parity, since the
                                     // binary walker types mono labeled
                                     // args and so emits these too.
-                                    try emitDeprecatedMemberTree(a, diags, schema, tree, ch, t, path);
-                                    try emitStringPatternUnsupportedTree(a, diags, schema, tree, ch, t, path);
+                                    try emitValueAdvisoriesTree(a, diags, schema, cross_index, tree_scope, scope_chain, tree, ch, t, path);
                                 }
                             }
                         }
@@ -3754,8 +3819,7 @@ fn validateFormHead(
                                     // other slot; the binary walker
                                     // already applies it to mono expr
                                     // args.
-                                    try emitDeprecatedMemberTree(a, diags, schema, tree, ch, t, path);
-                                    try emitStringPatternUnsupportedTree(a, diags, schema, tree, ch, t, path);
+                                    try emitValueAdvisoriesTree(a, diags, schema, cross_index, tree_scope, scope_chain, tree, ch, t, path);
                                 }
                             }
                         }
@@ -3821,7 +3885,126 @@ const FormKeysState = struct {
     overlay_present: ?std.bit_set.IntegerBitSet(Plugin.MAX_FORM_KEYS) = null,
     /// Variant-key analogue of `overlay_present`.
     overlay_present_variant: ?std.bit_set.IntegerBitSet(Plugin.MAX_FORM_KEYS) = null,
+    /// The bounded head-set governing this form's `:positional` slot, or
+    /// null when the slot is unbounded / untyped / absent. Resolved once
+    /// at form entry; `pos_head_counts` is allocated iff this is set.
+    pos_bounds: ?Plugin.ValueKind.HeadSet = null,
+    /// One tally per `pos_bounds.?.heads` entry, in the same order.
+    /// Counts positional children whose head matches byte-for-byte —
+    /// so a child the head-set rejects, or a non-form child, counts
+    /// towards nothing. Binary-path mirror: `form_walk.pos_head_counts`.
+    pos_head_counts: []u16 = &.{},
 };
+
+/// The bounded head-set governing `spec`'s positional slot, if any.
+/// Null for every other positional policy (`.none` / `.any` /
+/// `.flag_set`), for a `.kind` that isn't form-underlying or carries no
+/// head-set, and — the fast path — for a head-set where no entry
+/// declares a bound. Both walkers call this once per form, so an
+/// all-unbounded schema pays one pointer chase and allocates nothing.
+///
+/// This is the single place the scope rule from
+/// `docs/portable-manifest-v1.md` §4.5 is enforced: counts are read off
+/// a form's `:positional` declaration and nowhere else, so the same kind
+/// reused on a keyed slot or a `vector-shape :element` carries its
+/// bounds inertly.
+fn boundedPositionalHeads(
+    schema: Schema.Schema,
+    spec: Plugin.FormSpec,
+) ?Plugin.ValueKind.HeadSet {
+    const kind_ref = switch (spec.positional) {
+        .kind => |k| k,
+        .none, .any, .flag_set => return null,
+    };
+    const kind = resolveFormHeadKind(schema, .{ .named = kind_ref }) orelse return null;
+    const hs = kind.heads orelse return null;
+    if (hs.isUnbounded()) return null;
+    return hs;
+}
+
+/// Tally one positional child against `bounds` and report the child that
+/// crosses a `:max`. Shared by both walkers so the ceiling is judged
+/// identically: `head` is the child's form head (empty for a non-form
+/// child, which matches no entry and is therefore counted nowhere), and
+/// the emit fires exactly once — on the transition from `max` to
+/// `max + 1` — so a form five children over its ceiling still gets one
+/// diagnostic.
+fn tallyPositionalHead(
+    a: Allocator,
+    diags: *std.ArrayList(Diagnostic),
+    bounds: Plugin.ValueKind.HeadSet,
+    counts: []u16,
+    form_name: []const u8,
+    head: []const u8,
+    span: Ast.Span,
+    pos_path: []const []const u8,
+) Allocator.Error!void {
+    std.debug.assert(counts.len == bounds.heads.len);
+    if (head.len == 0) return;
+    for (bounds.heads, 0..) |h, i| {
+        if (!std.mem.eql(u8, h.name, head)) continue;
+        counts[i] +|= 1;
+        const max = h.max orelse return;
+        if (counts[i] == max + 1) {
+            try emit(a, diags, span, pos_path, .err, .positional_too_many, try positionalTooManyMsg(a, form_name, h.name, max, counts[i]));
+        }
+        return;
+    }
+}
+
+/// Report every head whose `:min` the finished child list did not reach.
+/// Shared end-of-form sweep: one diagnostic per unsatisfied head, at the
+/// parent's head span with the parent's path — `missing_required_key`'s
+/// placement, for `missing_required_key`'s reason.
+fn emitPositionalMissing(
+    a: Allocator,
+    diags: *std.ArrayList(Diagnostic),
+    bounds: Plugin.ValueKind.HeadSet,
+    counts: []const u16,
+    form_name: []const u8,
+    head_span: Ast.Span,
+    path: []const []const u8,
+) Allocator.Error!void {
+    std.debug.assert(counts.len == bounds.heads.len);
+    for (bounds.heads, counts) |h, n| {
+        if (h.min == 0) continue;
+        if (n >= h.min) continue;
+        try emit(a, diags, head_span, path, .err, .positional_missing, try positionalMissingMsg(a, form_name, h.name, h.min, n));
+    }
+}
+
+/// Prose for `positional_too_many`: the form, the head, the ceiling, and
+/// the count. The four facts a repair needs, in the order a reader asks
+/// for them.
+fn positionalTooManyMsg(
+    a: Allocator,
+    form_name: []const u8,
+    head: []const u8,
+    max: u16,
+    got: u16,
+) Allocator.Error![]const u8 {
+    return try std.fmt.allocPrint(
+        a,
+        "form `{s}` accepts at most {d} `{s}` positional child{s}, found {d}",
+        .{ form_name, max, head, if (max == 1) "" else "ren", got },
+    );
+}
+
+/// Prose for `positional_missing`, in `positionalTooManyMsg`'s shape so
+/// the pair reads as one rule seen from two sides.
+fn positionalMissingMsg(
+    a: Allocator,
+    form_name: []const u8,
+    head: []const u8,
+    min: u16,
+    got: u16,
+) Allocator.Error![]const u8 {
+    return try std.fmt.allocPrint(
+        a,
+        "form `{s}` requires at least {d} `{s}` positional child{s}, found {d}",
+        .{ form_name, min, head, if (min == 1) "" else "ren", got },
+    );
+}
 
 /// Validate a single form-header's kvpair children + positional
 /// children against `spec`, walking through six phases:
@@ -3829,6 +4012,7 @@ const FormKeysState = struct {
 ///   1. `emitDuplicateKvpairKeys`           — schema-independent dedup
 ///   2. `preresolveDiscriminantViaOverlay`  — axis D: variant from default
 ///   3. `validateChildKvpairsAndPositionals`— main type-check pass
+///   3b. `emitPositionalMissing`            — head-set `:min` sweep
 ///   4. `emitMissingDiscriminant`           — closed-form discriminant gate
 ///   5. `computeOverlayPresenceBitsets`     — axis C overlay bookkeeping
 ///   6. `emitMissingRequiredTopLevel`       — closed-form required sweep
@@ -3836,9 +4020,17 @@ const FormKeysState = struct {
 ///   8. `emitVariantSweeps`                 — variant required + exclusive
 ///   9. `runEffectiveRefLookups`            — axis B: cross-ref on defaults
 ///
-/// `spec.open` short-circuits after phase 3 — phases 4-9 enforce
-/// closed-form shape rules. Type checks always run regardless of
+/// `spec.open` short-circuits after phase 3b — phases 4-9 enforce
+/// closed-form *keyword* shape rules. Type checks always run regardless of
 /// `open` so declared keys still get typed values.
+///
+/// Phase 3b sits on the near side of that short-circuit deliberately, and
+/// it is the only end-of-form sweep that does. Every phase after it is
+/// about keywords, which is the surface `:open` widens ("unknown keywords
+/// are accepted silently"); a positional count is not, and the form's own
+/// `:positional <bounded-kind>` declaration is what opts into it. The
+/// neighbouring positional rules agree — `not_head_member` and
+/// `duplicate_positional_flag` both fire inside phase 3 on an open form.
 fn validateFormKeys(
     a: Allocator,
     diags: *std.ArrayList(Diagnostic),
@@ -3863,6 +4055,8 @@ fn validateFormKeys(
         }
     }
 
+    const pos_bounds = boundedPositionalHeads(schema, spec);
+
     var st: FormKeysState = .{
         .a = a,
         .diags = diags,
@@ -3879,11 +4073,17 @@ fn validateFormKeys(
         .any_required = any_required,
         .seen = .initEmpty(),
         .seen_variant = .initEmpty(),
+        .pos_bounds = pos_bounds,
+        .pos_head_counts = if (pos_bounds) |hs| try a.alloc(u16, hs.heads.len) else &.{},
     };
+    @memset(st.pos_head_counts, 0);
 
     try emitDuplicateKvpairKeys(&st);
     try preresolveDiscriminantViaOverlay(&st);
     try validateChildKvpairsAndPositionals(&st);
+    if (st.pos_bounds) |hs| {
+        try emitPositionalMissing(a, diags, hs, st.pos_head_counts, spec.name, hdr.head_span, path);
+    }
 
     if (spec.open) return;
 
@@ -3897,6 +4097,20 @@ fn validateFormKeys(
         st.spec.keys,
         st.seen,
         st.overlay_present,
+        st.spec.name,
+        null,
+        st.hdr.head_span,
+        st.path,
+    );
+    try emitDependentKeyDiagnostics(
+        st.a,
+        st.diags,
+        st.spec.keys,
+        st.seen,
+        st.overlay_present,
+        null,
+        null,
+        null,
         st.spec.name,
         null,
         st.hdr.head_span,
@@ -4012,8 +4226,7 @@ fn matchAndTypecheckDeclaredKey(
             );
         } else {
             const value_path = try appendStep(st.a, st.path, kvh.key);
-            try emitDeprecatedMemberTree(st.a, st.diags, st.schema, st.tree, kvh.value, k.value_type, value_path);
-            try emitStringPatternUnsupportedTree(st.a, st.diags, st.schema, st.tree, kvh.value, k.value_type, value_path);
+            try emitValueAdvisoriesTree(st.a, st.diags, st.schema, st.cross_index, st.tree_scope, st.scope_chain, st.tree, kvh.value, k.value_type, value_path);
         }
         // Discriminant slot: capture the author-written variant.
         // Type-check above already emitted any not_member diagnostic,
@@ -4068,8 +4281,7 @@ fn matchAndTypecheckVariantKey(
             );
         } else {
             const value_path = try appendStep(st.a, st.path, kvh.key);
-            try emitDeprecatedMemberTree(st.a, st.diags, st.schema, st.tree, kvh.value, vk.value_type, value_path);
-            try emitStringPatternUnsupportedTree(st.a, st.diags, st.schema, st.tree, kvh.value, vk.value_type, value_path);
+            try emitValueAdvisoriesTree(st.a, st.diags, st.schema, st.cross_index, st.tree_scope, st.scope_chain, st.tree, kvh.value, vk.value_type, value_path);
         }
         return true;
     }
@@ -4112,6 +4324,15 @@ fn validatePositionalChild(
         .any => {},
         .kind => |kind_ref| {
             const expected: Plugin.ValueType = .{ .named = kind_ref };
+            // Tally before the type check, and off the child's own head
+            // rather than the match outcome: a head outside the set fails
+            // `not_head_member` below and matches no entry here, so it
+            // counts towards nothing without either site consulting the
+            // other. Same reading order as the binary walker.
+            if (st.pos_bounds) |hs| {
+                const head: []const u8 = if (st.tree.tagOf(ch) == .form) st.tree.formHeader(ch).head else "";
+                try tallyPositionalHead(st.a, st.diags, hs, st.pos_head_counts, st.spec.name, head, st.tree.spanOf(ch), pos_path);
+            }
             if (try matchValueAgainstType(st.a, st.schema, st.cross_index, st.tree_scope, st.scope_chain, st.tree, ch, expected, 0)) |fail| {
                 try emitTypeMismatch(
                     st.a,
@@ -4125,16 +4346,15 @@ fn validatePositionalChild(
                     fail,
                 );
             } else {
-                // Both warnings, as at every declared-key and variant-key
-                // site. The binary walker emits them uniformly for every
-                // slot-contexted node (`processEvalValidate`); the tree
-                // side had grown them per-site and this one only ever got
-                // the string-pattern half — the `walk_opaque` bug class in
-                // warning form, invisible to the corpus replay only
-                // because no case covers a deprecated member in a
-                // positional slot.
-                try emitDeprecatedMemberTree(st.a, st.diags, st.schema, st.tree, ch, expected, pos_path);
-                try emitStringPatternUnsupportedTree(st.a, st.diags, st.schema, st.tree, ch, expected, pos_path);
+                // The whole advisory family, as at every declared-key and
+                // variant-key site. The binary walker emits them uniformly
+                // for every slot-contexted node (`processEvalValidate`);
+                // the tree side had grown them per-site and this one only
+                // ever got the string-pattern half — the `walk_opaque` bug
+                // class in warning form, invisible to the corpus replay
+                // only because no case covers a deprecated member in a
+                // positional slot. Bundling them is what keeps that shut.
+                try emitValueAdvisoriesTree(st.a, st.diags, st.schema, st.cross_index, st.tree_scope, st.scope_chain, st.tree, ch, expected, pos_path);
             }
         },
         .flag_set => |fs| {
@@ -4401,6 +4621,23 @@ fn emitVariantSweeps(st: *FormKeysState) Allocator.Error!void {
         st.hdr.head_span,
         st.path,
     );
+    // A variant key may require a base key, so the base scope is passed
+    // alongside. The reverse never happens — a base key naming a variant
+    // key is rejected at load.
+    try emitDependentKeyDiagnostics(
+        st.a,
+        st.diags,
+        v.keys,
+        st.seen_variant,
+        st.overlay_present_variant,
+        st.spec.keys,
+        st.seen,
+        st.overlay_present,
+        st.spec.name,
+        v.when,
+        st.hdr.head_span,
+        st.path,
+    );
 }
 
 /// Phase 9 — axis B. For each declared key whose kvpair is
@@ -4539,7 +4776,7 @@ fn maybeEmitEffectiveRefMiss(
         else => return,
     };
 
-    const canonical = (try schema.canonicalFormName(a, cr.target_form)) orelse return;
+    const canonical = (try schema.crossRefBucketKey(a, cr)) orelse return;
     const lookup_scope: ScopeId = if (cr.scope_form) |sf| sub: {
         const scope_canonical = (try schema.canonicalFormName(a, sf)) orelse return;
         break :sub findNearestScope(scope_chain, scope_canonical) orelse return;
@@ -4654,6 +4891,126 @@ fn indexOfKey(keys: []const Plugin.KeySpec, name: []const u8) ?usize {
         if (std.mem.eql(u8, k.name, name)) return i;
     }
     return null;
+}
+
+/// Key-dependency sweep: for each *present* key carrying `:requires`,
+/// report every named key that is absent. Shared by both walkers so the
+/// rule cannot drift between them — the signature deliberately mirrors
+/// `emitExclusiveGroupDiagnostics`, including the optional
+/// `overlay_present` bitset the binary path passes as `null`.
+///
+/// One diagnostic per unsatisfied *dependent* key, naming all of its
+/// absent requirements. A key requiring three absent keys should say so
+/// once with three names, not three times.
+///
+/// A variant key may name a base key, which lives in a different bitset —
+/// hence `base_keys` / `base_seen`, non-null only on the variant pass.
+/// Base keys naming variant keys is rejected at load, so the reverse
+/// lookup does not exist.
+///
+/// Presence = author-written, or overlay-defaulted when the caller
+/// supplies an overlay. An author who omits `:buffer` but whose schema
+/// defaults it has, in effect, written it — the same reading exclusive
+/// groups take, on the same axis.
+fn emitDependentKeyDiagnostics(
+    a: Allocator,
+    diags: *std.ArrayList(Diagnostic),
+    keys: []const Plugin.KeySpec,
+    seen: std.bit_set.IntegerBitSet(Plugin.MAX_FORM_KEYS),
+    overlay_present: ?std.bit_set.IntegerBitSet(Plugin.MAX_FORM_KEYS),
+    base_keys: ?[]const Plugin.KeySpec,
+    base_seen: ?std.bit_set.IntegerBitSet(Plugin.MAX_FORM_KEYS),
+    base_overlay_present: ?std.bit_set.IntegerBitSet(Plugin.MAX_FORM_KEYS),
+    form_name: []const u8,
+    variant_when: ?[]const u8,
+    span: Ast.Span,
+    path: []const []const u8,
+) Allocator.Error!void {
+    for (keys, 0..) |k, ki| {
+        if (k.requires.len == 0) continue;
+        if (ki >= Plugin.MAX_FORM_KEYS) continue;
+        if (!keyPresent(ki, seen, overlay_present)) continue;
+
+        var missing: std.ArrayList([]const u8) = .empty;
+        defer missing.deinit(a);
+        for (k.requires) |req| {
+            if (requirementPresent(req, keys, seen, overlay_present)) continue;
+            if (base_keys) |bk| {
+                if (requirementPresent(req, bk, base_seen.?, base_overlay_present)) continue;
+            }
+            try missing.append(a, req);
+        }
+        if (missing.items.len == 0) continue;
+
+        try emit(a, diags, span, path, .err, .dependent_key_missing, try dependentKeyMissingMsg(
+            a,
+            form_name,
+            variant_when,
+            k.name,
+            missing.items,
+        ));
+    }
+}
+
+/// A key at `idx` counts as present when the author wrote it, or when an
+/// overlay resolved a default for it (axis C; `null` on the binary path).
+fn keyPresent(
+    idx: usize,
+    seen: std.bit_set.IntegerBitSet(Plugin.MAX_FORM_KEYS),
+    overlay_present: ?std.bit_set.IntegerBitSet(Plugin.MAX_FORM_KEYS),
+) bool {
+    if (seen.isSet(idx)) return true;
+    if (overlay_present) |op| return op.isSet(idx);
+    return false;
+}
+
+/// Resolve a requirement name to its index in `keys` and test presence.
+/// A name that names nothing here is *not* present — but the loader
+/// already rejected unresolvable names, so this only returns false for a
+/// variant key's base-key requirement, which the caller retries against
+/// the base scope.
+fn requirementPresent(
+    name: []const u8,
+    keys: []const Plugin.KeySpec,
+    seen: std.bit_set.IntegerBitSet(Plugin.MAX_FORM_KEYS),
+    overlay_present: ?std.bit_set.IntegerBitSet(Plugin.MAX_FORM_KEYS),
+) bool {
+    for (keys, 0..) |k, i| {
+        if (i >= Plugin.MAX_FORM_KEYS) break;
+        if (!std.mem.eql(u8, k.name, name)) continue;
+        return keyPresent(i, seen, overlay_present);
+    }
+    return false;
+}
+
+fn dependentKeyMissingMsg(
+    a: Allocator,
+    form_name: []const u8,
+    variant_when: ?[]const u8,
+    key_name: []const u8,
+    missing: []const []const u8,
+) Allocator.Error![]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(a);
+    try buf.appendSlice(a, "form `");
+    try buf.appendSlice(a, form_name);
+    try buf.appendSlice(a, "` ");
+    if (variant_when) |w| {
+        try buf.appendSlice(a, "variant `");
+        try buf.appendSlice(a, w);
+        try buf.appendSlice(a, "` ");
+    }
+    try buf.appendSlice(a, "keyword `:");
+    try buf.appendSlice(a, key_name);
+    try buf.appendSlice(a, "` requires ");
+    for (missing, 0..) |m, i| {
+        if (i != 0) try buf.appendSlice(a, ", ");
+        try buf.appendSlice(a, "`:");
+        try buf.appendSlice(a, m);
+        try buf.appendSlice(a, "`");
+    }
+    try buf.appendSlice(a, if (missing.len == 1) ", which is absent" else ", which are absent");
+    return buf.toOwnedSlice(a);
 }
 
 fn emitExclusiveGroupDiagnostics(
@@ -5087,6 +5444,7 @@ fn matchFailToCode(fail: MatchFail) Diagnostic.Code {
         .number_at_or_below_exclusive_min => .number_at_or_below_exclusive_min,
         .number_at_or_above_exclusive_max => .number_at_or_above_exclusive_max,
         .number_not_integer => .number_not_integer,
+        .number_not_multiple => .number_not_multiple,
         .numeric_bound_unit_mismatch => .numeric_bound_unit_mismatch,
         .repr_out_of_range => .repr_out_of_range,
         .string_too_short => .string_too_short,
@@ -5161,7 +5519,7 @@ const MatchFail = union(enum) {
     /// `Tag.form` whose head name is not in `HeadSet.names`. Distinct
     /// from `not_member` so the diagnostic prose can name the
     /// discriminator role explicitly (`form head … not in set …`).
-    not_head_member: struct { got: []const u8, allowed: []const []const u8 },
+    not_head_member: struct { got: []const u8, allowed: []const Plugin.ValueKind.HeadSet.Head },
     /// The slot referenced an undeclared `ValueKind` — a plugin-setup bug.
     /// `namespace` is non-null when the slot was qualified (`paint/color`)
     /// so the rendered diagnostic preserves the user's surface text.
@@ -5219,6 +5577,9 @@ const MatchFail = union(enum) {
     /// `:integer true` set; value is fractional or non-finite. Payload is
     /// the value's f64 magnitude for the diagnostic message.
     number_not_integer: f64,
+    /// Value is not an exact multiple of `:multiple-of`. Shares
+    /// `NumericFail` with the range failures — `bound` is the divisor.
+    number_not_multiple: NumericFail,
     /// Bound carries a unit but the validated value either has none or
     /// carries a different unit. Either side may be null.
     numeric_bound_unit_mismatch: struct {
@@ -5404,7 +5765,77 @@ fn checkNumericBoundsValue(
             .number_above_max = .{ .value = value.toF64(), .bound = mx.value, .unit = mx.unit },
         };
     }
+    // Divisibility last: a value that is fractional, or outside the range,
+    // has a more basic problem than "not a multiple", and this checker
+    // reports the first failure it finds.
+    if (nb.multiple_of) |mo| {
+        if (boundUnitMismatch(mo, value_unit)) return MatchFail{
+            .numeric_bound_unit_mismatch = .{ .value_unit = value_unit, .bound_unit = mo.unit },
+        };
+        if (!isMultipleOf(value, mo)) return MatchFail{
+            .number_not_multiple = .{ .value = value.toF64(), .bound = mo.value, .unit = mo.unit },
+        };
+    }
     return null;
+}
+
+/// True when `value` is an exact multiple of `bound`.
+///
+/// Float remainder is the wrong default here: `@rem(0.3, 0.1)` is not zero
+/// in IEEE-754, and an alignment constraint is an integer fact about an
+/// integer value. So the test runs in integer space whenever it can, and
+/// refuses to guess when it cannot — three cases:
+///
+///  1. **Both integral** — the value is `.i` / `.u`, or an `.f` that
+///     `isInteger()` accepts, and the divisor is integral. `@rem` in
+///     `i128`, which is wide enough for the full `u64` × `i64` cross
+///     product, so `2^53 + 1` under `:multiple-of 2` answers correctly
+///     where an f64 remainder would round it to an even number and pass.
+///  2. **Fractional value, integral divisor** — cannot be a multiple.
+///     `3.5` is not a multiple of `4`, and no rounding makes it one.
+///  3. **Fractional divisor** — f64 remainder against a relative epsilon.
+///     Binary floating point has no exact answer for `:multiple-of 0.25`,
+///     and pretending otherwise is worse than saying so: the loader warns
+///     at the declaration, and every alignment rule uses case 1 anyway.
+///
+/// The bound's sign is irrelevant (a divisor and its negation have the same
+/// multiples), and a negative value is fine — `-512` is a multiple of
+/// `256`. Zero and non-finite divisors are rejected at load, so this
+/// function never divides by zero.
+fn isMultipleOf(value: NumericValue, bound: Plugin.ValueKind.NumericBounds.Bound) bool {
+    std.debug.assert(bound.value != 0);
+    std.debug.assert(std.math.isFinite(bound.value));
+
+    const divisor_integral = @floor(bound.value) == bound.value;
+    if (divisor_integral and boundFitsI128(bound.value)) {
+        const d: i128 = @intFromFloat(bound.value);
+        std.debug.assert(d != 0);
+        const n: i128 = switch (value) {
+            .i => |v| v,
+            .u => |v| v,
+            // Case 2: a fractional value under an integral divisor is never
+            // a multiple, and an infinite / NaN one is not either.
+            .f => |v| if (value.isInteger() and boundFitsI128(v)) @intFromFloat(v) else return false,
+        };
+        return @rem(n, d) == 0;
+    }
+
+    // Case 3: fractional (or unrepresentably large) divisor. Compare the
+    // remainder against a bound-relative epsilon rather than zero, since
+    // the exact remainder of two inexact binary fractions is noise.
+    const v = value.toF64();
+    if (!std.math.isFinite(v)) return false;
+    const rem = @abs(@rem(v, bound.value));
+    const eps = @abs(bound.value) * 1e-9;
+    return rem <= eps or @abs(bound.value) - rem <= eps;
+}
+
+/// True when an integral f64 is exactly representable as an `i128`. The
+/// upper edge is `2^127`, far above any `f64` a document can carry with
+/// integral precision, so this only rejects ±inf-adjacent magnitudes.
+fn boundFitsI128(v: f64) bool {
+    return v >= -170141183460469231731687303715884105728.0 and
+        v < 170141183460469231731687303715884105728.0;
 }
 
 /// GPU-representation range / integrality check. Derives a closed
@@ -5494,8 +5925,8 @@ fn matchValueAgainstType(
         if (resolveFormHeadKind(schema, expected)) |kind| {
             if (kind.heads) |hs| {
                 const head = tree.formHeader(idx).head;
-                for (hs.names) |n| if (std.mem.eql(u8, n, head)) return null;
-                return MatchFail{ .not_head_member = .{ .got = head, .allowed = hs.names } };
+                for (hs.heads) |h| if (std.mem.eql(u8, h.name, head)) return null;
+                return MatchFail{ .not_head_member = .{ .got = head, .allowed = hs.heads } };
             }
             return null;
         }
@@ -5689,6 +6120,47 @@ const ScalarView = struct {
     }
 };
 
+/// True when a member set declares at least one digit-leading spelling.
+/// The gate on the `.symbol` arm's escape: without one, a unit-bearing
+/// number in a symbol slot stays `wrong_underlying`, unchanged.
+fn declaresNumericSpelling(ms: Plugin.ValueKind.MemberSet) bool {
+    for (ms.members) |m| if (m.numeric_spelling != null) return true;
+    return false;
+}
+
+/// True when the view's `(magnitude, unit)` pair equals some member's
+/// digit-leading spelling.
+///
+/// Matching is on the parsed pair rather than on text, for two reasons:
+/// the binary walker has no source text to compare against, and the pair
+/// makes `2d`, `2.0d`, and `02d` the same member without any string
+/// work. `keyOf` is the shared legality test — it rejects a fractional
+/// magnitude, which is what keeps `2.5d` from rounding into `2d`.
+fn matchesNumericSpelling(ms: Plugin.ValueKind.MemberSet, sv: ScalarView) bool {
+    const unit = sv.unit orelse return false;
+    const numeric = sv.numeric orelse return false;
+    const key = Plugin.ValueKind.MemberSet.NumericSpelling.keyOf(numeric.toF64()) orelse return false;
+    for (ms.members) |m| {
+        const s = m.numeric_spelling orelse continue;
+        if (s.value == key and std.mem.eql(u8, s.unit, unit)) return true;
+    }
+    return false;
+}
+
+/// Render a unit-bearing value the way a member spelling reads, for the
+/// `not_member` message. A magnitude that is a legal spelling key goes
+/// through the canonical formatter the loader used, so the value and the
+/// member list are spelled the same way; anything else (fractional,
+/// negative, huge) is rendered as-is, since it matches no member and
+/// showing the author's magnitude is what helps.
+fn renderNumericSpelling(a: Allocator, sv: ScalarView) Allocator.Error![]const u8 {
+    const Spelling = Plugin.ValueKind.MemberSet.NumericSpelling;
+    const unit = sv.unit orelse return "";
+    const magnitude = if (sv.numeric) |n| n.toF64() else return "";
+    if (Spelling.keyOf(magnitude)) |key| return Spelling.canonical(a, key, unit);
+    return std.fmt.allocPrint(a, "{d}{s}", .{ magnitude, unit });
+}
+
 /// Shared refinement matcher for the number / string / symbol axes (plus the
 /// symbol cross-ref block). `kind.underlying` MUST be one of those three —
 /// the callers (`matchValueAgainstKind` on the tree, `matchKindBinary` on the
@@ -5775,7 +6247,34 @@ fn matchScalar(
             return null;
         },
         .symbol => {
-            if (tag != .symbol) return MatchFail{ .wrong_underlying = "symbol" };
+            if (tag != .symbol) {
+                // Digit-leading escape. A member spelled `1d` / `2d`
+                // cannot arrive as a symbol — the lexer reads it as a
+                // unit-bearing number — so a kind that declares one
+                // genuinely accepts that shape in this slot.
+                //
+                // Gated three ways. Only `.number_with_unit`, because a
+                // bare number is not a spelling. Only when the kind
+                // actually declares a digit-leading member, so a number
+                // in any other symbol slot stays `wrong_underlying`
+                // exactly as before. And never on a cross-ref slot: its
+                // member set comes from document symbols under
+                // `:name-key`, which cannot be digit-leading, so the
+                // escape would be meaningless there.
+                if (tag == .number_with_unit and kind.cross_ref == null) {
+                    if (kind.members) |m| if (declaresNumericSpelling(m)) {
+                        if (matchesNumericSpelling(m, sv)) return null;
+                        // The slot really does accept unit-bearing
+                        // numbers here, so "`5px` is not one of [1d | 2d
+                        // | 3d]" beats "a number is not a symbol".
+                        return MatchFail{ .not_member = .{
+                            .got = try renderNumericSpelling(a, sv),
+                            .allowed = m.members,
+                        } };
+                    };
+                }
+                return MatchFail{ .wrong_underlying = "symbol" };
+            }
             if (kind.cross_ref) |cr| {
                 const got = sv.text.?;
                 // Which key the reader should be looking at, decided once
@@ -5783,11 +6282,13 @@ fn matchScalar(
                 const route: @FieldType(@FieldType(MatchFail, "not_cross_ref"), "route") =
                     if (cr.provider != null) .provider else .identity;
                 const decl_key = if (cr.provider != null) cr.source_key else cr.name_key;
-                const canonical = (try schema.canonicalFormName(a, cr.target_form)) orelse {
+                const canonical = (try schema.crossRefBucketKey(a, cr)) orelse {
                     // Schema-aggregate phase already emitted unknown/ambiguous
                     // diagnostics for this; treat as unresolved so the symbol
-                    // doesn't masquerade as a valid reference.
-                    return MatchFail{ .not_cross_ref = .{ .got = got, .target = cr.target_form, .key = decl_key, .route = route } };
+                    // doesn't masquerade as a valid reference. A group with
+                    // one bad entry lands here too, and names the whole list
+                    // — the reference is against the group, not an entry.
+                    return MatchFail{ .not_cross_ref = .{ .got = got, .target = try cr.describeTargets(a), .key = decl_key, .route = route } };
                 };
                 // Resolve which scope to search: nearest enclosing instance
                 // of `:scope <form>` if specified; otherwise tree scope.
@@ -5853,8 +6354,8 @@ fn matchValueAgainstKind(
             if (tag != .form) break :blk MatchFail{ .wrong_underlying = "form" };
             if (kind.heads) |hs| {
                 const head = tree.formHeader(idx).head;
-                for (hs.names) |n| if (std.mem.eql(u8, n, head)) break :blk null;
-                break :blk MatchFail{ .not_head_member = .{ .got = head, .allowed = hs.names } };
+                for (hs.heads) |h| if (std.mem.eql(u8, h.name, head)) break :blk null;
+                break :blk MatchFail{ .not_head_member = .{ .got = head, .allowed = hs.heads } };
             }
             break :blk null;
         },
@@ -6221,6 +6722,7 @@ fn describeFailCommon(
             const piece = try std.fmt.allocPrint(a, "value {d} is not an integer", .{v});
             try buf.appendSlice(a, piece);
         },
+        .number_not_multiple => |nf| try writeNumericFail(a, buf, "is not a multiple of", nf),
         .numeric_bound_unit_mismatch => |m| {
             try buf.appendSlice(a, "value unit ");
             try writeUnitOrNone(a, buf, m.value_unit);
@@ -6359,6 +6861,16 @@ fn emitDeprecatedMemberCore(
     }
 }
 
+/// The canonical member spelling for a unit-bearing literal, or null when
+/// its magnitude cannot be one. Lets the advisory emitters look a
+/// numerically-matched member up by the same `name` the loader stored,
+/// so `deprecated_member` reaches a digit-leading member too.
+fn canonicalMemberSpelling(a: Allocator, nv: Ast.NumberWithUnit) Allocator.Error!?[]const u8 {
+    const Spelling = Plugin.ValueKind.MemberSet.NumericSpelling;
+    const key = Spelling.keyOf(nv.value) orelse return null;
+    return try Spelling.canonical(a, key, nv.unit);
+}
+
 /// Tree-path wrapper: extracts the symbol/string text from `idx` and
 /// delegates to `emitDeprecatedMemberCore`. No-op when the node isn't
 /// a symbol or string.
@@ -6374,6 +6886,10 @@ fn emitDeprecatedMemberTree(
     const text: []const u8 = switch (tree.tagOf(idx)) {
         .symbol => tree.symbolText(idx),
         .string => tree.stringText(idx),
+        // A digit-leading member matched numerically, so there is no
+        // symbol text to key off — render the canonical spelling instead,
+        // which is exactly what the loader stored as `Member.name`.
+        .number_with_unit => try canonicalMemberSpelling(a, tree.numberWithUnitOf(idx)) orelse return,
         else => return,
     };
     try emitDeprecatedMemberCore(a, diags, schema, text, expected, tree.spanOf(idx), path);
@@ -6432,6 +6948,256 @@ fn emitStringPatternUnsupportedTree(
     try emitStringPatternUnsupportedCore(a, diags, schema, expected, tree.spanOf(idx), path);
 }
 
+/// What one union alternative makes of a symbol value, for the ambiguity
+/// advisory.
+///
+/// Deliberately re-derived from the schema and the index rather than
+/// delegated to `matchScalar`, for two reasons. `matchScalar` registers a
+/// reference site on every cross-ref probe — the whole point of the union
+/// arm's capture-suppressed shallow copy — and an advisory that runs
+/// *after* the match has already picked a winner must add no sites at all.
+/// And it answers a wider question than this one: it folds "the bucket is
+/// poisoned" into accept, because a provider whose extraction failed has a
+/// root-cause diagnostic elsewhere and one error beats a cascade. Here that
+/// same bucket is `.rejects`, because a warning claiming two readings exist
+/// has to be able to name two declarations, and a member set nobody could
+/// compute contains none to name.
+const AltVerdict = union(enum) {
+    /// Cannot accept this symbol at all — wrong underlying, an unresolved
+    /// kind, or a member set the value is not in.
+    rejects,
+    /// Accepts, but denotes no named entity: a member set the value is in,
+    /// a bare `symbol`, or `any`. Winning the union with one of these means
+    /// the slot is not a reference, so there is nothing to be ambiguous
+    /// about.
+    accepts_plain,
+    /// Accepts as a reference. Carries the bucket the name was found in —
+    /// the canonical `<plugin>/<form>` target for the message, and the
+    /// resolved scope, because a `:scope`d cross-ref splits one target into
+    /// one bucket per enclosing instance and those are different entities.
+    accepts_ref: struct { target: []const u8, scope: ScopeId },
+};
+
+/// Classify one union alternative against a symbol value. Mirrors the
+/// acceptance gates of `matchScalar`'s `.symbol` arm — cross-ref
+/// membership, then the member set — and nothing else; every other
+/// underlying rejects a symbol outright.
+///
+/// A nested union would be neither classifiable nor legal: `nested_union`
+/// rejects it at schema-aggregate time, so the `.union_of` case here is
+/// unreachable in a schema that passed aggregation and folds into
+/// `.rejects` rather than growing a recursive walk.
+fn classifySymbolAlternative(
+    a: Allocator,
+    schema: Schema.Schema,
+    cross_index: *const CrossRefIndex,
+    tree_scope: ScopeId,
+    scope_chain: []const ScopeFrame,
+    alt: Plugin.QualifiedRef,
+    text: []const u8,
+) Allocator.Error!AltVerdict {
+    if (resolvePrimitiveShortcut(alt.name)) |vt| {
+        return switch (vt) {
+            .any, .symbol => .accepts_plain,
+            else => .rejects,
+        };
+    }
+    const kind = switch (schema.lookupValueKind(alt.name, alt.namespace)) {
+        .found => |k| k,
+        // Unknown / ambiguous alternatives already have their own
+        // diagnostic from the match itself; an advisory does not pile on.
+        .not_found, .ambiguous => return .rejects,
+    };
+    if (kind.underlying != .symbol) return .rejects;
+    if (kind.cross_ref) |cr| {
+        const canonical = (try schema.crossRefBucketKey(a, cr)) orelse return .rejects;
+        const lookup_scope: ScopeId = if (cr.scope_form) |sf| sub: {
+            const scope_canonical = (try schema.canonicalFormName(a, sf)) orelse return .rejects;
+            break :sub findNearestScope(scope_chain, scope_canonical) orelse return .rejects;
+        } else tree_scope;
+        return if (cross_index.contains(lookup_scope, canonical, text))
+            .{ .accepts_ref = .{ .target = canonical, .scope = lookup_scope } }
+        else
+            .rejects;
+    }
+    if (kind.members) |m| {
+        if (m.members.len == 0) return .accepts_plain;
+        for (m.members) |v| if (std.mem.eql(u8, v.name, text)) return .accepts_plain;
+        return .rejects;
+    }
+    return .accepts_plain;
+}
+
+/// After a symbol has matched a `:underlying union` slot, warn when two or
+/// more of the union's cross-ref-backed alternatives register that name —
+/// so which entity the slot denotes is decided by declaration order.
+///
+/// Walks the alternatives in the order the matcher does, which makes the
+/// first accepting one the winner. Three outcomes:
+///
+///   * the winner accepts plainly — the slot denotes no entity, so order
+///     decided nothing worth reporting; silent.
+///   * the winner is a reference and no later alternative claims the same
+///     name — the reading is unique; silent.
+///   * the winner is a reference and at least one later alternative claims
+///     it too — emit, naming every claimant and its target.
+///
+/// Runs on the slot's own declared type, like the other advisories: a
+/// union reached through a `vector-shape :element` is not inspected, the
+/// same limit `deprecated_member` and `string_pattern_unsupported` have.
+/// Widening the family is one change, not three.
+fn emitUnionAmbiguousCore(
+    a: Allocator,
+    diags: *std.ArrayList(Diagnostic),
+    schema: Schema.Schema,
+    cross_index: *const CrossRefIndex,
+    tree_scope: ScopeId,
+    scope_chain: []const ScopeFrame,
+    text: []const u8,
+    expected: Plugin.ValueType,
+    span: Ast.Span,
+    path: []const []const u8,
+) Allocator.Error!void {
+    const ref = switch (expected) {
+        .named => |n| n,
+        else => return,
+    };
+    const kind = switch (schema.lookupValueKind(ref.name, ref.namespace)) {
+        .found => |k| k,
+        else => return,
+    };
+    if (kind.underlying != .union_of) return;
+    const us = kind.union_of orelse return;
+
+    // One entry per *bucket* that registers `text`, in declaration order.
+    // The first is the winner.
+    //
+    // Deduplicated by bucket, not by alternative: two cross-ref kinds may
+    // legitimately point at one target — a naming convenience — and both
+    // readings then pick out the same entity, so order decides nothing. The
+    // bucket is `(scope, target)` rather than the target alone, because a
+    // `:scope`d cross-ref splits one target into one bucket per enclosing
+    // instance, and those really are different entities.
+    var claimants: std.ArrayList(struct { kind_name: []const u8, target: []const u8, scope: ScopeId }) = .empty;
+    for (us.alternatives) |alt| {
+        switch (try classifySymbolAlternative(a, schema, cross_index, tree_scope, scope_chain, alt, text)) {
+            .rejects => {},
+            // A plain acceptance ahead of every reference wins the union
+            // outright: the slot denotes a member, not an entity. After a
+            // reference has already won it changes nothing.
+            .accepts_plain => if (claimants.items.len == 0) return,
+            .accepts_ref => |bucket| {
+                for (claimants.items) |c| {
+                    if (c.scope == bucket.scope and std.mem.eql(u8, c.target, bucket.target)) break;
+                } else try claimants.append(a, .{
+                    .kind_name = alt.name,
+                    .target = bucket.target,
+                    .scope = bucket.scope,
+                });
+            },
+        }
+    }
+    if (claimants.items.len < 2) return;
+
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.appendSlice(a, "symbol `");
+    try buf.appendSlice(a, text);
+    try buf.appendSlice(a, "` resolves in ");
+    try buf.appendSlice(a, try std.fmt.allocPrint(a, "{d}", .{claimants.items.len}));
+    try buf.appendSlice(a, " alternatives of `");
+    try buf.appendSlice(a, kind.name);
+    try buf.appendSlice(a, "` — ");
+    for (claimants.items, 0..) |c, i| {
+        if (i > 0) try buf.appendSlice(a, if (i + 1 == claimants.items.len) " and " else ", ");
+        try buf.appendSlice(a, "`");
+        try buf.appendSlice(a, c.kind_name);
+        try buf.appendSlice(a, "` (target `");
+        try buf.appendSlice(a, c.target);
+        try buf.appendSlice(a, "`)");
+    }
+    try buf.appendSlice(a, ". First match wins; rename one declaration or split the slot.");
+    try emit(a, diags, span, path, .warning, .union_ambiguous, try buf.toOwnedSlice(a));
+}
+
+// ---------------------------------------------------------------------------
+// Value advisories
+// ---------------------------------------------------------------------------
+
+/// The advisory sweep run on a value that has just **matched** its slot's
+/// declared type. Every member of this family is `.warning` severity and
+/// none of them changes the document's verdict: they report that a match
+/// succeeded in a way the author probably wants to know about (the member
+/// is deprecated, the declared `:pattern` is not being enforced).
+///
+/// Bundled rather than called individually because they had already drifted
+/// once: the positional slot carried only the string-pattern half while
+/// every other slot carried both, and no corpus case covered a deprecated
+/// member in a positional slot, so nothing caught it. One call per match
+/// site means a new advisory reaches all six sites or none.
+///
+/// Both walkers run the same set. The tree entry takes a node index; the
+/// binary entry takes the cursor view plus the extras that carry the
+/// already-decoded text — the split is only about where the text and span
+/// come from, and both funnel into the shared `*Core` emitters.
+fn emitValueAdvisoriesTree(
+    a: Allocator,
+    diags: *std.ArrayList(Diagnostic),
+    schema: Schema.Schema,
+    cross_index: *const CrossRefIndex,
+    tree_scope: ScopeId,
+    scope_chain: []const ScopeFrame,
+    tree: *const Ast.Tree,
+    idx: Ast.NodeIndex,
+    expected: Plugin.ValueType,
+    path: []const []const u8,
+) Allocator.Error!void {
+    try emitDeprecatedMemberTree(a, diags, schema, tree, idx, expected, path);
+    try emitStringPatternUnsupportedTree(a, diags, schema, tree, idx, expected, path);
+    if (tree.tagOf(idx) == .symbol) {
+        try emitUnionAmbiguousCore(a, diags, schema, cross_index, tree_scope, scope_chain, tree.symbolText(idx), expected, tree.spanOf(idx), path);
+    }
+}
+
+/// Binary-path twin of `emitValueAdvisoriesTree`. The `extras.text` gate
+/// covers all three emitters, as it did for the two that were open-coded
+/// at the one binary match site: a view with no decoded text carries
+/// nothing any advisory can key off.
+fn emitValueAdvisoriesBinary(
+    a: Allocator,
+    diags: *std.ArrayList(Diagnostic),
+    schema: Schema.Schema,
+    cross_index: *const CrossRefIndex,
+    tree_scope: ScopeId,
+    scope_chain: []const ScopeFrame,
+    view: BinaryCursor.NodeView,
+    extras: MatchExtras,
+    expected: Plugin.ValueType,
+    path: []const []const u8,
+) Allocator.Error!void {
+    const span = view.span orelse ZERO_SPAN;
+    if (extras.text) |t| {
+        try emitDeprecatedMemberCore(a, diags, schema, t, expected, span, path);
+        if (view.kind == .string) {
+            try emitStringPatternUnsupportedCore(a, diags, schema, expected, span, path);
+        }
+        if (view.kind == .symbol) {
+            try emitUnionAmbiguousCore(a, diags, schema, cross_index, tree_scope, scope_chain, t, expected, span, path);
+        }
+        return;
+    }
+    // A digit-leading member carries no text on either walker, so the
+    // gate above skips it. `deprecated_member` is the one advisory that
+    // can still apply: the canonical spelling is the member's `name`.
+    // The other two are string- and symbol-only by construction.
+    if (view.kind == .number_with_unit) {
+        if (extras.unit) |u| if (extras.numeric) |n| {
+            if (try canonicalMemberSpelling(a, .{ .value = n.toF64(), .unit = u })) |t| {
+                try emitDeprecatedMemberCore(a, diags, schema, t, expected, span, path);
+            }
+        };
+    }
+}
+
 fn writeAllowedList(
     a: Allocator,
     buf: *std.ArrayList(u8),
@@ -6476,13 +7242,13 @@ fn writeAllowedMembers(
 fn writeAllowedHeads(
     a: Allocator,
     buf: *std.ArrayList(u8),
-    allowed: []const []const u8,
+    allowed: []const Plugin.ValueKind.HeadSet.Head,
 ) Allocator.Error!void {
     if (allowed.len == 0) return;
     try buf.appendSlice(a, " not in set [");
-    for (allowed, 0..) |u, i| {
+    for (allowed, 0..) |h, i| {
         if (i > 0) try buf.appendSlice(a, " | ");
-        try buf.appendSlice(a, u);
+        try buf.appendSlice(a, h.name);
     }
     try buf.appendSlice(a, "]");
 }
@@ -6761,6 +7527,14 @@ const FrameValidate = union(enum) {
         /// `duplicate_positional_flag`, since the single-pass cursor can't
         /// rewind to re-scan prior positionals the way the tree walker does.
         seen_flags: std.ArrayList([]const u8),
+        /// The bounded head-set governing this form's `:positional` slot,
+        /// or null when there is none. Resolved once at schedule time.
+        pos_bounds: ?Plugin.ValueKind.HeadSet = null,
+        /// One tally per `pos_bounds.?.heads` entry. The `seen_flags` of
+        /// the head-set world, and single-pass for the same reason: the
+        /// count crosses `:max` exactly once mid-stream, and the `:min`
+        /// sweep needs the totals the frame already accumulated.
+        pos_head_counts: []u16 = &.{},
         argc: u32,
         /// Running positional-argument index for `expr_func` slots —
         /// used to look up the param type via `ExprFunc.paramType(i)`.
@@ -7089,11 +7863,8 @@ fn processEvalValidate(
                 } else {
                     try emitTypeMismatchBinary(a, diags, view, paths.diag, ctx, e.expected, f, extras);
                 }
-            } else if (extras.text) |t| {
-                try emitDeprecatedMemberCore(a, diags, schema, t, e.expected, view.span orelse ZERO_SPAN, paths.diag);
-                if (view.kind == .string) {
-                    try emitStringPatternUnsupportedCore(a, diags, schema, e.expected, view.span orelse ZERO_SPAN, paths.diag);
-                }
+            } else {
+                try emitValueAdvisoriesBinary(a, diags, schema, cross_index, tree_scope, scope_stack.items, view, extras, e.expected, paths.diag);
             }
             element_type = result.element_type;
             element_depth = result.element_depth;
@@ -7105,14 +7876,14 @@ fn processEvalValidate(
             if (kind.heads) |hs| {
                 const head = maybe_form.?.head;
                 var matched = false;
-                for (hs.names) |n| if (std.mem.eql(u8, n, head)) {
+                for (hs.heads) |h| if (std.mem.eql(u8, h.name, head)) {
                     matched = true;
                     break;
                 };
                 if (!matched) {
                     var head_extras = extras;
                     head_extras.text = head;
-                    const head_fail: MatchFail = .{ .not_head_member = .{ .got = head, .allowed = hs.names } };
+                    const head_fail: MatchFail = .{ .not_head_member = .{ .got = head, .allowed = hs.heads } };
                     if (e.outer_vec) |ov| {
                         try emitTypeMismatchBinaryOuter(a, diags, view, ov, head_fail, head_extras);
                     } else {
@@ -7288,6 +8059,17 @@ fn scheduleFormWalkValidate(
         }
     }
 
+    // Resolve the positional count bounds once, here, so the per-entry
+    // loop below reads a plain slice instead of re-resolving the kind on
+    // every child. Allocated only for a bounded head-set (the tree
+    // walker's `pos_head_counts` does the same).
+    const pos_bounds: ?Plugin.ValueKind.HeadSet = switch (spec_state) {
+        .data_form => |spec| boundedPositionalHeads(schema, spec.*),
+        .walk_only, .expr_func => null,
+    };
+    const pos_head_counts: []u16 = if (pos_bounds) |hs| try a.alloc(u16, hs.heads.len) else &.{};
+    @memset(pos_head_counts, 0);
+
     try frames.append(gpa, .{ .form_walk = .{
         .head = head,
         .head_span = fv.head_span,
@@ -7301,6 +8083,8 @@ fn scheduleFormWalkValidate(
         .path = form_path,
         .opened_scope = opened_scope,
         .expr_labels = .empty,
+        .pos_bounds = pos_bounds,
+        .pos_head_counts = pos_head_counts,
     } });
 }
 
@@ -7338,6 +8122,11 @@ fn processFormWalkValidate(
     var seen_variant_keys = fw.seen_variant_keys;
     var dup_keys = fw.dup_keys;
     var seen_flags = fw.seen_flags;
+    // Carried by value, mutated in place: the counter array is arena-owned
+    // and lives as long as the frame, so the re-pushed frame below sees the
+    // tallies this iteration made.
+    const pos_bounds = fw.pos_bounds;
+    const pos_head_counts = fw.pos_head_counts;
     var expr_labels = fw.expr_labels;
     var expr_saw_positional = fw.expr_saw_positional;
     // Discriminant tracking carried across iterations of the same form.
@@ -7497,6 +8286,25 @@ fn processFormWalkValidate(
                     .kind => |kind_ref| {
                         expected = .{ .named = kind_ref };
                         slot_ctx = .{ .form_name = spec.name, .slot = .positional };
+                        // Tally the head before the child frame runs. The
+                        // narrowing itself happens down in
+                        // `processEvalValidate` (it serves every form-pinned
+                        // slot, not just this one), so the count is taken
+                        // here off the peeked head — `peekFormHead` rewinds
+                        // c.pos, as it does for the `.none` / `.flag_set`
+                        // arms, so the child's own `readForm` is unaffected.
+                        if (pos_bounds) |hs| {
+                            const child_head: []const u8 = if (entry.value.kind == .form)
+                                try BinaryCursor.peekFormHead(iter.cursor, entry.value)
+                            else
+                                "";
+                            const step: []const u8 = if (child_head.len > 0)
+                                try a.dupe(u8, child_head)
+                            else
+                                try indexStep(a, fw.pos_idx);
+                            const pos_path = try extendPath(a, fw.path, step);
+                            try tallyPositionalHead(a, diags, hs, pos_head_counts, spec.name, child_head, entry.value.span orelse ZERO_SPAN, pos_path);
+                        }
                     },
                     .flag_set => |fs| {
                         // Emit directly (like `.none`) and leave
@@ -7660,6 +8468,8 @@ fn processFormWalkValidate(
             .discriminant_variant_idx = discriminant_variant_idx,
             .expr_labels = expr_labels,
             .expr_saw_positional = expr_saw_positional,
+            .pos_bounds = pos_bounds,
+            .pos_head_counts = pos_head_counts,
         },
     });
     try frames.append(gpa, .{ .eval = .{
@@ -7684,6 +8494,12 @@ fn emitEndOfFormBinary(
     switch (fw.spec_state) {
         .walk_only => {},
         .data_form => |spec| {
+            // Before the `open` short-circuit, matching the tree walker's
+            // phase 3b: a positional count is not a keyword rule, and
+            // `:open` widens the keyword surface. See `validateFormKeys`.
+            if (fw.pos_bounds) |hs| {
+                try emitPositionalMissing(a, diags, hs, fw.pos_head_counts, spec.name, head_span, fw.path);
+            }
             if (spec.open) return;
             // Discriminant absent: emit one diagnostic and skip variant
             // required-key sweep so we don't pile up missing-key noise.
@@ -7708,6 +8524,23 @@ fn emitEndOfFormBinary(
                 spec.exclusive_groups,
                 spec.keys,
                 fw.seen_keys,
+                null,
+                spec.name,
+                null,
+                head_span,
+                fw.path,
+            );
+            // No overlay on this path: axis C materialization happens on
+            // trees, so the binary walker reads author-presence only —
+            // the same `null` the exclusive-group call above passes.
+            try emitDependentKeyDiagnostics(
+                a,
+                diags,
+                spec.keys,
+                fw.seen_keys,
+                null,
+                null,
+                null,
                 null,
                 spec.name,
                 null,
@@ -7741,6 +8574,20 @@ fn emitEndOfFormBinary(
                     v.exclusive_groups,
                     v.keys,
                     fw.seen_variant_keys,
+                    null,
+                    spec.name,
+                    v.when,
+                    head_span,
+                    fw.path,
+                );
+                try emitDependentKeyDiagnostics(
+                    a,
+                    diags,
+                    v.keys,
+                    fw.seen_variant_keys,
+                    null,
+                    spec.keys,
+                    fw.seen_keys,
                     null,
                     spec.name,
                     v.when,
@@ -8078,8 +8925,8 @@ fn matchFormAgainstTypeBinary(
     //    `matchValueAgainstType` 4342-4349 + `matchValueAgainstKind` `.form`).
     if (resolveFormHeadKind(schema, expected)) |kind| {
         if (kind.heads) |hs| {
-            for (hs.names) |n| if (std.mem.eql(u8, n, head)) return null;
-            return MatchFail{ .not_head_member = .{ .got = head, .allowed = hs.names } };
+            for (hs.heads) |h| if (std.mem.eql(u8, h.name, head)) return null;
+            return MatchFail{ .not_head_member = .{ .got = head, .allowed = hs.heads } };
         }
         return null;
     }

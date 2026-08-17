@@ -2359,7 +2359,7 @@ fn renderCrossRefValueHover(
     try buf.appendSlice(arena, "** (kind `");
     try buf.appendSlice(arena, kind_name);
     try buf.appendSlice(arena, "`)\n\nCross-reference to `(");
-    try buf.appendSlice(arena, cr.target_form);
+    try buf.appendSlice(arena, try cr.describeTargets(arena));
     try buf.appendSlice(arena, " …)` — ");
     if (cr.provider) |p| {
         try buf.appendSlice(arena, "extracted from each target's `:");
@@ -2901,7 +2901,7 @@ fn appendCrossRefFacts(
 ) Allocator.Error!void {
     try appendFactSep(arena, buf, first);
     try buf.appendSlice(arena, "cross-ref to `(");
-    try buf.appendSlice(arena, cr.target_form);
+    try buf.appendSlice(arena, try cr.describeTargets(arena));
     try buf.appendSlice(arena, " …)`");
     if (cr.provider) |p| {
         try buf.appendSlice(arena, " via provider `");
@@ -3954,14 +3954,14 @@ fn completionsForKvpairValue(
         };
     }
 
-    // Form-valued slot: `.form` underlying with a non-empty `heads.names`
+    // Form-valued slot: `.form` underlying with a non-empty `heads.heads`
     // emits one `(head :req …)` snippet per allowed head. Each name is
     // resolved through the schema so the snippet body matches the
     // form's required keys; lookup misses fall back to a bare
     // `(head $0)` placeholder.
     if (kind.underlying == .form) {
-        if (kind.heads) |hs| if (hs.names.len > 0) {
-            return self.completionsForFormValuedSlot(arena, hs.names);
+        if (kind.heads) |hs| if (hs.heads.len > 0) {
+            return self.completionsForFormValuedSlot(arena, hs.heads);
         };
     }
 
@@ -4142,11 +4142,12 @@ fn stringFormatSnippet(
 fn completionsForFormValuedSlot(
     self: *const Self,
     arena: Allocator,
-    head_names: []const []const u8,
+    heads: []const Plugin.ValueKind.HeadSet.Head,
 ) Allocator.Error![]const CompletionItem {
     var items: std.ArrayList(CompletionItem) = .empty;
-    try items.ensureTotalCapacity(arena, head_names.len);
-    for (head_names) |raw_name| {
+    try items.ensureTotalCapacity(arena, heads.len);
+    for (heads) |head| {
+        const raw_name = head.name;
         var ns: ?[]const u8 = null;
         var name = raw_name;
         if (std.mem.indexOfScalar(u8, raw_name, '/')) |slash| {
@@ -4178,7 +4179,7 @@ fn completionsForFormValuedSlot(
     return items.toOwnedSlice(arena);
 }
 
-/// Names registered for `xref.target_form` in the scope the cursor
+/// Names registered in `xref`'s bucket, in the scope the cursor
 /// sits in. Returns empty when the cross-ref index isn't built
 /// (validation hasn't run), the target doesn't resolve, this URI
 /// isn't in the index, or no names are registered in the resolved
@@ -4206,19 +4207,21 @@ fn completionsForCrossRef(
     const enclosing = doc.tree.formHeader(enclosing_form_idx);
 
     const resolved = (try self.resolveCrossRefTargetAndScope(arena, doc, tree_idx, enclosing_form_idx, xref)) orelse return &.{};
-    const canonical_target = resolved.canonical_target;
+    const canonical_target = resolved.bucket;
     const scope = resolved.scope;
-    const target_hit = resolved.target_hit;
 
-    // If the enclosing form IS a definition of the same target, find its
-    // `:name-key` value and exclude that name so we don't suggest the
+    // If the enclosing form IS a definition of one of the targets, find
+    // its `:name-key` value and exclude that name so we don't suggest the
     // symbol the user is currently defining.
     var self_name: ?[]const u8 = null;
     const enc_lookup = self.schema.lookupForm(enclosing.head, enclosing.namespace);
     if (enc_lookup == .found) {
         const enc_hit = enc_lookup.found;
-        if (enc_hit.plugin == target_hit.plugin and enc_hit.form == target_hit.form) {
-            self_name = findKvpairValueText(doc, enclosing, xref.name_key);
+        for (resolved.targets) |target_hit| {
+            if (enc_hit.plugin == target_hit.plugin and enc_hit.form == target_hit.form) {
+                self_name = findKvpairValueText(doc, enclosing, xref.name_key);
+                break;
+            }
         }
     }
 
@@ -4647,7 +4650,7 @@ fn findParentFormIdx(tree: *const Ast.Tree, child: Ast.NodeIndex) ?Ast.NodeIndex
 /// Canonicalise `head` (with optional `namespace`) into the
 /// `"<plugin>/<form>"` form the cross-ref index keys against. Mirrors
 /// the inline canonicalisation used in `completionsForCrossRef` for
-/// `target_form`; reused for ancestor-walk scope resolution so both
+/// a cross-ref target; reused for ancestor-walk scope resolution so both
 /// paths agree on identity. If `head` itself carries a `plugin/name`
 /// slash and `namespace` is null, the slash is split here so callers
 /// can pass either bare or already-qualified strings. Returns null
@@ -6111,11 +6114,19 @@ fn appendExprKvpairFix(
 /// `ValueKind` (or, when the kvpair holds a vector of cross-refs, the
 /// element kind). Scope resolution mirrors `completionsForCrossRef`
 /// (and the validator's own `findNearestScope`).
-/// A cross-ref's canonical target form + the scope to query it under.
+/// A cross-ref's registry bucket + the scope to query it under, plus
+/// every target form that feeds the bucket.
 const ResolvedCrossRef = struct {
-    canonical_target: []const u8,
+    /// The registry bucket, from `Schema.crossRefBucketKey` — the
+    /// canonical target for a single-target cross-ref, a synthetic group
+    /// key otherwise. Every registry query keys on this, so the editor
+    /// reads exactly the bucket the validator wrote.
+    bucket: []const u8,
     scope: Validator.ScopeId,
-    target_hit: Schema.FormHit,
+    /// Every resolved target, in manifest order; never empty. Plural
+    /// because the "am I currently defining one of these?" self-exclusion
+    /// has to consider each of a group's members.
+    targets: []const Schema.FormHit,
 };
 
 /// Canonicalise a cross-ref's target form to `<plugin>/<form>` and
@@ -6134,21 +6145,22 @@ fn resolveCrossRefTargetAndScope(
     enclosing_form_idx: Ast.NodeIndex,
     xref: sjon.Plugin.ValueKind.CrossRef,
 ) Allocator.Error!?ResolvedCrossRef {
-    var target_ns: ?[]const u8 = null;
-    var target_name = xref.target_form;
-    if (std.mem.indexOfScalar(u8, xref.target_form, '/')) |slash| {
-        target_ns = xref.target_form[0..slash];
-        target_name = xref.target_form[slash + 1 ..];
+    const hits = try arena.alloc(Schema.FormHit, xref.targets.len);
+    for (xref.targets, 0..) |spelling, i| {
+        var target_ns: ?[]const u8 = null;
+        var target_name = spelling;
+        if (std.mem.indexOfScalar(u8, spelling, '/')) |slash| {
+            target_ns = spelling[0..slash];
+            target_name = spelling[slash + 1 ..];
+        }
+        hits[i] = switch (self.schema.lookupForm(target_name, target_ns)) {
+            .found => |h| h,
+            // All-or-nothing, like the bucket key itself: a group with one
+            // unresolvable target has no bucket to query.
+            else => return null,
+        };
     }
-    const target_hit = switch (self.schema.lookupForm(target_name, target_ns)) {
-        .found => |h| h,
-        else => return null,
-    };
-    const canonical_target = try std.fmt.allocPrint(
-        arena,
-        "{s}/{s}",
-        .{ target_hit.plugin.name, target_hit.form.name },
-    );
+    const bucket = (try self.schema.crossRefBucketKey(arena, xref)) orelse return null;
 
     const scope: Validator.ScopeId = blk: {
         const sf_raw = xref.scope_form orelse break :blk .tree(tree_idx);
@@ -6157,7 +6169,7 @@ fn resolveCrossRefTargetAndScope(
         break :blk .lexical(tree_idx, @intFromEnum(scope_form_idx));
     };
 
-    return .{ .canonical_target = canonical_target, .scope = scope, .target_hit = target_hit };
+    return .{ .bucket = bucket, .scope = scope, .targets = hits };
 }
 
 /// The kvpair slot a code-action diagnostic points at, resolved to the
@@ -6237,9 +6249,8 @@ fn appendCrossRefFix(
     const tree_idx = self.uri_to_tree_idx.get(uri) orelse return;
 
     const resolved = (try self.resolveCrossRefTargetAndScope(arena, doc, tree_idx, enclosing_form_idx, xref)) orelse return;
-    const canonical_target = resolved.canonical_target;
+    const canonical_target = resolved.bucket;
     const scope = resolved.scope;
-    const target_hit = resolved.target_hit;
 
     // The diagnostic span is either the bad symbol itself OR the
     // enclosing vector (when the validator wrapped the leaf failure in
@@ -6252,8 +6263,11 @@ fn appendCrossRefFix(
     // suppress its own name from the candidate set (mirrors the
     // self-name filter in `completionsForCrossRef`).
     var self_name: ?[]const u8 = null;
-    if (form_hit.plugin == target_hit.plugin and form_hit.form == target_hit.form) {
-        self_name = findKvpairValueText(doc, enclosing, xref.name_key);
+    for (resolved.targets) |target_hit| {
+        if (form_hit.plugin == target_hit.plugin and form_hit.form == target_hit.form) {
+            self_name = findKvpairValueText(doc, enclosing, xref.name_key);
+            break;
+        }
     }
 
     var names: std.ArrayList([]const u8) = .empty;
@@ -6912,8 +6926,13 @@ fn findCrossRefAlt(
             else => continue,
         };
         const cr = alt_kind.cross_ref orelse continue;
-        const canon_target = (try self.canonicaliseFormHead(arena, cr.target_form, null)) orelse continue;
-        if (std.mem.eql(u8, canon_target, canonical_head)) return cr;
+        // Any listed target matching the head makes this the alternative
+        // that owns the name — a group is one namespace, so membership of
+        // the group is what matters, not which entry matched.
+        for (cr.targets) |spelling| {
+            const canon_target = (try self.canonicaliseFormHead(arena, spelling, null)) orelse continue;
+            if (std.mem.eql(u8, canon_target, canonical_head)) return cr;
+        }
     }
     return null;
 }
@@ -6972,8 +6991,8 @@ fn unionHasFormAlt(
         };
         if (alt_kind.underlying != .form) continue;
         const hs = alt_kind.heads orelse return true; // no narrowing → any head
-        for (hs.names) |h| {
-            const canon_h = (try self.canonicaliseFormHead(arena, h, null)) orelse continue;
+        for (hs.heads) |entry| {
+            const canon_h = (try self.canonicaliseFormHead(arena, entry.name, null)) orelse continue;
             if (std.mem.eql(u8, canon_h, canonical_head)) return true;
         }
     }
@@ -7033,7 +7052,7 @@ pub fn freshName(
     var n: u32 = 1;
     while (true) : (n += 1) {
         const candidate = try std.fmt.allocPrint(arena, "{s}-{d}", .{ site.head, n });
-        if (!xri.contains(resolved.scope, resolved.canonical_target, candidate)) return candidate;
+        if (!xri.contains(resolved.scope, resolved.bucket, candidate)) return candidate;
     }
 }
 

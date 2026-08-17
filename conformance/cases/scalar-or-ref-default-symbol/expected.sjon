@@ -1,0 +1,5 @@
+; One diagnostic, and only for the string. The two symbols are both clean —
+; that is the unchecked default, stated as an expectation rather than left
+; as an absence.
+(diagnostics
+  (diagnostic :code union_no_branch_matched :path [mesh bones]))

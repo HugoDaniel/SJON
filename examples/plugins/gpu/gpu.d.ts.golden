@@ -40,7 +40,20 @@ export interface Gpu_Draw {
   "lod-bias"?: number;
 }
 
+/** A colour target's masks, written in hex. */
+export interface Gpu_Target {
+  $form: "target";
+  $ns: "gpu";
+  /**
+   */
+  "sample-mask"?: U32;
+  /**
+   */
+  "write-mask"?: U32;
+}
+
 export type SjonGpu =
   | Gpu_Vertex
-  | Gpu_Draw;
+  | Gpu_Draw
+  | Gpu_Target;
 

@@ -1,0 +1,25 @@
+; `checkNumericBoundsValue` reports the FIRST failure, and the order it
+; checks in is a contract, not an accident. Each line below violates
+; `:multiple-of 256` as well as something else, and the something else is
+; what gets reported:
+;
+;   250.5  — also fractional. `:integer` is checked first, because a
+;            fractional value's real problem is that it is fractional.
+;   -256   — a genuine multiple of 256, but below `:min`. Range is checked
+;            before divisibility, so "below minimum" wins.
+;   250    — otherwise acceptable, so divisibility is what is left.
+;
+; Get the order wrong and an author chasing an alignment error is told to
+; align a number that is not even whole yet.
+(plugin :name gfx :version "1.0.0" :sjon "1.3"
+  (value-kind :name aligned-offset
+    :underlying number
+    :numeric (numeric-bounds :min 0 :integer true :multiple-of 256))
+
+  (form :name entry
+    (key :name binding :type number)
+    (key :name offset  :type aligned-offset :optional true)))
+
+(entry :binding 0 :offset 250.5)
+(entry :binding 1 :offset -256)
+(entry :binding 2 :offset 250)

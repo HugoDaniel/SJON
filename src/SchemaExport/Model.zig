@@ -93,6 +93,11 @@ pub const Key = struct {
     description: []const u8 = "",
     value: ValueShape,
     default: ?Default = null,
+    /// Sibling keys this key's presence demands, from
+    /// `Plugin.KeySpec.requires`. Exports exactly on the JSON Schema
+    /// channel as `dependentRequired`; TypeScript cannot express it in a
+    /// plain interface, so it rides the JSDoc there.
+    requires: []const []const u8 = &.{},
 };
 
 /// What kind of positional children a form accepts. Mirrors
@@ -272,6 +277,11 @@ pub const NumericBounds = struct {
     exclusive_max: bool = false,
     /// `true` when the source declared the slot as an integer (`:integer true`).
     integer: bool = false,
+    /// Divisor from `:multiple-of`. Exports exactly on the JSON Schema
+    /// channel — 2020-12's `multipleOf` is "division by this keyword's
+    /// value results in an integer", the same claim SJON makes — and is
+    /// annotation-only everywhere else.
+    multiple_of: ?Bound = null,
     /// GPU representation tag, propagated from `:repr (repr-shape …)`.
     /// Drives the `x-sjon-gpu-repr` JSON Schema annotation and a branded
     /// `F32`…`F16` TS alias. `null` when the source kind declared no
@@ -305,6 +315,18 @@ pub const Member = struct {
     description: []const u8 = "",
     deprecated: bool = false,
     deprecation_message: []const u8 = "",
+    /// Set when the member's spelling is digit-leading (`1d`, `2d`), in
+    /// which case a document writes it as a **unit-bearing number** and
+    /// not as a symbol. Every target has to know: the JSON bridge encodes
+    /// such a value as `{"$num": [<magnitude>, "<unit>"]}`, so a schema
+    /// pinning `{"$sym": "2d"}` would reject a document the validator
+    /// accepts. `name` still carries the canonical spelling for prose.
+    numeric_spelling: ?NumericSpelling = null,
+
+    pub const NumericSpelling = struct {
+        magnitude: u64,
+        unit: []const u8,
+    };
 };
 
 /// The exporter's mirror of `Plugin.CrossRef`. `provider` and `source_key`
@@ -316,7 +338,12 @@ pub const Member = struct {
 /// identity one, because the member set doesn't exist until a host runs an
 /// extraction pre-pass over a document the exporter never sees.
 pub const CrossRef = struct {
-    target_form: []const u8,
+    /// Every listed target, in manifest order; never empty. A group's
+    /// members share one namespace in the engine, which no export target
+    /// can express — but the `intermediate` target is a first-class
+    /// consumer surface, so it carries the whole list rather than a
+    /// first-target summary an IR reader could mistake for the truth.
+    targets: []const []const u8,
     name_key: []const u8,
     acyclic: bool,
     scope_form: ?[]const u8,
@@ -331,6 +358,20 @@ pub const CrossRef = struct {
 pub const FormRef = struct {
     plugin: []const u8,
     name: []const u8,
+    /// Positional-count bounds carried over from the source
+    /// `HeadSet.Head`. Meaningful only where this `FormRef` reached the
+    /// model through a form's `:positional` slot — the scope rule in
+    /// `docs/portable-manifest-v1.md` §4.5 — so the backends read them
+    /// only when emitting `$children`. `0` / `null` is "unbounded", and
+    /// an all-unbounded head-set therefore exports byte-identically to
+    /// before bounds existed, which is what keeps the goldens honest.
+    min: u16 = 0,
+    max: ?u16 = null,
+
+    /// True when this entry declares a count worth emitting.
+    pub fn isBounded(self: FormRef) bool {
+        return self.min != 0 or self.max != null;
+    }
 };
 
 /// One arm of a `union_of` shape: the source-declared alternative name

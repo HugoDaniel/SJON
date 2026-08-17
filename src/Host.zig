@@ -1033,7 +1033,7 @@ test "extractProviders answers the pairs a document asks for" {
         .value_kinds = &.{.{
             .name = "uniform-name",
             .underlying = .symbol,
-            .cross_ref = .{ .target_form = "shader", .provider = "words" },
+            .cross_ref = .{ .targets = &.{"shader"}, .provider = "words" },
         }},
         .forms = &.{.{ .name = "shader", .keys = &.{
             .{ .name = "name", .value_type = .symbol },
@@ -1063,7 +1063,7 @@ test "extractProviders is a no-op for a schema with no provider route" {
         .value_kinds = &.{.{
             .name = "uniform-name",
             .underlying = .symbol,
-            .cross_ref = .{ .target_form = "shader" },
+            .cross_ref = .{ .targets = &.{"shader"} },
         }},
         .forms = &.{.{ .name = "shader", .keys = &.{.{ .name = "name", .value_type = .symbol }} }},
     };

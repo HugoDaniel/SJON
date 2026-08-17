@@ -1,0 +1,7 @@
+; Three diagnostics, one per malformed prefix — `unspecified`, the same
+; parse-phase code a stray delimiter or an `1e+` exponent-without-digits
+; gets. No new code: a malformed numeric shape already had a channel.
+(diagnostics
+  (diagnostic :code unspecified :path [])
+  (diagnostic :code unspecified :path [])
+  (diagnostic :code unspecified :path []))

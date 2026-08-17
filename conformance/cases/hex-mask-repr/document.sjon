@@ -1,0 +1,27 @@
+; Hex reaches the existing numeric refinements with no validator change: a
+; hex literal *is* a number, so `:repr`, `:numeric`, and `:unit` judge it
+; exactly as they judge a decimal. This case is the proof, on the boundary
+; where it matters.
+;
+; Accept: `0xFFFFFFFF` is u32.max exactly, and `0xF` is the four-bit mask a
+; WebGPU sample-mask idiom writes. Reject: `0x1_0000_0000` is one past
+; u32.max and must be `repr_out_of_range` rather than truncating.
+;
+; `:unit (unit-shape :reject true)` is what used to catch this typo — the
+; `0` with unit `xFFFFFFFF` was rejected for carrying a unit, which is a
+; diagnosis about the wrong thing and only worked in schemas that opted in.
+; It stays here to pin that the two checks do not collide: a hex value has
+; no unit to reject.
+(plugin :name gpu :version "1.0.0"
+  (value-kind :name u32-mask
+    :underlying number
+    :description "A 32-bit write/sample mask, written in hex."
+    :repr (repr-shape :type u32)
+    :unit (unit-shape :reject true))
+
+  (form :name target
+    (key :name write-mask  :type u32-mask :optional true)
+    (key :name sample-mask :type u32-mask :optional true)))
+
+(target :write-mask 0xFFFFFFFF :sample-mask 0xF)
+(target :write-mask 0x1_0000_0000)

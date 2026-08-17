@@ -8,3 +8,21 @@
 ;   * :z — 1, another literal.
 
 (dispatch :x 64 :y WORKGROUP_SIZE :z 1)
+
+; The checked half. `checked-dim` names `define-ref` as its reference
+; alternative, so the symbol must name a `(define …)` in this document
+; rather than being any symbol at all.
+
+(define :name TILE :value 16)
+
+(checked-dispatch :x 64 :y TILE)
+
+; The whole point of naming a `:ref` is the line NOT written here:
+;
+;   (checked-dispatch :x 64 :y TIL)     ; union_no_branch_matched
+;
+; Under the default reference half (`dim`, above), the same typo is clean —
+; `TIL` is a well-formed symbol and nothing checks that it names anything.
+; Note the diagnostic is the union's, naming both alternatives, rather than
+; the reference branch's own `not_cross_ref`: the shorthand stores an
+; ordinary union, and a union does not forward one branch's private reason.

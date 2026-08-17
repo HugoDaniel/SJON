@@ -61,6 +61,10 @@ export interface ModelKey {
   readonly description: string;
   readonly value: ModelValueShape;
   readonly default: ModelDefault | null;
+  // Sibling keys this key's presence demands, from `KeySpec.requires`.
+  // Exports as 2020-12 `dependentRequired` on the JSON Schema channel and
+  // as a `@sjon-requires` JSDoc line on the TS one.
+  readonly requires: readonly string[];
 }
 
 export type ModelPositional =
@@ -169,6 +173,12 @@ export interface ModelNumericBounds {
   readonly exclusiveMin: boolean;
   readonly exclusiveMax: boolean;
   readonly integer: boolean;
+  // Divisor from `:multiple-of` (manifest format 1.3). Exports exactly on
+  // the JSON Schema channel — 2020-12's `multipleOf` is "division by this
+  // keyword's value results in an integer", the same claim SJON makes —
+  // and is JSDoc-annotation-only on the TS channel, which has no
+  // divisibility constraint. `null` when the source declared none.
+  readonly multipleOf: ModelNumericBound | null;
   // GPU representation tag from `:repr (repr-shape …)`. Drives the
   // `x-sjon-gpu-repr` JSON Schema annotation and a branded `F32`…`F16` TS
   // alias. `null` when the source declared no `:repr`. Orthogonal to
@@ -182,6 +192,17 @@ export interface ModelMember {
   readonly description: string;
   readonly deprecated: boolean;
   readonly deprecationMessage: string;
+  /** Set when the spelling is digit-leading (`1d`, `2d`), in which case a
+   *  document writes it as a unit-bearing number and the JSON bridge
+   *  encodes it as `{"$num": [magnitude, unit]}`. A schema pinning
+   *  `{"$sym": "2d"}` would reject a document the validator accepts, so
+   *  every backend has to know. Mirrors `Model.Member.numeric_spelling`. */
+  readonly numericSpelling?: ModelNumericSpelling;
+}
+
+export interface ModelNumericSpelling {
+  readonly magnitude: number;
+  readonly unit: string;
 }
 
 /**
@@ -194,7 +215,11 @@ export interface ModelMember {
  * a document the exporter never sees.
  */
 export interface ModelCrossRef {
-  readonly targetForm: string;
+  /** Every listed target, in manifest order; never empty. A group's
+   * members share one namespace in the engine, which no export target can
+   * express — but the IR carries the whole list rather than a
+   * first-target summary an IR reader could mistake for the truth. */
+  readonly targets: readonly string[];
   readonly nameKey: string;
   readonly acyclic: boolean;
   readonly scopeForm: string | null;
@@ -206,6 +231,22 @@ export interface ModelFormRef {
   /** Owning plugin name. Empty string when the lowering pass couldn't resolve. */
   readonly plugin: string;
   readonly name: string;
+  /**
+   * Positional-count bounds carried over from the source `Head`.
+   * Meaningful only where this ref reached the model through a form's
+   * `:positional` slot (the scope rule in
+   * `docs/portable-manifest-v1.md` §4.5), so the backends read them only
+   * when emitting `$children`. Absent = unbounded, and an all-unbounded
+   * head-set therefore exports byte-identically to before bounds
+   * existed. Mirrors `Model.FormRef` in `src/SchemaExport/Model.zig`.
+   */
+  readonly min?: number;
+  readonly max?: number;
+}
+
+/** True when a ref declares a count worth emitting. */
+export function isBoundedRef(ref: ModelFormRef): boolean {
+  return (ref.min ?? 0) !== 0 || ref.max !== undefined;
 }
 
 export interface ModelUnionAlternative {

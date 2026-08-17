@@ -1,0 +1,16 @@
+; A `0x` prefix with no hex digit after it is a parse diagnostic, not the
+; number zero. Three shapes: the bare prefix, a leading `_` (grouping needs
+; a digit to group), and a non-hex letter.
+;
+; The `.invalid` token spans only the prefix, so the tail lexes normally —
+; `_F` and `GG` each become an ordinary symbol — and one typo yields one
+; diagnostic instead of a cascade. Reading `0x` as zero-with-unit-`x` is the
+; silent failure hex literals exist to remove, so keeping that reading for
+; the degenerate case would have kept the bug for the typo that matters
+; most.
+;
+; The path is empty for all three: a malformed top-level literal belongs to
+; no form.
+0x
+0x_F
+0xGG

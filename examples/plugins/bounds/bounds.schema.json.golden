@@ -78,6 +78,13 @@
       "message": "value-kind `big` max bound 100000000000000000 exceeds 2^53; non-bigint JSON Schema validators may lose precision — see `x-sjon-exact-bound.max`",
       "plugin": "bounds",
       "kind": "big"
+    },
+    {
+      "code": "numeric_bounds_emitted_via_min_max",
+      "severity": "info",
+      "message": "value-kind `aligned-offset` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values",
+      "plugin": "bounds",
+      "kind": "aligned-offset"
     }
   ],
   "$defs": {
@@ -116,6 +123,11 @@
           "type": "string",
           "format": "uri",
           "x-sjon-length-unit": "codepoint"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "multipleOf": 256
         },
         "ratio": {
           "type": "number",

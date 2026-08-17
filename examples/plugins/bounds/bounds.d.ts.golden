@@ -14,6 +14,7 @@
 //   [info numeric_bounds_emitted_via_min_max] value-kind `count` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
 //   [info numeric_bounds_emitted_via_min_max] value-kind `big` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
 //   [info numeric_bound_exceeds_double_range] value-kind `big` max bound 100000000000000000 exceeds 2^53; non-bigint JSON Schema validators may lose precision — see `x-sjon-exact-bound.max`
+//   [info numeric_bounds_emitted_via_min_max] value-kind `aligned-offset` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
 
 export type Keyword<S extends string = string> = { readonly $kw: S };
 export type Symbol_<S extends string = string> = { readonly $sym: S };
@@ -54,6 +55,12 @@ export interface Bounds_Profile {
    * @format uri
    */
   homepage?: string;
+  /**
+   * @minimum 0
+   * @sjon-integer true
+   * @sjon-multiple-of 256
+   */
+  offset?: number;
   /**
    * @exclusiveMinimum 0
    * @maximum 1

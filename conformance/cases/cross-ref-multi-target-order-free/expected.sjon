@@ -1,0 +1,8 @@
+; Both counts are the assertion. A host keying the bucket on the written
+; order reports `duplicate_cross_ref_target` twice (once per namespace it
+; invented), emits no collapse warning at all, and adds a `union_ambiguous`
+; at `dispatch` — so any of the three failures shows up here as a count
+; mismatch rather than a message diff.
+(diagnostics
+  (diagnostic :code cross_ref_target_collapse :severity warning :path [gpu backwards cross-ref])
+  (diagnostic :code duplicate_cross_ref_target :path []))

@@ -32,6 +32,17 @@ test('numeric refinements accumulate immutably', () => {
   });
 });
 
+test('multipleOf carries the divisor, and refuses a non-positive one', () => {
+  assert.deepEqual(s.number().min(0).int().multipleOf(256)._def.shape, {
+    kind: 'number',
+    bounds: { min: 0, integer: true, multipleOf: 256 },
+  });
+  // The loader refuses both of these (`numeric_bounds_invalid`), so the
+  // builder refuses them first rather than emitting an unloadable manifest.
+  assert.throws(() => s.number().multipleOf(0), /needs a positive divisor/);
+  assert.throws(() => s.number().multipleOf(-256), /needs a positive divisor/);
+});
+
 test('gt/lt set the exclusive flags', () => {
   assert.deepEqual(s.number().gt(0)._def.shape, {
     kind: 'number',
@@ -112,14 +123,14 @@ test('s.kind preserves the wrapped node refinement methods', () => {
 test('crossRef captures target + refinements', () => {
   assert.deepEqual(s.crossRef('node', { nameKey: 'id', acyclic: true })._def.shape, {
     kind: 'cross_ref',
-    crossRef: { target: 'node', nameKey: 'id', acyclic: true },
+    crossRef: { targets: ['node'], nameKey: 'id', acyclic: true },
   });
 });
 
 test('crossRef captures the provider route', () => {
   assert.deepEqual(s.crossRef('shader', { provider: 'uniforms', sourceKey: 'body' })._def.shape, {
     kind: 'cross_ref',
-    crossRef: { target: 'shader', provider: 'uniforms', sourceKey: 'body' },
+    crossRef: { targets: ['shader'], provider: 'uniforms', sourceKey: 'body' },
   });
 });
 
@@ -140,6 +151,26 @@ test('crossRef rejects the three route contradictions at the call site', () => {
 test('crossRef allows acyclic: false alongside a provider', () => {
   // The exclusion is about an active cycle check, not the key's presence.
   assert.doesNotThrow(() => s.crossRef('shader', { provider: 'uniforms', acyclic: false }));
+});
+
+test('crossRef takes a target group, and one target keeps the bare spelling', () => {
+  // Both spellings normalise to a list, so `_def` cannot tell them apart —
+  // matching the engine's loader, where `:target [phrase]` is a
+  // single-target cross-ref rather than a group of one.
+  assert.deepEqual(s.crossRef(['render-pipeline', 'compute-pipeline'])._def.shape, {
+    kind: 'cross_ref',
+    crossRef: { targets: ['render-pipeline', 'compute-pipeline'] },
+  });
+  assert.deepEqual(s.crossRef(['phrase'])._def.shape, s.crossRef('phrase')._def.shape);
+});
+
+test('crossRef rejects what a target group cannot carry', () => {
+  assert.throws(() => s.crossRef([]), /at least one target/);
+  assert.throws(() => s.crossRef(['a', 'b', 'a']), /twice/);
+  assert.throws(() => s.crossRef(['a', 'b'], { acyclic: true }), /needs a single target/);
+  assert.throws(() => s.crossRef(['a', 'b'], { provider: 'p' }), /needs a single target/);
+  // A single target is unaffected by any of it.
+  assert.doesNotThrow(() => s.crossRef('a', { acyclic: true }));
 });
 
 test('form def collects keys with namespace defaulting to head', () => {

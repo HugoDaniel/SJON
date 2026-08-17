@@ -290,6 +290,7 @@ fn writeFormInterface(w: *std.Io.Writer, p: Model.Plugin_, f: Model.Form) std.Io
         .none => {},
         .any => try w.writeAll("  $children?: unknown[];\n"),
         .kind => |shape| {
+            try writeChildCountsDoc(w, shape, "  ");
             try w.writeAll("  $children?: Array<");
             try writeShape(w, shape);
             try w.writeAll(">;\n");
@@ -299,6 +300,58 @@ fn writeFormInterface(w: *std.Io.Writer, p: Model.Plugin_, f: Model.Form) std.Io
         try w.writeAll("  [key: string]: unknown;\n");
     }
     try w.writeAll("}\n\n");
+}
+
+/// TypeScript cannot express "exactly one element of this union in an
+/// array" — no amount of tuple or template trickery reaches a per-member
+/// count over a heterogeneous array. So the bounds ride as a doc comment
+/// above the `$children` member and nothing more. Documented in
+/// `docs/SCHEMA_EXPORT.md`: a silently weaker `.d.ts` is worse than a
+/// documented one, because a consumer would otherwise read the absence of
+/// a constraint as the absence of a rule.
+///
+/// Emitted for the two block-shaped form emitters only. The inline
+/// local-form literal carries no JSDoc at all by design (it stays on one
+/// line, see `writeInlineKey`), so it is left alone rather than given the
+/// project's only single-line annotation.
+fn writeChildCountsDoc(
+    w: *std.Io.Writer,
+    shape: Model.ValueShape,
+    indent: []const u8,
+) std.Io.Writer.Error!void {
+    const refs = switch (shape) {
+        .form_heads => |r| r,
+        else => return,
+    };
+    var any = false;
+    for (refs) |ref| {
+        if (ref.isBounded()) {
+            any = true;
+            break;
+        }
+    }
+    if (!any) return;
+
+    try w.writeAll(indent);
+    try w.writeAll("/** Positional counts (not expressible in TS):");
+    var first = true;
+    for (refs) |ref| {
+        if (!ref.isBounded()) continue;
+        try w.writeAll(if (first) " " else "; ");
+        first = false;
+        try w.writeAll(ref.name);
+        try w.writeAll(": ");
+        if (ref.max) |mx| {
+            if (ref.min == mx) {
+                try w.print("{d}", .{mx});
+            } else {
+                try w.print("{d}..{d}", .{ ref.min, mx });
+            }
+        } else {
+            try w.print("{d}..", .{ref.min});
+        }
+    }
+    try w.writeAll(" */\n");
 }
 
 /// Emit a discriminated form as a union of per-variant object types.
@@ -344,6 +397,7 @@ fn writeDiscriminatedFormType(
             .none => {},
             .any => try w.writeAll("      $children?: unknown[];\n"),
             .kind => |shape| {
+                try writeChildCountsDoc(w, shape, "      ");
                 try w.writeAll("      $children?: Array<");
                 try writeShape(w, shape);
                 try w.writeAll(">;\n");
@@ -364,7 +418,7 @@ fn writeKey(w: *std.Io.Writer, k: Model.Key, indent: []const u8) std.Io.Writer.E
     const unit_anno = unitOf(k.value);
 
     const has_axis_jsdoc = bounds_anno != null or string_anno != null or
-        cross_ref_anno != null or unit_anno != null;
+        cross_ref_anno != null or unit_anno != null or k.requires.len != 0;
     const needs_doc = k.description.len > 0 or has_expr_default or
         rich_members != null or has_axis_jsdoc;
 
@@ -389,6 +443,17 @@ fn writeKey(w: *std.Io.Writer, k: Model.Key, indent: []const u8) std.Io.Writer.E
                 for (members) |m| try writeMemberDocLine(w, m, indent);
             }
             if (bounds_anno) |b| try writeNumericBoundsDoc(w, b, indent);
+            if (k.requires.len != 0) {
+                // Not expressible in a plain interface — it would need a
+                // discriminated union over which keys are present.
+                try w.writeAll(indent);
+                try w.writeAll(" * @sjon-requires ");
+                for (k.requires, 0..) |r, i| {
+                    if (i != 0) try w.writeAll(", ");
+                    try w.writeAll(r);
+                }
+                try w.writeByte('\n');
+            }
             if (string_anno) |sb| try writeStringBoundsDoc(w, sb, indent);
             if (cross_ref_anno) |cr| try writeCrossRefDoc(w, cr, indent);
             if (unit_anno) |u| try writeUnitDoc(w, u, indent);
@@ -453,6 +518,19 @@ fn writeNumericBoundsDoc(
         try w.writeAll(indent);
         try w.writeAll(" * @sjon-integer true\n");
     }
+    // Not expressible in the type system — TS has no divisibility
+    // constraint — so it rides the JSDoc alongside `@sjon-integer`.
+    if (b.multiple_of) |mo| {
+        try w.writeAll(indent);
+        try w.writeAll(" * @sjon-multiple-of ");
+        try printF64(w, mo.value);
+        if (mo.unit) |u| {
+            try w.writeAll(" (");
+            try w.writeAll(u);
+            try w.writeByte(')');
+        }
+        try w.writeByte('\n');
+    }
 }
 
 fn writeStringBoundsDoc(
@@ -493,7 +571,7 @@ fn writeCrossRefDoc(
 ) std.Io.Writer.Error!void {
     try w.writeAll(indent);
     try w.writeAll(" * @sjon-cross-ref target=`");
-    try w.writeAll(cr.target_form);
+    try writeJoined(w, cr.targets, " | ");
     // Prose names only what the route can carry. The provider route has
     // no `name-key` (rejected beside a provider) and no `acyclic` (cycle
     // edges need per-name declaration sites), so printing the struct's
@@ -735,9 +813,16 @@ fn writeShape(w: *std.Io.Writer, shape: Model.ValueShape) std.Io.Writer.Error!vo
             try w.writeAll("{ readonly $form: string; readonly $ns?: string }");
         },
         .cross_ref => |cr| {
-            try w.writeAll("CrossRef<\"");
-            try w.writeAll(cr.target_form);
-            try w.writeAll("\">");
+            // A group is a union of brands, one per target — the same
+            // shape a `:union` of cross-ref kinds would produce, and the
+            // only honest TS reading of "this name may come from either
+            // form". One target emits exactly what it always did.
+            for (cr.targets, 0..) |t, i| {
+                if (i > 0) try w.writeAll(" | ");
+                try w.writeAll("CrossRef<\"");
+                try w.writeAll(t);
+                try w.writeAll("\">");
+            }
         },
         .union_of => |alts| {
             for (alts, 0..) |alt, i| {
@@ -852,6 +937,20 @@ fn writeBrandedUnion(w: *std.Io.Writer, brand: []const u8, names: []const []cons
     }
 }
 
+/// Write `parts` separated by `sep`. One part writes just that part, so a
+/// single-target cross-ref annotation is byte-identical to the
+/// pre-group output.
+fn writeJoined(
+    w: *std.Io.Writer,
+    parts: []const []const u8,
+    sep: []const u8,
+) std.Io.Writer.Error!void {
+    for (parts, 0..) |part, i| {
+        if (i > 0) try w.writeAll(sep);
+        try w.writeAll(part);
+    }
+}
+
 fn writeStringLiteralUnion(w: *std.Io.Writer, names: []const []const u8) std.Io.Writer.Error!void {
     if (names.len == 0) {
         try w.writeAll("string");
@@ -869,6 +968,13 @@ fn writeStringLiteralUnion(w: *std.Io.Writer, names: []const []const u8) std.Io.
 /// receives a JSDoc enrichment block at the consuming key (see
 /// `writeKey`). The TS compiler ignores the JSDoc when computing the
 /// type; editors and language servers surface it as hover content.
+///
+/// A digit-leading member breaks the brand: a document writes `2d` as a
+/// unit-bearing number, which the JSON bridge encodes as a
+/// `[magnitude, unit]` pair, so the alternative is the tuple type
+/// `number_with_unit` already uses rather than `Symbol_<"2d">`. Getting
+/// this wrong would make the `.d.ts` reject a document the validator
+/// accepts, so it is not a cosmetic difference.
 fn writeRichBrandedUnion(w: *std.Io.Writer, brand: []const u8, members: []const Model.Member) std.Io.Writer.Error!void {
     if (members.len == 0) {
         try w.writeAll(brand);
@@ -876,6 +982,10 @@ fn writeRichBrandedUnion(w: *std.Io.Writer, brand: []const u8, members: []const 
     }
     for (members, 0..) |m, i| {
         if (i > 0) try w.writeAll(" | ");
+        if (m.numeric_spelling) |s| {
+            try w.print("readonly [{d}, \"{s}\"]", .{ s.magnitude, s.unit });
+            continue;
+        }
         try w.writeAll(brand);
         try w.writeAll("<\"");
         try w.writeAll(m.name);
@@ -1262,6 +1372,41 @@ test "emit: positional local forms render as inline $children union" {
     try testing.expect(std.mem.indexOf(u8, bytes, "$form: \"rect\"") != null);
     // …and the trailing open branch keeps the additive global fallback open.
     try testing.expect(std.mem.indexOf(u8, bytes, "$form: string") != null);
+}
+
+test "emit: bounded head-set counts ride as a $children doc comment" {
+    // TS cannot express "exactly one element of this union in an array",
+    // so the bounds are prose above the member. Documented as a known
+    // weakening in `docs/SCHEMA_EXPORT.md` rather than left implicit.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "gfx",
+        .forms = &.{
+            .{ .name = "vertex" },
+            .{ .name = "fragment" },
+            .{ .name = "constant" },
+            .{ .name = "render-pipeline", .positional = .{ .kind = .{ .name = "pipeline-section" } } },
+        },
+        .value_kinds = &.{.{
+            .name = "pipeline-section",
+            .underlying = .form,
+            .heads = .{ .heads = &.{
+                .{ .name = "vertex", .min = 1, .max = 1 },
+                .{ .name = "fragment", .max = 1 },
+                .{ .name = "constant" },
+            } },
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    try testing.expect(std.mem.indexOf(u8, bytes, "Positional counts (not expressible in TS): vertex: 1; fragment: 0..1 */") != null);
+    // The unbounded head contributes nothing — the comment lists what is
+    // constrained, not every head in the set.
+    try testing.expect(std.mem.indexOf(u8, bytes, "constant:") == null);
+    // The type itself is unchanged: still the whole-set array.
+    try testing.expect(std.mem.indexOf(u8, bytes, "$children?: Array<") != null);
 }
 
 test "emit: PascalCase converts kebab + snake to camel" {

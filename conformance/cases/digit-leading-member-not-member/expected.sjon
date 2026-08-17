@@ -1,0 +1,6 @@
+; Three `not_member`s, one per miss — and no `wrong_underlying`, which is
+; the half of the contract a bare "did it complain?" check would miss.
+(diagnostics
+  (diagnostic :code not_member :path [texture dimension])
+  (diagnostic :code not_member :path [texture dimension])
+  (diagnostic :code not_member :path [texture dimension]))

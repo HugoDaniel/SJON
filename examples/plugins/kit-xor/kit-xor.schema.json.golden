@@ -151,6 +151,64 @@
           ]
         }
       ]
+    },
+    "form.kit-xor.anchor": {
+      "type": "object",
+      "description": "A point on a phrase. The offset and length are measured FROM :target, so neither means anything without it.",
+      "properties": {
+        "$form": {
+          "const": "anchor"
+        },
+        "$ns": {
+          "const": "kit-xor"
+        },
+        "length": {
+          "description": "Extent from :offset.",
+          "type": "number"
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "offset": {
+          "description": "Distance from :target.",
+          "type": "number"
+        },
+        "target": {
+          "description": "The phrase this anchor is measured against.",
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "$form",
+        "name"
+      ],
+      "dependentRequired": {
+        "offset": [
+          "target"
+        ],
+        "length": [
+          "target"
+        ]
+      },
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -159,6 +217,9 @@
     },
     {
       "$ref": "#/$defs/form.kit-xor.tag"
+    },
+    {
+      "$ref": "#/$defs/form.kit-xor.anchor"
     }
   ]
 }

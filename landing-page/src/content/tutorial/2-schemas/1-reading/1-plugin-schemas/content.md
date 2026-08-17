@@ -247,7 +247,9 @@ multi-key exclusive bundles). Every loss is recorded as an
 `x-sjon-export-warnings` entry at the top of the schema and as a
 matching `// WARNING:` header in the `.d.ts`. Discriminated forms
 become `allOf` of `if/then` chains; head-sets become `oneOf` of
-`$ref`s; exclusive groups become `oneOf`/`not:{allOf}`. See
+`$ref`s — plus, when a head declares a positional count, one
+`contains` / `minContains` / `maxContains` entry per bounded head in the
+`$children` array's `allOf`; exclusive groups become `oneOf`/`not:{allOf}`. See
 [`docs/SCHEMA_EXPORT.md`](../SCHEMA_EXPORT.md) for the full mapping
 table, lossiness budget, and worked examples for the `kit`, `audio`,
 `enum-rich`, and `kit-xor` fixtures.

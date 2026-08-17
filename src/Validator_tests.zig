@@ -1537,7 +1537,7 @@ const head_pinned_plugin: Plugin.Plugin = .{
     .value_kinds = &.{.{
         .name = "point-or-rect",
         .underlying = .form,
-        .heads = .{ .names = &.{ "point", "rect" } },
+        .heads = .{ .heads = &.{ .{ .name = "point" }, .{ .name = "rect" } } },
     }},
 };
 
@@ -1571,7 +1571,7 @@ test "head-set: rejects a disallowed head" {
         .value_kinds = &.{.{
             .name = "point-or-rect",
             .underlying = .form,
-            .heads = .{ .names = &.{ "point", "rect" } },
+            .heads = .{ .heads = &.{ .{ .name = "point" }, .{ .name = "rect" } } },
         }},
     };
     const schema = Schema.Schema.init(&.{p});
@@ -1636,7 +1636,7 @@ test "head-set: vector-of-head-pinned flags the failing element" {
         },
         .value_kinds = &.{
             .{ .name = "shapes", .underlying = .vector, .vector = .{ .element = .{ .name = "point-or-rect" } } },
-            .{ .name = "point-or-rect", .underlying = .form, .heads = .{ .names = &.{ "point", "rect" } } },
+            .{ .name = "point-or-rect", .underlying = .form, .heads = .{ .heads = &.{ .{ .name = "point" }, .{ .name = "rect" } } } },
         },
     };
     const schema = Schema.Schema.init(&.{p});
@@ -1670,7 +1670,7 @@ test "head-set: cross-plugin form-name ambiguity still fires alongside head chec
         .value_kinds = &.{.{
             .name = "point-or-rect",
             .underlying = .form,
-            .heads = .{ .names = &.{ "point", "rect" } },
+            .heads = .{ .heads = &.{ .{ .name = "point" }, .{ .name = "rect" } } },
         }},
     };
     const schema = Schema.Schema.init(&.{ a_plugin, b_plugin, slot_plugin });
@@ -1708,7 +1708,7 @@ test "head-set: open form still type-checks head-pinned key" {
         .value_kinds = &.{.{
             .name = "point-or-rect",
             .underlying = .form,
-            .heads = .{ .names = &.{ "point", "rect" } },
+            .heads = .{ .heads = &.{ .{ .name = "point" }, .{ .name = "rect" } } },
         }},
     };
     const schema = Schema.Schema.init(&.{p});
@@ -3172,7 +3172,7 @@ test "validateBinary: head-set accepts an allowed head" {
         .value_kinds = &.{.{
             .name = "point-or-rect",
             .underlying = .form,
-            .heads = .{ .names = &.{ "point", "rect" } },
+            .heads = .{ .heads = &.{ .{ .name = "point" }, .{ .name = "rect" } } },
         }},
     };
     const schema = Schema.Schema.init(&.{p});
@@ -3191,7 +3191,7 @@ test "validateBinary: head-set rejects a disallowed head" {
         .value_kinds = &.{.{
             .name = "point-or-rect",
             .underlying = .form,
-            .heads = .{ .names = &.{ "point", "rect" } },
+            .heads = .{ .heads = &.{ .{ .name = "point" }, .{ .name = "rect" } } },
         }},
     };
     const schema = Schema.Schema.init(&.{p});
@@ -3215,7 +3215,7 @@ test "validateBinary: head-set rejects a non-form value" {
         .value_kinds = &.{.{
             .name = "point-or-rect",
             .underlying = .form,
-            .heads = .{ .names = &.{ "point", "rect" } },
+            .heads = .{ .heads = &.{ .{ .name = "point" }, .{ .name = "rect" } } },
         }},
     };
     const schema = Schema.Schema.init(&.{p});
@@ -3414,7 +3414,7 @@ const audio_union_plugin: Plugin.Plugin = .{
         .{
             .name = "event",
             .underlying = .form,
-            .heads = .{ .names = &.{ "n", "rest" } },
+            .heads = .{ .heads = &.{ .{ .name = "n" }, .{ .name = "rest" } } },
         },
         .{
             .name = "note-or-event",
@@ -3571,7 +3571,7 @@ const event_union_plugin: Plugin.Plugin = .{
         .{
             .name = "event",
             .underlying = .form,
-            .heads = .{ .names = &.{ "n", "rest" } },
+            .heads = .{ .heads = &.{ .{ .name = "n" }, .{ .name = "rest" } } },
         },
         .{
             .name = "note-or-event",
@@ -6400,7 +6400,7 @@ test "binary path parity: HeadSet failure emits at slot path, not at form" {
         .value_kinds = &.{.{
             .name = "shape-form",
             .underlying = .form,
-            .heads = .{ .names = &.{ "circle", "rect" } },
+            .heads = .{ .heads = &.{ .{ .name = "circle" }, .{ .name = "rect" } } },
         }},
     };
     try parityCheckPaths("(canvas :shape (triangle :w 10))", Schema.Schema.init(&.{p}));
@@ -6826,7 +6826,7 @@ test "walk_opaque: the slot type-check still runs (HeadSet survives suppression)
         .value_kinds = &.{.{
             .name = "shape",
             .underlying = .form,
-            .heads = .{ .names = &.{ "circle", "square" } },
+            .heads = .{ .heads = &.{ .{ .name = "circle" }, .{ .name = "square" } } },
         }},
         .forms = &.{.{
             .name = "set",
@@ -7104,7 +7104,7 @@ test "positional local_forms (dual): a head-set closes the set while locals vali
         .value_kinds = &.{.{
             .name = "shape-set",
             .underlying = .form,
-            .heads = .{ .names = &.{ "circle", "rect" } },
+            .heads = .{ .heads = &.{ .{ .name = "circle" }, .{ .name = "rect" } } },
         }},
     };
     const schema = Schema.Schema.init(&.{p});
@@ -7189,7 +7189,7 @@ test "code: not_head_member on closed-set HeadSet" {
         .value_kinds = &.{.{
             .name = "shape-form",
             .underlying = .form,
-            .heads = .{ .names = &.{ "circle", "rect" } },
+            .heads = .{ .heads = &.{ .{ .name = "circle" }, .{ .name = "rect" } } },
         }},
     };
     try expectCodeOnBoth("(badge :shape (typo))", Schema.Schema.init(&.{p}), .not_head_member);
@@ -7707,7 +7707,7 @@ fn buildPhraseTrackPlugin() Plugin.Plugin {
     const phrase_name_kind: Plugin.ValueKind = .{
         .name = "phrase-name",
         .underlying = .symbol,
-        .cross_ref = .{ .target_form = "phrase" },
+        .cross_ref = .{ .targets = &.{"phrase"} },
     };
     const phrase_seq_kind: Plugin.ValueKind = .{
         .name = "phrase-sequence",
@@ -8009,7 +8009,7 @@ test "forest: two plugins with same form name register under distinct canonical 
     const audio_phrase_name: Plugin.ValueKind = .{
         .name = "audio-phrase-name",
         .underlying = .symbol,
-        .cross_ref = .{ .target_form = "audio/phrase" },
+        .cross_ref = .{ .targets = &.{"audio/phrase"} },
     };
     const audio_seq: Plugin.ValueKind = .{
         .name = "audio-phrase-seq",
@@ -8031,7 +8031,7 @@ test "forest: two plugins with same form name register under distinct canonical 
     const music_phrase_name: Plugin.ValueKind = .{
         .name = "music-phrase-name",
         .underlying = .symbol,
-        .cross_ref = .{ .target_form = "music/phrase" },
+        .cross_ref = .{ .targets = &.{"music/phrase"} },
     };
     const music_seq: Plugin.ValueKind = .{
         .name = "music-phrase-seq",
@@ -8083,7 +8083,7 @@ fn buildScopedPiecePlugin() Plugin.Plugin {
     const phrase_name_kind: Plugin.ValueKind = .{
         .name = "phrase-name",
         .underlying = .symbol,
-        .cross_ref = .{ .target_form = "phrase", .scope_form = "piece" },
+        .cross_ref = .{ .targets = &.{"phrase"}, .scope_form = "piece" },
     };
     const phrase_seq_kind: Plugin.ValueKind = .{
         .name = "phrase-sequence",
@@ -8286,7 +8286,7 @@ fn buildUnionRefPlugin() Plugin.Plugin {
     return .{
         .name = "demo",
         .value_kinds = &.{
-            .{ .name = "phrase-name", .underlying = .symbol, .cross_ref = .{ .target_form = "phrase" } },
+            .{ .name = "phrase-name", .underlying = .symbol, .cross_ref = .{ .targets = &.{"phrase"} } },
             .{ .name = "off-switch", .underlying = .symbol, .members = .{ .members = &.{.{ .name = "off" }} } },
             .{
                 .name = "slot",
@@ -8462,7 +8462,7 @@ fn buildAcyclicPhrasePlugin() Plugin.Plugin {
             .{
                 .name = "phrase-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "phrase", .acyclic = true },
+                .cross_ref = .{ .targets = &.{"phrase"}, .acyclic = true },
             },
             .{
                 .name = "phrase-name-list",
@@ -8609,7 +8609,7 @@ test "forest acyclic: same shape without :acyclic flag has no cycle diagnostic" 
         .value_kinds = &.{.{
             .name = "phrase-name",
             .underlying = .symbol,
-            .cross_ref = .{ .target_form = "phrase" },
+            .cross_ref = .{ .targets = &.{"phrase"} },
         }},
         .forms = &.{.{
             .name = "phrase",
@@ -9010,7 +9010,7 @@ const Validator_test_actor: Plugin.Plugin = .{
         .{
             .name = "ActorRef",
             .underlying = .symbol,
-            .cross_ref = .{ .target_form = "actor", .name_key = "name" },
+            .cross_ref = .{ .targets = &.{"actor"}, .name_key = "name" },
         },
     },
     .forms = &.{
@@ -10796,6 +10796,392 @@ test "bounds binary: parity on exact-int u64 off-by-one above f64 max" {
     try expectCodeOnBoth("(set :v 9007199254740993)", schema, .number_at_or_above_exclusive_max);
 }
 
+// ----- :requires key dependency (dual-path) ---------------------------------
+//
+// One shared sweep (`emitDependentKeyDiagnostics`) serves both walkers, so
+// these go through `expectCodeOnBoth` / `expectNoCodeOnBoth`. The overlay
+// cases are the exception: axis C materialization is a tree-path feature,
+// so those assert the tree path directly and pin the binary path's
+// author-only reading separately.
+
+/// `:offset` and `:size` are meaningless without `:buffer` — the WebGPU
+/// bind-group-entry shape the ask was filed for.
+const entry_requires_plugin: Plugin.Plugin = .{
+    .name = "gfx",
+    .forms = &.{
+        .{
+            .name = "entry",
+            .keys = &.{
+                .{ .name = "binding", .value_type = .number, .optional = false },
+                .{ .name = "buffer", .value_type = .symbol, .optional = true },
+                .{ .name = "offset", .value_type = .number, .optional = true, .requires = &.{"buffer"} },
+                .{ .name = "size", .value_type = .number, .optional = true, .requires = &.{"buffer"} },
+            },
+        },
+    },
+};
+
+test "requires: a present dependent key with its requirement satisfied is clean" {
+    const schema = Schema.Schema.init(&.{entry_requires_plugin});
+    try expectNoCodeOnBoth("(entry :binding 0 :buffer uniforms :offset 256 :size 64)", schema, .dependent_key_missing);
+}
+
+test "requires: an absent dependent key constrains nothing" {
+    // The rule is one-directional. `:buffer` alone, and neither key at
+    // all, are both fine.
+    const schema = Schema.Schema.init(&.{entry_requires_plugin});
+    try expectNoCodeOnBoth("(entry :binding 0)", schema, .dependent_key_missing);
+    try expectNoCodeOnBoth("(entry :binding 0 :buffer uniforms)", schema, .dependent_key_missing);
+}
+
+test "requires: a present dependent key with its requirement absent fires on both paths" {
+    const schema = Schema.Schema.init(&.{entry_requires_plugin});
+    try expectCodeOnBoth("(entry :binding 0 :offset 256)", schema, .dependent_key_missing);
+}
+
+test "requires: two unsatisfied dependent keys produce two diagnostics" {
+    // One per *dependent* key, not one per missing requirement.
+    const a = testing.allocator;
+    const schema = Schema.Schema.init(&.{entry_requires_plugin});
+    var tree = try Parser.parse(a, "(entry :binding 0 :offset 256 :size 64)");
+    defer tree.deinit();
+    var r = try validate(a, tree, schema);
+    defer r.deinit();
+    var count: usize = 0;
+    for (r.diagnostics) |d| {
+        if (d.code == .dependent_key_missing) count += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), count);
+}
+
+test "requires: one dependent key with three absent requirements says so once" {
+    // The message-shape decision: three names in one diagnostic, not
+    // three diagnostics.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "gfx",
+        .forms = &.{
+            .{
+                .name = "thing",
+                .keys = &.{
+                    .{ .name = "a", .value_type = .number, .optional = true, .requires = &.{ "b", "c", "d" } },
+                    .{ .name = "b", .value_type = .number, .optional = true },
+                    .{ .name = "c", .value_type = .number, .optional = true },
+                    .{ .name = "d", .value_type = .number, .optional = true },
+                },
+            },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var tree = try Parser.parse(a, "(thing :a 1)");
+    defer tree.deinit();
+    var r = try validate(a, tree, schema);
+    defer r.deinit();
+    var count: usize = 0;
+    var msg: []const u8 = "";
+    for (r.diagnostics) |d| {
+        if (d.code == .dependent_key_missing) {
+            count += 1;
+            msg = d.message;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), count);
+    try testing.expect(std.mem.indexOf(u8, msg, "`:b`") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "`:c`") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "`:d`") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "which are absent") != null);
+}
+
+test "requires: a partially satisfied multi-requirement names only the absent ones" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "gfx",
+        .forms = &.{
+            .{
+                .name = "thing",
+                .keys = &.{
+                    .{ .name = "a", .value_type = .number, .optional = true, .requires = &.{ "b", "c" } },
+                    .{ .name = "b", .value_type = .number, .optional = true },
+                    .{ .name = "c", .value_type = .number, .optional = true },
+                },
+            },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var tree = try Parser.parse(a, "(thing :a 1 :b 2)");
+    defer tree.deinit();
+    var r = try validate(a, tree, schema);
+    defer r.deinit();
+    for (r.diagnostics) |d| {
+        if (d.code != .dependent_key_missing) continue;
+        try testing.expect(std.mem.indexOf(u8, d.message, "`:c`") != null);
+        try testing.expect(std.mem.indexOf(u8, d.message, "`:b`") == null);
+        try testing.expect(std.mem.indexOf(u8, d.message, "which is absent") != null);
+    }
+}
+
+/// A variant key requiring a base key — the `:strip-index-format` shape.
+/// Legal because both scopes are unconditionally live once the variant is
+/// active, and the two presence bitsets are separate, so this exercises
+/// the base-scope fallback in `emitDependentKeyDiagnostics`.
+const primitive_requires_plugin: Plugin.Plugin = .{
+    .name = "gfx",
+    .forms = &.{
+        .{
+            .name = "primitive",
+            .discriminant_idx = 0,
+            .discriminant_name = "topology",
+            .keys = &.{
+                .{ .name = "topology", .value_type = .{ .named = .{ .name = "topology-kind" } }, .optional = false },
+                .{ .name = "cull", .value_type = .symbol, .optional = true },
+            },
+            .variants = &.{
+                .{
+                    .when = "triangle-strip",
+                    .keys = &.{
+                        .{ .name = "strip-index-format", .value_type = .symbol, .optional = true, .requires = &.{"cull"} },
+                    },
+                },
+            },
+        },
+    },
+    .value_kinds = &.{
+        .{
+            .name = "topology-kind",
+            .underlying = .symbol,
+            .members = .{ .members = &.{
+                .{ .name = "triangle-list" },
+                .{ .name = "triangle-strip" },
+            } },
+        },
+    },
+};
+
+test "requires: a variant key may name a base key" {
+    const schema = Schema.Schema.init(&.{primitive_requires_plugin});
+    try expectNoCodeOnBoth(
+        "(primitive :topology triangle-strip :cull back :strip-index-format uint16)",
+        schema,
+        .dependent_key_missing,
+    );
+    try expectCodeOnBoth(
+        "(primitive :topology triangle-strip :strip-index-format uint16)",
+        schema,
+        .dependent_key_missing,
+    );
+}
+
+test "requires: an inactive variant's dependency does not fire" {
+    // The variant key cannot be present when its variant is not selected,
+    // so there is nothing to depend on anything.
+    const schema = Schema.Schema.init(&.{primitive_requires_plugin});
+    try expectNoCodeOnBoth("(primitive :topology triangle-list)", schema, .dependent_key_missing);
+}
+
+test "requires: :open true suppresses the sweep, like every other shape rule" {
+    // Both walkers return before the end-of-form sweeps on an open form,
+    // so `missing_required_key` and exclusive groups do not fire there
+    // either. This pins that `:requires` follows its siblings rather than
+    // becoming the one exception.
+    const p: Plugin.Plugin = .{
+        .name = "gfx",
+        .forms = &.{
+            .{
+                .name = "entry",
+                .open = true,
+                .keys = &.{
+                    .{ .name = "buffer", .value_type = .symbol, .optional = true },
+                    .{ .name = "offset", .value_type = .number, .optional = true, .requires = &.{"buffer"} },
+                },
+            },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    try expectNoCodeOnBoth("(entry :offset 256)", schema, .dependent_key_missing);
+}
+
+test "requires: an overlay-defaulted requirement satisfies it when axis C is on" {
+    // Same reading exclusive groups take, on the same axis: an author who
+    // omits `:buffer` but whose schema defaults it has, in effect,
+    // written it.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "gfx",
+        .forms = &.{
+            .{
+                .name = "entry",
+                .keys = &.{
+                    .{ .name = "buffer", .value_type = .symbol, .default = .{ .symbol = "fallback" } },
+                    .{ .name = "offset", .value_type = .number, .optional = true, .requires = &.{"buffer"} },
+                },
+            },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    const src: [:0]const u8 = "(entry :offset 256)";
+
+    var on = try runWithAxes(a, src, schema, .{ .exclusive_group = true });
+    defer {
+        on.result.deinit();
+        on.mat.deinit(a);
+        on.arena.deinit();
+        on.tree.deinit();
+    }
+    try testing.expect(!anyCode(on.result.diagnostics, .dependent_key_missing));
+
+    // Axis C off: author-presence only, so the same document fails.
+    var off = try runWithAxes(a, src, schema, .{ .exclusive_group = false });
+    defer {
+        off.result.deinit();
+        off.mat.deinit(a);
+        off.arena.deinit();
+        off.tree.deinit();
+    }
+    try testing.expect(anyCode(off.result.diagnostics, .dependent_key_missing));
+}
+
+// ----- :multiple-of divisibility (dual-path) --------------------------------
+//
+// One shared checker (`checkNumericBoundsValue`) serves both walkers, so
+// these run through `expectCodeOnBoth` / `expectNoCodeOnBoth` rather than
+// being written twice. The ordering cases are the interesting ones: the
+// checker reports the FIRST failure, and which one that is, is the contract.
+
+test "multiple-of: an exact multiple validates on both paths" {
+    const schema = boundsSchema("aligned", .{
+        .multiple_of = .{ .value = 256, .exact_int = true },
+    }, null);
+    try expectNoCodeOnBoth("(set :v 512)", schema, .number_not_multiple);
+    try expectNoCodeOnBoth("(set :v 0)", schema, .number_not_multiple);
+    try expectNoCodeOnBoth("(set :v 256)", schema, .number_not_multiple);
+}
+
+test "multiple-of: a non-multiple emits number_not_multiple on both paths" {
+    const schema = boundsSchema("aligned", .{
+        .multiple_of = .{ .value = 256, .exact_int = true },
+    }, null);
+    try expectCodeOnBoth("(set :v 250)", schema, .number_not_multiple);
+}
+
+test "multiple-of: a negative value is judged on magnitude, not sign" {
+    // -512 IS a multiple of 256. A `@rem` that leaked its sign into the
+    // zero test would reject this.
+    const schema = boundsSchema("aligned", .{
+        .multiple_of = .{ .value = 256, .exact_int = true },
+    }, null);
+    try expectNoCodeOnBoth("(set :v -512)", schema, .number_not_multiple);
+    try expectCodeOnBoth("(set :v -250)", schema, .number_not_multiple);
+}
+
+test "multiple-of: a negative divisor has the same multiples as its negation" {
+    // A *manifest* can no longer spell this: the loader refuses a
+    // non-positive divisor, because a negative one is redundant here and
+    // exports a `multipleOf` JSON Schema forbids. This schema is built as a
+    // Zig literal, which bypasses the loader the way every native plugin
+    // does — so what is pinned is the checker's tolerance, not a supported
+    // declaration. It matters because that tolerance is why the sign never
+    // needed handling in the first place.
+    const schema = boundsSchema("aligned", .{
+        .multiple_of = .{ .value = -4, .exact_int = true },
+    }, null);
+    try expectNoCodeOnBoth("(set :v 8)", schema, .number_not_multiple);
+    try expectCodeOnBoth("(set :v 9)", schema, .number_not_multiple);
+}
+
+test "multiple-of: a unit-bearing divisor follows the bound-unit rules" {
+    // `:multiple-of` reuses `Bound`, which is why it got units for free —
+    // and the unit *mismatch* half comes with them. A bare value against a
+    // unit-bearing divisor, and a value in a different unit, are both
+    // `numeric_bound_unit_mismatch` rather than a divisibility verdict:
+    // there is no conversion, so "is 512 a multiple of 256b" has no answer.
+    const schema = boundsSchema("aligned", .{
+        .multiple_of = .{ .value = 256, .unit = "b", .exact_int = true },
+    }, null);
+    try expectNoCodeOnBoth("(set :v 512b)", schema, .numeric_bound_unit_mismatch);
+    try expectCodeOnBoth("(set :v 300b)", schema, .number_not_multiple);
+    try expectCodeOnBoth("(set :v 512)", schema, .numeric_bound_unit_mismatch);
+    try expectCodeOnBoth("(set :v 512kb)", schema, .numeric_bound_unit_mismatch);
+    // A mismatch is not also reported as a non-multiple: one verdict.
+    try expectNoCodeOnBoth("(set :v 512kb)", schema, .number_not_multiple);
+}
+
+test "multiple-of: integrality is reported before divisibility" {
+    // 250.5 violates both `:integer true` and `:multiple-of 4`. The
+    // fractional-ness is the more basic problem, so that is what is said.
+    const schema = boundsSchema("aligned", .{
+        .integer = true,
+        .multiple_of = .{ .value = 4, .exact_int = true },
+    }, null);
+    try expectCodeOnBoth("(set :v 250.5)", schema, .number_not_integer);
+    try expectNoCodeOnBoth("(set :v 250.5)", schema, .number_not_multiple);
+}
+
+test "multiple-of: range is reported before divisibility" {
+    // -256 IS a multiple of 256, but it is below :min — and even a value
+    // that violated both should read as "below minimum" first.
+    const schema = boundsSchema("aligned", .{
+        .min = .{ .value = 0, .exact_int = true },
+        .multiple_of = .{ .value = 256, .exact_int = true },
+    }, null);
+    try expectCodeOnBoth("(set :v -250)", schema, .number_below_min);
+    try expectNoCodeOnBoth("(set :v -250)", schema, .number_not_multiple);
+}
+
+test "multiple-of: a fractional value under an integral divisor is never a multiple" {
+    // With no `:integer true` to catch it first, 3.5 reaches the
+    // divisibility check and must fail there rather than being rounded.
+    const schema = boundsSchema("aligned", .{
+        .multiple_of = .{ .value = 4, .exact_int = true },
+    }, null);
+    try expectCodeOnBoth("(set :v 3.5)", schema, .number_not_multiple);
+    try expectCodeOnBoth("(set :v 8.5)", schema, .number_not_multiple);
+}
+
+test "multiple-of: exactness holds above 2^53" {
+    // The case that separates an integer-space implementation from an f64
+    // remainder. 2^53 + 1 is odd, but as an f64 it rounds to 2^53, which IS
+    // a multiple of 2 — so a naive `@rem(f64)` accepts it.
+    const schema = boundsSchema("even", .{
+        .multiple_of = .{ .value = 2, .exact_int = true },
+    }, null);
+    try expectCodeOnBoth("(set :v 9007199254740993)", schema, .number_not_multiple);
+    try expectNoCodeOnBoth("(set :v 9007199254740992)", schema, .number_not_multiple);
+}
+
+test "multiple-of: a fractional divisor uses the epsilon path" {
+    // `:multiple-of 0.25` loads with a warning (see ManifestLoader_tests)
+    // and is compared with a tolerance, because 0.75 / 0.25 has no exact
+    // binary answer. Both directions are checked: the tolerance must not
+    // be so wide that a genuine non-multiple slips through.
+    const schema = boundsSchema("quarter", .{
+        .multiple_of = .{ .value = 0.25 },
+    }, null);
+    try expectNoCodeOnBoth("(set :v 0.75)", schema, .number_not_multiple);
+    try expectNoCodeOnBoth("(set :v 1.5)", schema, .number_not_multiple);
+    try expectCodeOnBoth("(set :v 0.3)", schema, .number_not_multiple);
+}
+
+test "multiple-of: a unit mismatch is reported before divisibility" {
+    // Same rule the other bounds follow: a bound carrying a unit demands a
+    // byte-equal one on the value, and disagreeing about units is a
+    // different complaint from failing to divide.
+    const schema = boundsSchema("aligned-bytes", .{
+        .multiple_of = .{ .value = 256, .unit = "b", .exact_int = true },
+    }, .{ .allowed = &.{"b"} });
+    try expectCodeOnBoth("(set :v 512)", schema, .numeric_bound_unit_mismatch);
+    try expectNoCodeOnBoth("(set :v 512b)", schema, .number_not_multiple);
+    try expectCodeOnBoth("(set :v 250b)", schema, .number_not_multiple);
+}
+
+test "multiple-of: absent leaves every value alone" {
+    // The compatibility pin: a NumericBounds with no `:multiple-of` must
+    // behave exactly as before, including for values that would fail a
+    // divisibility check if one existed.
+    const schema = boundsSchema("plain", .{ .min = .{ .value = 0, .exact_int = true } }, null);
+    try expectNoCodeOnBoth("(set :v 250)", schema, .number_not_multiple);
+    try expectNoCodeOnBoth("(set :v 3.5)", schema, .number_not_multiple);
+}
+
 // ----- :repr GPU-representation validation (dual-path) ----------------------
 //
 // A `.number` kind tagged `:repr <f32|u32|i32|u16|f16>` rejects a literal
@@ -11307,7 +11693,7 @@ test "scalar message parity: not_member (symbol members)" {
 test "scalar message parity: not_cross_ref (symbol cross-ref)" {
     const p: Plugin.Plugin = .{
         .name = "demo",
-        .value_kinds = &.{.{ .name = "phrase-name", .underlying = .symbol, .cross_ref = .{ .target_form = "phrase" } }},
+        .value_kinds = &.{.{ .name = "phrase-name", .underlying = .symbol, .cross_ref = .{ .targets = &.{"phrase"} } }},
         .forms = &.{
             .{ .name = "phrase", .keys = &.{.{ .name = "name", .value_type = .symbol }} },
             .{ .name = "ref", .keys = &.{.{ .name = "k", .value_type = .{ .named = .{ .name = "phrase-name" } } }} },
@@ -11324,7 +11710,7 @@ test "scalar message parity: not_cross_ref (symbol cross-ref)" {
 test "scalar message parity: not_cross_ref names a non-default :name-key" {
     const p: Plugin.Plugin = .{
         .name = "demo",
-        .value_kinds = &.{.{ .name = "node-ref", .underlying = .symbol, .cross_ref = .{ .target_form = "node", .name_key = "id" } }},
+        .value_kinds = &.{.{ .name = "node-ref", .underlying = .symbol, .cross_ref = .{ .targets = &.{"node"}, .name_key = "id" } }},
         .forms = &.{
             .{ .name = "node", .keys = &.{.{ .name = "id", .value_type = .symbol }} },
             .{ .name = "ref", .keys = &.{.{ .name = "k", .value_type = .{ .named = .{ .name = "node-ref" } } }} },
@@ -11340,7 +11726,7 @@ test "scalar message parity: not_cross_ref points at the source key on the provi
     const p: Plugin.Plugin = .{
         .name = "demo",
         .cross_ref_providers = &.{.{ .name = "uniforms" }},
-        .value_kinds = &.{.{ .name = "uniform-ref", .underlying = .symbol, .cross_ref = .{ .target_form = "shader", .provider = "uniforms", .source_key = "code" } }},
+        .value_kinds = &.{.{ .name = "uniform-ref", .underlying = .symbol, .cross_ref = .{ .targets = &.{"shader"}, .provider = "uniforms", .source_key = "code" } }},
         .forms = &.{
             .{ .name = "shader", .keys = &.{ .{ .name = "name", .value_type = .symbol }, .{ .name = "code", .value_type = .string } } },
             .{ .name = "ref", .keys = &.{.{ .name = "k", .value_type = .{ .named = .{ .name = "uniform-ref" } } }} },
@@ -11459,7 +11845,7 @@ const ProviderXref = struct {
         .value_kinds = &.{.{
             .name = "uniform-name",
             .underlying = .symbol,
-            .cross_ref = .{ .target_form = "shader", .provider = "lines" },
+            .cross_ref = .{ .targets = &.{"shader"}, .provider = "lines" },
         }},
         .forms = forms,
     };
@@ -11886,7 +12272,7 @@ const ScopedProviderXref = struct {
         .value_kinds = &.{.{
             .name = "uniform-name",
             .underlying = .symbol,
-            .cross_ref = .{ .target_form = "shader", .provider = "lines", .scope_form = "pass" },
+            .cross_ref = .{ .targets = &.{"shader"}, .provider = "lines", .scope_form = "pass" },
         }},
         .forms = ProviderXref.forms,
     };
@@ -12039,7 +12425,7 @@ const UnionProviderXref = struct {
             .{
                 .name = "uniform-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader", .provider = "lines" },
+                .cross_ref = .{ .targets = &.{"shader"}, .provider = "lines" },
             },
             .{
                 .name = "auto-mode",
@@ -12155,4 +12541,1204 @@ test "provider xref (both paths): an unavailable provider under a union is also 
         \\(mixed-bind :uniform u_a)
         \\(mixed-bind :uniform u_b)
     , &table, .cross_ref_provider_unavailable, 1);
+}
+
+// ---------------------------------------------------------------------------
+// union_ambiguous — declaration order deciding which entity a name means
+// ---------------------------------------------------------------------------
+//
+// The warning fires when a symbol in a `:underlying union` slot is a
+// registered name in two or more of the union's cross-ref-backed
+// alternatives. Duplicate detection is per-target, so two forms of
+// *different* kinds may each define `same` with neither bucket seeing a
+// collision — which is exactly why nothing else catches it.
+//
+// The tests below pin all four corners: the ambiguous case, the
+// unambiguous one, the plain-overlap one that must stay silent, and the
+// severity, which is the load-bearing decision (a warning does not turn a
+// document that validates today into one that fails).
+
+/// A union over two cross-ref kinds pointing at *different* target forms.
+/// `dispatch :pipeline` is the ambiguous slot; `:label` is the same union
+/// reached through a non-union sibling so the tests can contrast.
+fn buildPipelineUnionPlugin() Plugin.Plugin {
+    return .{
+        .name = "gfx",
+        .value_kinds = &.{
+            .{
+                .name = "render-pipeline-ref",
+                .underlying = .symbol,
+                .cross_ref = .{ .targets = &.{"render-pipeline"} },
+            },
+            .{
+                .name = "compute-pipeline-ref",
+                .underlying = .symbol,
+                .cross_ref = .{ .targets = &.{"compute-pipeline"} },
+            },
+            .{
+                .name = "pipeline-ref",
+                .underlying = .union_of,
+                .union_of = .{ .alternatives = &.{
+                    .{ .name = "render-pipeline-ref" },
+                    .{ .name = "compute-pipeline-ref" },
+                } },
+            },
+        },
+        .forms = &.{
+            .{ .name = "render-pipeline", .keys = &.{.{ .name = "name", .value_type = .symbol }} },
+            .{ .name = "compute-pipeline", .keys = &.{.{ .name = "name", .value_type = .symbol }} },
+            .{
+                .name = "dispatch",
+                .keys = &.{.{ .name = "pipeline", .value_type = .{ .named = .{ .name = "pipeline-ref" } } }},
+            },
+        },
+    };
+}
+
+test "union_ambiguous: a name registered by two cross-ref alternatives warns on both paths" {
+    const schema = Schema.Schema.init(&.{buildPipelineUnionPlugin()});
+    try expectCodeOnBoth(
+        \\(render-pipeline  :name same)
+        \\(compute-pipeline :name same)
+        \\(dispatch :pipeline same)
+    , schema, .union_ambiguous);
+}
+
+test "union_ambiguous: distinct names in each target stay silent on both paths" {
+    const schema = Schema.Schema.init(&.{buildPipelineUnionPlugin()});
+    try expectNoCodeOnBoth(
+        \\(render-pipeline  :name blit)
+        \\(compute-pipeline :name reduce)
+        \\(dispatch :pipeline blit)
+        \\(dispatch :pipeline reduce)
+    , schema, .union_ambiguous);
+}
+
+test "union_ambiguous: severity is warning and the document still validates" {
+    // The whole reason this code exists at `.warning` rather than `.err`:
+    // appending a Diagnostic.Code variant is safe, turning a
+    // previously-clean document red is a semantic break. Pin both halves —
+    // the severity, and that no error-severity diagnostic joins it.
+    var bundle = try validateSrc(
+        \\(render-pipeline  :name same)
+        \\(compute-pipeline :name same)
+        \\(dispatch :pipeline same)
+    , Schema.Schema.init(&.{buildPipelineUnionPlugin()}));
+    defer bundle.tree.deinit();
+    defer {
+        var r = bundle.result;
+        r.deinit();
+    }
+    try testing.expectEqual(@as(usize, 1), bundle.result.diagnostics.len);
+    const d = bundle.result.diagnostics[0];
+    try testing.expectEqual(Ast.Diagnostic.Code.union_ambiguous, d.code);
+    try testing.expectEqual(Ast.Diagnostic.Severity.warning, d.severity);
+    // Both claimants named, with their canonical targets, plus the repair.
+    try testing.expect(std.mem.indexOf(u8, d.message, "render-pipeline-ref") != null);
+    try testing.expect(std.mem.indexOf(u8, d.message, "compute-pipeline-ref") != null);
+    try testing.expect(std.mem.indexOf(u8, d.message, "gfx/render-pipeline") != null);
+    try testing.expect(std.mem.indexOf(u8, d.message, "gfx/compute-pipeline") != null);
+    try testing.expect(std.mem.indexOf(u8, d.message, "First match wins") != null);
+}
+
+test "union_ambiguous: one diagnostic per reference site, not per claimant" {
+    // Counting rule. Two claimants is one diagnostic naming two, and two
+    // *references* to the ambiguous name are two diagnostics — the warning
+    // is about the reference, and each one is separately ambiguous.
+    var bundle = try validateSrc(
+        \\(render-pipeline  :name same)
+        \\(compute-pipeline :name same)
+        \\(dispatch :pipeline same)
+        \\(dispatch :pipeline same)
+    , Schema.Schema.init(&.{buildPipelineUnionPlugin()}));
+    defer bundle.tree.deinit();
+    defer {
+        var r = bundle.result;
+        r.deinit();
+    }
+    try testing.expectEqual(@as(usize, 2), countCode(bundle.result.diagnostics, .union_ambiguous));
+}
+
+test "union_ambiguous: a plain-value overlap is deliberately silent" {
+    // `scalar-or-ref-shape`'s desugar is exactly this shape — a union whose
+    // halves overlap by design, where first-match is the point. Nothing here
+    // names two entities, so nothing warns; flagging it would bury the
+    // signal the code exists to carry.
+    const plugin: Plugin.Plugin = .{
+        .name = "gfx",
+        .value_kinds = &.{
+            .{ .name = "topology", .underlying = .symbol, .members = .{ .members = &.{
+                .{ .name = "same" },
+                .{ .name = "triangle-list" },
+            } } },
+            .{ .name = "any-symbol", .underlying = .symbol },
+            .{
+                .name = "topology-or-symbol",
+                .underlying = .union_of,
+                .union_of = .{ .alternatives = &.{ .{ .name = "topology" }, .{ .name = "any-symbol" } } },
+            },
+        },
+        .forms = &.{.{
+            .name = "dispatch",
+            .keys = &.{.{ .name = "mode", .value_type = .{ .named = .{ .name = "topology-or-symbol" } } }},
+        }},
+    };
+    try expectNoCodeOnBoth("(dispatch :mode same)", Schema.Schema.init(&.{plugin}), .union_ambiguous);
+}
+
+test "union_ambiguous: a plain winner ahead of two references is silent" {
+    // The slot resolves to a member, not to either entity, so alternative
+    // order decided nothing about *which entity* is meant — there is no
+    // ambiguity to report even though both reference buckets hold the name.
+    const plugin: Plugin.Plugin = .{
+        .name = "gfx",
+        .value_kinds = &.{
+            .{ .name = "auto-mode", .underlying = .symbol, .members = .{ .members = &.{.{ .name = "same" }} } },
+            .{ .name = "render-pipeline-ref", .underlying = .symbol, .cross_ref = .{ .targets = &.{"render-pipeline"} } },
+            .{ .name = "compute-pipeline-ref", .underlying = .symbol, .cross_ref = .{ .targets = &.{"compute-pipeline"} } },
+            .{
+                .name = "mode-or-pipeline",
+                .underlying = .union_of,
+                .union_of = .{ .alternatives = &.{
+                    .{ .name = "auto-mode" },
+                    .{ .name = "render-pipeline-ref" },
+                    .{ .name = "compute-pipeline-ref" },
+                } },
+            },
+        },
+        .forms = &.{
+            .{ .name = "render-pipeline", .keys = &.{.{ .name = "name", .value_type = .symbol }} },
+            .{ .name = "compute-pipeline", .keys = &.{.{ .name = "name", .value_type = .symbol }} },
+            .{
+                .name = "dispatch",
+                .keys = &.{.{ .name = "pipeline", .value_type = .{ .named = .{ .name = "mode-or-pipeline" } } }},
+            },
+        },
+    };
+    try expectNoCodeOnBoth(
+        \\(render-pipeline  :name same)
+        \\(compute-pipeline :name same)
+        \\(dispatch :pipeline same)
+    , Schema.Schema.init(&.{plugin}), .union_ambiguous);
+}
+
+test "union_ambiguous: a reference winner ahead of a plain alternative still warns" {
+    // Mirror image of the test above. The plain alternative sits *after*
+    // both references, so a reference wins and the second one is a genuine
+    // rival reading — order is load-bearing and the warning is due.
+    const plugin: Plugin.Plugin = .{
+        .name = "gfx",
+        .value_kinds = &.{
+            .{ .name = "render-pipeline-ref", .underlying = .symbol, .cross_ref = .{ .targets = &.{"render-pipeline"} } },
+            .{ .name = "compute-pipeline-ref", .underlying = .symbol, .cross_ref = .{ .targets = &.{"compute-pipeline"} } },
+            .{ .name = "auto-mode", .underlying = .symbol, .members = .{ .members = &.{.{ .name = "same" }} } },
+            .{
+                .name = "pipeline-or-mode",
+                .underlying = .union_of,
+                .union_of = .{ .alternatives = &.{
+                    .{ .name = "render-pipeline-ref" },
+                    .{ .name = "compute-pipeline-ref" },
+                    .{ .name = "auto-mode" },
+                } },
+            },
+        },
+        .forms = &.{
+            .{ .name = "render-pipeline", .keys = &.{.{ .name = "name", .value_type = .symbol }} },
+            .{ .name = "compute-pipeline", .keys = &.{.{ .name = "name", .value_type = .symbol }} },
+            .{
+                .name = "dispatch",
+                .keys = &.{.{ .name = "pipeline", .value_type = .{ .named = .{ .name = "pipeline-or-mode" } } }},
+            },
+        },
+    };
+    try expectCodeOnBoth(
+        \\(render-pipeline  :name same)
+        \\(compute-pipeline :name same)
+        \\(dispatch :pipeline same)
+    , Schema.Schema.init(&.{plugin}), .union_ambiguous);
+}
+
+test "union_ambiguous: a name in only one of the two buckets is silent" {
+    // One claimant is not an ambiguity. Guards the `< 2` gate against an
+    // off-by-one that would warn on every union-typed reference.
+    const schema = Schema.Schema.init(&.{buildPipelineUnionPlugin()});
+    try expectNoCodeOnBoth(
+        \\(render-pipeline  :name blit)
+        \\(compute-pipeline :name reduce)
+        \\(dispatch :pipeline blit)
+    , schema, .union_ambiguous);
+}
+
+test "union_ambiguous: an unresolvable reference reports no-branch, not ambiguity" {
+    // A symbol in neither bucket fails the union outright. The advisory
+    // runs only after a successful match, so the failure path is untouched.
+    const schema = Schema.Schema.init(&.{buildPipelineUnionPlugin()});
+    try expectCodeOnBoth(
+        \\(render-pipeline  :name same)
+        \\(compute-pipeline :name same)
+        \\(dispatch :pipeline missing)
+    , schema, .union_no_branch_matched);
+    try expectNoCodeOnBoth(
+        \\(render-pipeline  :name same)
+        \\(compute-pipeline :name same)
+        \\(dispatch :pipeline missing)
+    , schema, .union_ambiguous);
+}
+
+test "union_ambiguous: two alternatives onto the SAME target are one bucket, not two" {
+    // Two cross-ref kinds may point at one form — a naming convenience, not
+    // an ambiguity: both readings pick out the same entity, so order decides
+    // nothing. Counting *alternatives* here would warn on every reference
+    // through such a union; counting buckets is what makes the code mean
+    // what its name says.
+    const plugin: Plugin.Plugin = .{
+        .name = "gfx",
+        .value_kinds = &.{
+            .{ .name = "pipeline-ref-a", .underlying = .symbol, .cross_ref = .{ .targets = &.{"render-pipeline"} } },
+            .{ .name = "pipeline-ref-b", .underlying = .symbol, .cross_ref = .{ .targets = &.{"render-pipeline"} } },
+            .{
+                .name = "either-ref",
+                .underlying = .union_of,
+                .union_of = .{ .alternatives = &.{ .{ .name = "pipeline-ref-a" }, .{ .name = "pipeline-ref-b" } } },
+            },
+        },
+        .forms = &.{
+            .{ .name = "render-pipeline", .keys = &.{.{ .name = "name", .value_type = .symbol }} },
+            .{
+                .name = "dispatch",
+                .keys = &.{.{ .name = "pipeline", .value_type = .{ .named = .{ .name = "either-ref" } } }},
+            },
+        },
+    };
+    try expectNoCodeOnBoth(
+        \\(render-pipeline :name blit)
+        \\(dispatch :pipeline blit)
+    , Schema.Schema.init(&.{plugin}), .union_ambiguous);
+}
+
+test "union_ambiguous: fires in a positional slot, not only a keyed one" {
+    // The advisory family runs at every match site. Before the bundle
+    // refactor the positional site carried only part of the family, which is
+    // exactly the drift this asserts against.
+    const plugin: Plugin.Plugin = .{
+        .name = "gfx",
+        .value_kinds = &.{
+            .{ .name = "render-pipeline-ref", .underlying = .symbol, .cross_ref = .{ .targets = &.{"render-pipeline"} } },
+            .{ .name = "compute-pipeline-ref", .underlying = .symbol, .cross_ref = .{ .targets = &.{"compute-pipeline"} } },
+            .{
+                .name = "pipeline-ref",
+                .underlying = .union_of,
+                .union_of = .{ .alternatives = &.{
+                    .{ .name = "render-pipeline-ref" },
+                    .{ .name = "compute-pipeline-ref" },
+                } },
+            },
+        },
+        .forms = &.{
+            .{ .name = "render-pipeline", .keys = &.{.{ .name = "name", .value_type = .symbol }} },
+            .{ .name = "compute-pipeline", .keys = &.{.{ .name = "name", .value_type = .symbol }} },
+            .{ .name = "dispatch", .positional = .{ .kind = .{ .name = "pipeline-ref" } } },
+        },
+    };
+    try expectCodeOnBoth(
+        \\(render-pipeline  :name same)
+        \\(compute-pipeline :name same)
+        \\(dispatch same)
+    , Schema.Schema.init(&.{plugin}), .union_ambiguous);
+}
+
+// ---------------------------------------------------------------------------
+// Positional cardinality — `(head :name … :min … :max …)`.
+//
+// A head-set says *which* heads a positional slot accepts; a `(head …)`
+// entry can also say *how many*. Two codes fall out, and they land in
+// different places on purpose: `positional_too_many` at the child that
+// crosses the ceiling (actionable — that is the line to delete),
+// `positional_missing` at the parent's head (there is no child to point
+// at). Every case below runs on both walkers, because the tree walker
+// counts by random access over `hdr.children` and the binary walker
+// counts a single-pass stream, and those are two chances to disagree.
+// ---------------------------------------------------------------------------
+
+/// `render-pipeline` bounds its positional slot: `vertex` exactly once,
+/// `fragment` at most once, `constant` any number. `open-pipeline` is the
+/// same slot on an `:open true` form, `holder` reuses the same kind on a
+/// *keyed* slot (where the bounds must be inert), and `loose` carries a
+/// compact head-set so the unbounded fast path stays covered.
+fn buildPipelineBoundsPlugin() Plugin.Plugin {
+    return .{
+        .name = "gfx",
+        .value_kinds = &.{
+            .{
+                .name = "pipeline-section",
+                .underlying = .form,
+                .heads = .{ .heads = &.{
+                    .{ .name = "vertex", .min = 1, .max = 1 },
+                    .{ .name = "fragment", .max = 1 },
+                    .{ .name = "constant" },
+                } },
+            },
+            .{
+                .name = "loose-section",
+                .underlying = .form,
+                .heads = .{ .heads = &.{ .{ .name = "vertex" }, .{ .name = "fragment" } } },
+            },
+        },
+        .forms = &.{
+            .{ .name = "vertex", .keys = &.{.{ .name = "entry", .value_type = .symbol, .optional = true }} },
+            .{ .name = "fragment", .keys = &.{.{ .name = "entry", .value_type = .symbol, .optional = true }} },
+            .{ .name = "constant", .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = true }} },
+            .{ .name = "nope" },
+            .{
+                .name = "render-pipeline",
+                .positional = .{ .kind = .{ .name = "pipeline-section" } },
+                .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = true }},
+            },
+            .{
+                .name = "open-pipeline",
+                .open = true,
+                .positional = .{ .kind = .{ .name = "pipeline-section" } },
+            },
+            .{
+                .name = "holder",
+                .keys = &.{.{ .name = "section", .value_type = .{ .named = .{ .name = "pipeline-section" } }, .optional = true }},
+            },
+            .{ .name = "loose", .positional = .{ .kind = .{ .name = "loose-section" } } },
+        },
+    };
+}
+
+/// Count diagnostics carrying `code` on both walkers and assert both see
+/// exactly `want`. `expectCodeOnBoth` answers "at least one", which is
+/// blind to the property these bounds most need pinned: one diagnostic
+/// per crossing, not one per child past it.
+fn expectCodeCountOnBoth(
+    src: [:0]const u8,
+    schema: Schema.Schema,
+    code: Diagnostic.Code,
+    want: usize,
+) !void {
+    const a = testing.allocator;
+    var tree = try Parser.parse(a, src);
+    defer tree.deinit();
+
+    var tr = try validate(a, tree, schema);
+    defer tr.deinit();
+    var tree_n: usize = 0;
+    for (tr.diagnostics) |d| if (d.code == code) {
+        tree_n += 1;
+    };
+    try testing.expectEqual(want, tree_n);
+
+    const bin = try Binary.toBinary(a, tree, .{});
+    defer bin.deinit();
+    var br = try validateBinary(a, bin.data, schema);
+    defer br.deinit();
+    var bin_n: usize = 0;
+    for (br.diagnostics) |d| if (d.code == code) {
+        bin_n += 1;
+    };
+    try testing.expectEqual(want, bin_n);
+}
+
+test "positional cardinality: a document inside every bound is clean" {
+    const schema = Schema.Schema.init(&.{buildPipelineBoundsPlugin()});
+    const src =
+        \\(render-pipeline :name main
+        \\  (vertex :entry vs)
+        \\  (fragment :entry fs)
+        \\  (constant :name gamma)
+        \\  (constant :name exposure))
+    ;
+    try expectNoCodeOnBoth(src, schema, .positional_too_many);
+    try expectNoCodeOnBoth(src, schema, .positional_missing);
+}
+
+test "positional cardinality: over :max reports at the crossing child" {
+    // The path is the child's own positional step (its head), not the
+    // parent's — that is what puts the squiggle on the line to delete.
+    const schema = Schema.Schema.init(&.{buildPipelineBoundsPlugin()});
+    try expectPathOnBoth(
+        \\(render-pipeline :name main
+        \\  (vertex :entry vs)
+        \\  (fragment :entry fs)
+        \\  (fragment :entry alt))
+    , schema, .positional_too_many, &.{ "render-pipeline", "fragment" });
+}
+
+test "positional cardinality: under :min reports at the parent form" {
+    const schema = Schema.Schema.init(&.{buildPipelineBoundsPlugin()});
+    try expectPathOnBoth(
+        \\(render-pipeline :name main
+        \\  (fragment :entry fs))
+    , schema, .positional_missing, &.{"render-pipeline"});
+}
+
+test "positional cardinality: the ±1 boundaries of one bound" {
+    // `fragment` is `:max 1`: one is fine, two is not. `vertex` is
+    // `:min 1`: none is not, one is fine. Both directions, both walkers.
+    const schema = Schema.Schema.init(&.{buildPipelineBoundsPlugin()});
+    try expectNoCodeOnBoth("(render-pipeline (vertex) (fragment))", schema, .positional_too_many);
+    try expectCodeOnBoth("(render-pipeline (vertex) (fragment) (fragment))", schema, .positional_too_many);
+    try expectNoCodeOnBoth("(render-pipeline (vertex))", schema, .positional_missing);
+    try expectCodeOnBoth("(render-pipeline (constant))", schema, .positional_missing);
+}
+
+test "positional cardinality: one diagnostic per crossing, not one per extra child" {
+    // Four `fragment` children against `:max 1` is one report, fired on
+    // the transition from 1 to 2. A count that emitted per child over the
+    // ceiling would bury the vertex report underneath three duplicates.
+    const schema = Schema.Schema.init(&.{buildPipelineBoundsPlugin()});
+    try expectCodeCountOnBoth(
+        \\(render-pipeline
+        \\  (vertex)
+        \\  (fragment) (fragment) (fragment) (fragment))
+    , schema, .positional_too_many, 1);
+}
+
+test "positional cardinality: one diagnostic per unsatisfied head" {
+    // Two floors unmet on one form is two reports, so a repair sees the
+    // whole gap rather than one head at a time.
+    const p: Plugin.Plugin = .{
+        .name = "gfx",
+        .value_kinds = &.{.{
+            .name = "pair",
+            .underlying = .form,
+            .heads = .{ .heads = &.{ .{ .name = "color", .min = 1 }, .{ .name = "alpha", .min = 1 } } },
+        }},
+        .forms = &.{
+            .{ .name = "color" },
+            .{ .name = "alpha" },
+            .{ .name = "blend", .positional = .{ .kind = .{ .name = "pair" } } },
+        },
+    };
+    try expectCodeCountOnBoth("(blend)", Schema.Schema.init(&.{p}), .positional_missing, 2);
+    try expectCodeCountOnBoth("(blend (color))", Schema.Schema.init(&.{p}), .positional_missing, 1);
+}
+
+test "positional cardinality: a head outside the set counts towards nothing" {
+    // `(nope)` fails the head-set narrowing. It must not also consume a
+    // slot in some other head's tally — the two checks read the child's
+    // head independently and neither consults the other's verdict.
+    const schema = Schema.Schema.init(&.{buildPipelineBoundsPlugin()});
+    const src = "(render-pipeline (vertex) (fragment) (nope))";
+    try expectCodeOnBoth(src, schema, .not_head_member);
+    try expectNoCodeOnBoth(src, schema, .positional_too_many);
+    try expectNoCodeOnBoth(src, schema, .positional_missing);
+}
+
+test "positional cardinality: a non-form positional counts towards nothing" {
+    // A number in a form-pinned slot already fails `wrong_underlying`. It
+    // has no head, so it satisfies no floor: `vertex` is still missing.
+    const schema = Schema.Schema.init(&.{buildPipelineBoundsPlugin()});
+    try expectCodeOnBoth("(render-pipeline 42)", schema, .positional_missing);
+}
+
+test "positional cardinality: :open true suppresses neither code" {
+    // The one end-of-form sweep openness leaves alone. `:open` widens
+    // which *keywords* a form accepts; a positional count is a different
+    // surface, and `:positional <bounded-kind>` opts into it. Its sibling
+    // positional rules — `not_head_member`, `duplicate_positional_flag` —
+    // fire on open forms for the same reason.
+    const schema = Schema.Schema.init(&.{buildPipelineBoundsPlugin()});
+    const src = "(open-pipeline :whatever 1 (fragment) (fragment))";
+    try expectCodeOnBoth(src, schema, .positional_too_many);
+    try expectCodeOnBoth(src, schema, .positional_missing);
+    // …and the keyword sweep it *does* suppress still is suppressed, so
+    // this test pins the distinction rather than just one half of it.
+    try expectNoCodeOnBoth(src, schema, .unknown_key);
+}
+
+test "positional cardinality: bounds are inert away from a :positional slot" {
+    // The same bounded kind on a `(key …)` slot. A keyed slot holds one
+    // value: `:max 1` is trivially satisfied and `:min 1` has no set to be
+    // missing from, so neither code may fire — the scope rule in
+    // `docs/portable-manifest-v1.md` §4.5, pinned.
+    const schema = Schema.Schema.init(&.{buildPipelineBoundsPlugin()});
+    try expectNoCodeOnBoth("(holder :section (fragment))", schema, .positional_too_many);
+    try expectNoCodeOnBoth("(holder :section (fragment))", schema, .positional_missing);
+    // The narrowing still applies at that slot — inert bounds, live set.
+    try expectCodeOnBoth("(holder :section (nope))", schema, .not_head_member);
+}
+
+test "positional cardinality: an unbounded head-set is untouched" {
+    // The compact `:names [a b]` spelling can carry no bound, so this is
+    // the `isUnbounded` fast path: no counters allocated, no sweep run.
+    const schema = Schema.Schema.init(&.{buildPipelineBoundsPlugin()});
+    const src = "(loose (vertex) (vertex) (vertex))";
+    try expectNoCodeOnBoth(src, schema, .positional_too_many);
+    try expectNoCodeOnBoth(src, schema, .positional_missing);
+}
+
+test "positional cardinality: :max 0 declares a head and forbids it" {
+    // The degenerate ceiling, and it is a real spelling rather than a
+    // curiosity: it says "this head belongs to the set — the narrowing
+    // still names it, so a typo is `not_head_member` — but not here". The
+    // alternative, leaving the head out, would make every instance of it
+    // read as an unknown head instead of a forbidden one.
+    const p: Plugin.Plugin = .{
+        .name = "gfx",
+        .value_kinds = &.{.{
+            .name = "no-legs",
+            .underlying = .form,
+            .heads = .{ .heads = &.{ .{ .name = "arm" }, .{ .name = "leg", .max = 0 } } },
+        }},
+        .forms = &.{
+            .{ .name = "arm" },
+            .{ .name = "leg" },
+            .{ .name = "torso", .positional = .{ .kind = .{ .name = "no-legs" } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    try expectCodeCountOnBoth("(torso (leg))", schema, .positional_too_many, 1);
+    try expectNoCodeOnBoth("(torso (arm) (arm))", schema, .positional_too_many);
+    // Still a member of the set: a head outside it reports as such, not as
+    // a count breach.
+    try expectCodeOnBoth("(torso (nope))", schema, .not_head_member);
+}
+
+test "positional cardinality: an exact count reports on both sides of it" {
+    // `:min 2 :max 2` — "exactly two". One is a floor breach, three is a
+    // ceiling breach, two is clean. The spelling PNGine's ~20 unenforced
+    // constraints mostly want.
+    const p: Plugin.Plugin = .{
+        .name = "gfx",
+        .value_kinds = &.{.{
+            .name = "exactly-two",
+            .underlying = .form,
+            .heads = .{ .heads = &.{.{ .name = "leg", .min = 2, .max = 2 }} },
+        }},
+        .forms = &.{
+            .{ .name = "leg" },
+            .{ .name = "biped", .positional = .{ .kind = .{ .name = "exactly-two" } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    try expectCodeOnBoth("(biped (leg))", schema, .positional_missing);
+    try expectNoCodeOnBoth("(biped (leg) (leg))", schema, .positional_missing);
+    try expectNoCodeOnBoth("(biped (leg) (leg))", schema, .positional_too_many);
+    try expectCodeOnBoth("(biped (leg) (leg) (leg))", schema, .positional_too_many);
+}
+
+test "positional cardinality: both messages name form, head, bound, and count" {
+    // The four facts a repair needs. Asserted on the tree path only —
+    // prose is not a cross-host contract, the codes and paths above are.
+    const schema = Schema.Schema.init(&.{buildPipelineBoundsPlugin()});
+    {
+        var bundle = try validateSrc("(render-pipeline (vertex) (fragment) (fragment))", schema);
+        defer bundle.tree.deinit();
+        defer {
+            var r = bundle.result;
+            r.deinit();
+        }
+        var found = false;
+        for (bundle.result.diagnostics) |d| {
+            if (d.code != .positional_too_many) continue;
+            found = true;
+            try testing.expect(std.mem.indexOf(u8, d.message, "render-pipeline") != null);
+            try testing.expect(std.mem.indexOf(u8, d.message, "fragment") != null);
+            try testing.expect(std.mem.indexOf(u8, d.message, "at most 1") != null);
+            try testing.expect(std.mem.indexOf(u8, d.message, "found 2") != null);
+        }
+        try testing.expect(found);
+    }
+    {
+        var bundle = try validateSrc("(render-pipeline (constant))", schema);
+        defer bundle.tree.deinit();
+        defer {
+            var r = bundle.result;
+            r.deinit();
+        }
+        var found = false;
+        for (bundle.result.diagnostics) |d| {
+            if (d.code != .positional_missing) continue;
+            found = true;
+            try testing.expect(std.mem.indexOf(u8, d.message, "render-pipeline") != null);
+            try testing.expect(std.mem.indexOf(u8, d.message, "vertex") != null);
+            try testing.expect(std.mem.indexOf(u8, d.message, "at least 1") != null);
+            try testing.expect(std.mem.indexOf(u8, d.message, "found 0") != null);
+        }
+        try testing.expect(found);
+    }
+}
+
+test "positional cardinality: bounds count per form instance, not per document" {
+    // Two sibling `render-pipeline`s, each with its own single
+    // `fragment`. A counter shared across instances (a stale frame, a
+    // hoisted array) would report the second as a duplicate of the first.
+    const schema = Schema.Schema.init(&.{buildPipelineBoundsPlugin()});
+    const src =
+        \\(render-pipeline :name a (vertex) (fragment))
+        \\(render-pipeline :name b (vertex) (fragment))
+    ;
+    try expectNoCodeOnBoth(src, schema, .positional_too_many);
+    try expectNoCodeOnBoth(src, schema, .positional_missing);
+}
+
+test "positional cardinality: a nested bounded form keeps its own tally" {
+    // `render-pipeline` inside `render-pipeline` is not a thing, so nest
+    // through a wrapper whose positional is open. Each bounded form's
+    // counters belong to its own frame — the binary walker pushes and
+    // re-pushes one frame per form, which is exactly where a shared array
+    // would leak between them.
+    const p: Plugin.Plugin = .{
+        .name = "gfx",
+        .value_kinds = &.{.{
+            .name = "one-leg",
+            .underlying = .form,
+            .heads = .{ .heads = &.{.{ .name = "leg", .min = 1, .max = 1 }} },
+        }},
+        .forms = &.{
+            .{ .name = "leg" },
+            .{ .name = "biped", .positional = .{ .kind = .{ .name = "one-leg" } } },
+            .{ .name = "zoo", .positional = .any },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    try expectNoCodeOnBoth("(zoo (biped (leg)) (biped (leg)))", schema, .positional_too_many);
+    try expectNoCodeOnBoth("(zoo (biped (leg)) (biped (leg)))", schema, .positional_missing);
+    try expectCodeOnBoth("(zoo (biped (leg)) (biped))", schema, .positional_missing);
+}
+
+// ---------------------------------------------------------------------------
+// Digit-leading member spellings (ask S2, format 1.3). A member spelled `2d`
+// cannot arrive as a symbol — the lexer reads it as a unit-bearing number —
+// so `matchScalar`'s `.symbol` arm accepts that shape when, and only when,
+// the kind declares one. The escape lives in the SHARED matcher, so one edit
+// serves both walkers; every case below still asserts on both, because that
+// sharing is a property to pin rather than assume.
+// ---------------------------------------------------------------------------
+
+fn buildDigitLeadingPlugin() Plugin.Plugin {
+    return .{
+        .name = "gpu",
+        .value_kinds = &.{
+            // The WebGPU case the ask is about: three digit-leading
+            // spellings and nothing else.
+            .{
+                .name = "texture-dimension",
+                .underlying = .symbol,
+                .members = .{ .members = &.{
+                    .{ .name = "1d", .numeric_spelling = .{ .value = 1, .unit = "d" } },
+                    .{ .name = "2d", .numeric_spelling = .{ .value = 2, .unit = "d" } },
+                    .{ .name = "3d", .numeric_spelling = .{ .value = 3, .unit = "d" } },
+                } },
+            },
+            // Mixed: symbols and digit-leading spellings in one set, which
+            // is what `GPUTextureViewDimension` actually is.
+            .{
+                .name = "view-dimension",
+                .underlying = .symbol,
+                .members = .{ .members = &.{
+                    .{ .name = "2d", .numeric_spelling = .{ .value = 2, .unit = "d" } },
+                    .{ .name = "cube" },
+                    .{ .name = "cube-array" },
+                } },
+            },
+            // Ordinary symbol member-set — the control. A unit-bearing
+            // number here must stay `wrong_underlying`.
+            .{
+                .name = "mode",
+                .underlying = .symbol,
+                .members = .{ .members = &.{ .{ .name = "loop" }, .{ .name = "once" } } },
+            },
+            // A deprecated digit-leading member: the advisory keys off
+            // `Member.name`, and a numeric match has no symbol text, so
+            // this is the case that proves the canonical spelling reaches
+            // the lookup.
+            .{
+                .name = "legacy-dimension",
+                .underlying = .symbol,
+                .members = .{ .members = &.{
+                    .{ .name = "2d", .numeric_spelling = .{ .value = 2, .unit = "d" } },
+                    .{
+                        .name = "1d",
+                        .numeric_spelling = .{ .value = 1, .unit = "d" },
+                        .deprecated = true,
+                        .deprecation_message = "use 2d",
+                    },
+                } },
+            },
+            // A hyphenated spelling — one token only because a `-` may
+            // join two letter runs inside a unit. The unit is `d-array`,
+            // so nothing about the match differs from `2d`; what differs
+            // is that the lexer can produce it at all.
+            .{
+                .name = "view-dimension-full",
+                .underlying = .symbol,
+                .members = .{ .members = &.{
+                    .{ .name = "2d", .numeric_spelling = .{ .value = 2, .unit = "d" } },
+                    .{ .name = "2d-array", .numeric_spelling = .{ .value = 2, .unit = "d-array" } },
+                    .{ .name = "cube" },
+                } },
+            },
+            // Same spellings under a different unit — the unit is part of
+            // the identity, not decoration.
+            .{
+                .name = "byte-width",
+                .underlying = .symbol,
+                .members = .{ .members = &.{
+                    .{ .name = "2b", .numeric_spelling = .{ .value = 2, .unit = "b" } },
+                } },
+            },
+        },
+        .forms = &.{
+            .{
+                .name = "texture",
+                .keys = &.{
+                    .{ .name = "dimension", .value_type = .{ .named = .{ .name = "texture-dimension" } }, .optional = true },
+                    .{ .name = "view", .value_type = .{ .named = .{ .name = "view-dimension" } }, .optional = true },
+                    .{ .name = "mode", .value_type = .{ .named = .{ .name = "mode" } }, .optional = true },
+                    .{ .name = "legacy", .value_type = .{ .named = .{ .name = "legacy-dimension" } }, .optional = true },
+                    .{ .name = "width", .value_type = .{ .named = .{ .name = "byte-width" } }, .optional = true },
+                    .{ .name = "full", .value_type = .{ .named = .{ .name = "view-dimension-full" } }, .optional = true },
+                },
+            },
+            // A positional slot and a vector element, so the escape is
+            // shown not to be keyed-slot-specific.
+            .{
+                .name = "dims",
+                .positional = .{ .kind = .{ .name = "texture-dimension" } },
+            },
+        },
+    };
+}
+
+test "digit-leading member: the declared spelling validates in a keyed slot" {
+    const schema = Schema.Schema.init(&.{buildDigitLeadingPlugin()});
+    try expectNoCodeOnBoth("(texture :dimension 2d)", schema, .not_member);
+    try expectNoCodeOnBoth("(texture :dimension 2d)", schema, .wrong_underlying);
+    try expectNoCodeOnBoth("(texture :dimension 1d)", schema, .not_member);
+    try expectNoCodeOnBoth("(texture :dimension 3d)", schema, .not_member);
+}
+
+test "digit-leading member: matching is on the (magnitude, unit) pair, not the text" {
+    // `2.0d` and `02d` are the same member as `2d`. Text comparison could
+    // not say so, and the binary walker has no text to compare anyway.
+    const schema = Schema.Schema.init(&.{buildDigitLeadingPlugin()});
+    try expectNoCodeOnBoth("(texture :dimension 2.0d)", schema, .not_member);
+    try expectNoCodeOnBoth("(texture :dimension 02d)", schema, .not_member);
+    try expectNoCodeOnBoth("(texture :dimension 2.000d)", schema, .not_member);
+}
+
+test "digit-leading member: a fractional magnitude does not round into a member" {
+    const schema = Schema.Schema.init(&.{buildDigitLeadingPlugin()});
+    try expectCodeOnBoth("(texture :dimension 2.5d)", schema, .not_member);
+    try expectCodeOnBoth("(texture :dimension 1.9d)", schema, .not_member);
+}
+
+test "digit-leading member: the unit is part of the identity" {
+    // `2b` is not `2d`, and `2d` is not `2b` — magnitude alone decides
+    // nothing.
+    const schema = Schema.Schema.init(&.{buildDigitLeadingPlugin()});
+    try expectCodeOnBoth("(texture :dimension 2b)", schema, .not_member);
+    try expectCodeOnBoth("(texture :width 2d)", schema, .not_member);
+    try expectNoCodeOnBoth("(texture :width 2b)", schema, .not_member);
+}
+
+test "digit-leading member: the unit's case is part of the identity too" {
+    // Units are opaque bytes with no canonicalisation (`docs/LANGUAGE.md`
+    // §2.6), and `:min 1b` / `1B` already compare case-sensitively. A
+    // member's unit is half its identity, so it inherits that rule — and
+    // this is the test that fails if someone "helpfully" lowercases units
+    // on either side of the comparison.
+    const schema = Schema.Schema.init(&.{buildDigitLeadingPlugin()});
+    try expectCodeOnBoth("(texture :dimension 2D)", schema, .not_member);
+    try expectNoCodeOnBoth("(texture :dimension 2d)", schema, .not_member);
+}
+
+test "digit-leading member: an unknown spelling is not_member, naming the set" {
+    const schema = Schema.Schema.init(&.{buildDigitLeadingPlugin()});
+    try expectCodeOnBoth("(texture :dimension 4d)", schema, .not_member);
+    // Not `wrong_underlying`: the slot genuinely accepts unit-bearing
+    // numbers once a digit-leading member is declared, so the useful
+    // report is "which ones", not "a number is not a symbol".
+    try expectNoCodeOnBoth("(texture :dimension 4d)", schema, .wrong_underlying);
+    try expectPathOnBoth("(texture :dimension 4d)", schema, .not_member, &.{ "texture", "dimension" });
+}
+
+test "digit-leading member: the near-miss message spells the value canonically" {
+    const schema = Schema.Schema.init(&.{buildDigitLeadingPlugin()});
+    try expectMessageOnBoth(
+        "(texture :dimension 4d)",
+        schema,
+        .not_member,
+        "form `texture` keyword `:dimension` expects `texture-dimension`, got `4d` (allowed: `1d`, `2d`, `3d`)",
+    );
+    // A magnitude that could never be a spelling is shown as written,
+    // since it matches nothing and the author's number is what helps.
+    try expectMessageOnBoth(
+        "(texture :dimension 2.5d)",
+        schema,
+        .not_member,
+        "form `texture` keyword `:dimension` expects `texture-dimension`, got `2.5d` (allowed: `1d`, `2d`, `3d`)",
+    );
+}
+
+test "digit-leading member: a bare number is still wrong_underlying" {
+    // Unitless is not a spelling — a magnitude alone is not a name, which
+    // is also why the loader rejects declaring one.
+    const schema = Schema.Schema.init(&.{buildDigitLeadingPlugin()});
+    try expectCodeOnBoth("(texture :dimension 2)", schema, .wrong_underlying);
+    try expectNoCodeOnBoth("(texture :dimension 2)", schema, .not_member);
+}
+
+test "digit-leading member: a kind declaring none is completely unchanged" {
+    // The gate. `mode` has only symbol members, so a unit-bearing number
+    // in its slot reports exactly what it always did.
+    const schema = Schema.Schema.init(&.{buildDigitLeadingPlugin()});
+    try expectCodeOnBoth("(texture :mode 2d)", schema, .wrong_underlying);
+    try expectNoCodeOnBoth("(texture :mode 2d)", schema, .not_member);
+    try expectNoCodeOnBoth("(texture :mode loop)", schema, .wrong_underlying);
+}
+
+test "digit-leading member: symbol members in a mixed set still work both ways" {
+    const schema = Schema.Schema.init(&.{buildDigitLeadingPlugin()});
+    try expectNoCodeOnBoth("(texture :view cube)", schema, .not_member);
+    try expectNoCodeOnBoth("(texture :view cube-array)", schema, .not_member);
+    try expectNoCodeOnBoth("(texture :view 2d)", schema, .not_member);
+    try expectCodeOnBoth("(texture :view sphere)", schema, .not_member);
+    try expectCodeOnBoth("(texture :view 3d)", schema, .not_member);
+}
+
+test "digit-leading member: deprecated_member reaches a numerically-matched member" {
+    // The advisory looks a member up by `Member.name`, and a numeric match
+    // supplies no symbol text — so both walkers render the canonical
+    // spelling to do the lookup. Without that, a deprecated digit-leading
+    // member would match silently.
+    const schema = Schema.Schema.init(&.{buildDigitLeadingPlugin()});
+    try expectCodeOnBoth("(texture :legacy 1d)", schema, .deprecated_member);
+    try expectNoCodeOnBoth("(texture :legacy 2d)", schema, .deprecated_member);
+}
+
+test "digit-leading member: the escape works in a positional slot too" {
+    // Nothing about it is keyed-slot-specific — `matchScalar` is reached
+    // the same way from every slot shape.
+    const schema = Schema.Schema.init(&.{buildDigitLeadingPlugin()});
+    try expectNoCodeOnBoth("(dims 2d 1d 3d)", schema, .not_member);
+    try expectCodeOnBoth("(dims 2d 4d)", schema, .not_member);
+}
+
+test "digit-leading member: a hyphenated spelling is one member" {
+    // `2d-array` reaches the validator as a single `number_with_unit` whose
+    // unit is `d-array`, so the match is the ordinary pair comparison. What
+    // the lexer's hyphen rule buys is that the atom exists at all — before
+    // it, `2d-array` was a `number_with_unit` plus a stray symbol `-array`,
+    // two diagnostics from one intended value.
+    const schema = Schema.Schema.init(&.{buildDigitLeadingPlugin()});
+    try expectNoCodeOnBoth("(texture :full 2d-array)", schema, .not_member);
+    try expectNoCodeOnBoth("(texture :full 2d-array)", schema, .wrong_underlying);
+    try expectNoCodeOnBoth("(texture :full 2d)", schema, .not_member);
+    try expectNoCodeOnBoth("(texture :full cube)", schema, .not_member);
+
+    // The unit carries the hyphen, so the two spellings are distinct
+    // members rather than one with an optional tail.
+    try expectCodeOnBoth("(texture :full 2d-cube)", schema, .not_member);
+    try expectCodeOnBoth("(texture :dimension 2d-array)", schema, .not_member);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-target cross-refs (`:target [a b]`)
+// ---------------------------------------------------------------------------
+//
+// One namespace over several forms. The tests below are deliberately about
+// the *bucket*, not about any one target: a group's names live in a
+// synthetic bucket keyed by `Schema.crossRefBucketKey`, so what has to hold
+// is that every listed target writes into it, one lookup reads it, and a
+// name defined twice inside it collides.
+
+/// `(render-pipeline …)` and `(compute-pipeline …)` in one namespace, with
+/// `(dispatch :pipeline …)` referencing across both. `render-only-ref` is a
+/// second kind targeting just one of them, so a form is simultaneously a
+/// group member and a single-target kind's target — the shape that makes
+/// the index map one-to-many.
+fn buildPipelineGroupPlugin() Plugin.Plugin {
+    const pipeline_ref: Plugin.ValueKind = .{
+        .name = "pipeline-ref",
+        .underlying = .symbol,
+        .cross_ref = .{ .targets = &.{ "render-pipeline", "compute-pipeline" } },
+    };
+    const render_only_ref: Plugin.ValueKind = .{
+        .name = "render-only-ref",
+        .underlying = .symbol,
+        .cross_ref = .{ .targets = &.{"render-pipeline"} },
+    };
+    return .{
+        .name = "gpu",
+        .value_kinds = &.{ pipeline_ref, render_only_ref },
+        .forms = &.{
+            .{
+                .name = "render-pipeline",
+                .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = false }},
+            },
+            .{
+                .name = "compute-pipeline",
+                .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = false }},
+            },
+            .{
+                .name = "dispatch",
+                .keys = &.{
+                    .{ .name = "pipeline", .value_type = .{ .named = .{ .name = "pipeline-ref" } }, .optional = true },
+                    .{ .name = "render", .value_type = .{ .named = .{ .name = "render-only-ref" } }, .optional = true },
+                },
+            },
+        },
+    };
+}
+
+test "cross-ref group: a name from either target resolves" {
+    const schema = Schema.Schema.init(&.{buildPipelineGroupPlugin()});
+    try expectNoCodeOnBoth(
+        \\(render-pipeline :name blit)
+        \\(compute-pipeline :name reduce)
+        \\(dispatch :pipeline blit)
+        \\(dispatch :pipeline reduce)
+    , schema, .not_cross_ref);
+}
+
+test "cross-ref group: a name from neither target is not_cross_ref" {
+    const schema = Schema.Schema.init(&.{buildPipelineGroupPlugin()});
+    try expectCodeOnBoth(
+        \\(render-pipeline :name blit)
+        \\(compute-pipeline :name reduce)
+        \\(dispatch :pipeline blot)
+    , schema, .not_cross_ref);
+}
+
+test "cross-ref group: the same name in two targets is duplicate_cross_ref_target" {
+    // The whole point of one namespace: the collision is caught at the
+    // *declarations*, not silently resolved to whichever came first.
+    const schema = Schema.Schema.init(&.{buildPipelineGroupPlugin()});
+    try expectCodeOnBoth(
+        \\(render-pipeline :name same)
+        \\(compute-pipeline :name same)
+    , schema, .duplicate_cross_ref_target);
+}
+
+test "cross-ref group: a name in one target only is no duplicate" {
+    const schema = Schema.Schema.init(&.{buildPipelineGroupPlugin()});
+    try expectNoCodeOnBoth(
+        \\(render-pipeline :name blit)
+        \\(compute-pipeline :name reduce)
+    , schema, .duplicate_cross_ref_target);
+}
+
+test "cross-ref group: a group member's own bucket stays separate" {
+    // `render-only-ref` targets `render-pipeline` alone, so its bucket holds
+    // only render names — a compute name must not leak in through the group
+    // registration the same form also performs.
+    const schema = Schema.Schema.init(&.{buildPipelineGroupPlugin()});
+    try expectNoCodeOnBoth(
+        \\(render-pipeline :name blit)
+        \\(compute-pipeline :name reduce)
+        \\(dispatch :render blit)
+    , schema, .not_cross_ref);
+    try expectCodeOnBoth(
+        \\(render-pipeline :name blit)
+        \\(compute-pipeline :name reduce)
+        \\(dispatch :render reduce)
+    , schema, .not_cross_ref);
+}
+
+test "cross-ref group: registrations land in the group bucket, not a target's" {
+    // White-box, and worth it: this is the design's load-bearing claim.
+    // Every listed target writes into one synthetic bucket, so a lookup
+    // under a *target's* name finds only what that target's own
+    // single-target kind registered.
+    const a = testing.allocator;
+    const schema = Schema.Schema.init(&.{buildPipelineGroupPlugin()});
+    var tree = try Parser.parse(a,
+        \\(render-pipeline :name blit)
+        \\(compute-pipeline :name reduce)
+    );
+    defer tree.deinit();
+    const trees = [_]Ast.Tree{tree};
+    var fr = try Validator.validateForest(a, &trees, schema);
+    defer fr.deinit(a);
+
+    // Sorted, not as written: the key is a set (`Schema.crossRefBucketKey`),
+    // so a group spelled `[compute-pipeline render-pipeline]` keys here too.
+    const group = "gpu/compute-pipeline gpu/render-pipeline";
+    try testing.expect(fr.cross_ref_index.contains(.tree(0), group, "blit"));
+    try testing.expect(fr.cross_ref_index.contains(.tree(0), group, "reduce"));
+
+    // `render-pipeline`'s own bucket exists too (`render-only-ref` targets
+    // it), and holds only its own name.
+    try testing.expect(fr.cross_ref_index.contains(.tree(0), "gpu/render-pipeline", "blit"));
+    try testing.expect(!fr.cross_ref_index.contains(.tree(0), "gpu/render-pipeline", "reduce"));
+
+    // `compute-pipeline` is in no single-target kind's sights, so it has no
+    // bucket of its own at all — its names exist only in the group's.
+    try testing.expect(!fr.cross_ref_index.contains(.tree(0), "gpu/compute-pipeline", "reduce"));
+}
+
+/// The same namespace declared twice, spelled in opposite orders, plus a
+/// union over both. Nothing here is a sensible schema to write — it is the
+/// shape that shows whether the bucket key is an *identity* or a rendering
+/// of the author's list.
+fn buildReversedGroupPlugin() Plugin.Plugin {
+    const forwards: Plugin.ValueKind = .{
+        .name = "forwards",
+        .underlying = .symbol,
+        .cross_ref = .{ .targets = &.{ "render-pipeline", "compute-pipeline" } },
+    };
+    const backwards: Plugin.ValueKind = .{
+        .name = "backwards",
+        .underlying = .symbol,
+        .cross_ref = .{ .targets = &.{ "compute-pipeline", "render-pipeline" } },
+    };
+    const either: Plugin.ValueKind = .{
+        .name = "either",
+        .underlying = .union_of,
+        .union_of = .{ .alternatives = &.{ .{ .name = "forwards" }, .{ .name = "backwards" } } },
+    };
+    return .{
+        .name = "gpu",
+        .value_kinds = &.{ forwards, backwards, either },
+        .forms = &.{
+            .{
+                .name = "render-pipeline",
+                .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = false }},
+            },
+            .{
+                .name = "compute-pipeline",
+                .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = false }},
+            },
+            .{
+                .name = "dispatch",
+                .keys = &.{.{ .name = "pipeline", .value_type = .{ .named = .{ .name = "either" } }, .optional = false }},
+            },
+        },
+    };
+}
+
+test "cross-ref group: two spellings of one group collide once, not twice" {
+    // Keyed on the written order, `[a b]` and `[b a]` were two buckets over
+    // the same two forms, so one duplicated name was reported once per
+    // bucket — two errors for one authoring mistake, which is the same
+    // de-duplication rule `:requires`' self-edge carve-out follows.
+    const schema = Schema.Schema.init(&.{buildReversedGroupPlugin()});
+    try expectCodeCountOnBoth(
+        \\(render-pipeline :name same)
+        \\(compute-pipeline :name same)
+    , schema, .duplicate_cross_ref_target, 1);
+}
+
+test "cross-ref group: two spellings of one group are not an ambiguity" {
+    // `union_ambiguous` asserts that declaration order picks *which entity*
+    // the slot denotes. Both alternatives here read the same namespace, so
+    // both readings land on the same instance and order decides nothing —
+    // the very false positive the gate counts buckets (not alternatives) to
+    // avoid, defeated by spelling one bucket two ways.
+    const schema = Schema.Schema.init(&.{buildReversedGroupPlugin()});
+    try expectNoCodeOnBoth(
+        \\(render-pipeline :name blit)
+        \\(compute-pipeline :name reduce)
+        \\(dispatch :pipeline blit)
+    , schema, .union_ambiguous);
+}
+
+test "cross-ref group: a scoped group is scoped like any other bucket" {
+    const pipeline_ref: Plugin.ValueKind = .{
+        .name = "pipeline-ref",
+        .underlying = .symbol,
+        .cross_ref = .{
+            .targets = &.{ "render-pipeline", "compute-pipeline" },
+            .scope_form = "pass",
+        },
+    };
+    const plugin: Plugin.Plugin = .{
+        .name = "gpu",
+        .value_kinds = &.{pipeline_ref},
+        .forms = &.{
+            .{
+                .name = "render-pipeline",
+                .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = false }},
+            },
+            .{
+                .name = "compute-pipeline",
+                .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = false }},
+            },
+            .{
+                .name = "dispatch",
+                .keys = &.{.{ .name = "pipeline", .value_type = .{ .named = .{ .name = "pipeline-ref" } }, .optional = false }},
+            },
+            .{ .name = "pass", .open = true },
+        },
+    };
+    const schema = Schema.Schema.init(&.{plugin});
+
+    // Inside one pass, both targets' names resolve.
+    try expectNoCodeOnBoth(
+        \\(pass
+        \\  (render-pipeline :name blit)
+        \\  (compute-pipeline :name reduce)
+        \\  (dispatch :pipeline reduce))
+    , schema, .not_cross_ref);
+
+    // Across two passes they do not — the group is one namespace *per
+    // scope instance*, exactly as a single-target scoped cross-ref is.
+    try expectCodeOnBoth(
+        \\(pass (compute-pipeline :name reduce))
+        \\(pass (dispatch :pipeline reduce))
+    , schema, .not_cross_ref);
+
+    // And the same name in two passes is not a duplicate.
+    try expectNoCodeOnBoth(
+        \\(pass (render-pipeline :name same))
+        \\(pass (compute-pipeline :name same))
+    , schema, .duplicate_cross_ref_target);
+}
+
+test "cross-ref group: two kinds listing the same group share one bucket" {
+    // Same bucket key ⇒ the existing first-wins rule applies, and
+    // `Schema.checkTargetCollapse` warns. A group is not special here; it
+    // is only a different key.
+    const a = testing.allocator;
+    const by_name: Plugin.ValueKind = .{
+        .name = "by-name",
+        .underlying = .symbol,
+        .cross_ref = .{ .targets = &.{ "render-pipeline", "compute-pipeline" } },
+    };
+    const by_alias: Plugin.ValueKind = .{
+        .name = "by-alias",
+        .underlying = .symbol,
+        .cross_ref = .{ .targets = &.{ "render-pipeline", "compute-pipeline" }, .name_key = "alias" },
+    };
+    const plugin: Plugin.Plugin = .{
+        .name = "gpu",
+        .value_kinds = &.{ by_name, by_alias },
+        .forms = &.{
+            .{
+                .name = "render-pipeline",
+                .keys = &.{
+                    .{ .name = "name", .value_type = .symbol, .optional = false },
+                    .{ .name = "alias", .value_type = .symbol, .optional = true },
+                },
+            },
+            .{
+                .name = "compute-pipeline",
+                .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = false }},
+            },
+        },
+    };
+    const schema = Schema.Schema.init(&.{plugin});
+    const diags = try schema.validateCrossRefs(a);
+    defer {
+        for (diags) |d| {
+            a.free(d.message);
+            for (d.path) |seg| a.free(seg);
+            a.free(d.path);
+        }
+        a.free(diags);
+    }
+    var found = false;
+    for (diags) |d| {
+        if (d.code != .cross_ref_target_collapse) continue;
+        found = true;
+        // The bucket is named as a group, not introduced as a form — a
+        // synthetic key is not a form name and must not read as one.
+        try testing.expect(std.mem.indexOf(u8, d.message, "the target group") != null);
+    }
+    try testing.expect(found);
 }

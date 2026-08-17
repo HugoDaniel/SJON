@@ -1,0 +1,5 @@
+; One diagnostic, on the last line only. The variant key found its base-key
+; requirement absent — reported at the form path like every other end-of-form
+; sweep, not at the key.
+(diagnostics
+  (diagnostic :code dependent_key_missing :path [primitive]))

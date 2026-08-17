@@ -1,0 +1,7 @@
+; Exactly one diagnostic per line, and a different one each time. Three
+; `number_not_multiple`s here would mean a host checks divisibility first;
+; three of any single code would mean it does not check the others at all.
+(diagnostics
+  (diagnostic :code number_not_integer :path [entry offset])
+  (diagnostic :code number_below_min   :path [entry offset])
+  (diagnostic :code number_not_multiple :path [entry offset]))

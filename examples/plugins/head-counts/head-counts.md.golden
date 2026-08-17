@@ -1,0 +1,74 @@
+# head-counts v1.0.0
+
+## Forms
+
+### `(vertex …)`
+
+The vertex stage of a pipeline.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:entry` | `symbol` | yes | — | — |
+
+### `(fragment …)`
+
+The fragment stage. Optional — a depth-only pass has none.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:entry` | `symbol` | yes | — | — |
+
+### `(constant …)`
+
+A pipeline-overridable constant. Any number of these.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:name` | `symbol` | yes | — | — |
+| `:value` | `number` | yes | — | — |
+
+### `(render-pipeline …)`
+
+A pipeline whose sections are counted, not just typed.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:name` | `symbol` | yes | — | — |
+
+Positional children: `form: (vertex …) | (fragment …) | (constant …)`.
+
+| Head | Count |
+| --- | --- |
+| `vertex` | exactly 1 |
+| `fragment` | at most 1 |
+| `constant` | any |
+
+### `(section-holder …)`
+
+Same kind, keyed slot — the counts ride along inertly here.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:section` | `form: (vertex …) \| (fragment …) \| (constant …)` | no | — | — |
+
+### `(scratch-pipeline …)`
+
+Open form, same bounded slot: `:open true` does not silence the counts.
+
+Positional children: `form: (vertex …) | (fragment …) | (constant …)`.
+
+| Head | Count |
+| --- | --- |
+| `vertex` | exactly 1 |
+| `fragment` | at most 1 |
+| `constant` | any |
+
+Open form: unknown keys are accepted.
+
+## Value kinds
+
+### pipeline-section
+
+One section of a render pipeline, with how many of each are allowed.
+
+Type: `form: (vertex …) | (fragment …) | (constant …)`.

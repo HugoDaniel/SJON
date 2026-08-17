@@ -172,6 +172,66 @@ test('schemaExport: flag-set emits x-sjon-positional-flags annotation', () => {
   assert.deepEqual(flags[1], { name: 'archived' });
 });
 
+test('schemaExport: bounded head-set emits contains/minContains/maxContains', () => {
+  // The `$children` array keeps the whole-set `items` union; the per-head
+  // counts ride in `allOf` beside it. NOT minItems/maxItems, which bound
+  // the array's total length — a different claim.
+  const source = `(plugin :name gfx :version "1.0.0"
+  (form :name vertex)
+  (form :name fragment)
+  (form :name constant)
+  (value-kind :name pipeline-section :underlying form
+    :heads (head-set
+      (head :name vertex   :min 1 :max 1)
+      (head :name fragment :max 1)
+      (head :name constant)))
+  (form :name render-pipeline :positional pipeline-section))`;
+  const { exportResult } = exportSchema(source, nullHostOptions(), {
+    target: { jsonSchema: true, tsTypes: true },
+  });
+  assert.ok(exportResult.jsonSchemaBytes, 'JSON Schema bytes missing');
+  const schema = JSON.parse(exportResult.jsonSchemaBytes);
+  const children = schema.$defs['form.gfx.render-pipeline'].properties.$children;
+  assert.ok(children.items, '$children.items missing — the whole-set union must survive');
+  assert.equal(children.minItems, undefined);
+  assert.equal(children.maxItems, undefined);
+  assert.deepEqual(children.allOf, [
+    { contains: { $ref: '#/$defs/form.gfx.vertex' }, minContains: 1, maxContains: 1 },
+    // `minContains: 0` is explicit: without it `contains` would also
+    // demand at least one match, making "at most one" mean "exactly one".
+    { contains: { $ref: '#/$defs/form.gfx.fragment' }, minContains: 0, maxContains: 1 },
+  ]);
+
+  // TS cannot express a per-member array count, so the bounds are prose.
+  assert.ok(exportResult.tsTypesBytes, 'TS bytes missing');
+  assert.ok(
+    exportResult.tsTypesBytes.includes(
+      'Positional counts (not expressible in TS): vertex: 1; fragment: 0..1 */',
+    ),
+    'the $children doc comment must match the Zig emitter byte for byte',
+  );
+});
+
+test('schemaExport: an unbounded head-set adds no allOf and no doc comment', () => {
+  // The drift gate for every golden written before bounds existed.
+  const source = `(plugin :name gfx :version "1.0.0"
+  (form :name vertex)
+  (form :name fragment)
+  (value-kind :name loose-section :underlying form
+    :heads (head-set :names [vertex fragment]))
+  (form :name loose :positional loose-section))`;
+  const { exportResult } = exportSchema(source, nullHostOptions(), {
+    target: { jsonSchema: true, tsTypes: true },
+  });
+  assert.ok(exportResult.jsonSchemaBytes, 'JSON Schema bytes missing');
+  const schema = JSON.parse(exportResult.jsonSchemaBytes);
+  const children = schema.$defs['form.gfx.loose'].properties.$children;
+  assert.ok(children.items, '$children.items missing');
+  assert.equal(children.allOf, undefined);
+  assert.ok(exportResult.tsTypesBytes, 'TS bytes missing');
+  assert.ok(!exportResult.tsTypesBytes.includes('Positional counts'));
+});
+
 test('schemaExport: empty-string flag metadata matches Zig (desc omitted, link kept)', () => {
   // Long-tail parity: the Zig emitter gates `description` on `len > 0`
   // (so `:description ""` is dropped) but emits `link` on presence alone
@@ -341,14 +401,16 @@ test('schemaExport: the two cross-ref routes render differently in every target'
     acyclic: false,
   });
 
-  // TS JSDoc names only what each route carries.
+  // TS JSDoc names only what each route carries. An annotation always
+  // renders in block form (matching `TsTypes.zig`'s `use_block`), so the
+  // line ends at the newline, not at a `*/`.
   assert.match(
     exportResult.tsTypesBytes,
-    /@sjon-cross-ref target=shader provider=uniforms source-key=code \*\//,
+    /@sjon-cross-ref target=shader provider=uniforms source-key=code\n/,
   );
   assert.match(
     exportResult.tsTypesBytes,
-    /@sjon-cross-ref target=layer name-key=name acyclic=false \*\//,
+    /@sjon-cross-ref target=layer name-key=name acyclic=false\n/,
   );
 
   // Both routes warn, and the provider route's message says why it is
@@ -394,11 +456,18 @@ function exportOf(fixture: string) {
 /** Drop the JSDoc a `:description` produces: a whole single-line `/** … *​/`,
  *  a prose line inside a multi-line block, and the `*` separator that only
  *  existed to space prose from the `@sjon-…` annotations below it. The
- *  annotation lines themselves are kept — they are what this compares. */
+ *  annotation lines themselves are kept — they are what this compares.
+ *
+ *  Continuation lines carry the member's indentation on both emitters, so
+ *  the prose and separator patterns allow leading whitespace. A single-line
+ *  block containing an `@`-annotation is NOT a description and is kept —
+ *  both emitters reserve the single-line shape for lone prose. */
 function withoutDescriptionDoc(src: string): string {
   return src
     .split('\n')
-    .filter((l) => !/^\s*\/\*\*.*\*\/$/.test(l) && !/^ \* [^@]/.test(l) && l !== ' *')
+    .filter(
+      (l) => !/^\s*\/\*\*(?!.*@).*\*\/$/.test(l) && !/^\s*\* [^@]/.test(l) && l.trim() !== '*',
+    )
     .join('\n');
 }
 

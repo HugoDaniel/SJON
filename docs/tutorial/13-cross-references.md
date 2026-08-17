@@ -147,6 +147,27 @@ The same rule applies at the reference site:
 (track :sequence [:p0])   ; keyword element, wrong shape
 ```
 
+### A Cross-Reference As Half Of A scalar-or-ref
+
+This is how most authors first meet a cross-reference in practice. A
+slot that takes "a number, or a constant naming one" is the
+`scalar-or-ref` shorthand from chapter 12, and its reference half can be
+a cross-reference kind:
+
+```sjon
+(define :name MAX_BONES :value 128)
+
+(mesh :bones 128)         ; the literal half
+(mesh :bones MAX_BONES)   ; the reference half — a cross-reference
+```
+
+The value of doing it this way is what happens on a typo. Left as the
+default, the reference half is a plain `symbol` and `MAX_BONE`
+validates clean, naming nothing. Backed by a cross-reference kind, it
+fails — reported as `union_no_branch_matched`, since the shorthand is a
+union and the union names its alternatives rather than forwarding
+`not_cross_ref` from one branch.
+
 ## Duplicate Declarations
 
 A name should identify one target in its scope. If two declarations use
@@ -187,6 +208,136 @@ Then choose which one the track should reference:
 
 Duplicate checking happens inside the active scope. The next section
 explains what "scope" means for references.
+
+## Two Targets, One Name
+
+You just learned that two declarations sharing a name is an error. Here
+is the case where it is not, and why that turns out to matter.
+
+Duplicate checking is **per target**. Each target form gets its own
+namespace, so a `(render-pipeline :name same)` and a
+`(compute-pipeline :name same)` are each alone in theirs. Neither is a
+duplicate. Both are fine.
+
+Now suppose a slot accepts either one — a union of two reference kinds:
+
+```text
+render-pipeline-ref:  symbol, cross-ref to render-pipeline
+compute-pipeline-ref: symbol, cross-ref to compute-pipeline
+pipeline-ref:         union render-pipeline-ref | compute-pipeline-ref
+
+(dispatch ...)
+  :pipeline pipeline-ref
+```
+
+Before reading on, predict what happens here:
+
+```sjon
+(render-pipeline  :name same)
+(compute-pipeline :name same)
+
+(dispatch :pipeline same)
+```
+
+Ask yourself two questions. Does it validate? And which pipeline is
+`same`?
+
+The answers are "yes" and "the render one" — but only because
+`render-pipeline-ref` is listed first. That is lesson 12's rule doing
+real work: alternatives are tried in declaration order, the first that
+accepts wins, and here *both* accept. Reorder the plugin's alternatives
+and the same document means something different.
+
+So it validates, with a warning:
+
+```text
+union_ambiguous (warning)
+```
+
+Read it as: *this reference has two readings, and nothing but
+declaration order is choosing between them.* Your document is not
+broken. What is fragile is that a tool resolving `same` through its own
+lookup — an emitter, a code generator, an editor — may pick the compute
+pipeline, and neither it nor the validator would ever notice they
+disagreed.
+
+Two repairs, and the right one depends on what you meant:
+
+```sjon
+; Repair A - the collision was an accident. Rename one.
+(render-pipeline  :name blit)
+(compute-pipeline :name reduce)
+
+(dispatch :pipeline blit)
+```
+
+```sjon
+; Repair B - both names are deliberate; the SLOT was overloaded.
+; Ask the plugin author for two keys, one reference kind each.
+(dispatch :render-pipeline same)
+```
+
+```sjon
+; Repair C - the names were never meant to coexist. Ask the plugin author
+; for ONE reference kind over BOTH forms:
+;
+;   pipeline-ref: symbol, cross-ref to [render-pipeline compute-pipeline]
+;
+; Then this document does not warn — it fails, at the declarations:
+
+(render-pipeline  :name same)
+(compute-pipeline :name same)   ; duplicate_cross_ref_target
+```
+
+Repair A is right most of the time. Reach for B when the two names are
+genuinely the same concept in two pipelines and renaming would be a lie.
+Repair C is the one to ask for when they are *never* meant to be the same
+name — see below.
+
+### One Namespace Or Two
+
+Repairs B and C look similar and are opposites. Both change the schema;
+what they change is how many namespaces exist.
+
+A **union of two reference kinds** is two namespaces. `same` in each is
+two different names that happen to be spelled alike, so declaring both is
+fine and every *reference* is the ambiguous thing.
+
+A **target group** — one cross-reference over a list of forms — is one
+namespace. `same` declared twice is one name declared twice, so the
+*declaration* is the wrong thing and no reference is ever ambiguous.
+
+That is the whole distinction, and it is a question about your data, not
+about SJON: are a render pipeline and a compute pipeline allowed to share
+a name? If yes, the union is right and `union_ambiguous` is a fair warning
+about a genuinely overloaded slot. If no, the group is right and you want
+to hear about the collision once, where you made it.
+
+You cannot pick between them as a document author — `:target` is the
+plugin's to write. What you can do is read the diagnostic and know which
+one you are inside: a warning on a reference means two namespaces, an
+error on a declaration means one.
+
+### When It Stays Quiet
+
+This warning is deliberately narrow, so do not expect it whenever a
+union overlaps:
+
+- **A union over plain values.** "A byte count or a named constant"
+  overlaps by design, and first-match is the point. Nothing there names
+  two entities, so nothing warns.
+- **A member set that wins first.** If the alternative that accepts is
+  an enum rather than a reference, the slot denotes a member, not an
+  entity — there is no "which one" to answer.
+- **Two alternatives onto the same target.** Both readings pick out the
+  same declaration, so order decides nothing.
+- **A target group.** One namespace has nothing to be ambiguous between;
+  the collision it would warn about is an error at the declarations
+  instead.
+
+The one case it fires on is the one where order silently picks between
+two *different things*. Everything else is the union working as
+designed.
 
 ## Scope
 
@@ -479,6 +630,7 @@ it. That is a limit of the route, not a bug in the editor.
 | --- | --- | --- |
 | `not_cross_ref` | The symbol is not in the visible registry. | Fix the spelling, add the declaration, or move the reference into the right scope. |
 | `duplicate_cross_ref_target` | Two declarations use the same name in one scope. | Rename or remove one declaration. |
+| `union_ambiguous` (warning) | A name exists in two of a union slot's reference targets, so declaration order is picking which one. | Rename one declaration, or ask for the slot to be split into two single-kind keys. |
 | `cross_ref_outside_scope` | A scoped reference appears outside its required enclosing form. | Put the declaration and reference inside that scope form. |
 | `cyclic_cross_ref` | An acyclic reference chain loops back on itself. | Remove or change one edge in the cycle. |
 | `wrong_underlying` | The declaration or reference is not the expected value shape, often string vs symbol. | Match the plugin's declared type. |
@@ -501,8 +653,10 @@ When a cross-reference fails, do this mechanically:
 4. List the declarations visible from the reference's scope.
 5. Check exact symbol spelling and case.
 6. If the name exists twice, rename one declaration.
-7. If the kind is acyclic, draw the arrows and remove the loop.
-8. If the kind names a provider, the list in step 4 is what the
+7. If the slot is a union of reference kinds, check every target for the
+   name - not just the one you had in mind.
+8. If the kind is acyclic, draw the arrows and remove the loop.
+9. If the kind names a provider, the list in step 4 is what the
    provider extracted from the source string, so read the source
    instead of looking for declarations.
 
@@ -587,6 +741,52 @@ declaration:
 
 (track :sequence [p0])
 ```
+
+### Same Name, Two Targets
+
+Slot `:pipeline` is typed `pipeline-ref`, a union of
+`render-pipeline-ref | compute-pipeline-ref` in that order.
+
+```sjon
+(render-pipeline  :name same)
+(compute-pipeline :name same)
+
+(dispatch :pipeline same)
+```
+
+Two questions before you answer: does this validate, and which pipeline
+does `same` mean?
+
+It validates. `same` is the *render* pipeline, because that alternative
+is listed first. Neither declaration is a duplicate - duplicate checking
+is per target, and these are two targets. Likely diagnostic:
+`union_ambiguous`, at `warning` severity. Repair by renaming so the two
+targets do not collide:
+
+```sjon
+(render-pipeline  :name blit)
+(compute-pipeline :name reduce)
+
+(dispatch :pipeline blit)
+```
+
+### Overlapping Union, No Warning
+
+Slot `:size` is typed `byte-count | symbol`.
+
+```sjon
+(buffer :size 1024)
+(buffer :size default-size)
+```
+
+Both lines match a union whose alternatives overlap on shape, so is this
+the ambiguity case?
+
+No - clean, no diagnostic. `1024` matches `byte-count` and
+`default-size` matches the `symbol` half, and neither value names two
+different entities. `union_ambiguous` is about two *references* to two
+different things colliding on one name, not about a union having
+alternatives that could both accept.
 
 ### Outside Lexical Scope
 
@@ -702,5 +902,11 @@ Repair the source, and the reference becomes checkable again.
 - Where does a provider-backed kind get its legal names from?
 - Why are the references silent when `cross_ref_extraction_failed`
   fires?
+- Why is the same name under two different target forms *not* a
+  `duplicate_cross_ref_target`?
+- When a union slot's alternatives both accept a name, what decides
+  which one the slot means?
+- Why is `union_ambiguous` a warning rather than an error?
+- Name one case where a union's alternatives overlap and nothing warns.
 
 Next: [Diagnostics-Driven Repair](14-diagnostics-driven-repair.md).

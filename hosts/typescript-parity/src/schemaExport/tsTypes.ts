@@ -37,6 +37,7 @@ import type {
   ModelUnitShape,
   ModelValueShape,
 } from './model.ts';
+import { isBoundedRef } from './model.ts';
 import type { Warning } from './warnings.ts';
 import type { Repr } from '../plugin.ts';
 import { assertNever } from '../internal.ts';
@@ -246,6 +247,29 @@ function sortKeys(keys: readonly ModelKey[]): ModelKey[] {
   return [...keys].sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/**
+ * TypeScript cannot express "exactly one element of this union in an
+ * array", so a bounded head-set's counts ride as a doc comment above the
+ * `$children` member and nothing more. Documented as a known weakening in
+ * `docs/SCHEMA_EXPORT.md`: a silently weaker `.d.ts` is worse than a
+ * documented one. Returns the empty string when nothing is bounded.
+ *
+ * The inline local-form literal is deliberately not given one — that
+ * surface carries no JSDoc at all, by design. Mirrors Zig's
+ * `writeChildCountsDoc`.
+ */
+function childCountsDoc(shape: ModelValueShape, indent: string): string {
+  if (shape.kind !== 'form_heads') return '';
+  const bounded = shape.heads.filter(isBoundedRef);
+  if (bounded.length === 0) return '';
+  const parts = bounded.map((h) => {
+    const min = h.min ?? 0;
+    if (h.max === undefined) return `${h.name}: ${min}..`;
+    return h.max === min ? `${h.name}: ${h.max}` : `${h.name}: ${min}..${h.max}`;
+  });
+  return `${indent}/** Positional counts (not expressible in TS): ${parts.join('; ')} */\n`;
+}
+
 /** The `$children` line for a form's positional slot, shared by the interface
  *  and per-variant-branch emitters (the positional is form-level — a variant
  *  overlays keys, never children). */
@@ -256,7 +280,10 @@ function writeChildren(form: ModelForm, indent: string, ctx: EmitContext): strin
     case 'any':
       return `${indent}$children?: unknown[];\n`;
     case 'kind':
-      return `${indent}$children?: Array<${writeShape(form.positional.shape, ctx)}>;\n`;
+      return (
+        childCountsDoc(form.positional.shape, indent) +
+        `${indent}$children?: Array<${writeShape(form.positional.shape, ctx)}>;\n`
+      );
     default:
       return assertNever(form.positional);
   }
@@ -291,8 +318,8 @@ function writeFormDoc(form: ModelForm): string {
 
 function writeKey(key: ModelKey, indent: string, ctx: EmitContext): string {
   let out = '';
-  const jsdoc = buildKeyJSDoc(key);
-  if (jsdoc) out += indent + jsdoc;
+  const jsdoc = buildKeyJSDoc(key, indent);
+  if (jsdoc) out += jsdoc;
   const optMark = key.optional ? '?' : '';
   out += `${indent}${escapeIdentifier(key.name)}${optMark}: ${writeShape(key.value, ctx)};\n`;
   return out;
@@ -351,7 +378,7 @@ function writeInlineLocalKey(key: ModelKey, ctx: EmitContext): string {
   return `${escapeIdentifier(key.name)}${optMark}: ${writeShape(key.value, ctx)};`;
 }
 
-function buildKeyJSDoc(key: ModelKey): string {
+function buildKeyJSDoc(key: ModelKey, indent: string): string {
   const lines: string[] = [];
   if (key.description) lines.push(key.description);
   if (key.default && key.default.kind === 'expression') {
@@ -364,6 +391,10 @@ function buildKeyJSDoc(key: ModelKey): string {
     if (bounds.max)
       lines.push(`@maximum ${bounds.max.value}${bounds.exclusiveMax ? ' (exclusive)' : ''}`);
     if (bounds.integer) lines.push('@integer true');
+    // TS has no divisibility constraint, so this is JSDoc-only. (Tag
+    // spelling follows this host's local convention — `@integer`, not
+    // Zig's `@sjon-integer` — which these JSDoc lines already use.)
+    if (bounds.multipleOf) lines.push(`@multiple-of ${bounds.multipleOf.value}`);
   }
   const sb = stringBoundsOf(key.value);
   if (sb) {
@@ -371,6 +402,12 @@ function buildKeyJSDoc(key: ModelKey): string {
     if (sb.maxLen != null) lines.push(`@maxLength ${sb.maxLen}`);
     if (sb.pattern) lines.push(`@pattern ${sb.pattern}`);
     if (sb.format) lines.push(`@format ${sb.format}`);
+  }
+  if (key.requires.length > 0) {
+    // Not expressible in a plain interface — it would need a discriminated
+    // union over which keys are present. Tag matches the Zig exporter's
+    // byte-for-byte, since the kit-xor golden is compared directly.
+    lines.push(`@sjon-requires ${key.requires.join(', ')}`);
   }
   const cr = crossRefOf(key.value);
   if (cr) {
@@ -383,7 +420,7 @@ function buildKeyJSDoc(key: ModelKey): string {
         ? `name-key=${cr.nameKey} acyclic=${cr.acyclic}`
         : `provider=${cr.provider} source-key=${cr.sourceKey}`;
     lines.push(
-      `@sjon-cross-ref target=${cr.targetForm} ${route}` +
+      `@sjon-cross-ref target=${cr.targets.join(' | ')} ${route}` +
         (cr.scopeForm ? ` scope-form=${cr.scopeForm}` : ''),
     );
   }
@@ -394,8 +431,14 @@ function buildKeyJSDoc(key: ModelKey): string {
     }
   }
   if (lines.length === 0) return '';
-  if (lines.length === 1) return `/** ${lines[0]} */\n`;
-  return '/**\n' + lines.map((l) => ` * ${l}`).join('\n') + '\n */\n';
+  // Block form whenever any line is an `@`-annotation, single-line only for
+  // a lone description — mirroring `TsTypes.zig`'s `use_block` rule. The two
+  // emitters are byte-compared on the `kit` / `kit-xor` goldens (modulo the
+  // `:description` this port does not read), so the *shape* has to agree and
+  // not just the content. Continuation lines carry `indent`, as Zig's do.
+  const hasAnnotation = lines.some((l) => l.startsWith('@'));
+  if (lines.length === 1 && !hasAnnotation) return `${indent}/** ${lines[0]} */\n`;
+  return `${indent}/**\n` + lines.map((l) => `${indent} * ${l}`).join('\n') + `\n${indent} */\n`;
 }
 
 function writeShape(shape: ModelValueShape, ctx: EmitContext): string {
@@ -424,11 +467,19 @@ function writeShape(shape: ModelValueShape, ctx: EmitContext): string {
     case 'symbol':
       return 'Symbol_';
     case 'symbol_members':
-    case 'symbol_members_rich': {
-      const names =
-        shape.kind === 'symbol_members' ? shape.members : shape.members.map((m) => m.name);
-      return names.map((n) => `Symbol_<"${n}">`).join(' | ');
-    }
+      return shape.members.map((n) => `Symbol_<"${n}">`).join(' | ');
+    case 'symbol_members_rich':
+      // A digit-leading member breaks the brand: a document writes `2d` as
+      // a unit-bearing number, so its alternative is the `[magnitude,
+      // unit]` tuple `number_with_unit` already uses. `Symbol_<"2d">` here
+      // would make the `.d.ts` reject a document the validator accepts.
+      return shape.members
+        .map((m) =>
+          m.numericSpelling !== undefined
+            ? `readonly [${m.numericSpelling.magnitude}, "${m.numericSpelling.unit}"]`
+            : `Symbol_<"${m.name}">`,
+        )
+        .join(' | ');
     case 'string_members':
     case 'string_members_rich': {
       const names =
@@ -473,7 +524,9 @@ function writeShape(shape: ModelValueShape, ctx: EmitContext): string {
     case 'expr':
       return 'SjonExpr';
     case 'cross_ref':
-      return `CrossRef<"${shape.crossRef.targetForm}">`;
+      // A group is a union of brands, one per target — the honest TS
+      // reading of "this name may come from either form".
+      return shape.crossRef.targets.map((t) => `CrossRef<"${t}">`).join(' | ');
     case 'union_of':
       return shape.alternatives.map((a) => writeShape(a.shape, ctx)).join(' | ');
     case 'unresolved_named':

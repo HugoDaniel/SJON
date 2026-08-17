@@ -470,6 +470,16 @@ fn makeLeaf(
     switch (tok.tag) {
         .number => {
             const slice = source[tok.start..tok.end];
+
+            // Hex is an integer literal and nothing else — no unit, no
+            // fraction, no exponent — so it takes the exact-integer ladder
+            // directly and never reaches `splitNumberAndUnit`, whose
+            // decimal walk would read `0xFF` as the value `0` with unit
+            // `xFF`. That reading is what made a mask typo silent.
+            if (splitHexLexeme(slice)) |hex| {
+                return try makeHexLeaf(b, hex, span, tok, diagnostics, frames, a);
+            }
+
             const split = splitNumberAndUnit(slice);
             const cleaned = try stripUnderscores(a, split.numeric);
 
@@ -605,6 +615,56 @@ fn makeLeaf(
         },
         else => return null,
     }
+}
+
+/// Build the leaf for a hex-integer lexeme. Mirrors the decimal
+/// exact-integer ladder in `makeLeaf`: `i64` first, `u64` for magnitudes
+/// in (i64.max, u64.max], and only true overflow falls through to an f64
+/// fallback that emits `number_overflow_exact_integer`. There is no
+/// float-shaped branch to take first — a hex lexeme is integer-shaped by
+/// construction.
+///
+/// Never returns null: a lexer-produced hex lexeme always yields a node,
+/// so the tree stays well-formed even on overflow.
+fn makeHexLeaf(
+    b: *Ast.TreeBuilder,
+    hex: HexLexeme,
+    span: Span,
+    tok: Token,
+    diagnostics: *std.ArrayList(Ast.Diagnostic),
+    frames: []const Frame,
+    a: Allocator,
+) Allocator.Error!?Ast.NodeIndex {
+    const spell = try renderHex(a, hex);
+
+    if (std.fmt.parseInt(i64, spell.signed, 16)) |iv| {
+        return try b.appendNumberI64(iv, span);
+    } else |err| switch (err) {
+        error.Overflow => {
+            // Positive overflow may still fit in u64. `spell.signed` has
+            // no sign here, so it doubles as the magnitude.
+            if (!hex.negative) {
+                if (std.fmt.parseInt(u64, spell.signed, 16)) |uv| {
+                    return try b.appendNumberU64(uv, span);
+                } else |_| {
+                    // Falls through to overflow diagnostic + f64.
+                }
+            }
+            try emitOverflow(diagnostics, a, frames, tok);
+        },
+        error.InvalidCharacter => {
+            // Unreachable via the lexer, which admits only `[0-9a-fA-F_]`
+            // after the prefix and whose underscores `renderHex` removed.
+            // Defensive: fall through to the f64 read, which has its own
+            // diagnostic path.
+        },
+    }
+
+    const v = std.fmt.parseFloat(f64, spell.hex_float) catch {
+        try emit(diagnostics, a, frames, tok, "invalid number literal", true);
+        return try b.appendNumber(0, span);
+    };
+    return try b.appendNumber(v, span);
 }
 
 fn flushPendingFlag(
@@ -967,6 +1027,58 @@ const NumberSplit = struct {
     unit: []const u8,
 };
 
+/// A hex-integer lexeme, split into its sign and the digit run with the
+/// `0x` / `0X` prefix removed. Digit-group underscores are still present —
+/// `renderHex` strips them, the same way the decimal path does.
+const HexLexeme = struct {
+    negative: bool,
+    /// At least one `[0-9a-fA-F_]` byte; the lexer's `.hex_first_digit`
+    /// state guarantees the first one is a digit.
+    digits: []const u8,
+};
+
+/// Recognise a hex-integer lexeme: `[-] 0 (x|X) hex-digit …`. Returns null
+/// for every other number shape, including a decimal that merely starts
+/// with `0` and a `0` carrying a unit that begins with `x` — the lexer's
+/// bare-zero gate means it never emits the latter, but this is a re-read of
+/// bytes, not of lexer state, so it re-derives the shape rather than
+/// assuming it.
+///
+/// The returned slices alias `slice`.
+fn splitHexLexeme(slice: []const u8) ?HexLexeme {
+    var i: usize = 0;
+    const negative = slice.len > 0 and slice[0] == '-';
+    if (negative) i += 1;
+    // `0x` plus at least one digit.
+    if (slice.len < i + 3) return null;
+    if (slice[i] != '0') return null;
+    if (slice[i + 1] != 'x' and slice[i + 1] != 'X') return null;
+    return .{ .negative = negative, .digits = slice[i + 2 ..] };
+}
+
+/// A hex lexeme rendered into the two spellings the standard library
+/// wants, both underscore-free:
+///
+///   * `signed` — `-FF`, for `parseInt` at base 16. `parseInt` rejects the
+///     `0x` prefix at an explicit base, so it is dropped here.
+///   * `hex_float` — `-0xFFp0`, for `parseFloat`, which needs the prefix
+///     *and* a binary exponent. Only the overflow fallback reads it, and
+///     it is correctly rounded, so the approximate value agrees with a
+///     host that goes through a bignum.
+const HexSpellings = struct {
+    signed: []const u8,
+    hex_float: []const u8,
+};
+
+fn renderHex(a: Allocator, hex: HexLexeme) Allocator.Error!HexSpellings {
+    const digits = try stripUnderscores(a, hex.digits);
+    const sign: []const u8 = if (hex.negative) "-" else "";
+    return .{
+        .signed = try std.mem.concat(a, u8, &.{ sign, digits }),
+        .hex_float = try std.mem.concat(a, u8, &.{ sign, "0x", digits, "p0" }),
+    };
+}
+
 /// Walk a `.number` token slice produced by the lexer and split it into
 /// the numeric portion (digits / `.` / `_` / valid `eEXP`) and the unit
 /// suffix (ASCII letters, or a single trailing `%`). Mirrors the lexer's
@@ -1018,9 +1130,16 @@ inline fn isDigit(c: u8) bool {
 /// differ in the last bit. Any unit suffix is dropped — the GPU consumer
 /// wants the magnitude.
 ///
-/// O(n) in the lexeme length; allocates a transient underscore-stripping
-/// buffer (freed before return) — no tree mutation, no retained state.
-/// `T` must be a float or integer type; anything else is a compile error.
+/// A hex lexeme is read in base 16 off its digit run. This is not an
+/// optimisation but a correctness requirement: the decimal walk sees `0xFF`
+/// as the numeric portion `0` plus the unit `xFF`, so before hex literals
+/// existed this function returned `0` for every mask an author wrote — the
+/// same silent zero, one layer down.
+///
+/// O(n) in the lexeme length; allocates transient scratch for the
+/// underscore strip and, on the hex path, the two re-spellings — all freed
+/// before return, no tree mutation, no retained state. `T` must be a float
+/// or integer type; anything else is a compile error.
 ///
 /// Errors:
 ///   * `error.Overflow` — value outside `T`'s *integer* range (`parseInt`
@@ -1042,8 +1161,28 @@ pub fn parseNumberAs(
     const tag = tree.tagOf(idx);
     std.debug.assert(tag.isNumber() or tag == .number_with_unit);
 
+    comptime switch (@typeInfo(T)) {
+        .float, .int => {},
+        else => @compileError("parseNumberAs supports float/int repr types only, got " ++ @typeName(T)),
+    };
+
     const span = tree.spanOf(idx);
     const slice = tree.source[span.start..span.end];
+
+    if (splitHexLexeme(slice)) |hex| {
+        // The two hex spellings need three transient allocations; an arena
+        // keeps the frees to one `deinit` instead of three `defer`s over
+        // slices whose lengths the caller GPA would have to reconstruct.
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const spell = try renderHex(arena.allocator(), hex);
+        return switch (@typeInfo(T)) {
+            .float => std.fmt.parseFloat(T, spell.hex_float),
+            .int => std.fmt.parseInt(T, spell.signed, 16),
+            else => unreachable, // guarded by the comptime switch above
+        };
+    }
+
     const numeric = splitNumberAndUnit(slice).numeric;
 
     // Strip digit-group underscores into a scratch buffer (mirrors
@@ -1063,7 +1202,7 @@ pub fn parseNumberAs(
     return switch (@typeInfo(T)) {
         .float => std.fmt.parseFloat(T, cleaned),
         .int => std.fmt.parseInt(T, cleaned, 10),
-        else => @compileError("parseNumberAs supports float/int repr types only, got " ++ @typeName(T)),
+        else => unreachable, // guarded by the comptime switch above
     };
 }
 
@@ -1185,6 +1324,106 @@ test "parse number: negative overflow below i64.min emits .number_overflow_exact
         if (d.code == .number_overflow_exact_integer) saw_code = true;
     }
     try testing.expect(saw_code);
+}
+
+test "parse hex: values, case, sign, and underscores" {
+    const a = testing.allocator;
+    var tree = try parse(a, "0xFF 0Xff 0xFFFF_FFFF -0x10 0x0 0xdeadBEEF");
+    defer tree.deinit();
+    try testing.expect(!tree.hasErrors());
+    try testing.expectEqual(@as(usize, 6), tree.root.len);
+    // Every one of them lands on the exact-integer tag, not `.number` and
+    // not `.number_with_unit` — a hex literal has no unit and no f64 step.
+    for (tree.root) |idx| try testing.expectEqual(.number_i64, tree.tagOf(idx));
+    try testing.expectEqual(@as(i64, 255), tree.numberI64Of(tree.root[0]));
+    try testing.expectEqual(@as(i64, 255), tree.numberI64Of(tree.root[1]));
+    try testing.expectEqual(@as(i64, 4294967295), tree.numberI64Of(tree.root[2]));
+    try testing.expectEqual(@as(i64, -16), tree.numberI64Of(tree.root[3]));
+    try testing.expectEqual(@as(i64, 0), tree.numberI64Of(tree.root[4]));
+    try testing.expectEqual(@as(i64, 3735928559), tree.numberI64Of(tree.root[5]));
+}
+
+test "parse hex: width boundaries walk the same i64 → u64 → f64 ladder as decimal" {
+    const a = testing.allocator;
+    {
+        // i64.max, then i64.max + 1 — the second crosses into u64.
+        var tree = try parse(a, "0x7FFFFFFFFFFFFFFF 0x8000000000000000");
+        defer tree.deinit();
+        try testing.expect(!tree.hasErrors());
+        try testing.expectEqual(.number_i64, tree.tagOf(tree.root[0]));
+        try testing.expectEqual(std.math.maxInt(i64), tree.numberI64Of(tree.root[0]));
+        try testing.expectEqual(.number_u64, tree.tagOf(tree.root[1]));
+        try testing.expectEqual(@as(u64, 1) << 63, tree.numberU64Of(tree.root[1]));
+    }
+    {
+        // u64.max exactly, and i64.min via its negative hex spelling.
+        var tree = try parse(a, "0xFFFFFFFFFFFFFFFF -0x8000000000000000");
+        defer tree.deinit();
+        try testing.expect(!tree.hasErrors());
+        try testing.expectEqual(.number_u64, tree.tagOf(tree.root[0]));
+        try testing.expectEqual(std.math.maxInt(u64), tree.numberU64Of(tree.root[0]));
+        try testing.expectEqual(.number_i64, tree.tagOf(tree.root[1]));
+        try testing.expectEqual(std.math.minInt(i64), tree.numberI64Of(tree.root[1]));
+    }
+}
+
+test "parse hex: u64.max + 1 reuses number_overflow_exact_integer and the f64 fallback" {
+    // The decimal path's overflow arm, reached in hex. `0x1_0000…` is 2^64,
+    // one past the exact-integer ceiling, so the tree keeps an approximate
+    // f64 and says so — no new diagnostic code for hex.
+    const a = testing.allocator;
+    var tree = try parse(a, "0x1_0000000000000000");
+    defer tree.deinit();
+    try testing.expectEqual(.number, tree.tagOf(tree.root[0]));
+    try testing.expectEqual(@as(f64, 18446744073709551616.0), tree.numberOf(tree.root[0]));
+    var saw_code = false;
+    for (tree.diagnostics) |d| {
+        if (d.code == .number_overflow_exact_integer) saw_code = true;
+    }
+    try testing.expect(saw_code);
+}
+
+test "parse hex: a bare prefix is one diagnostic, not a silent zero" {
+    // `0x` reaches the parser as an `.invalid` token spanning the prefix
+    // (see `Lexer`), so this is the "invalid token" path — one diagnostic,
+    // and the `GG` tail lexes as an ordinary symbol rather than cascading.
+    const a = testing.allocator;
+    var tree = try parse(a, "(mask :bits 0xGG)");
+    defer tree.deinit();
+    try testing.expect(tree.hasErrors());
+    var errs: usize = 0;
+    for (tree.diagnostics) |d| {
+        if (d.severity == .err) errs += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), errs);
+}
+
+test "parse hex: the neighbours the bare-zero gate protects still carry units" {
+    const a = testing.allocator;
+    var tree = try parse(a, "10x 0.5x 1X 0_x");
+    defer tree.deinit();
+    try testing.expect(!tree.hasErrors());
+    for (tree.root) |idx| try testing.expectEqual(.number_with_unit, tree.tagOf(idx));
+    try testing.expectEqualStrings("x", tree.numberWithUnitOf(tree.root[0]).unit);
+    try testing.expectEqualStrings("x", tree.numberWithUnitOf(tree.root[1]).unit);
+    try testing.expectEqualStrings("X", tree.numberWithUnitOf(tree.root[2]).unit);
+    try testing.expectEqualStrings("x", tree.numberWithUnitOf(tree.root[3]).unit);
+}
+
+test "parseNumberAs: reads a hex lexeme in base 16, not as zero-with-unit" {
+    // The regression this guards is one layer below the parser: the decimal
+    // walk splits `0xFFFFFFFF` into the numeric portion `0` and the unit
+    // `xFFFFFFFF`, so a `:repr u32` read used to come back 0 for every mask.
+    const a = testing.allocator;
+    var tree = try parse(a, "0xFFFFFFFF 0xFF -0x10");
+    defer tree.deinit();
+    try testing.expectEqual(@as(u32, 4294967295), try parseNumberAs(u32, &tree, a, tree.root[0]));
+    try testing.expectEqual(@as(u16, 255), try parseNumberAs(u16, &tree, a, tree.root[1]));
+    try testing.expectEqual(@as(i32, -16), try parseNumberAs(i32, &tree, a, tree.root[2]));
+    // The float arm goes through hex-float syntax and must agree.
+    try testing.expectEqual(@as(f32, 255.0), try parseNumberAs(f32, &tree, a, tree.root[1]));
+    // And an over-range integer read still signals, same as decimal.
+    try testing.expectError(error.Overflow, parseNumberAs(u16, &tree, a, tree.root[0]));
 }
 
 test "parseNumberAs f32: single-rounds the slice, beating the f64 double-round" {

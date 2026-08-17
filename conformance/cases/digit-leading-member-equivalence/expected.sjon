@@ -1,0 +1,6 @@
+; The first three are clean. `2` is `wrong_underlying` (a bare magnitude is
+; not a name), and `2.5d` is `not_member` (a real unit-bearing value in a
+; slot that accepts them — it just is not one of the three).
+(diagnostics
+  (diagnostic :code wrong_underlying :path [texture dimension])
+  (diagnostic :code not_member :path [texture dimension]))

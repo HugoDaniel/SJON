@@ -43,7 +43,7 @@ fn audioSchemaPlugin() sjon.Plugin.Plugin {
     const phrase_name_kind: sjon.Plugin.ValueKind = .{
         .name = "phrase-name",
         .underlying = .symbol,
-        .cross_ref = .{ .target_form = "phrase" },
+        .cross_ref = .{ .targets = &.{"phrase"} },
     };
     const phrase_seq_kind: sjon.Plugin.ValueKind = .{
         .name = "phrase-sequence",
@@ -78,7 +78,7 @@ fn crossRefDirectPlugin() sjon.Plugin.Plugin {
     const phrase_name_kind: sjon.Plugin.ValueKind = .{
         .name = "phrase-name",
         .underlying = .symbol,
-        .cross_ref = .{ .target_form = "phrase" },
+        .cross_ref = .{ .targets = &.{"phrase"} },
     };
     return .{
         .name = "audio",
@@ -3065,7 +3065,7 @@ test "cross-doc: per-tree default isolates references; same-doc edit updates own
     const phrase_name_kind: sjon.Plugin.ValueKind = .{
         .name = "phrase-name",
         .underlying = .symbol,
-        .cross_ref = .{ .target_form = "phrase" },
+        .cross_ref = .{ .targets = &.{"phrase"} },
     };
     const phrase_seq_kind: sjon.Plugin.ValueKind = .{
         .name = "phrase-sequence",
@@ -3726,7 +3726,7 @@ test "cross-ref completion: empty when target form doesn't resolve" {
     const ghost_kind: sjon.Plugin.ValueKind = .{
         .name = "ghost-name",
         .underlying = .symbol,
-        .cross_ref = .{ .target_form = "unknown-form" },
+        .cross_ref = .{ .targets = &.{"unknown-form"} },
     };
     const plugin: sjon.Plugin.Plugin = .{
         .name = "ghost",
@@ -3789,7 +3789,7 @@ fn providerCrossRefPlugin() sjon.Plugin.Plugin {
         .value_kinds = &.{.{
             .name = "uniform-name",
             .underlying = .symbol,
-            .cross_ref = .{ .target_form = "shader", .provider = "lines" },
+            .cross_ref = .{ .targets = &.{"shader"}, .provider = "lines" },
         }},
         .forms = &.{
             .{
@@ -4334,7 +4334,7 @@ fn crossRefScopedPlugin() sjon.Plugin.Plugin {
     const phrase_name_kind: sjon.Plugin.ValueKind = .{
         .name = "phrase-name",
         .underlying = .symbol,
-        .cross_ref = .{ .target_form = "phrase", .scope_form = "piece" },
+        .cross_ref = .{ .targets = &.{"phrase"}, .scope_form = "piece" },
     };
     const phrase_seq_kind: sjon.Plugin.ValueKind = .{
         .name = "phrase-sequence",
@@ -4563,7 +4563,7 @@ test "scoped cross-ref completion: scope_form that doesn't resolve returns empty
     const phantom_name_kind: sjon.Plugin.ValueKind = .{
         .name = "phrase-name",
         .underlying = .symbol,
-        .cross_ref = .{ .target_form = "phrase", .scope_form = "phantom" },
+        .cross_ref = .{ .targets = &.{"phrase"}, .scope_form = "phantom" },
     };
     const plugin: sjon.Plugin.Plugin = .{
         .name = "audio",
@@ -5358,7 +5358,7 @@ test "form-valued slot completion: emits a snippet per allowed head" {
     const shape_kind: sjon.Plugin.ValueKind = .{
         .name = "shape",
         .underlying = .form,
-        .heads = .{ .names = &.{ "rect", "circle" } },
+        .heads = .{ .heads = &.{ .{ .name = "rect" }, .{ .name = "circle" } } },
     };
     const plugin: sjon.Plugin.Plugin = .{
         .name = "draw",
@@ -5415,7 +5415,7 @@ test "form-valued slot completion: unknown head still emits a bare snippet" {
     const shape_kind: sjon.Plugin.ValueKind = .{
         .name = "shape",
         .underlying = .form,
-        .heads = .{ .names = &.{"ghost"} },
+        .heads = .{ .heads = &.{.{ .name = "ghost" }} },
     };
     const plugin: sjon.Plugin.Plugin = .{
         .name = "draw",
@@ -7694,7 +7694,7 @@ test "semantic tokens colour a member that is also a cross-ref once" {
         .name = "tag",
         .underlying = .symbol,
         .members = .{ .members = &.{.{ .name = "p0" }} },
-        .cross_ref = .{ .target_form = "phrase" },
+        .cross_ref = .{ .targets = &.{"phrase"} },
     };
     const plugin: sjon.Plugin.Plugin = .{
         .name = "both",
@@ -8101,12 +8101,12 @@ fn extractSchemaPlugin() sjon.Plugin.Plugin {
     const phrase_inline: sjon.Plugin.ValueKind = .{
         .name = "phrase-inline",
         .underlying = .form,
-        .heads = .{ .names = &.{"phrase"} },
+        .heads = .{ .heads = &.{.{ .name = "phrase" }} },
     };
     const phrase_ref: sjon.Plugin.ValueKind = .{
         .name = "phrase-ref",
         .underlying = .symbol,
-        .cross_ref = .{ .target_form = "phrase" },
+        .cross_ref = .{ .targets = &.{"phrase"} },
     };
     const phrase_or_ref: sjon.Plugin.ValueKind = .{
         .name = "phrase-or-ref",
@@ -8116,12 +8116,12 @@ fn extractSchemaPlugin() sjon.Plugin.Plugin {
     const motif_inline: sjon.Plugin.ValueKind = .{
         .name = "motif-inline",
         .underlying = .form,
-        .heads = .{ .names = &.{"motif"} },
+        .heads = .{ .heads = &.{.{ .name = "motif" }} },
     };
     const motif_ref_scoped: sjon.Plugin.ValueKind = .{
         .name = "motif-ref-scoped",
         .underlying = .symbol,
-        .cross_ref = .{ .target_form = "motif", .scope_form = "piece" },
+        .cross_ref = .{ .targets = &.{"motif"}, .scope_form = "piece" },
     };
     const motif_or_ref_scoped: sjon.Plugin.ValueKind = .{
         .name = "motif-or-ref-scoped",

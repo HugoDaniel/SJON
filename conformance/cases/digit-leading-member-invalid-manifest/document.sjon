@@ -1,0 +1,45 @@
+; The four load-time rejections. `member-name` widens the declaration slot
+; to "symbol or number", which is all a type can say; *which* numbers are
+; spellings is a semantic question, so the loader owns it — the same split
+; `(fixed N)` uses.
+;
+;   * `bad-unitless` — a number with no unit. A bare magnitude is not a
+;     name, and accepting one would make `(member-set :values [1 2 3])`
+;     look like an enum of integers.
+;   * `bad-magnitude` — negative. Fractional and above-2^53 magnitudes are
+;     rejected the same way: the cap is the range where the canonical
+;     spelling has one text form in every host, which matters because the
+;     name reaches the exported JSON-Schema enum and the `.d.ts` union.
+;   * `bad-underlying` — on a `:string` underlying the members are string
+;     literals, so no numeric value can ever reach them. Dead declaration,
+;     said out loud rather than left looking effective.
+;   * `bad-duplicate` — `2d` and `02d` canonicalise to the same name *and*
+;     the same identity. The check is on the pair, since that is what the
+;     validator matches on.
+;   * `bad-duplicate-compact` — the same collision in the *other* authoring
+;     shape. Both spellings of a member set run the same scan; the compact
+;     one is the shape most schemas use, and it is where canonicalisation
+;     makes a duplicate hardest to see by eye.
+;
+; A bare literal stands in for a document body: the plugin failed to load,
+; so the host drops it entirely, and any `(texture …)` here would add an
+; `unknown_form` cascade that says nothing about the declarations.
+(plugin :name gpu :version "1.0.0" :sjon "1.3"
+  (value-kind :name bad-unitless :underlying symbol
+    :members (member-set :values [1 2 3]))
+
+  (value-kind :name bad-magnitude :underlying symbol
+    :members (member-set (member :name -1d)))
+
+  (value-kind :name bad-underlying :underlying string
+    :members (member-set (member :name 2d)))
+
+  (value-kind :name bad-duplicate :underlying symbol
+    :members (member-set
+      (member :name 2d)
+      (member :name 02d)))
+
+  (value-kind :name bad-duplicate-compact :underlying symbol
+    :members (member-set :values [2d 2.0d])))
+
+42

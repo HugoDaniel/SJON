@@ -118,8 +118,20 @@ export function sjonToken(stream: StringStream, state: SjonStreamState): string 
     return 'punctuation';
   }
 
-  // Numbers: optional sign, decimal, exponent, and a rejected-but-tolerated unit.
-  if (stream.match(/^-?\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?(?:[a-zA-Z]+|%)?/)) {
+  // Numbers: optional sign, then either a hex integer or a decimal with an
+  // optional exponent and a rejected-but-tolerated unit. The hex branch goes
+  // FIRST: the decimal branch would match `0x1F` as `0` plus the unit `x`
+  // and leave `1F` to colour as a second number, which is what the lexer
+  // itself used to do before hex literals existed.
+  //
+  // The unit's `(?:-[a-zA-Z]+)*` tail is the lexer's hyphen rule: a `-`
+  // continues the unit only before another letter, so `2d-array` is one
+  // number and `1em-2` stays `1em` then `-2`.
+  if (
+    stream.match(
+      /^-?(?:0[xX][0-9a-fA-F][0-9a-fA-F_]*|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?(?:[a-zA-Z]+(?:-[a-zA-Z]+)*|%)?)/,
+    )
+  ) {
     state.afterParen = false;
     return 'number';
   }

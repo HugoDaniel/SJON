@@ -76,6 +76,52 @@
               }
             }
           ]
+        },
+        {
+          "name": "anchor",
+          "description": "A point on a phrase. The offset and length are measured FROM :target, so neither means anything without it.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "name",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            },
+            {
+              "name": "target",
+              "optional": true,
+              "description": "The phrase this anchor is measured against.",
+              "value": {
+                "kind": "symbol"
+              }
+            },
+            {
+              "name": "offset",
+              "optional": true,
+              "description": "Distance from :target.",
+              "value": {
+                "kind": "number"
+              },
+              "requires": [
+                "target"
+              ]
+            },
+            {
+              "name": "length",
+              "optional": true,
+              "description": "Extent from :offset.",
+              "value": {
+                "kind": "number"
+              },
+              "requires": [
+                "target"
+              ]
+            }
+          ]
         }
       ],
       "value_kinds": []

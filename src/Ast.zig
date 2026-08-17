@@ -776,6 +776,110 @@ pub const Diagnostic = struct {
         /// target. Span `{0,0}`, path `[<plugin>, <kind>, cross-ref]` on
         /// the losing kind. Wire-stable: appended last.
         cross_ref_target_collapse,
+        /// A `:numeric (numeric-bounds … :multiple-of N)` value that is not
+        /// an exact multiple of `N` — the alignment constraint (offsets of
+        /// 4 or 256, sizes of 4) that a range and an integrality flag
+        /// together cannot express.
+        ///
+        /// Checked *after* `:integer` and after the range bounds, so
+        /// `250.5` under `:integer true :multiple-of 4` reads as "not an
+        /// integer" and `-4` under `:min 0 :multiple-of 4` reads as "below
+        /// minimum" — in both cases the more basic violation is the one
+        /// worth reporting. Emitted by both walkers through the shared
+        /// `checkNumericBoundsValue`.
+        ///
+        /// Divisibility is decided in **exact integer space** whenever the
+        /// value and the divisor are both integral, so a `u64`/`i64` above
+        /// 2^53 answers correctly where an f64 remainder would not. A
+        /// fractional divisor falls back to an f64 remainder against a
+        /// relative epsilon, and the loader warns at the declaration —
+        /// binary floating point has no exact answer there, and every
+        /// alignment rule uses an integer divisor anyway. Wire-stable:
+        /// appended last.
+        number_not_multiple,
+        /// A key carrying `(key … :requires [b c])` is present, but one or
+        /// more of the keys it names is absent. The message lists every
+        /// absent requirement, so a key with three unmet dependencies
+        /// produces one diagnostic naming three, not three diagnostics.
+        ///
+        /// The third inter-key mechanism, and the only one about
+        /// *presence implying presence*: `exclusive-group` bounds how many
+        /// of a set may appear, `(variant …)` gates keys on the
+        /// discriminant's **value**, and this gates one key's requirement
+        /// on another key's presence. One-directional — an absent
+        /// dependent key constrains nothing.
+        ///
+        /// Emitted at the form's head span with the form's path, matching
+        /// the other end-of-form sweeps, by both walkers. Presence follows
+        /// the same rule exclusive groups use: author-written on the
+        /// binary path, and author-written *or* overlay-defaulted on the
+        /// tree path when axis C is on. Suppressed by `:open true`, like
+        /// every other closed-form shape rule. Wire-stable: appended last.
+        dependent_key_missing,
+        /// Severity `.warning`. A symbol in a `:underlying union` slot is a
+        /// registered name in **two or more** of the union's cross-ref-backed
+        /// alternatives, so which entity the slot denotes is decided by the
+        /// order the alternatives were declared in.
+        ///
+        /// The union's semantics are unchanged and the document still
+        /// validates: first match still wins, and the winner is still the
+        /// earliest accepting alternative. What this reports is that a second
+        /// reading exists — duplicate-name detection is per-target, so two
+        /// forms of *different* kinds may each define `same` without either
+        /// bucket seeing a collision. A host that resolves the reference by
+        /// its own table rather than by alternative order will disagree with
+        /// the validator, silently. That is the defect; the repair is to
+        /// rename one declaration or split the slot.
+        ///
+        /// Deliberately narrow. Gated on **cross-ref-backed** alternatives
+        /// because a union whose halves overlap on plain values (the
+        /// `scalar-or-ref-shape` desugar is exactly that) is *designed* for
+        /// first-match, and flagging every overlap would bury the signal.
+        /// Only when both readings pick out different *named entities in the
+        /// document* is the order load-bearing in a way the author did not
+        /// choose. Silent when the winning alternative is not itself
+        /// cross-ref-backed — the slot then denotes no entity at all — and
+        /// silent for a poisoned bucket, whose members nobody could compute
+        /// and which therefore has no declaration to point at.
+        ///
+        /// Emitted at the value's span by both walkers, as one of the
+        /// post-match advisories. Wire-stable: appended last.
+        union_ambiguous,
+        /// A form carries more positional children of one head than its
+        /// `:positional` head-set allows: `(head :name fragment :max 1)`
+        /// met a second `(fragment …)`.
+        ///
+        /// Emitted at the **offending child** — the one that crosses the
+        /// ceiling — with that child's positional path step, not at the
+        /// parent. That is what makes it actionable in an editor (the
+        /// squiggle is on the line to delete), and it is what the
+        /// single-pass binary walker can do without rewinding: the count
+        /// crosses `max` exactly once, mid-stream. Exactly one diagnostic
+        /// per form no matter how far over the ceiling the author went;
+        /// the crossing child names the real count so the message stays
+        /// honest.
+        ///
+        /// Unaffected by `:open`. A form that declares
+        /// `:positional <bounded-kind>` has opted into the count; `:open`
+        /// widens the *keyword* surface, and its sibling positional rules
+        /// — `not_head_member`, `duplicate_positional_flag` — already fire
+        /// on open forms for the same reason. Wire-stable: appended last.
+        positional_too_many,
+        /// A form carries fewer positional children of one head than its
+        /// `:positional` head-set requires: `(head :name vertex :min 1)`
+        /// saw none.
+        ///
+        /// Inherently an end-of-children fact, so it lands at the parent
+        /// form's head span with the parent's path — the same place
+        /// `missing_required_key` lands, and for the same reason: there is
+        /// no child to point at. One diagnostic per unsatisfied head, each
+        /// naming the head, the floor, and the count actually found.
+        ///
+        /// Unaffected by `:open`, per `positional_too_many` above. This is
+        /// the one end-of-form sweep that is not about keywords, which is
+        /// why it runs before the `open` short-circuit that suppresses all
+        /// the others. Wire-stable: appended last.
+        positional_missing,
     };
 
     /// Deep-copy this diagnostic into `a`: `message` and every `path`

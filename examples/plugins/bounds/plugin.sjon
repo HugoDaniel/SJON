@@ -6,6 +6,8 @@
 ;   * `big`    — exact-int `:max 9007199254740993` (> 2^53; triggers
 ;                `x-sjon-exact-bound.max` annotation and the
 ;                `numeric_bound_exceeds_double_range` info warning)
+;   * `offset` — `:multiple-of 256` (divisibility; the one bound JSON
+;                Schema expresses natively but TS cannot express at all)
 ;   * `email`  — string with `:format email`
 ;   * `slug`   — string with `:min-len 3 :max-len 32 :pattern "^[a-z][a-z0-9-]*$"`
 ;   * `uri`    — string with `:format uri`
@@ -38,6 +40,11 @@
     :description "Integer bounded above by ~10^16 to exercise the >2^53 annotation. (At this magnitude the f64 wire value loses ~3 bits of precision; `x-sjon-exact-bound.max` carries the round-tripped digit string so SJON-aware tooling can recover exact intent.)"
     :underlying number
     :numeric (numeric-bounds :min 0 :max 99999999999999999 :integer true))
+
+  (value-kind :name aligned-offset
+    :description "Byte offset aligned to a 256-byte boundary — the constraint a range and an integrality flag cannot express between them."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :integer true :multiple-of 256))
 
   (value-kind :name email-string
     :description "RFC-5322 email."
@@ -80,4 +87,5 @@
     (key :name score :type score :optional true)
     (key :name ratio :type ratio :optional true)
     (key :name visits :type count :optional true)
-    (key :name big-id :type big :optional true)))
+    (key :name big-id :type big :optional true)
+    (key :name offset :type aligned-offset :optional true)))

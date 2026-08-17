@@ -1,0 +1,31 @@
+; The reject side, and the two counting rules that go with it.
+;
+; One diagnostic per unsatisfied *dependent* key: the third entry writes both
+; `:offset` and `:size` without `:buffer`, so it reports twice — once for
+; each key whose requirement went unmet.
+;
+; But one diagnostic per dependent key even when *several* of its
+; requirements are absent: `(span)` requires three keys and names all three
+; in a single message rather than complaining three times. A key with three
+; unmet dependencies has one problem, not three.
+(plugin :name gfx :version "1.0.0" :sjon "1.3"
+  (value-kind :name byte-count :underlying number
+    :numeric (numeric-bounds :min 0 :integer true))
+
+  (form :name entry
+    (key :name binding :type number     :optional false)
+    (key :name buffer  :type symbol     :optional true)
+    (key :name offset  :type byte-count :optional true :requires [buffer])
+    (key :name size    :type byte-count :optional true :requires [buffer]))
+
+  (form :name span
+    (key :name start :type byte-count :optional true :requires [origin unit scale])
+    (key :name origin :type symbol :optional true)
+    (key :name unit   :type symbol :optional true)
+    (key :name scale  :type number :optional true)))
+
+(entry :binding 0 :offset 256)             ; one unmet dependent key
+(entry :binding 1 :offset 256 :size 64)    ; two unmet dependent keys
+
+(span :start 8)                            ; one key, three absent requirements
+(span :start 8 :origin here)               ; two still absent — one diagnostic

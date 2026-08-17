@@ -12,6 +12,13 @@
 //   [info cross_ref_annotation_only] value-kind `phrase-ref` cross-ref annotation surfaces target-form=`phrase` name-key=`name` acyclic=false scope-form=`piece`; none are enforceable by JSON Schema
 //   [warn cross_ref_unenforceable] value-kind `uniform-ref` cross-ref: schema validates symbol shape only; the member set is extracted from each target's `:code` string by provider `uniforms` during validation, so it is not knowable at export time
 //   [info cross_ref_annotation_only] value-kind `uniform-ref` cross-ref annotation surfaces target-form=`shader` provider=`uniforms` source-key=`code` scope-form=``; none are enforceable by JSON Schema
+//   [info union_emitted_via_anyof] value-kind `pipeline-ref` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [warn cross_ref_unenforceable] value-kind `render-pipeline-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
+//   [info cross_ref_annotation_only] value-kind `render-pipeline-ref` cross-ref annotation surfaces target-form=`render-pipeline` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
+//   [warn cross_ref_unenforceable] value-kind `compute-pipeline-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
+//   [info cross_ref_annotation_only] value-kind `compute-pipeline-ref` cross-ref annotation surfaces target-form=`compute-pipeline` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
+//   [warn cross_ref_unenforceable] value-kind `pipeline-group-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
+//   [info cross_ref_annotation_only] value-kind `pipeline-group-ref` cross-ref annotation surfaces target-form=`render-pipeline | compute-pipeline` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
 
 export type Keyword<S extends string = string> = { readonly $kw: S };
 export type Symbol_<S extends string = string> = { readonly $sym: S };
@@ -65,6 +72,20 @@ export interface Xref_Shader {
   name: Symbol_;
 }
 
+/** A raster pipeline. One half of the ambiguous pair. */
+export interface Xref_RenderPipeline {
+  $form: "render-pipeline";
+  $ns: "xref";
+  name: Symbol_;
+}
+
+/** A compute pipeline. The other half. */
+export interface Xref_ComputePipeline {
+  $form: "compute-pipeline";
+  $ns: "xref";
+  name: Symbol_;
+}
+
 /** Directed edge between two `(node …)` declarations. */
 export interface Xref_Edge {
   $form: "edge";
@@ -74,9 +95,14 @@ export interface Xref_Edge {
    */
   from: CrossRef<"node">;
   /**
+   * @sjon-cross-ref target=`render-pipeline | compute-pipeline` name-key=`name` acyclic=false
+   */
+  "group-pipeline"?: CrossRef<"render-pipeline"> | CrossRef<"compute-pipeline">;
+  /**
    * @sjon-cross-ref target=`phrase` name-key=`name` acyclic=false scope-form=`piece`
    */
   phrase?: CrossRef<"phrase">;
+  pipeline?: CrossRef<"render-pipeline"> | CrossRef<"compute-pipeline">;
   /**
    * @sjon-cross-ref target=`node` name-key=`id` acyclic=true
    */
@@ -92,5 +118,7 @@ export type SjonXref =
   | Xref_Phrase
   | Xref_Piece
   | Xref_Shader
+  | Xref_RenderPipeline
+  | Xref_ComputePipeline
   | Xref_Edge;
 

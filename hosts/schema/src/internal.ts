@@ -29,3 +29,70 @@ export function isRecord(x: unknown): x is Record<string, unknown> {
 export function isFormObject(x: unknown): x is Record<string, unknown> {
   return isRecord(x) && '$form' in x;
 }
+
+// --- member spellings ------------------------------------------------------
+
+/** Largest member magnitude, mirroring `Plugin.NumericSpelling.MAX_SPELLING_VALUE`. */
+const MAX_MEMBER_MAGNITUDE = 2 ** 53;
+
+/** A unit tail: ASCII letters, hyphen-joined, or a single `%` (`Lexer.number_unit`). */
+const MEMBER_UNIT_RE = /^(?:[A-Za-z]+(?:-[A-Za-z]+)*|%)$/;
+
+/** A bare symbol spelling (`serialize.ts`'s `SYMBOL_RE`, kept in step by the tests). */
+const MEMBER_SYMBOL_RE = /^[A-Za-z_][\w-]*$/;
+
+/** True when `spelling` lexes as a unit-bearing number rather than a symbol. */
+export function isDigitLeadingMember(spelling: string): boolean {
+  const head = spelling[0];
+  return head !== undefined && head >= '0' && head <= '9';
+}
+
+/**
+ * Validate a `s.symbolMembers` spelling and return the text the manifest
+ * should declare. Throws on a spelling the engine's loader would reject, so a
+ * mistake surfaces where it was written rather than as an `invalid_manifest`
+ * diagnostic on a serialized manifest nobody has read yet.
+ *
+ * Digit-leading spellings are **canonicalised**, exactly as
+ * `ManifestLoader.parseMemberName` canonicalises them: `02d` declares the
+ * member `2d`, so that is what gets written. Rejecting a legal spelling would
+ * make this builder stricter than the language; silently writing `02d` would
+ * make the manifest's member name disagree with every diagnostic about it.
+ */
+export function canonicalMemberName(spelling: string): string {
+  if (spelling.length === 0) {
+    throw new Error('SJON s.symbolMembers: a member spelling cannot be empty.');
+  }
+  if (!isDigitLeadingMember(spelling)) {
+    if (!MEMBER_SYMBOL_RE.test(spelling)) {
+      throw new Error(
+        `SJON s.symbolMembers: "${spelling}" is neither a bare symbol nor a digit-leading spelling — ` +
+          'a symbol member starts with a letter or `_` and continues with letters, digits, `_`, or `-`.',
+      );
+    }
+    return spelling;
+  }
+  const split = /^([0-9][0-9_]*(?:\.[0-9_]+)?)(.*)$/.exec(spelling);
+  const magnitudeText = split?.[1];
+  const unit = split?.[2];
+  if (magnitudeText === undefined || unit === undefined || unit.length === 0) {
+    throw new Error(
+      `SJON s.symbolMembers: member spelling "${spelling}" carries no unit; ` +
+        'a digit-leading member needs a letter tail, e.g. `1d`.',
+    );
+  }
+  if (!MEMBER_UNIT_RE.test(unit)) {
+    throw new Error(
+      `SJON s.symbolMembers: member spelling "${spelling}" has the unit "${unit}", which is not ` +
+        'ASCII letters (optionally hyphen-joined) or a single `%` — it would not lex as one token.',
+    );
+  }
+  const magnitude = Number(magnitudeText.replaceAll('_', ''));
+  if (!Number.isInteger(magnitude) || magnitude > MAX_MEMBER_MAGNITUDE) {
+    throw new Error(
+      `SJON s.symbolMembers: member spelling "${spelling}" needs a whole magnitude at or below ` +
+        `${MAX_MEMBER_MAGNITUDE} — matching is integer-keyed, so a fractional one could never match.`,
+    );
+  }
+  return `${magnitude}${unit}`;
+}

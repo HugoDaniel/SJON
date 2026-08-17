@@ -1,0 +1,7 @@
+; The severities are the assertion. A host that made the fractional divisor
+; an error would reject a schema that works; one that made the zero divisor a
+; warning would go on to divide by it.
+(diagnostics
+  (diagnostic :code numeric_bounds_invalid :path [zero-divisor numeric multiple-of])
+  (diagnostic :code numeric_bounds_invalid :path [negative-divisor numeric multiple-of])
+  (diagnostic :code numeric_bounds_invalid :severity warning :path [quarter numeric multiple-of]))

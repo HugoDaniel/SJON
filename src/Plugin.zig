@@ -79,7 +79,7 @@ pub const MAX_KEYWORDS: usize = 16;
 /// Highest portable-manifest format version this host understands.
 /// Bumped on incompatible spec changes. `sjon_format_unsupported` fires
 /// when a manifest declares a strictly higher version.
-pub const SUPPORTED_SJON_FORMAT: []const u8 = "1.2";
+pub const SUPPORTED_SJON_FORMAT: []const u8 = "1.3";
 
 /// Description of one data-form constructor (e.g. `(scene …)`).
 ///
@@ -294,6 +294,25 @@ pub const KeySpec = struct {
     default: ?Default = null,
     /// Free-text help string surfaced by editor tooltips.
     description: []const u8 = "",
+    /// Sibling keys this key's presence demands. When this key is present
+    /// and any named key is absent, the validator emits
+    /// `dependent_key_missing` naming every absent one. Empty (the
+    /// default) means no dependency, and an *absent* key constrains
+    /// nothing — the rule is one-directional by construction, so mutual
+    /// dependence is two `requires` lists.
+    ///
+    /// Names resolve within the scope this key is declared in: a base key
+    /// names base keys, a variant key names that variant's keys or the
+    /// form's base keys (both are unconditionally in scope once the
+    /// variant is active). The loader rejects an unresolvable name, a
+    /// self-reference, a requirement that is already non-optional (it can
+    /// never fire), a requirement inside the same exclusive group (the
+    /// group says "at most one", this says "both"), and cycles.
+    ///
+    /// Like every other closed-form shape rule, this is suppressed by
+    /// `FormSpec.open` — both walkers return before the end-of-form
+    /// sweeps on an open form.
+    requires: []const []const u8 = &.{},
     /// When true, the validator's tree walk does not descend into a
     /// form-shaped value paired with this key — the value's head and
     /// inner contents are treated as opaque to the surrounding schema.
@@ -963,6 +982,18 @@ pub const ValueKind = struct {
         exclusive_min: bool = false,
         exclusive_max: bool = false,
         integer: bool = false,
+        /// Divisibility constraint: the value must be an exact multiple of
+        /// this bound. Carries a unit like `min` / `max`, under the same
+        /// byte-equality rule, so `:multiple-of 256b` beside `:min 0b` is
+        /// expressible. `null` = no divisibility constraint.
+        ///
+        /// The loader rejects zero and non-finite divisors
+        /// (`numeric_bounds_invalid`, error) and warns on a *fractional*
+        /// one, because the check runs in exact integer space only when
+        /// both the value and the divisor are integral — the alignment
+        /// case every GPU schema actually wants. See
+        /// `Validator.checkNumericBoundsValue`.
+        multiple_of: ?Bound = null,
 
         /// A bound value with optional unit. `unit` is borrowed from the
         /// schema arena (interned string-pool lifetime).
@@ -1043,20 +1074,121 @@ pub const ValueKind = struct {
             /// Optional replacement hint shown alongside the warning /
             /// hover when `deprecated == true`. Empty = generic prose.
             deprecation_message: []const u8 = "",
+            /// Set when this member's declared spelling is digit-leading
+            /// (`1d`, `2d`, `50%`) and therefore cannot be written as a
+            /// bare symbol — the lexer reads it as a unit-bearing number.
+            /// `name` still holds the spelling (`"2d"`), so diagnostics,
+            /// exports, and completions are unchanged in shape; this is
+            /// the **match key**, because the validator compares a parsed
+            /// `(value, unit)` pair rather than text. Two reasons for the
+            /// pair: the binary walker has no source text to compare
+            /// against, and the pair makes `2d`, `2.0d`, and `02d` the
+            /// same member for free.
+            ///
+            /// Null for ordinary symbol members, which is every member
+            /// declared before format 1.3. Meaningful only on a
+            /// `.symbol` underlying — the loader rejects it elsewhere.
+            numeric_spelling: ?NumericSpelling = null,
+        };
+
+        /// The parsed `(value, unit)` identity of a digit-leading member
+        /// spelling.
+        pub const NumericSpelling = struct {
+            /// The spelling's numeric portion, which the loader has
+            /// already checked is a non-negative integer at or below
+            /// `MAX_SPELLING_VALUE`. Integer-keyed on purpose: no f64
+            /// equality, and it is the range where every host's
+            /// number→text agrees, so the canonical `Member.name` the
+            /// loader derives is byte-identical across the four
+            /// exporters.
+            value: u64,
+            /// Unit suffix, interned in the schema arena. Never empty — a
+            /// unitless number is not a member spelling, and the loader
+            /// rejects one.
+            unit: []const u8,
+
+            /// 2^53, the f64 exact-integer ceiling. A member spelling is
+            /// an enum name, so nothing real comes close; the cap exists
+            /// so the value has one text form in every host rather than
+            /// diverging into exponent notation.
+            pub const MAX_SPELLING_VALUE: u64 = 1 << 53;
+
+            /// The integer key for a literal's magnitude, or null when
+            /// that magnitude cannot be a member spelling: non-finite,
+            /// fractional, negative, or above `MAX_SPELLING_VALUE`.
+            ///
+            /// The loader's rejection and the validator's match test are
+            /// the same question, so they ask it here rather than each
+            /// spelling out four conditions. Rejecting a fractional
+            /// magnitude is what keeps `2.5d` from rounding into `2d`.
+            pub fn keyOf(magnitude: f64) ?u64 {
+                if (!std.math.isFinite(magnitude)) return null;
+                if (@floor(magnitude) != magnitude) return null;
+                if (magnitude < 0) return null;
+                if (magnitude > @as(f64, @floatFromInt(MAX_SPELLING_VALUE))) return null;
+                return @intFromFloat(magnitude);
+            }
+
+            /// The canonical spelling of a `(key, unit)` pair. The loader
+            /// derives `Member.name` with it, so `02d` and `2.0d` both
+            /// declare `2d`; the validator names a member it matched
+            /// numerically with it. One function, so a spelling cannot
+            /// read one way in a manifest and another in a diagnostic.
+            pub fn canonical(
+                a: std.mem.Allocator,
+                key: u64,
+                unit: []const u8,
+            ) std.mem.Allocator.Error![]const u8 {
+                return std.fmt.allocPrint(a, "{d}{s}", .{ key, unit });
+            }
         };
     };
 
     /// Closed-set head-name constraint for `.form` underlying. The
-    /// validator structurally checks the form's head against `names`
-    /// (byte-equality, no namespace canonicalisation — that's a host
-    /// concern). Useful for slot pinning like
+    /// validator structurally checks the form's head against each
+    /// `Head.name` (byte-equality, no namespace canonicalisation —
+    /// that's a host concern). Useful for slot pinning like
     /// `:shape (point | rect | circle)`.
     ///
-    /// `names` must be non-empty. An empty list is treated as "no
+    /// `heads` must be non-empty. An empty list is treated as "no
     /// narrowing" by the validator (same as `heads = null`); plugin
     /// authors should set the field to null rather than supply `&.{}`.
+    ///
+    /// Each entry may additionally carry a **count** bound — how many
+    /// positional children of one form may (or must) use that head.
+    /// Those bounds are enforced at a form's `:positional` slot and are
+    /// inert anywhere else the same kind is reused (a keyed slot holds
+    /// one value; a `vector-shape :element` is a value, not a child
+    /// list). See `docs/portable-manifest-v1.md` §4.5.
     pub const HeadSet = struct {
-        names: []const []const u8,
+        heads: []const Head,
+
+        /// True when no entry carries a count bound. The compact
+        /// `:names [a b c]` spelling always lowers to this, and it is
+        /// the fast path for the validator's per-form count sweep:
+        /// nothing to tally, so the counters are never allocated.
+        pub fn isUnbounded(self: HeadSet) bool {
+            for (self.heads) |h| if (h.min != 0 or h.max != null) return false;
+            return true;
+        }
+
+        /// One entry in a `HeadSet`. `name` is the only required field
+        /// and is what the validator matches against (byte-equality).
+        /// Wire syntax: either compact (`(head-set :names [a b c])` →
+        /// one unbounded entry per name) or rich
+        /// (`(head-set (head :name a :min 1 :max 1) …)`) — see
+        /// `docs/portable-manifest-v1.md` §4.5.
+        pub const Head = struct {
+            name: []const u8,
+            /// Inclusive floor on how many positional children of the
+            /// enclosing form may carry this head. 0 = no floor (the
+            /// default, and what every compact-spelling head gets).
+            min: u16 = 0,
+            /// Inclusive ceiling. `null` = unbounded.
+            max: ?u16 = null,
+            /// Author-supplied editor metadata; the validator ignores it.
+            description: []const u8 = "",
+        };
     };
 
     /// Alternative-list constraint for `.union_of` underlying. Each
@@ -1077,7 +1209,7 @@ pub const ValueKind = struct {
 
     /// Document-spanning name-reference constraint for `.symbol`
     /// underlying. The set of acceptable values is the names supplied by
-    /// every `(target_form …)` form anywhere in the validated forest.
+    /// every listed target form anywhere in the validated forest.
     /// Resolution lives in the validator, not the manifest — the registry
     /// is rebuilt on every validate call.
     ///
@@ -1090,13 +1222,22 @@ pub const ValueKind = struct {
     ///     `CrossRefProvider` extracts the names from it. The extraction
     ///     itself runs in a host pre-pass, never in the validator.
     ///
-    /// `target_form` is the bare head name of the form whose instances
-    /// supply names (e.g. `"phrase"` for `:sequence` slots referencing
-    /// `(phrase :name p0 …)`). The manifest's possibly-qualified spelling
-    /// is kept verbatim here; the validator's index pass canonicalises it
-    /// once per validate call (`Schema.canonicalFormName`) to the
+    /// `targets` holds the head names of the forms whose instances supply
+    /// names (e.g. `"phrase"` for `:sequence` slots referencing
+    /// `(phrase :name p0 …)`). Each manifest spelling is kept verbatim
+    /// here, possibly qualified; the validator's index pass canonicalises
+    /// each once per validate call (`Schema.canonicalFormName`) to the
     /// **qualified** `<plugin>/<form>` spelling and matches form heads
     /// against that.
+    ///
+    /// `.len >= 1` always. With more than one entry the listed targets
+    /// share **one namespace**: a name supplied by any of them satisfies a
+    /// reference, and a name supplied by two of them is
+    /// `duplicate_cross_ref_target` — caught at the declaration rather
+    /// than silently resolved to whichever target the walk reached first.
+    /// `:acyclic true` is rejected at load with more than one target
+    /// (cycle edges are defined over a target's *self*-referential keys,
+    /// and "self" is not well defined across a group).
     ///
     /// `name_key` is the kvpair key under which each instance carries
     /// its name on the identity route. Defaults to `"name"`.
@@ -1107,7 +1248,7 @@ pub const ValueKind = struct {
     /// is meaningless — rejected at load — without `provider`.
     ///
     /// `acyclic`, when true, asks the validator to detect cycles among
-    /// edges declared on `target_form`'s self-referential keys (any key
+    /// edges declared on the sole target's self-referential keys (any key
     /// whose effective `value_type` resolves back to this kind, scalar
     /// or single-vector hop). Used for `:parent`-style chains;
     /// `cyclic_cross_ref` diagnostics fire at validate time. Identity
@@ -1122,7 +1263,8 @@ pub const ValueKind = struct {
     /// `(piece …)` carries its own `phrase` registry. Composes with both
     /// routes.
     pub const CrossRef = struct {
-        target_form: []const u8,
+        /// The listed target forms, in manifest order. Never empty.
+        targets: []const []const u8,
         name_key: []const u8 = "name",
         acyclic: bool = false,
         scope_form: ?[]const u8 = null,
@@ -1130,9 +1272,65 @@ pub const ValueKind = struct {
         /// Null = identity route. Never set together with a non-default
         /// `name_key` — the loader rejects the combination.
         provider: ?[]const u8 = null,
-        /// Provider route: kvpair key on `target_form` whose string value
-        /// is handed to the provider. Ignored on the identity route.
+        /// Provider route: kvpair key on each target whose string value is
+        /// handed to the provider. Read on *every* listed target. Ignored
+        /// on the identity route.
         source_key: []const u8 = "src",
+
+        /// Allocate a one-element `targets` slice, name included. The
+        /// literal `&.{"phrase"}` spelling only works when the name is
+        /// comptime-known; a loader or host building one from a runtime
+        /// string needs this. Both the slice and the name are owned by `a`.
+        pub fn dupeOne(
+            a: std.mem.Allocator,
+            target: []const u8,
+        ) std.mem.Allocator.Error![]const []const u8 {
+            const list = try a.alloc([]const u8, 1);
+            list[0] = try a.dupe(u8, target);
+            // The write half of the `.len >= 1` invariant three readers
+            // assert (`soleTarget`, `describeTargets`, `crossRefBucketKey`).
+            std.debug.assert(list.len == 1);
+            return list;
+        }
+
+        /// The single target, or null when this cross-ref lists several.
+        /// The axes that are single-target *by construction* — cycle
+        /// detection, which the loader rejects for a group — read through
+        /// this rather than indexing `targets[0]`, so the assumption is
+        /// stated where it is relied on instead of being implied by a
+        /// subscript.
+        pub fn soleTarget(self: CrossRef) ?[]const u8 {
+            std.debug.assert(self.targets.len >= 1);
+            return if (self.targets.len == 1) self.targets[0] else null;
+        }
+
+        /// Render the target list for a human-facing message: the bare
+        /// spelling for one target (no allocation, and every existing
+        /// message stays byte-identical), `a | b` for a group — the same
+        /// separator the union and member-set messages use for "one of
+        /// these".
+        ///
+        /// **Ownership depends on the count**, which is why every caller
+        /// passes an arena: one target returns a slice *borrowed* from the
+        /// schema, several return a fresh allocation on `a`. There is no
+        /// unconditional `free` for the result, so do not call this with an
+        /// allocator whose frees you have to pair by hand.
+        pub fn describeTargets(
+            self: CrossRef,
+            a: std.mem.Allocator,
+        ) std.mem.Allocator.Error![]const u8 {
+            std.debug.assert(self.targets.len >= 1);
+            if (self.targets.len == 1) return self.targets[0];
+            return std.mem.join(a, " | ", self.targets);
+        }
+
+        /// True when `name` is one of the listed targets, compared
+        /// verbatim (pre-canonicalisation). For loader-side checks only;
+        /// the validator compares canonical names.
+        pub fn listsTarget(self: CrossRef, name: []const u8) bool {
+            for (self.targets) |t| if (std.mem.eql(u8, t, name)) return true;
+            return false;
+        }
     };
 };
 

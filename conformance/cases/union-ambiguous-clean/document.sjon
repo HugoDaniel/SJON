@@ -1,0 +1,47 @@
+; The same schema as `union-ambiguous`, with the collision removed. Each
+; pipeline carries its own name, so every reference has exactly one
+; reading and alternative order decides nothing.
+;
+; The third reference is the deliberate silence: `mode` is a plain
+; member-set alternative that wins ahead of both reference kinds, so the
+; slot denotes a member rather than an entity — there is no "which
+; pipeline" question to be ambiguous about, even though a union is doing
+; the dispatch.
+(plugin :name gfx :version "1.0.0"
+  (value-kind :name render-pipeline-ref
+    :description "A symbol naming a `(render-pipeline :name …)`."
+    :underlying symbol
+    :cross-ref (cross-ref :target render-pipeline))
+  (value-kind :name compute-pipeline-ref
+    :description "A symbol naming a `(compute-pipeline :name …)`."
+    :underlying symbol
+    :cross-ref (cross-ref :target compute-pipeline))
+  (value-kind :name pipeline-ref
+    :description "Either kind of pipeline, tried in this order."
+    :underlying union
+    :union (union-shape :alternatives [render-pipeline-ref compute-pipeline-ref]))
+  (value-kind :name auto-mode
+    :description "The sentinel that means \"pick one for me\"."
+    :underlying symbol
+    :members (member-set :values [auto]))
+  (value-kind :name mode-or-pipeline
+    :description "The sentinel first, so it shadows any pipeline named `auto`."
+    :underlying union
+    :union (union-shape :alternatives [auto-mode render-pipeline-ref compute-pipeline-ref]))
+
+  (form :name render-pipeline
+    (key :name name :type symbol))
+  (form :name compute-pipeline
+    (key :name name :type symbol))
+  (form :name dispatch
+    (key :name pipeline :type pipeline-ref :optional true)
+    (key :name mode :type mode-or-pipeline :optional true)))
+
+(render-pipeline  :name blit)
+(render-pipeline  :name auto)
+(compute-pipeline :name reduce)
+(compute-pipeline :name auto)
+
+(dispatch :pipeline blit)
+(dispatch :pipeline reduce)
+(dispatch :mode auto)

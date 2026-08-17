@@ -1,0 +1,5 @@
+; One diagnostic, on the over-range mask only. The first `(target …)` is
+; clean: u32.max is in range, and neither hex value carries a unit for
+; `:unit (unit-shape :reject true)` to complain about.
+(diagnostics
+  (diagnostic :code repr_out_of_range :path [target write-mask]))

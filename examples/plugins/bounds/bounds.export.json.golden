@@ -153,6 +153,25 @@
                   "integer": true
                 }
               }
+            },
+            {
+              "name": "offset",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "number_bounded",
+                "bounds": {
+                  "min": {
+                    "value": 0,
+                    "exact_int": true
+                  },
+                  "integer": true,
+                  "multiple_of": {
+                    "value": 256,
+                    "exact_int": true
+                  }
+                }
+              }
             }
           ]
         }
@@ -222,6 +241,24 @@
                 "exact_int": true
               },
               "integer": true
+            }
+          }
+        },
+        {
+          "name": "aligned-offset",
+          "description": "Byte offset aligned to a 256-byte boundary — the constraint a range and an integrality flag cannot express between them.",
+          "shape": {
+            "kind": "number_bounded",
+            "bounds": {
+              "min": {
+                "value": 0,
+                "exact_int": true
+              },
+              "integer": true,
+              "multiple_of": {
+                "value": 256,
+                "exact_int": true
+              }
             }
           }
         },
@@ -371,6 +408,13 @@
       "message": "value-kind `big` max bound 100000000000000000 exceeds 2^53; non-bigint JSON Schema validators may lose precision — see `x-sjon-exact-bound.max`",
       "plugin_name": "bounds",
       "kind_name": "big"
+    },
+    {
+      "code": "numeric_bounds_emitted_via_min_max",
+      "severity": "info",
+      "message": "value-kind `aligned-offset` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values",
+      "plugin_name": "bounds",
+      "kind_name": "aligned-offset"
     }
   ]
 }

@@ -32,20 +32,26 @@ export interface Bounds_Profile {
   age: number;
   bio?: string;
   coord: readonly [number, number, number];
-  /** @format email */
+  /**
+   * @format email
+   */
   email: string;
   formula: SjonExpr;
-  /** @pattern ^[a-z][a-z0-9-]*$ */
+  /**
+   * @pattern ^[a-z][a-z0-9-]*$
+   */
   handle: string;
   meta?: { readonly $form: string };
   notes: Array<unknown>;
-  /** @sjon-cross-ref target=account name-key=name acyclic=false */
+  /**
+   * @sjon-cross-ref target=account name-key=name acyclic=false
+   */
   owner: CrossRef<"account">;
   role: Symbol_<"admin"> | Symbol_<"user">;
   /**
- * @minimum 0
- * @maximum 100
- */
+   * @minimum 0
+   * @maximum 100
+   */
   score?: number;
   status: "active" | "archived";
   tags: Array<string>;

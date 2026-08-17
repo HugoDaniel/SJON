@@ -226,6 +226,7 @@ fn writeForm(w: *std.json.Stringify, p: Model.Plugin_, f: Model.Form) std.Io.Wri
             try w.write("array");
             try w.objectField("items");
             try writeShape(w, shape);
+            try writeChildrenBounds(w, shape);
             try w.endObject();
         },
     }
@@ -244,6 +245,34 @@ fn writeForm(w: *std.json.Stringify, p: Model.Plugin_, f: Model.Form) std.Io.Wri
         try w.write(try escapedFieldName(&name_buf, k.name));
     }
     try w.endArray();
+
+    // `dependentRequired` is 2020-12's exact encoding of `:requires`:
+    // "if this property is present, these must be too". Emitted only when
+    // some key declares one, so a schema without dependencies is
+    // byte-identical to before.
+    var any_requires = false;
+    for (f.keys) |k| {
+        if (k.requires.len != 0) {
+            any_requires = true;
+            break;
+        }
+    }
+    if (any_requires) {
+        try w.objectField("dependentRequired");
+        try w.beginObject();
+        for (f.keys) |k| {
+            if (k.requires.len == 0) continue;
+            var name_buf: [128]u8 = undefined;
+            try w.objectField(try escapedFieldName(&name_buf, k.name));
+            try w.beginArray();
+            for (k.requires) |r| {
+                var req_buf: [128]u8 = undefined;
+                try w.write(try escapedFieldName(&req_buf, r));
+            }
+            try w.endArray();
+        }
+        try w.endObject();
+    }
 
     // Discriminated forms compose per-variant overlays via `allOf` of
     // `if/then`. Each `then` carries the overlay's properties and any
@@ -355,6 +384,11 @@ const MemberUnderlying = enum { symbol, string };
 /// `const` shape is `{$sym: "name"}` for symbol-underlying members and a
 /// bare string for string-underlying members (matching the JSON bridge's
 /// canonical-mode encoding).
+///
+/// A digit-leading member is the exception on both counts: a document
+/// writes it as a unit-bearing number, so the JSON bridge encodes it as
+/// `{"$num": [<magnitude>, "<unit>"]}` and that is what gets pinned. A
+/// `$sym` const there would reject a document the validator accepts.
 fn writeRichMember(
     w: *std.json.Stringify,
     m: Model.Member,
@@ -362,7 +396,15 @@ fn writeRichMember(
 ) std.Io.Writer.Error!void {
     try w.beginObject();
     try w.objectField("const");
-    switch (underlying) {
+    if (m.numeric_spelling) |s| {
+        try w.beginObject();
+        try w.objectField("$num");
+        try w.beginArray();
+        try w.write(s.magnitude);
+        try w.write(s.unit);
+        try w.endArray();
+        try w.endObject();
+    } else switch (underlying) {
         .symbol => {
             try w.beginObject();
             try w.objectField("$sym");
@@ -909,8 +951,22 @@ fn writeShapeBody(w: *std.json.Stringify, shape: Model.ValueShape) std.Io.Writer
             try w.write(false);
             try w.objectField("x-sjon-cross-ref");
             try w.beginObject();
-            try w.objectField("target-form");
-            try w.write(cr.target_form);
+            // One target keeps `target-form`, byte-identically; a group
+            // gets `target-forms`, an array. Two keys rather than one
+            // widened to "string or array", following `scope-form`'s
+            // omit-when-inapplicable idiom below: a consumer that only
+            // understands `target-form` then finds the field *absent* on a
+            // group rather than reading a group as a single target it
+            // cannot represent.
+            if (cr.targets.len == 1) {
+                try w.objectField("target-form");
+                try w.write(cr.targets[0]);
+            } else {
+                try w.objectField("target-forms");
+                try w.beginArray();
+                for (cr.targets) |t| try w.write(t);
+                try w.endArray();
+            }
             try w.objectField("name-key");
             try w.write(cr.name_key);
             try w.objectField("acyclic");
@@ -1046,6 +1102,13 @@ fn writeNumericBoundsBody(w: *std.json.Stringify, b: Model.NumericBounds) std.Io
         }
         try w.write(max.value);
     }
+    // Exact semantic match rather than an annotation: 2020-12's
+    // `multipleOf` is "division by this keyword's value results in an
+    // integer", which is the claim `:multiple-of` makes.
+    if (b.multiple_of) |mo| {
+        try w.objectField("multipleOf");
+        try w.write(mo.value);
+    }
     var exact_min_buf: [32]u8 = undefined;
     var exact_max_buf: [32]u8 = undefined;
     var exact_min: ?[]const u8 = null;
@@ -1112,6 +1175,60 @@ fn writeWarning(w: *std.json.Stringify, wn: Warnings.Warning) std.Io.Writer.Erro
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Emit the per-head positional counts of a `$children` array, when the
+/// slot's shape is a head-set with at least one bounded entry.
+///
+/// The encoding is one `contains` + `minContains` / `maxContains` per
+/// bounded head, gathered in an `allOf` beside `items`. **Not**
+/// `minItems` / `maxItems`: those bound the array's *total* length, which
+/// is a different claim — `:min 1 :max 1` on `vertex` says nothing about
+/// how many `constant` children there are. `contains` counts the
+/// elements matching one subschema, which is exactly the per-head
+/// question. `items` keeps the whole-set union it emits today.
+///
+/// `minContains: 0` is emitted explicitly for a ceiling-only head:
+/// without it, `contains` would additionally demand at least one match,
+/// turning "at most one fragment" into "exactly one".
+///
+/// Unbounded heads contribute nothing, so an all-unbounded head-set (and
+/// therefore every schema written before bounds existed) emits no `allOf`
+/// at all and stays byte-identical.
+fn writeChildrenBounds(w: *std.json.Stringify, shape: Model.ValueShape) std.Io.Writer.Error!void {
+    const refs = switch (shape) {
+        .form_heads => |r| r,
+        else => return,
+    };
+    var any = false;
+    for (refs) |ref| {
+        if (ref.isBounded()) {
+            any = true;
+            break;
+        }
+    }
+    if (!any) return;
+
+    try w.objectField("allOf");
+    try w.beginArray();
+    for (refs) |ref| {
+        if (!ref.isBounded()) continue;
+        try w.beginObject();
+        try w.objectField("contains");
+        try w.beginObject();
+        try w.objectField("$ref");
+        var buf: [256]u8 = undefined;
+        try w.write(try formatFormRef(&buf, ref));
+        try w.endObject();
+        try w.objectField("minContains");
+        try w.write(ref.min);
+        if (ref.max) |mx| {
+            try w.objectField("maxContains");
+            try w.write(mx);
+        }
+        try w.endObject();
+    }
+    try w.endArray();
+}
 
 /// Build a `$ref` string for a form. In the aggregated layout (`current_ctx.filter_plugin == null`)
 /// this is always a same-document fragment `#/$defs/form.<plugin>.<head>`.
@@ -1631,7 +1748,7 @@ test "emit: head-set produces oneOf of $refs into $defs" {
             },
         },
         .value_kinds = &.{
-            .{ .name = "shape-form", .underlying = .form, .heads = .{ .names = &.{ "circle", "rect" } } },
+            .{ .name = "shape-form", .underlying = .form, .heads = .{ .heads = &.{ .{ .name = "circle" }, .{ .name = "rect" } } } },
         },
     };
     const schema = Schema.Schema.init(&.{p});
@@ -1643,6 +1760,72 @@ test "emit: head-set produces oneOf of $refs into $defs" {
     try testing.expect(std.mem.indexOf(u8, bytes, "\"$ref\": \"#/$defs/form.shapes.rect\"") != null);
     // The annotation stays for SJON-aware consumers.
     try testing.expect(std.mem.indexOf(u8, bytes, "\"x-sjon-head-set\"") != null);
+}
+
+test "emit: bounded head-set on $children emits contains/minContains/maxContains" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "gfx",
+        .forms = &.{
+            .{ .name = "vertex" },
+            .{ .name = "fragment" },
+            .{ .name = "constant" },
+            .{ .name = "render-pipeline", .positional = .{ .kind = .{ .name = "pipeline-section" } } },
+        },
+        .value_kinds = &.{.{
+            .name = "pipeline-section",
+            .underlying = .form,
+            .heads = .{ .heads = &.{
+                .{ .name = "vertex", .min = 1, .max = 1 },
+                .{ .name = "fragment", .max = 1 },
+                .{ .name = "constant" },
+            } },
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = true, .ts_types = false } });
+    defer result.deinit();
+    const bytes = result.json_schema_bytes.?;
+    // `items` keeps the whole-set union — the per-head counts are a
+    // separate claim and ride in `allOf` beside it.
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"items\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"contains\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"minContains\": 1") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"maxContains\": 1") != null);
+    // The ceiling-only head emits `minContains: 0` explicitly: without it,
+    // `contains` would also demand at least one match, turning "at most
+    // one fragment" into "exactly one".
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"minContains\": 0") != null);
+    // NOT minItems/maxItems: those bound the array's total length, which
+    // is a different claim than a per-head count.
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"minItems\"") == null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"maxItems\"") == null);
+}
+
+test "emit: an unbounded head-set on $children emits no allOf at all" {
+    // The drift gate for every golden written before bounds existed: a
+    // compact `:names [a b]` head-set must export byte-identically.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "gfx",
+        .forms = &.{
+            .{ .name = "vertex" },
+            .{ .name = "fragment" },
+            .{ .name = "render-pipeline", .positional = .{ .kind = .{ .name = "loose-section" } } },
+        },
+        .value_kinds = &.{.{
+            .name = "loose-section",
+            .underlying = .form,
+            .heads = .{ .heads = &.{ .{ .name = "vertex" }, .{ .name = "fragment" } } },
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = true, .ts_types = false } });
+    defer result.deinit();
+    const bytes = result.json_schema_bytes.?;
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"$children\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"contains\"") == null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"minContains\"") == null);
 }
 
 test "emit: positional local forms render as inline $children union" {

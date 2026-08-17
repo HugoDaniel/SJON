@@ -348,6 +348,42 @@ describe('sjonToken (CodeMirror) — long tail', () => {
     assert.equal(cmClasses('1.5e+2hz')[0], 'nnnnnnnn');
     assert.equal(cmClasses('1_000_000')[0], 'nnnnnnnnn');
   });
+  it('styles a hex integer as one number, digit-containing tail included', () => {
+    assert.equal(cmClasses('0xFF')[0], 'nnnn');
+    assert.equal(cmClasses('0Xff')[0], 'nnnn');
+    assert.equal(cmClasses('0xFFFF_FFFF')[0], 'nnnnnnnnnnn');
+    assert.equal(cmClasses('-0x10')[0], 'nnnnn');
+    // The reason the hex alternative has to come first in the regex: under
+    // the decimal alternative this is `0x` (number, unit `x`) then `1F`
+    // (number, unit `F`) — two numbers where the lexer now sees one.
+    assert.equal(cmClasses('0x1F')[0], 'nnnn');
+  });
+  it('splits `0xFFms` the way the lexer does (hex integer, then a symbol)', () => {
+    // Hex terminates at the first non-hex byte and takes no unit, so `ms`
+    // is a bare symbol — plain, per the grammar's unscoped-symbol rule.
+    assert.equal(cmClasses('0xFFms')[0], 'nnnn..');
+  });
+  it('DEGRADES a bare `0x` prefix to a unit number (lexer: an invalid token)', () => {
+    // Neither grammar models error tokens — `1e+` colours numeric too. The
+    // hex alternative requires at least one digit, so this falls through to
+    // the decimal alternative and reads as `0` with the unit `x`.
+    assert.equal(cmClasses('0x')[0], 'nn');
+  });
+  it('styles a hyphenated unit as one number', () => {
+    // `2d-array` is the spelling `GPUTextureViewDimension` needs, and the
+    // reason the unit regex grew a `(?:-[a-zA-Z]+)*` tail.
+    assert.equal(cmClasses('2d-array')[0], 'nnnnnnnn');
+    assert.equal(cmClasses('5ms-per-frame')[0], 'nnnnnnnnnnnnn');
+  });
+  it('ends the unit at a hyphen not followed by a letter', () => {
+    // `1em-2` is `1em` then `-2` — two numbers, no gap. The narrowness of
+    // the lexer's rule is visible here: a permissive hyphen would colour
+    // the whole thing as one token with the unit `em-2`.
+    assert.equal(cmClasses('1em-2')[0], 'nnnnn');
+    assert.equal(cmClasses('2d-2')[0], 'nnnn');
+    // A trailing hyphen becomes a bare symbol, which is unstyled.
+    assert.equal(cmClasses('2d-')[0], 'nn.');
+  });
   it('splits adjacent unit numbers like the lexer (90deg5px ⇒ two numbers)', () => {
     // Per §2.6: `90deg5px` lexes as `90deg` then `5px`; both colour numeric.
     assert.equal(cmClasses('90deg5px')[0], 'nnnnnnnn');
@@ -476,6 +512,17 @@ const PARITY_CORPUS: Array<[string, string]> = [
   ['unit after exp', '1.5e+2hz'],
   ['underscores', '1_000_000'],
   ['adjacent units', '90deg5px'],
+  ['hex integer', '0xFF'],
+  ['hex upper prefix', '0Xff'],
+  ['hex grouped', '0xFFFF_FFFF'],
+  ['hex negative', '-0x10'],
+  ['hex digit tail', '0x1F'],
+  ['hex then symbol', '0xFFms'],
+  ['bare hex prefix (degrades equally)', '0x'],
+  ['hyphenated unit', '2d-array'],
+  ['hyphenated unit, multi-run', '5ms-per-frame'],
+  ['hyphen before a digit', '1em-2'],
+  ['trailing hyphen', '2d-'],
   ['date (degrades equally)', '2026-06-09'],
   ['time (degrades equally)', '12:30:00'],
   ['vector of numbers', '[1 2 3]'],

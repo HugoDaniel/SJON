@@ -55,8 +55,9 @@
       "match": "(?<![^\\s()\\[\\]\";:])(?:true|false|nil)(?![^\\s()\\[\\]\";:])"
     },
     "number": {
+      "comment": "The hex alternative comes FIRST: the decimal alternative would match `0x1F` as `0` plus the unit `x`, leaving `1F` to scope as a second number. The unit's `(?:-[a-zA-Z]+)*` tail is the lexer's hyphen rule — `2d-array` is one number, `1em-2` is `1em` then `-2`. Mirrors the CodeMirror grammar's regex.",
       "name": "constant.numeric.sjon",
-      "match": "-?\\d[\\d_]*(?:\\.\\d+)?(?:[eE][+-]?\\d+)?(?:[a-zA-Z]+|%)?"
+      "match": "-?(?:0[xX][0-9a-fA-F][0-9a-fA-F_]*|\\d[\\d_]*(?:\\.\\d+)?(?:[eE][+-]?\\d+)?(?:[a-zA-Z]+(?:-[a-zA-Z]+)*|%)?)"
     },
     "symbol": {
       "comment": "A bare identifier (non-head). Matched after #number so digit-leading tokens like 90deg stay numeric, but identifier-leading tokens with embedded digits (f32, vec4f, C#4) are consumed whole here instead of leaking their digit-run to #number. Intentionally unscoped — bare symbols render as default foreground, matching the CodeMirror grammar.",

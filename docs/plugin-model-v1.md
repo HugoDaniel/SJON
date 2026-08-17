@@ -267,6 +267,22 @@ ordinary forest validation, cross-references included, exactly as
 hand-written forms would; declaring the head is the entire cost, one line
 per resource kind.
 
+### Emitting a bare positional atom
+
+A hook's `children` list accepts **scalars** as well as nested forms —
+`symbol`, `number`, `string`, `keyword`, `boolean`, `nil`. A scalar child
+is a *positional atom*: it has no head, so it is not checked against
+`:produces`, and it materializes as a bare value child. That is the same
+shape an author writes in `(module shader)` or
+`(topology triangle-list)`, and a hook can synthesize it directly.
+
+A nested `.form` child, by contrast, carries a head and **is**
+`:produces`-checked at every depth, including inside vectors. The two
+arms differ in exactly that: whether there is a head to check.
+
+Reference: `Lowering.EmittedValue` for the union, and
+`conformance/cases/lowering-positional-atom/` for the end-to-end shape.
+
 ### Reading input values (eval-capable reads, host env)
 
 A hook reads the surface form through `LoweringInput`, which wraps the

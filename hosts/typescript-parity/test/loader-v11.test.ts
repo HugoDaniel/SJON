@@ -129,13 +129,14 @@ test('loader v1.1: :sjon "99.0" emits sjon_format_unsupported error', () => {
   assert.strictEqual(d!.severity, 'err');
 });
 
-test('loader v1.1: SUPPORTED_SJON_FORMAT == "1.2" — bumping requires Zig+TS sync', () => {
+test('loader v1.1: SUPPORTED_SJON_FORMAT == "1.3" — bumping requires Zig+TS sync', () => {
   // If you bump this, also bump src/Plugin.zig:SUPPORTED_SJON_FORMAT.
-  // `1.2` added the (cross-ref-provider …) form and the :provider /
-  // :source-key cross-ref keys; `1.1` manifests keep loading, since the
-  // check is "declared > supported", not "declared != supported".
+  // `1.3` added (scalar-or-ref-shape :ref …); `1.2` added the
+  // (cross-ref-provider …) form and the :provider / :source-key cross-ref
+  // keys; older manifests keep loading, since the check is
+  // "declared > supported", not "declared != supported".
   // (Imported indirectly via the loader's check.)
-  for (const declared of ['1.1', '1.2']) {
+  for (const declared of ['1.1', '1.2', '1.3']) {
     const r = loadManifest(
       manifestRootsOrThrow(`(plugin :name x :version "1.0.0" :sjon "${declared}")`),
     );
@@ -208,5 +209,71 @@ test('validator: an unadorned key is now reported missing, as on every other hos
   assert.deepStrictEqual(
     r.diagnostics.filter((d) => d.severity === 'err').map((d) => d.code),
     ['missing_required_key'],
+  );
+});
+
+test('loader v1.3: scalar-or-ref :ref substitutes for the default symbol', () => {
+  const r = loadManifest(
+    manifestRootsOrThrow(
+      '(plugin :name p :version "1.0.0"' +
+        ' (value-kind :name count-value :underlying number)' +
+        ' (value-kind :name define-ref :underlying symbol :cross-ref (cross-ref :target define))' +
+        ' (value-kind :name count :underlying scalar-or-ref' +
+        ' :scalar-or-ref (scalar-or-ref-shape :base count-value :ref define-ref)))',
+    ),
+  );
+  const alts = r.plugin.valueKinds[2]?.unionOf?.alternatives;
+  assert.strictEqual(alts?.length, 2);
+  assert.strictEqual(alts?.[0]?.name, 'count-value');
+  // The whole feature: alternative 1 is the named kind, not `symbol`.
+  assert.strictEqual(alts?.[1]?.name, 'define-ref');
+});
+
+test('loader v1.3: scalar-or-ref with no :ref still desugars to [base symbol]', () => {
+  // The compatibility pin. Mirrors the Zig test of the same name; the
+  // corpus case `scalar-or-ref-default-symbol` carries it cross-host.
+  const r = loadManifest(
+    manifestRootsOrThrow(
+      '(plugin :name p :version "1.0.0"' +
+        ' (value-kind :name count-value :underlying number)' +
+        ' (value-kind :name count :underlying scalar-or-ref' +
+        ' :scalar-or-ref (scalar-or-ref-shape :base count-value)))',
+    ),
+  );
+  const alts = r.plugin.valueKinds[1]?.unionOf?.alternatives;
+  assert.strictEqual(alts?.[1]?.name, 'symbol');
+  assert.strictEqual(alts?.[1]?.namespace, null);
+});
+
+test('loader v1.3: scalar-or-ref :ref equal to :base emits invalid_manifest', () => {
+  const r = loadManifest(
+    manifestRootsOrThrow(
+      '(plugin :name p :version "1.0.0"' +
+        ' (value-kind :name count-value :underlying number)' +
+        ' (value-kind :name count :underlying scalar-or-ref' +
+        ' :scalar-or-ref (scalar-or-ref-shape :base count-value :ref count-value)))',
+    ),
+  );
+  const d = r.diagnostics.find(
+    (x) => x.code === 'invalid_manifest' && x.message.includes('`:ref` equal to `:base`'),
+  );
+  assert.ok(d, 'expected invalid_manifest for :ref == :base');
+});
+
+test('loader v1.3: scalar-or-ref :ref differing only in namespace is not a collision', () => {
+  // `qualifiedRefEql` is byte-equality on both halves, matching the Zig
+  // loader: a bare name and a qualified one are different refs even when
+  // the namespace names this plugin.
+  const r = loadManifest(
+    manifestRootsOrThrow(
+      '(plugin :name p :version "1.0.0"' +
+        ' (value-kind :name count-value :underlying number)' +
+        ' (value-kind :name count :underlying scalar-or-ref' +
+        ' :scalar-or-ref (scalar-or-ref-shape :base count-value :ref p/count-value)))',
+    ),
+  );
+  assert.strictEqual(
+    r.diagnostics.find((x) => x.message.includes('`:ref` equal to `:base`')),
+    undefined,
   );
 });

@@ -1,0 +1,25 @@
+; The compatibility pin for `(scalar-or-ref-shape …)`: with no `:ref`, the
+; reference half is the primitive `symbol`, exactly as it was before the key
+; existed. Every manifest using the shorthand today keeps meaning what it
+; meant.
+;
+; This case exists to stop a future refactor from quietly retiring the
+; default — say by making `:ref` required, or by defaulting it to something
+; narrower. Both would be silent breaks for existing manifests, and both
+; would turn this case red.
+;
+; The reference half being unchecked is the point of the sibling case: any
+; symbol at all satisfies it, so `ANYTHING_AT_ALL` is clean here and a
+; misspelled constant would be too. `:ref` is how a schema opts out of that.
+(plugin :name gfx :version "1.0.0"
+  (value-kind :name bone-count :underlying number)
+  (value-kind :name bone-count-or-ref
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base bone-count))
+  (form :name mesh
+    (key :name bones :type bone-count-or-ref)))
+
+(mesh :bones 128)              ; the base half
+(mesh :bones MAX_BONES)        ; the default ref half — an unchecked symbol
+(mesh :bones ANYTHING_AT_ALL)  ; also the ref half; nothing declares this
+(mesh :bones "128")            ; neither half — a string is not one of them

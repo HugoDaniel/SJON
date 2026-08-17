@@ -1,0 +1,34 @@
+; A head-set name whose ONLY form is slot-local — no global declaration
+; anywhere. `bgl-resource` names `storage-texture`, and the only
+; `(form :name storage-texture …)` is a slot-local of `entry`, which is itself
+; a slot-local of `bind-group-layout`.
+;
+; Head-set narrowing is byte-equality over `:names` and resolves nothing —
+; not at manifest-load time, not at validate time. The descent that FOLLOWS a
+; narrowed head is a separate step, and that step is local-first. So a global
+; "dummy" form is not required to make a head-set name resolvable, and must
+; not become required.
+;
+; Sibling of `positional-local-headset-resolves-local`, which keeps a global
+; `entry` in place to prove *shadowing* — a local beats a same-named global.
+; This case removes the global entirely to prove *sufficiency*. A refactor
+; that reordered the fallback (global first, local second) would keep that
+; case green and turn this one red, which is the whole point of having both.
+(plugin :name p :version "1.0.0"
+  (value-kind :name bgl-entry-item :underlying form
+    :heads (head-set :names [entry]))
+  (value-kind :name bgl-resource :underlying form
+    :heads (head-set :names [buffer storage-texture]))
+  (form :name bind-group-layout
+    :positional bgl-entry-item
+    (key :name name :type symbol)
+    (form :name entry
+      :positional bgl-resource
+      (key :name binding :type number)
+      (form :name buffer
+        (key :name type :type symbol))
+      (form :name storage-texture
+        (key :name format :type symbol)))))
+
+(bind-group-layout :name bgl0
+  (entry :binding 0 (storage-texture :format rgba8unorm)))

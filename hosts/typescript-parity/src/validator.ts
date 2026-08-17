@@ -36,6 +36,7 @@ import type {
   ExclusiveGroup,
   FormSpec,
   ExprFunc,
+  Head,
   KeySpec,
   Member,
   ValueType,
@@ -48,12 +49,15 @@ import type {
 } from './plugin.ts';
 import {
   MAX_KIND_DEPTH,
+  canonicalSpelling,
   checkArity,
+  crossRefBucketKey,
   effectiveOptional,
   lookupExprFunc,
   lookupForm,
   lookupValueKind,
   paramTypeAt,
+  spellingKeyOf,
 } from './plugin.ts';
 import * as StringFormats from './stringFormats.ts';
 
@@ -274,7 +278,11 @@ interface CrossRefRegistry {
   // Bare form-head → canonical target spec. Cross-ref targets are
   // looked up by the registered form's bare head during the document
   // walk (the document doesn't carry plugin qualifiers on heads).
-  readonly targetsByHead: ReadonlyMap<string, CrossRefTargetSpec>;
+  /** Bare form head → every bucket that head's instances register into:
+   * its own (from a single-target cross-ref) plus one per group listing
+   * it. One entry for every schema written before multi-target
+   * cross-refs. Mirrors Zig's one-to-many `collectCrossRefTargets`. */
+  readonly targetsByHead: ReadonlyMap<string, readonly CrossRefTargetSpec[]>;
   // Cross-ref kind name → its target spec, for the validator's resolve
   // path which knows the kind, not the head.
   readonly targetsByKind: ReadonlyMap<string, CrossRefTargetSpec>;
@@ -348,7 +356,11 @@ function collectAcyclicSpecs(schema: Schema): AcyclicSpec[] {
     for (const k of p.valueKinds) {
       const cr = k.crossRef;
       if (!cr || !cr.acyclic) continue;
-      const canonicalTarget = canonicalize(schema, cr.target);
+      // Single-target by construction: the loader rejects `:acyclic true`
+      // on a group, because cycle edges are a target's *self*-referential
+      // keys and "self" is not well defined across several forms.
+      if (cr.targets.length !== 1) continue;
+      const canonicalTarget = canonicalize(schema, cr.targets[0]!);
       if (!canonicalTarget) continue;
       const targetBare = bareFromCanonical(canonicalTarget);
       const targetForm = lookupFormFull(schema, targetBare, canonicalTarget.split('/')[0]!);
@@ -419,13 +431,17 @@ function buildCrossRefIndex(
   diags: Diagnostic[],
 ): CrossRefRegistry {
   // 1. Cross-ref kinds → canonical target specs.
-  const targetsByHead = new Map<string, CrossRefTargetSpec>();
+  const targetsByHead = new Map<string, CrossRefTargetSpec[]>();
   const targetsByKind = new Map<string, CrossRefTargetSpec>();
   for (const p of schema.plugins) {
     for (const k of p.valueKinds) {
       const cr = k.crossRef;
       if (!cr) continue;
-      const canonicalTarget = canonicalize(schema, cr.target);
+      // `canonicalTarget` is the *bucket*: the canonical form name for one
+      // target, a synthetic group key for several. Every listed target's
+      // instances register into it, which is what keeps lookup a
+      // single-bucket operation.
+      const canonicalTarget = crossRefBucketKey(schema, cr);
       if (!canonicalTarget) continue;
       const scopeForm = cr.scopeForm ? canonicalize(schema, cr.scopeForm) : null;
       const spec: CrossRefTargetSpec = {
@@ -434,10 +450,22 @@ function buildCrossRefIndex(
         scopeForm,
         acyclic: cr.acyclic ?? false,
       };
-      // First-wins: if two kinds target the same form, the first one
-      // sets the head's resolution policy.
-      const bareHead = bareFromCanonical(canonicalTarget);
-      if (!targetsByHead.has(bareHead)) targetsByHead.set(bareHead, spec);
+      for (const spelling of cr.targets) {
+        const canonicalOne = canonicalize(schema, spelling);
+        if (!canonicalOne) continue;
+        const bareHead = bareFromCanonical(canonicalOne);
+        const list = targetsByHead.get(bareHead);
+        if (list === undefined) {
+          targetsByHead.set(bareHead, [spec]);
+          continue;
+        }
+        // First-wins *per bucket*: a second kind landing in a bucket this
+        // head already feeds sets nothing (and
+        // `cross_ref_target_collapse` warns). A different bucket is a
+        // different namespace and gets its own entry.
+        if (list.some((e) => e.canonicalTarget === canonicalTarget)) continue;
+        list.push(spec);
+      }
       targetsByKind.set(k.name, spec);
     }
   }
@@ -447,8 +475,10 @@ function buildCrossRefIndex(
 
   // 3. Scope-opener canonicals: union of every cross-ref's scope_form.
   const scopeOpeners = new Set<string>();
-  for (const t of targetsByHead.values()) {
-    if (t.scopeForm) scopeOpeners.add(t.scopeForm);
+  for (const specs of targetsByHead.values()) {
+    for (const t of specs) {
+      if (t.scopeForm) scopeOpeners.add(t.scopeForm);
+    }
   }
   for (const s of acyclicSpecs) {
     if (s.scopeForm) scopeOpeners.add(s.scopeForm);
@@ -513,7 +543,7 @@ function walkIndex(
   treeIdx: number,
   treeScope: ScopeId,
   scopeStack: ScopeFrame[],
-  targetsByHead: ReadonlyMap<string, CrossRefTargetSpec>,
+  targetsByHead: ReadonlyMap<string, readonly CrossRefTargetSpec[]>,
   acyclicSpecs: readonly AcyclicSpec[],
   scopeOpeners: ReadonlySet<string>,
   byScope: Map<ScopeId, Map<string, Set<string>>>,
@@ -531,8 +561,8 @@ function walkIndex(
       pushed = true;
     }
 
-    const targetSpec = targetsByHead.get(node.head);
-    if (targetSpec) {
+    // Register into every bucket this head feeds.
+    for (const targetSpec of targetsByHead.get(node.head) ?? []) {
       registerInstance(node, targetSpec, treeScope, scopeStack, byScope, diags);
     }
 
@@ -1101,6 +1131,64 @@ function describeType(t: ValueType): string {
   }
 }
 
+/**
+ * The bounded head-set governing `spec`'s positional slot, or null when
+ * there is none — every other positional policy, a `.kind` that is not
+ * form-underlying or carries no head-set, and (the fast path) a head-set
+ * where no entry declares a bound.
+ *
+ * This is the single place the scope rule from
+ * `docs/portable-manifest-v1.md` §4.5 is enforced: counts are read off a
+ * form's `:positional` declaration and nowhere else, so the same kind
+ * reused on a keyed slot or a `vector-shape :element` carries its bounds
+ * inertly. Mirrors Zig's `boundedPositionalHeads`.
+ */
+function boundedPositionalHeads(schema: Schema, spec: FormSpec): readonly Head[] | null {
+  if (spec.positional.kind !== 'kind') return null;
+  const hit = lookupValueKind(schema, spec.positional.name, spec.positional.namespace);
+  if (hit.kind !== 'found') return null;
+  const vk = hit.value;
+  if (vk.underlying !== 'form' || !vk.heads) return null;
+  const bounded = vk.heads.some((h) => (h.min ?? 0) !== 0 || h.max !== undefined);
+  return bounded ? vk.heads : null;
+}
+
+/**
+ * Tally one positional child and report the child that crosses a `:max`.
+ * `head` is empty for a non-form child, which matches no entry and is
+ * therefore counted nowhere. The emit fires exactly once — on the
+ * transition from `max` to `max + 1` — so a form five children over its
+ * ceiling still gets one diagnostic. Mirrors Zig's `tallyPositionalHead`.
+ */
+function tallyPositionalHead(
+  diags: Diagnostic[],
+  bounds: readonly Head[],
+  counts: number[],
+  formName: string,
+  head: string,
+  span: Span,
+  posPath: readonly string[],
+): void {
+  if (head.length === 0) return;
+  for (let i = 0; i < bounds.length; i++) {
+    const h = bounds[i]!;
+    if (h.name !== head) continue;
+    counts[i] = counts[i]! + 1;
+    if (h.max === undefined) return;
+    if (counts[i] === h.max + 1) {
+      emit(
+        diags,
+        span,
+        posPath,
+        'positional_too_many',
+        `form \`${formName}\` accepts at most ${h.max} \`${h.name}\` positional ` +
+          `child${h.max === 1 ? '' : 'ren'}, found ${counts[i]}`,
+      );
+    }
+    return;
+  }
+}
+
 function validateFormKeys(
   schema: Schema,
   registry: CrossRefRegistry,
@@ -1144,9 +1232,9 @@ function validateFormKeys(
   let resolvedWhen: string | null = null;
   let resolvedVariantIdx: number | null = null;
 
-  /** Type-check one kvpair value against the slot it landed in, and emit
-   *  the two slot warnings on success. Shared by the declared-key and
-   *  variant-key arms, which differ only in where the spec came from. */
+  /** Type-check one kvpair value against the slot it landed in, and run the
+   *  advisory sweep on success. Shared by the declared-key and variant-key
+   *  arms, which differ only in where the spec came from. */
   const checkKvpairValue = (child: KvPairNode, valueType: ValueType): void => {
     const fail = matchType(schema, registry, child.value, valueType, scopeChain, treeScope, 0);
     if (fail) {
@@ -1158,8 +1246,10 @@ function validateFormKeys(
         fail.message(spec.name, child.key),
       );
     } else {
-      emitDeprecatedMember(diags, schema, valueType, child.value, [...path, child.key]);
-      emitStringPatternUnsupported(diags, schema, valueType, child.value, [...path, child.key]);
+      emitValueAdvisories(diags, schema, registry, valueType, child.value, scopeChain, treeScope, [
+        ...path,
+        child.key,
+      ]);
     }
   };
 
@@ -1167,6 +1257,11 @@ function validateFormKeys(
   // set of already-seen flag names (mirrors Zig's `seen_flags`).
   let posIndex = 0;
   const seenFlags = new Set<string>();
+  // Per-head positional tallies (mirrors Zig's `pos_head_counts`).
+  // Resolved once per form; null for every unbounded head-set, which is
+  // the fast path the compact `:names [a b c]` spelling always takes.
+  const posBounds = boundedPositionalHeads(schema, spec);
+  const posCounts: number[] = posBounds ? posBounds.map(() => 0) : [];
   for (const child of node.children) {
     if (child.tag === 'kvpair') {
       const matchIdx = spec.keys.findIndex((k) => k.name === child.key);
@@ -1225,6 +1320,18 @@ function validateFormKeys(
         case 'any':
           break;
         case 'kind': {
+          // Tally before the type check, and off the child's own head
+          // rather than the match outcome: a head outside the set fails
+          // `not_head_member` below and matches no entry here, so it
+          // counts towards nothing. Same reading order as both Zig
+          // walkers.
+          if (posBounds) {
+            const childHead = child.tag === 'form' ? child.head : '';
+            tallyPositionalHead(diags, posBounds, posCounts, spec.name, childHead, child.span, [
+              ...path,
+              step,
+            ]);
+          }
           const fail = matchType(
             schema,
             registry,
@@ -1243,11 +1350,17 @@ function validateFormKeys(
               fail.message(spec.name, '<positional>'),
             );
           } else {
-            emitStringPatternUnsupported(
+            // The whole advisory family, as at every keyed site. This slot
+            // used to carry only the string-pattern half — the same drift
+            // the Zig walker had, and the reason both hosts now bundle.
+            emitValueAdvisories(
               diags,
               schema,
+              registry,
               { kind: 'named', name: spec.positional.name, namespace: spec.positional.namespace },
               child,
+              scopeChain,
+              treeScope,
               [...path, step],
             );
           }
@@ -1290,6 +1403,28 @@ function validateFormKeys(
         }
       }
       posIndex++;
+    }
+  }
+
+  // The `:min` sweep, on the near side of the `open` short-circuit below
+  // and the only end-of-form sweep that is. Every other one is about
+  // *keywords*, which is the surface `:open` widens; a positional count
+  // is a different surface, and `:positional <bounded-kind>` opts into
+  // it. Mirrors `validateFormKeys` phase 3b in the reference walker.
+  if (posBounds) {
+    for (let i = 0; i < posBounds.length; i++) {
+      const h = posBounds[i]!;
+      const min = h.min ?? 0;
+      const n = posCounts[i]!;
+      if (min === 0 || n >= min) continue;
+      emit(
+        diags,
+        node.headSpan,
+        path,
+        'positional_missing',
+        `form \`${spec.name}\` requires at least ${min} \`${h.name}\` positional ` +
+          `child${min === 1 ? '' : 'ren'}, found ${n}`,
+      );
     }
   }
 
@@ -1345,6 +1480,18 @@ function validateFormKeys(
     path,
   );
 
+  emitDependentKeyDiagnostics(
+    diags,
+    spec.keys,
+    seenIdx,
+    null,
+    null,
+    spec.name,
+    null,
+    node.headSpan,
+    path,
+  );
+
   // Variant-only required sweep. Skips a key the author *did* write but
   // which landed as `unknown_key` for preceding the discriminant — they
   // wrote it, just in the wrong order, and the ordering diagnostic is the
@@ -1376,7 +1523,77 @@ function validateFormKeys(
       node.headSpan,
       path,
     );
+    // A variant key may require a base key, so the base scope comes along.
+    // The reverse is rejected at manifest-load time.
+    emitDependentKeyDiagnostics(
+      diags,
+      v.keys,
+      seenVariantIdx,
+      spec.keys,
+      seenIdx,
+      spec.name,
+      v.when,
+      node.headSpan,
+      path,
+    );
   }
+}
+
+// ─── Key dependencies (`:requires`) ─────────────────────────────────────
+//
+// Mirrors `emitDependentKeyDiagnostics` in `src/Validator.zig`, minus the
+// overlay leg — this port has no materialized-defaults machinery, matching
+// how it handles exclusive groups.
+//
+// One diagnostic per unsatisfied *dependent* key, naming all of its absent
+// requirements: a key requiring three absent keys says so once with three
+// names, not three times.
+function emitDependentKeyDiagnostics(
+  diags: Diagnostic[],
+  keys: readonly KeySpec[],
+  seen: ReadonlySet<number>,
+  baseKeys: readonly KeySpec[] | null,
+  baseSeen: ReadonlySet<number> | null,
+  formName: string,
+  variantWhen: string | null,
+  span: { start: number; end: number },
+  path: readonly string[],
+) {
+  for (let ki = 0; ki < keys.length; ki++) {
+    const k = keys[ki]!;
+    const reqs = k.requires;
+    if (!reqs || reqs.length === 0) continue;
+    if (!seen.has(ki)) continue;
+
+    const missing = reqs.filter((req) => {
+      if (requirementPresent(req, keys, seen)) return false;
+      if (baseKeys && baseSeen && requirementPresent(req, baseKeys, baseSeen)) return false;
+      return true;
+    });
+    if (missing.length === 0) continue;
+
+    const scope = variantWhen === null ? '' : `variant \`${variantWhen}\` `;
+    const names = missing.map((m) => `\`:${m}\``).join(', ');
+    const tail = missing.length === 1 ? 'which is absent' : 'which are absent';
+    emit(
+      diags,
+      span,
+      path,
+      'dependent_key_missing',
+      `form \`${formName}\` ${scope}keyword \`:${k.name}\` requires ${names}, ${tail}`,
+    );
+  }
+}
+
+function requirementPresent(
+  name: string,
+  keys: readonly KeySpec[],
+  seen: ReadonlySet<number>,
+): boolean {
+  for (let i = 0; i < keys.length; i++) {
+    if (keys[i]!.name === name) return seen.has(i);
+  }
+  return false;
 }
 
 // ─── Exclusive groups ───────────────────────────────────────────────────
@@ -1720,7 +1937,38 @@ function matchKind(
       }
       return null;
     case 'symbol':
-      if (node.tag !== 'symbol') return wrongUnderlying('symbol');
+      if (node.tag !== 'symbol') {
+        // Digit-leading escape. A member spelled `1d` / `2d` cannot arrive
+        // as a symbol — the lexer reads it as a unit-bearing number — so a
+        // kind that declares one genuinely accepts that shape here.
+        // Gated as in `matchScalar`: unit-bearing numbers only, only when
+        // the kind declares such a member, never on a cross-ref slot
+        // (whose member set comes from document symbols under
+        // `:name-key`, which cannot be digit-leading).
+        if (
+          node.tag === 'number' &&
+          node.unit !== undefined &&
+          kind.crossRef === undefined &&
+          kind.members?.some((m) => m.numericSpelling !== undefined)
+        ) {
+          const key = spellingKeyOf(node.value);
+          if (
+            key !== undefined &&
+            kind.members.some(
+              (m) => m.numericSpelling?.value === key && m.numericSpelling.unit === node.unit,
+            )
+          ) {
+            return null;
+          }
+          // The slot really does accept unit-bearing numbers here, so
+          // "`5px` is not one of [1d | 2d | 3d]" beats "a number is not a
+          // symbol".
+          const shown =
+            key === undefined ? `${node.value}${node.unit}` : canonicalSpelling(key, node.unit);
+          return notMember(shown, kind.members);
+        }
+        return wrongUnderlying('symbol');
+      }
       if (kind.crossRef) {
         const targetSpec = registry.targetsByKind.get(kind.name);
         if (!targetSpec) return null; // schema-level miss handled elsewhere
@@ -1772,7 +2020,7 @@ function matchKind(
       return null;
     case 'form':
       if (node.tag !== 'form') return wrongUnderlying('form');
-      if (kind.heads && !kind.heads.includes(node.head)) {
+      if (kind.heads && !kind.heads.some((h) => h.name === node.head)) {
         return notHeadMember(node.head, kind.heads);
       }
       return null;
@@ -1824,6 +2072,15 @@ function notMember(got: string, allowed: readonly Member[]): MatchFail {
   };
 }
 
+/// The canonical member spelling for a unit-bearing literal, or null when
+/// its magnitude cannot be one. Mirrors `canonicalMemberSpelling` in
+/// src/Validator.zig.
+function numericMemberText(magnitude: number, unit: string): string | null {
+  const key = spellingKeyOf(magnitude);
+  if (key === undefined) return null;
+  return canonicalSpelling(key, unit);
+}
+
 /// After a successful symbol/string match against a typed slot, emit a
 /// `deprecated_member` warning when the matched member carries
 /// `deprecated: true`. No-op when the slot's expected type isn't a
@@ -1842,7 +2099,18 @@ function emitDeprecatedMember(
   if (lookup.kind !== 'found') return;
   const kind = lookup.value;
   if (!kind.members || kind.members.length === 0) return;
-  const text = value.tag === 'symbol' ? value.text : value.tag === 'string' ? value.value : null;
+  // A digit-leading member matched numerically supplies no symbol text,
+  // so render the canonical spelling — which is exactly what the loader
+  // stored as `Member.name`. Without this a deprecated `2d` would match
+  // silently. Mirrors the tree wrapper's `.number_with_unit` arm in Zig.
+  const text =
+    value.tag === 'symbol'
+      ? value.text
+      : value.tag === 'string'
+        ? value.value
+        : value.tag === 'number' && value.unit !== undefined
+          ? numericMemberText(value.value, value.unit)
+          : null;
   if (text === null) return;
   for (const m of kind.members) {
     if (m.name !== text) continue;
@@ -1892,10 +2160,163 @@ function emitStringPatternUnsupported(
   });
 }
 
-function notHeadMember(got: string, allowed: readonly string[]): MatchFail {
+/// What one union alternative makes of a symbol value, for the ambiguity
+/// advisory. Mirrors `AltVerdict` in src/Validator.zig.
+type AltVerdict =
+  /// Cannot accept this symbol at all.
+  | { readonly kind: 'rejects' }
+  /// Accepts, but denotes no named entity — a member set, a bare `symbol`,
+  /// or `any`. Winning the union with one of these means the slot is not a
+  /// reference, so there is nothing to be ambiguous about.
+  | { readonly kind: 'accepts_plain' }
+  /// Accepts as a reference into the named bucket.
+  | { readonly kind: 'accepts_ref'; readonly target: string; readonly scope: ScopeId };
+
+const REJECTS: AltVerdict = { kind: 'rejects' };
+const ACCEPTS_PLAIN: AltVerdict = { kind: 'accepts_plain' };
+
+/// Classify one union alternative against a symbol value. Mirrors the
+/// acceptance gates of `matchKind`'s `symbol` arm — cross-ref membership,
+/// then the member set — and nothing else; every other underlying rejects a
+/// symbol outright. Re-derived rather than delegated for the reason the Zig
+/// twin gives: this asks the narrower "is the name demonstrably registered
+/// in this bucket" and must have no side effects.
+///
+/// A nested union is rejected at schema-aggregate time (`nested_union`), so
+/// the `union_of` case folds into `rejects` rather than recursing.
+function classifySymbolAlternative(
+  schema: Schema,
+  registry: CrossRefRegistry,
+  alt: QualifiedRef,
+  scopeChain: readonly ScopeFrame[],
+  treeScope: ScopeId,
+  text: string,
+): AltVerdict {
+  switch (alt.name) {
+    case 'any':
+    case 'symbol':
+      return ACCEPTS_PLAIN;
+    case 'number':
+    case 'string':
+    case 'boolean':
+    case 'nil':
+    case 'vector':
+    case 'form':
+      return REJECTS;
+  }
+  const lookup = lookupValueKind(schema, alt.name, alt.namespace);
+  // Unknown / ambiguous alternatives already have their own diagnostic from
+  // the match itself; an advisory does not pile on.
+  if (lookup.kind !== 'found') return REJECTS;
+  const kind = lookup.value;
+  if (kind.underlying !== 'symbol') return REJECTS;
+  if (kind.crossRef) {
+    const targetSpec = registry.targetsByKind.get(kind.name);
+    if (!targetSpec) return REJECTS;
+    let scopeId: ScopeId;
+    if (targetSpec.scopeForm) {
+      const found = findNearestScope(scopeChain, targetSpec.scopeForm);
+      if (found === null) return REJECTS;
+      scopeId = found;
+    } else {
+      scopeId = treeScope;
+    }
+    const set = registry.byScope.get(scopeId)?.get(targetSpec.canonicalTarget);
+    if (!set || !set.has(text)) return REJECTS;
+    return { kind: 'accepts_ref', target: targetSpec.canonicalTarget, scope: scopeId };
+  }
+  if (kind.members && kind.members.length > 0) {
+    return kind.members.some((m) => m.name === text) ? ACCEPTS_PLAIN : REJECTS;
+  }
+  return ACCEPTS_PLAIN;
+}
+
+/// After a symbol has matched a `:underlying union` slot, warn when two or
+/// more of the union's cross-ref-backed alternatives register that name — so
+/// which entity the slot denotes is decided by declaration order. Mirrors
+/// `emitUnionAmbiguousCore` in src/Validator.zig, including its silences: a
+/// plain winner ahead of every reference, and the bucket dedup that keeps
+/// two kinds pointing at one target from reading as two entities.
+function emitUnionAmbiguous(
+  diags: Diagnostic[],
+  schema: Schema,
+  registry: CrossRefRegistry,
+  expected: ValueType,
+  value: Node,
+  scopeChain: readonly ScopeFrame[],
+  treeScope: ScopeId,
+  path: readonly string[],
+): void {
+  if (expected.kind !== 'named') return;
+  if (value.tag !== 'symbol') return;
+  const lookup = lookupValueKind(schema, expected.name, expected.namespace);
+  if (lookup.kind !== 'found') return;
+  const kind = lookup.value;
+  if (kind.underlying !== 'union_of' || !kind.unionOf) return;
+
+  const claimants: { kindName: string; target: string; scope: ScopeId }[] = [];
+  for (const alt of kind.unionOf.alternatives) {
+    const verdict = classifySymbolAlternative(
+      schema,
+      registry,
+      alt,
+      scopeChain,
+      treeScope,
+      value.text,
+    );
+    if (verdict.kind === 'rejects') continue;
+    if (verdict.kind === 'accepts_plain') {
+      // A plain acceptance ahead of every reference wins the union
+      // outright. After a reference has already won it changes nothing.
+      if (claimants.length === 0) return;
+      continue;
+    }
+    const seen = claimants.some((c) => c.scope === verdict.scope && c.target === verdict.target);
+    if (!seen) claimants.push({ kindName: alt.name, target: verdict.target, scope: verdict.scope });
+  }
+  if (claimants.length < 2) return;
+
+  const list = claimants
+    .map((c, i) => {
+      const sep = i === 0 ? '' : i + 1 === claimants.length ? ' and ' : ', ';
+      return `${sep}\`${c.kindName}\` (target \`${c.target}\`)`;
+    })
+    .join('');
+  diags.push({
+    code: 'union_ambiguous',
+    message:
+      `symbol \`${value.text}\` resolves in ${claimants.length} alternatives of \`${kind.name}\` — ` +
+      `${list}. First match wins; rename one declaration or split the slot.`,
+    path: [...path],
+    span: value.span,
+    severity: 'warning',
+  });
+}
+
+/// The advisory sweep run on a value that has just matched its slot's
+/// declared type. Every member is `warning` severity and none changes the
+/// document's verdict. Bundled for the reason the Zig twin gives: they had
+/// already drifted apart per-site once, and one call means a new advisory
+/// reaches every match site or none. Mirrors `emitValueAdvisoriesTree`.
+function emitValueAdvisories(
+  diags: Diagnostic[],
+  schema: Schema,
+  registry: CrossRefRegistry,
+  expected: ValueType,
+  value: Node,
+  scopeChain: readonly ScopeFrame[],
+  treeScope: ScopeId,
+  path: readonly string[],
+): void {
+  emitDeprecatedMember(diags, schema, expected, value, path);
+  emitStringPatternUnsupported(diags, schema, expected, value, path);
+  emitUnionAmbiguous(diags, schema, registry, expected, value, scopeChain, treeScope, path);
+}
+
+function notHeadMember(got: string, allowed: readonly Head[]): MatchFail {
   return {
     code: 'not_head_member',
-    message: () => `head \`${got}\` is not in [${allowed.join(', ')}]`,
+    message: () => `head \`${got}\` is not in [${allowed.map((h) => h.name).join(', ')}]`,
   };
 }
 
@@ -2034,7 +2455,56 @@ function checkNumericBounds(node: NumberNode, nb: NumericBounds): MatchFail | nu
       return numberAboveMax(value.f, nb.max.value, nb.max.unit);
     }
   }
+  // Divisibility last: a value that is fractional, or outside the range,
+  // has a more basic problem than "not a multiple", and this checker
+  // reports the first failure it finds. Parity with Zig's ordering.
+  if (nb.multipleOf) {
+    if (boundUnitMismatch(nb.multipleOf, node.unit)) {
+      return numericBoundUnitMismatch(node.unit, nb.multipleOf.unit);
+    }
+    if (!isMultipleOf(value, nb.multipleOf)) {
+      return numberNotMultiple(value.f, nb.multipleOf.value, nb.multipleOf.unit);
+    }
+  }
   return null;
+}
+
+// True when `value` is an exact multiple of `bound`. Mirrors Zig's
+// `isMultipleOf`, and the bigint path is the whole reason this is not a
+// one-line `%`: an f64 remainder rounds 2^53 + 1 to an even number and
+// reports it as a multiple of 2. Three cases, matching the reference:
+//
+//   1. both integral   → bigint remainder, exact at any magnitude;
+//   2. fractional value, integral divisor → never a multiple;
+//   3. fractional divisor → f64 remainder against a relative epsilon,
+//      because binary floating point has no exact answer there. The
+//      loader warns at the declaration.
+//
+// Sign is irrelevant on both sides. Zero / non-finite divisors are
+// rejected at load, so this never divides by zero.
+function isMultipleOf(value: NumericValue, bound: NumericBound): boolean {
+  const d = bound.value;
+  const divisorIntegral = Number.isFinite(d) && Math.floor(d) === d;
+  if (divisorIntegral) {
+    const db = bound.integerBits ?? BigInt(d);
+    if (db === 0n) return true; // unreachable: rejected at load.
+    let nb: bigint;
+    if (value.kind === 'int') {
+      nb = value.bits;
+    } else if (Number.isFinite(value.f) && Math.floor(value.f) === value.f) {
+      nb = BigInt(value.f);
+    } else {
+      // Case 2: a fractional (or non-finite) value under a whole divisor.
+      return false;
+    }
+    return nb % db === 0n;
+  }
+
+  // Case 3.
+  if (!Number.isFinite(value.f)) return false;
+  const rem = Math.abs(value.f % d);
+  const eps = Math.abs(d) * 1e-9;
+  return rem <= eps || Math.abs(d) - rem <= eps;
 }
 
 type ReprSpec = { readonly min: number; readonly max: number; readonly integer: boolean };
@@ -2120,6 +2590,13 @@ function numberNotInteger(v: number): MatchFail {
   return {
     code: 'number_not_integer',
     message: () => `value ${v} is not an integer`,
+  };
+}
+
+function numberNotMultiple(v: number, b: number, unit: string | undefined): MatchFail {
+  return {
+    code: 'number_not_multiple',
+    message: () => `value ${v} is not a multiple of ${formatBound(b, unit)}`,
   };
 }
 

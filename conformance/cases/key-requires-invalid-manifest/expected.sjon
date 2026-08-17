@@ -1,0 +1,13 @@
+; Five, one per condition — and five rather than six is itself the
+; assertion. A self-reference is technically also a cycle, but it has its own
+; more specific diagnostic, so the cycle walk skips self-edges rather than
+; saying the same thing twice in different words.
+;
+; The path is `[<form>, <key>, requires]`, naming the declaration that is
+; wrong rather than the form as a whole.
+(diagnostics
+  (diagnostic :code invalid_manifest :path [self a requires])
+  (diagnostic :code invalid_manifest :path [unknown a requires])
+  (diagnostic :code invalid_manifest :path [always a requires])
+  (diagnostic :code invalid_manifest :path [grouped a requires])
+  (diagnostic :code invalid_manifest :path [cycle y requires]))

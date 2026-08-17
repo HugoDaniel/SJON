@@ -93,7 +93,9 @@
                     "name": "phrase-ref",
                     "shape": {
                       "kind": "cross_ref",
-                      "target_form": "phrase",
+                      "targets": [
+                        "phrase"
+                      ],
                       "name_key": "name",
                       "acyclic": false,
                       "scope_form": null,
@@ -251,7 +253,9 @@
           "description": "A bare symbol naming a `(phrase :name …)` definition.",
           "shape": {
             "kind": "cross_ref",
-            "target_form": "phrase",
+            "targets": [
+              "phrase"
+            ],
             "name_key": "name",
             "acyclic": false,
             "scope_form": null,
@@ -281,7 +285,9 @@
                 "name": "phrase-ref",
                 "shape": {
                   "kind": "cross_ref",
-                  "target_form": "phrase",
+                  "targets": [
+                    "phrase"
+                  ],
                   "name_key": "name",
                   "acyclic": false,
                   "scope_form": null,

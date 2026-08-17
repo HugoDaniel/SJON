@@ -14,21 +14,53 @@
 ; ordinary union, so it exports through the union path as an `anyOf` of the
 ; resolved alternatives plus an `x-sjon-union-alternatives` annotation, and
 ; the TS surface renders the matching `<base-type> | Symbol_` union.
+;
+; The optional `:ref` (format 1.3) names the reference alternative. Both
+; halves of the contrast are declared below, because the difference only
+; shows up on a *misspelling*: the default leaves the reference half an
+; unchecked `symbol`, so a typo validates clean and names nothing, while a
+; `:ref` naming a cross-ref kind catches it. See `example.sjon`.
 
-(plugin :name scalar-or-ref :version "1.0.0"
+(plugin :name scalar-or-ref :version "1.0.0" :sjon "1.3"
   ; The scalar alternative — a plain workgroup-dimension count.
   (value-kind :name dim-value
     :description "A literal workgroup dimension."
     :underlying number)
 
   ; The shorthand: a literal dim-value OR a symbol naming a constant.
+  ; No `:ref`, so the reference half is the primitive `symbol` — any
+  ; spelling satisfies it, checked by nobody.
   (value-kind :name dim
     :description "A workgroup dimension: a literal count, or a symbol referencing a named constant."
     :underlying scalar-or-ref
     :scalar-or-ref (scalar-or-ref-shape :base dim-value))
 
+  ; A checked reference: `:target define` ties the symbol to a declaration
+  ; that must exist in the document.
+  (value-kind :name define-ref
+    :description "A symbol naming a (define …) in this document."
+    :underlying symbol
+    :cross-ref (cross-ref :target define))
+
+  ; The same shorthand with the reference half named. A misspelling here
+  ; fails at validate time instead of resolving to nothing at runtime.
+  (value-kind :name checked-dim
+    :description "A workgroup dimension whose reference half must name a real (define …)."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base dim-value :ref define-ref))
+
+  (form :name define
+    :description "A named constant a dimension may reference."
+    (key :name name :type symbol :optional false)
+    (key :name value :type number :optional false))
+
   (form :name dispatch
     :description "A compute dispatch sized on three axes; each axis is a literal or a named reference."
     (key :name x :type dim :optional false)
     (key :name y :type dim :optional false)
-    (key :name z :type dim :optional true)))
+    (key :name z :type dim :optional true))
+
+  (form :name checked-dispatch
+    :description "As (dispatch …), but every axis reference is checked against a (define …)."
+    (key :name x :type checked-dim :optional false)
+    (key :name y :type checked-dim :optional true)))

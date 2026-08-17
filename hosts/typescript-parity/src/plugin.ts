@@ -63,6 +63,14 @@ export interface KeySpec {
    * declared no inline forms.
    */
   readonly localForms?: readonly FormSpec[];
+  /**
+   * Sibling keys this key's presence demands (manifest format 1.3). When
+   * this key is present and any named key is absent, the validator emits
+   * `dependent_key_missing` naming every absent one. Absent means no
+   * dependency, and an absent *dependent* key constrains nothing — the
+   * rule runs one way only. Mirrors `Plugin.KeySpec.requires`.
+   */
+  readonly requires?: readonly string[];
 }
 
 /**
@@ -218,6 +226,12 @@ export interface NumericBounds {
   readonly exclusiveMin: boolean;
   readonly exclusiveMax: boolean;
   readonly integer: boolean;
+  // Divisor from `:multiple-of` (manifest format 1.3). Carries a unit
+  // like min/max, under the same byte-equality rule. Mirrors
+  // `Plugin.ValueKind.NumericBounds.multiple_of`; the divisibility check
+  // must run in exact integer space whenever both sides are whole, which
+  // is what `integerBits` is for.
+  readonly multipleOf?: NumericBound;
 }
 
 // GPU representation tag for a `.number` underlying. Opt-in via
@@ -259,12 +273,68 @@ export interface Member {
   readonly description?: string;
   readonly deprecated?: boolean;
   readonly deprecationMessage?: string;
+  /** Set when the spelling is digit-leading (`1d`, `2d`) and therefore
+   *  arrives as a unit-bearing number rather than a symbol. `name` keeps
+   *  the canonical spelling; this pair is what the validator matches on,
+   *  which is what makes `2d`, `2.0d`, and `02d` one member. */
+  readonly numericSpelling?: NumericSpelling;
+}
+
+/** The parsed `(magnitude, unit)` identity of a digit-leading member
+ *  spelling. Mirrors `Plugin.ValueKind.MemberSet.NumericSpelling`. */
+export interface NumericSpelling {
+  /** A whole, non-negative magnitude at or below `MAX_SPELLING_VALUE`. */
+  readonly value: number;
+  /** Never empty — a unitless number is not a spelling. */
+  readonly unit: string;
+}
+
+/** 2^53, the f64 exact-integer ceiling. Mirrors
+ *  `NumericSpelling.MAX_SPELLING_VALUE` in src/Plugin.zig. */
+export const MAX_SPELLING_VALUE = 2 ** 53;
+
+/** The integer key for a literal's magnitude, or undefined when that
+ *  magnitude cannot be a member spelling: non-finite, fractional,
+ *  negative, or above `MAX_SPELLING_VALUE`. The loader's rejection and
+ *  the validator's match test are the same question — rejecting a
+ *  fractional magnitude is what keeps `2.5d` out of `2d`. */
+export function spellingKeyOf(magnitude: number): number | undefined {
+  if (!Number.isFinite(magnitude)) return undefined;
+  if (!Number.isInteger(magnitude)) return undefined;
+  if (magnitude < 0) return undefined;
+  if (magnitude > MAX_SPELLING_VALUE) return undefined;
+  return magnitude;
+}
+
+/** The canonical spelling of a `(key, unit)` pair. The loader derives
+ *  `Member.name` with it so `02d` declares `2d`; the validator names a
+ *  numerically-matched member with it. One function, so a spelling cannot
+ *  read one way in a manifest and another in a diagnostic. */
+export function canonicalSpelling(key: number, unit: string): string {
+  return `${key}${unit}`;
+}
+
+/**
+ * One entry in a `(head-set …)`. `name` is what the validator matches a
+ * form head against; `min`/`max` bound how many positional children of
+ * one form may carry that head, and are enforced only at a form's
+ * `:positional` slot (see `docs/portable-manifest-v1.md` §4.5). The
+ * compact `:names [a b c]` spelling lowers to one unbounded entry per
+ * name, so every reader has a single shape to walk.
+ */
+export interface Head {
+  readonly name: string;
+  /** Inclusive floor; absent = 0 = no floor. */
+  readonly min?: number;
+  /** Inclusive ceiling; absent = unbounded. */
+  readonly max?: number;
+  readonly description?: string;
 }
 
 export interface ValueKind {
   readonly name: string;
   readonly underlying: 'number' | 'string' | 'vector' | 'form' | 'symbol' | 'union_of';
-  readonly heads?: readonly string[];
+  readonly heads?: readonly Head[];
   readonly members?: readonly Member[];
   readonly vector?: {
     readonly element: QualifiedRef;
@@ -282,7 +352,13 @@ export interface ValueKind {
   readonly repr?: Repr;
   readonly stringBounds?: StringBounds;
   readonly crossRef?: {
-    readonly target: string;
+    /** Every listed target form, in manifest order; never empty. More than
+     * one declares that the listed forms share **one namespace**: a name
+     * from any of them satisfies a reference, and a name from two of them
+     * is `duplicate_cross_ref_target`. Both `:target phrase` and
+     * `:target [phrase]` arrive here as a one-element list, so nothing
+     * downstream can tell the spellings apart. */
+    readonly targets: readonly string[];
     readonly nameKey?: string;
     readonly acyclic?: boolean;
     readonly scopeForm?: string;
@@ -349,7 +425,7 @@ export const MAX_KEYWORDS = 16;
 /// Highest portable-manifest format version this host understands.
 /// Mirrors `Plugin.SUPPORTED_SJON_FORMAT`. Bumped on incompatible spec
 /// changes.
-export const SUPPORTED_SJON_FORMAT = '1.2';
+export const SUPPORTED_SJON_FORMAT = '1.3';
 
 export interface Schema {
   readonly plugins: readonly Plugin[];
@@ -712,6 +788,45 @@ function canonicalFormName(schema: Schema, spelling: string): string | null {
   return hit.kind === 'found' ? `${hit.plugin.name}/${hit.form.name}` : null;
 }
 
+/**
+ * The name-registry **bucket** a cross-ref's names live in, or null when
+ * the cross-ref cannot contribute one. Mirrors
+ * `Schema.crossRefBucketKey` — and must, byte for byte: the aggregate
+ * collapse check and the index build both key on it, so two spellings of
+ * the rule would look up names in a bucket nothing registered into.
+ *
+ * One target → the canonical `<plugin>/<form>` name, exactly as before
+ * groups existed. Several → one synthetic key naming each canonical
+ * target, space-separated; a space cannot occur in a symbol, so a group
+ * key can never collide with a form name. All-or-nothing: one
+ * unresolvable entry and the whole cross-ref contributes nothing, since
+ * `unknown_cross_ref_target` has already been emitted at `err` for it.
+ *
+ * The key is a **set**: sorted and de-duplicated, so `[a b]` and `[b a]`
+ * name one bucket and `[a p/a]` names the same bucket as `:target a`. A
+ * group declares that its targets share one namespace and a namespace has
+ * no order; keying on the written order made one namespace register twice.
+ */
+export function crossRefBucketKey(
+  schema: Schema,
+  cr: NonNullable<ValueKind['crossRef']>,
+): string | null {
+  const parts: string[] = [];
+  for (const t of cr.targets) {
+    const canonical = canonicalFormName(schema, t);
+    if (canonical === null) return null;
+    parts.push(canonical);
+  }
+  if (parts.length === 0) return null;
+  if (parts.length === 1) return parts[0]!;
+  // Code-unit order, which is byte order — and so Zig's
+  // `std.mem.lessThan` — for the ASCII symbols a canonical form name is
+  // built from. `localeCompare` would be locale-dependent and could
+  // disagree with the reference host on the same schema.
+  parts.sort((x, y) => (x < y ? -1 : x > y ? 1 : 0));
+  return [...new Set(parts)].join(' ');
+}
+
 /** The provider vocabulary's twin. Mirrors `Schema.canonicalProviderName`. */
 function canonicalProviderName(schema: Schema, spelling: string): string | null {
   const hit = resolveProvider(schema, spelling);
@@ -730,85 +845,89 @@ export function validateCrossRefs(schema: Schema): Diagnostic[] {
       const cr = kind.crossRef;
       if (!cr) continue;
 
-      const target = resolveForm(schema, cr.target);
-      if (target.kind === 'not_found') {
-        out.push({
-          code: 'unknown_cross_ref_target',
-          message: `value-kind \`${kind.name}\` cross-ref \`:target ${cr.target}\` does not resolve to any form`,
-          path: aggregatePath(plugin.name, kind.name),
-          span: ZERO_SPAN,
-          severity: 'err',
-        });
-      } else if (target.kind === 'ambiguous') {
-        const list = target.plugins.map((p) => p.name).join(', ');
-        const bareName = cr.target.includes('/') ? cr.target.split('/')[1]! : cr.target;
-        out.push({
-          code: 'ambiguous_cross_ref_target',
-          message: `value-kind \`${kind.name}\` cross-ref \`:target ${cr.target}\` is ambiguous — defined by [${list}]; qualify with \`<ns>/${bareName}\``,
-          path: aggregatePath(plugin.name, kind.name),
-          span: ZERO_SPAN,
-          severity: 'err',
-        });
-      } else {
-        const targetForm = target.form;
-        // Exactly one of the two routes' keys is checked — the loader has
-        // already rejected a spec claiming both, so this is a dispatch,
-        // not a precedence rule.
-        if (cr.provider === undefined) {
-          const nameKey = cr.nameKey ?? 'name';
-          let foundKey = false;
-          let symbolTyped = false;
-          for (const k of targetForm.keys) {
-            if (k.name !== nameKey) continue;
-            foundKey = true;
-            symbolTyped = isSymbolValueType(schema, k.valueType);
-            break;
-          }
-          if (!foundKey || !symbolTyped) {
-            out.push({
-              code: 'cross_ref_name_key_unknown',
-              message: `value-kind \`${kind.name}\` cross-ref \`:name-key ${nameKey}\` is not a symbol-typed key on form \`${targetForm.name}\``,
-              path: aggregatePath(plugin.name, kind.name),
-              span: ZERO_SPAN,
-              severity: 'err',
-            });
-          }
+      for (const targetSpelling of cr.targets) {
+        const target = resolveForm(schema, targetSpelling);
+        if (target.kind === 'not_found') {
+          out.push({
+            code: 'unknown_cross_ref_target',
+            message: `value-kind \`${kind.name}\` cross-ref \`:target ${targetSpelling}\` does not resolve to any form`,
+            path: aggregatePath(plugin.name, kind.name),
+            span: ZERO_SPAN,
+            severity: 'err',
+          });
+        } else if (target.kind === 'ambiguous') {
+          const list = target.plugins.map((p) => p.name).join(', ');
+          const bareName = targetSpelling.includes('/')
+            ? targetSpelling.split('/')[1]!
+            : targetSpelling;
+          out.push({
+            code: 'ambiguous_cross_ref_target',
+            message: `value-kind \`${kind.name}\` cross-ref \`:target ${targetSpelling}\` is ambiguous — defined by [${list}]; qualify with \`<ns>/${bareName}\``,
+            path: aggregatePath(plugin.name, kind.name),
+            span: ZERO_SPAN,
+            severity: 'err',
+          });
         } else {
-          const sourceKey = cr.sourceKey ?? 'src';
-          let foundKey = false;
-          let stringTyped = false;
-          for (const k of targetForm.keys) {
-            if (k.name !== sourceKey) continue;
-            foundKey = true;
-            stringTyped = isStringValueType(schema, k.valueType);
-            break;
-          }
-          if (!foundKey || !stringTyped) {
-            out.push({
-              code: 'cross_ref_source_key_unknown',
-              message: `value-kind \`${kind.name}\` cross-ref \`:source-key ${sourceKey}\` is not a string-typed key on form \`${targetForm.name}\``,
-              path: aggregatePath(plugin.name, kind.name),
-              span: ZERO_SPAN,
-              severity: 'err',
-            });
-          }
-        }
-        if (cr.acyclic) {
-          let hasSelfEdge = false;
-          for (const k of targetForm.keys) {
-            if (selfEdges(schema, k.valueType, kind.name)) {
-              hasSelfEdge = true;
+          const targetForm = target.form;
+          // Exactly one of the two routes' keys is checked — the loader has
+          // already rejected a spec claiming both, so this is a dispatch,
+          // not a precedence rule.
+          if (cr.provider === undefined) {
+            const nameKey = cr.nameKey ?? 'name';
+            let foundKey = false;
+            let symbolTyped = false;
+            for (const k of targetForm.keys) {
+              if (k.name !== nameKey) continue;
+              foundKey = true;
+              symbolTyped = isSymbolValueType(schema, k.valueType);
               break;
             }
+            if (!foundKey || !symbolTyped) {
+              out.push({
+                code: 'cross_ref_name_key_unknown',
+                message: `value-kind \`${kind.name}\` cross-ref \`:name-key ${nameKey}\` is not a symbol-typed key on form \`${targetForm.name}\``,
+                path: aggregatePath(plugin.name, kind.name),
+                span: ZERO_SPAN,
+                severity: 'err',
+              });
+            }
+          } else {
+            const sourceKey = cr.sourceKey ?? 'src';
+            let foundKey = false;
+            let stringTyped = false;
+            for (const k of targetForm.keys) {
+              if (k.name !== sourceKey) continue;
+              foundKey = true;
+              stringTyped = isStringValueType(schema, k.valueType);
+              break;
+            }
+            if (!foundKey || !stringTyped) {
+              out.push({
+                code: 'cross_ref_source_key_unknown',
+                message: `value-kind \`${kind.name}\` cross-ref \`:source-key ${sourceKey}\` is not a string-typed key on form \`${targetForm.name}\``,
+                path: aggregatePath(plugin.name, kind.name),
+                span: ZERO_SPAN,
+                severity: 'err',
+              });
+            }
           }
-          if (!hasSelfEdge) {
-            out.push({
-              code: 'acyclic_without_self_edge',
-              message: `value-kind \`${kind.name}\` declares \`:acyclic true\` but form \`${targetForm.name}\` has no key whose type resolves to \`${kind.name}\` — the cycle check has no edges to follow`,
-              path: aggregatePath(plugin.name, kind.name),
-              span: ZERO_SPAN,
-              severity: 'err',
-            });
+          if (cr.acyclic) {
+            let hasSelfEdge = false;
+            for (const k of targetForm.keys) {
+              if (selfEdges(schema, k.valueType, kind.name)) {
+                hasSelfEdge = true;
+                break;
+              }
+            }
+            if (!hasSelfEdge) {
+              out.push({
+                code: 'acyclic_without_self_edge',
+                message: `value-kind \`${kind.name}\` declares \`:acyclic true\` but form \`${targetForm.name}\` has no key whose type resolves to \`${kind.name}\` — the cycle check has no edges to follow`,
+                path: aggregatePath(plugin.name, kind.name),
+                span: ZERO_SPAN,
+                severity: 'err',
+              });
+            }
           }
         }
       }
@@ -862,13 +981,15 @@ export function validateCrossRefs(schema: Schema): Diagnostic[] {
         }
       }
 
-      // One target form, one member set. A second cross-ref naming the
-      // same target contributes nothing, so when the two specs disagree
-      // the loser's references end up checked against the winner's names.
-      // Skips exactly what `collectCrossRefTargets` skips: a spec the
-      // registry never sees can neither win nor lose a collapse, and has
-      // already been reported for the reason it was dropped.
-      const canonicalTarget = canonicalFormName(schema, cr.target);
+      // One bucket, one member set. A second cross-ref landing in the same
+      // bucket contributes nothing, so when the two specs disagree the
+      // loser's references end up checked against the winner's names. For a
+      // single-target cross-ref the bucket *is* the target, which is why
+      // this reads as "one target form, one member set" for every schema
+      // written before groups. Skips exactly what the index build skips: a
+      // spec the registry never sees can neither win nor lose a collapse,
+      // and has already been reported for the reason it was dropped.
+      const canonicalTarget = crossRefBucketKey(schema, cr);
       if (canonicalTarget === null) continue;
       let provider: string | null = null;
       if (cr.provider !== undefined) {
@@ -891,7 +1012,11 @@ export function validateCrossRefs(schema: Schema): Diagnostic[] {
       out.push({
         code: 'cross_ref_target_collapse',
         message:
-          `value-kind \`${kind.name}\` cross-references form \`${canonicalTarget}\`, whose members ` +
+          `value-kind \`${kind.name}\` cross-references ${
+            cr.targets.length === 1
+              ? `form \`${canonicalTarget}\``
+              : `the target group \`${canonicalTarget}\``
+          }, whose members ` +
           `are already collected by value-kind \`${won.kind}\` in plugin \`${won.plugin}\` using ` +
           `${describeRegistrySpec(won)}; this kind's ${describeRegistrySpec(mine)} is ignored, and ` +
           `its references are checked against the other kind's names`,

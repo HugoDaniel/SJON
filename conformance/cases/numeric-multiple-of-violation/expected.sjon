@@ -1,0 +1,8 @@
+; Four failures, one per line. The third is the exactness gate: a host that
+; implemented divisibility as an f64 remainder passes 2^53 + 1 and is missing
+; only this diagnostic.
+(diagnostics
+  (diagnostic :code number_not_multiple :path [entry offset])
+  (diagnostic :code number_not_multiple :path [entry offset])
+  (diagnostic :code number_not_multiple :path [entry count])
+  (diagnostic :code number_not_multiple :path [entry span]))

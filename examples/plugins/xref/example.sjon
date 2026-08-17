@@ -11,6 +11,10 @@
 ;     validating this document reports `cross_ref_provider_unavailable` at
 ;     the shader and stays silent at the reference — loud once at the
 ;     source, not once per use.
+;   * target group — `(edge :group-pipeline blit)` references either kind of
+;     pipeline through ONE namespace. Read the two sections at the bottom
+;     together: the union and the group answer the same question, and the
+;     answers differ exactly where a name is defined twice.
 
 (node :id a :label "Origin")
 (node :id b :parent a :label "Branch")
@@ -21,3 +25,62 @@
   (phrase :name intro :body "rest 4")
   (phrase :name coda :body "tutti")
   (edge :from a :to b :phrase intro :uniform u_time))
+
+; --- Two targets, one name ------------------------------------------------
+;
+; `:pipeline` is a union over two cross-ref kinds, render first. These two
+; declarations are BOTH legal: duplicate names are caught per target, and
+; these are two different targets, so each `blit` / `reduce` is alone in its
+; own namespace.
+
+(render-pipeline  :name blit)
+(compute-pipeline :name reduce)
+
+(edge :from a :to b :pipeline blit)     ; the render pipeline
+(edge :from a :to b :pipeline reduce)   ; the compute pipeline
+
+; Now give them the same name. Still no duplicate — still two namespaces —
+; but the reference below now resolves in both, and the only thing choosing
+; between them is that `render-pipeline-ref` is listed first in the union.
+
+(render-pipeline  :name shared)
+(compute-pipeline :name shared)
+
+(edge :from a :to b :pipeline shared)   ; union_ambiguous (warning)
+
+; The document above VALIDATES: `union_ambiguous` is a warning, first match
+; still wins, and `shared` here is the render pipeline. What the warning
+; says is that a second reading exists — so a tool resolving `shared`
+; through its own table instead of by alternative order would pick the
+; compute pipeline, and neither it nor the validator would notice they
+; disagreed.
+;
+; Two repairs, and which is right depends on what you meant: rename one
+; declaration (the collision was an accident), or split `:pipeline` into two
+; single-kind keys (both names are deliberate and the slot was overloaded).
+
+; --- The same two targets, one namespace ----------------------------------
+;
+; `:group-pipeline` is `(cross-ref :target [render-pipeline compute-pipeline])`
+; — not a union of two cross-refs, but one cross-ref over two forms. Both
+; names below resolve through it, and neither reference needs to know which
+; form defined the name it points at.
+
+(edge :from a :to b :group-pipeline blit)     ; the render pipeline
+(edge :from a :to b :group-pipeline reduce)   ; the compute pipeline
+
+; What the group changes is `shared`, declared twice above. Through
+; `:pipeline` it is two names in two namespaces and every reference is
+; `union_ambiguous`; through `:group-pipeline` it is one name defined twice
+; in one namespace, which is `duplicate_cross_ref_target` — reported once,
+; at the declarations, where the mistake actually is.
+;
+; So this document carries both diagnostics, and that is the point of
+; keeping the two shapes side by side: the warning is about a *reference*
+; that has two readings, the error is about *declarations* that collided.
+; A schema author picks the group when the names are meant to be unique
+; across the forms, and the union when they are not.
+
+(edge :from a :to b :group-pipeline shared)   ; resolves — the collision is
+                                              ; reported at the declarations
+

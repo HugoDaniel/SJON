@@ -40,7 +40,7 @@ import type {
   StringBoundsIR,
 } from './shape.ts';
 import { resolveFormDef } from './shape.ts';
-import { assertNever, isFormObject } from './internal.ts';
+import { assertNever, canonicalMemberName, isFormObject } from './internal.ts';
 import {
   type ParseOptions,
   type SafeEditResult,
@@ -103,6 +103,17 @@ function numberNode(def: NodeDef): NumberNode {
     gt: (value: number) => withBounds({ min: value, exclusiveMin: true }),
     lt: (value: number) => withBounds({ max: value, exclusiveMax: true }),
     int: () => withBounds({ integer: true }),
+    multipleOf: (divisor: number) => {
+      // The loader refuses a non-positive divisor (it would divide by zero,
+      // and a negative one is both redundant and unexportable — JSON Schema
+      // requires `multipleOf > 0`). Refusing here names the call site.
+      if (!(divisor > 0)) {
+        throw new Error(
+          `SJON schema: multipleOf(${divisor}) needs a positive divisor — zero has no multiples to check, and a negative divisor accepts exactly what its magnitude accepts.`,
+        );
+      }
+      return withBounds({ multipleOf: divisor });
+    },
   };
   return node as unknown as NumberNode;
 }
@@ -502,10 +513,30 @@ export const semver = (): StringNode => stringPreset({ format: 'semver' }, 'semv
 export const path = (): StringNode => stringPreset({ format: 'path' }, 'path');
 
 // --- enums ---
+/**
+ * A symbol enum. A member may be spelled digit-leading (`2d`, `2d-array`,
+ * `50%`) — the WebGPU-style spelling no bare symbol can express — in which
+ * case the slot's value type is `SjonUnit`, not `Symbol_`, because that is
+ * what such a spelling lexes as. Invalid spellings throw here rather than
+ * becoming an `invalid_manifest` diagnostic later; see `canonicalMemberName`.
+ */
 export const symbolMembers = <const M extends readonly string[]>(
   members: M,
-): Node<MemberSymbol<M[number]>> =>
-  leaf({ shape: { kind: 'symbol_members', members: [...members] }, isOptional: false });
+): Node<MemberSymbol<M[number]>> => {
+  // Canonicalise first, then look for repeats *among the canonical names* —
+  // two spellings can be one member (`2d` and `2.0d`), which is exactly the
+  // duplicate hardest to see in the source. The engine refuses the emitted
+  // manifest either way; throwing here names the pair at the call site
+  // instead of at load time.
+  const canonical = members.map(canonicalMemberName);
+  const duplicate = canonical.find((m, i) => canonical.indexOf(m, i + 1) !== -1);
+  if (duplicate !== undefined) {
+    throw new Error(
+      `SJON schema: symbolMembers declares member "${duplicate}" twice — a member set is a set, and two spellings of one magnitude and unit (2d, 2.0d, 02d) are one member.`,
+    );
+  }
+  return leaf({ shape: { kind: 'symbol_members', members: canonical }, isOptional: false });
+};
 export const stringMembers = <const M extends readonly string[]>(members: M): Node<M[number]> =>
   leaf({ shape: { kind: 'string_members', members: [...members] }, isOptional: false });
 
@@ -583,8 +614,25 @@ export function formOf<NS extends string, Head extends string, Sh extends ShapeR
  * illegal state unconstructible, and the stack trace at the call site
  * beats a diagnostic three layers down.
  */
-export const crossRef = <Target extends string>(
-  target: Target,
+/**
+ * A cross-reference slot. `s.crossRef('account')` names one target form;
+ * `s.crossRef(['render-pipeline', 'compute-pipeline'])` names several,
+ * which declares that the listed forms share **one namespace** — a name
+ * from any of them satisfies a reference, and a name defined by two of
+ * them is `duplicate_cross_ref_target` at validate time.
+ *
+ * The value type distributes: a group is a union of `CrossRef` brands, one
+ * per target, which is the honest reading of "this name may come from
+ * either form".
+ *
+ * Two options are rejected on a group, matching the engine's loader rather
+ * than emitting a manifest it would refuse: `acyclic` (cycle edges are a
+ * target's *self*-referential keys, and "self" is not well defined across
+ * several forms) and `provider` (an extracted member set is collected per
+ * target form — declare one cross-ref per target instead).
+ */
+export const crossRef = <const Target extends string>(
+  target: Target | readonly Target[],
   options?: {
     readonly nameKey?: string;
     readonly acyclic?: boolean;
@@ -593,6 +641,30 @@ export const crossRef = <Target extends string>(
     readonly sourceKey?: string;
   },
 ): Node<CrossRef<Target>> => {
+  const targets: readonly string[] = typeof target === 'string' ? [target] : target;
+  if (targets.length === 0) {
+    throw new Error(
+      'SJON schema: crossRef needs at least one target — an empty target list accepts nothing and rejects everything.',
+    );
+  }
+  const duplicate = targets.find((t, i) => targets.indexOf(t, i + 1) !== -1);
+  if (duplicate !== undefined) {
+    throw new Error(
+      `SJON schema: crossRef lists target "${duplicate}" twice — the group is one namespace, so the repeat adds nothing and hides a likely typo.`,
+    );
+  }
+  if (targets.length > 1) {
+    if (options?.acyclic === true) {
+      throw new Error(
+        "SJON schema: crossRef `acyclic` needs a single target — cycle edges are defined over one form's self-referential keys, and `self` is not well defined across a group.",
+      );
+    }
+    if (options?.provider !== undefined) {
+      throw new Error(
+        'SJON schema: crossRef `provider` needs a single target — an extracted member set is collected per target form, so declare one cross-ref per target.',
+      );
+    }
+  }
   if (options?.provider !== undefined) {
     if (options.nameKey !== undefined) {
       throw new Error(
@@ -610,7 +682,7 @@ export const crossRef = <Target extends string>(
     );
   }
   const crossRef: CrossRefIR = {
-    target,
+    targets,
     ...(options?.nameKey !== undefined ? { nameKey: options.nameKey } : {}),
     ...(options?.acyclic !== undefined ? { acyclic: options.acyclic } : {}),
     ...(options?.scope !== undefined ? { scope: options.scope } : {}),

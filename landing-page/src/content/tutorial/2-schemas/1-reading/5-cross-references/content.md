@@ -144,6 +144,27 @@ The same rule applies at the reference site:
 (track :sequence [:p0])   ; keyword element, wrong shape
 ```
 
+### A Cross-Reference As Half Of A scalar-or-ref
+
+This is how most authors first meet a cross-reference in practice. A
+slot that takes "a number, or a constant naming one" is the
+`scalar-or-ref` shorthand from chapter 12, and its reference half can be
+a cross-reference kind:
+
+```sjon
+(define :name MAX_BONES :value 128)
+
+(mesh :bones 128)         ; the literal half
+(mesh :bones MAX_BONES)   ; the reference half — a cross-reference
+```
+
+The value of doing it this way is what happens on a typo. Left as the
+default, the reference half is a plain `symbol` and `MAX_BONE`
+validates clean, naming nothing. Backed by a cross-reference kind, it
+fails — reported as `union_no_branch_matched`, since the shorthand is a
+union and the union names its alternatives rather than forwarding
+`not_cross_ref` from one branch.
+
 ## Duplicate Declarations
 
 A name should identify one target in its scope. If two declarations use
@@ -184,6 +205,136 @@ Then choose which one the track should reference:
 
 Duplicate checking happens inside the active scope. The next section
 explains what "scope" means for references.
+
+## Two Targets, One Name
+
+You just learned that two declarations sharing a name is an error. Here
+is the case where it is not, and why that turns out to matter.
+
+Duplicate checking is **per target**. Each target form gets its own
+namespace, so a `(render-pipeline :name same)` and a
+`(compute-pipeline :name same)` are each alone in theirs. Neither is a
+duplicate. Both are fine.
+
+Now suppose a slot accepts either one — a union of two reference kinds:
+
+```text
+render-pipeline-ref:  symbol, cross-ref to render-pipeline
+compute-pipeline-ref: symbol, cross-ref to compute-pipeline
+pipeline-ref:         union render-pipeline-ref | compute-pipeline-ref
+
+(dispatch ...)
+  :pipeline pipeline-ref
+```
+
+Before reading on, predict what happens here:
+
+```sjon
+(render-pipeline  :name same)
+(compute-pipeline :name same)
+
+(dispatch :pipeline same)
+```
+
+Ask yourself two questions. Does it validate? And which pipeline is
+`same`?
+
+The answers are "yes" and "the render one" — but only because
+`render-pipeline-ref` is listed first. That is lesson 12's rule doing
+real work: alternatives are tried in declaration order, the first that
+accepts wins, and here *both* accept. Reorder the plugin's alternatives
+and the same document means something different.
+
+So it validates, with a warning:
+
+```text
+union_ambiguous (warning)
+```
+
+Read it as: *this reference has two readings, and nothing but
+declaration order is choosing between them.* Your document is not
+broken. What is fragile is that a tool resolving `same` through its own
+lookup — an emitter, a code generator, an editor — may pick the compute
+pipeline, and neither it nor the validator would ever notice they
+disagreed.
+
+Two repairs, and the right one depends on what you meant:
+
+```sjon
+; Repair A - the collision was an accident. Rename one.
+(render-pipeline  :name blit)
+(compute-pipeline :name reduce)
+
+(dispatch :pipeline blit)
+```
+
+```sjon
+; Repair B - both names are deliberate; the SLOT was overloaded.
+; Ask the plugin author for two keys, one reference kind each.
+(dispatch :render-pipeline same)
+```
+
+```sjon
+; Repair C - the names were never meant to coexist. Ask the plugin author
+; for ONE reference kind over BOTH forms:
+;
+;   pipeline-ref: symbol, cross-ref to [render-pipeline compute-pipeline]
+;
+; Then this document does not warn — it fails, at the declarations:
+
+(render-pipeline  :name same)
+(compute-pipeline :name same)   ; duplicate_cross_ref_target
+```
+
+Repair A is right most of the time. Reach for B when the two names are
+genuinely the same concept in two pipelines and renaming would be a lie.
+Repair C is the one to ask for when they are *never* meant to be the same
+name — see below.
+
+### One Namespace Or Two
+
+Repairs B and C look similar and are opposites. Both change the schema;
+what they change is how many namespaces exist.
+
+A **union of two reference kinds** is two namespaces. `same` in each is
+two different names that happen to be spelled alike, so declaring both is
+fine and every *reference* is the ambiguous thing.
+
+A **target group** — one cross-reference over a list of forms — is one
+namespace. `same` declared twice is one name declared twice, so the
+*declaration* is the wrong thing and no reference is ever ambiguous.
+
+That is the whole distinction, and it is a question about your data, not
+about SJON: are a render pipeline and a compute pipeline allowed to share
+a name? If yes, the union is right and `union_ambiguous` is a fair warning
+about a genuinely overloaded slot. If no, the group is right and you want
+to hear about the collision once, where you made it.
+
+You cannot pick between them as a document author — `:target` is the
+plugin's to write. What you can do is read the diagnostic and know which
+one you are inside: a warning on a reference means two namespaces, an
+error on a declaration means one.
+
+### When It Stays Quiet
+
+This warning is deliberately narrow, so do not expect it whenever a
+union overlaps:
+
+- **A union over plain values.** "A byte count or a named constant"
+  overlaps by design, and first-match is the point. Nothing there names
+  two entities, so nothing warns.
+- **A member set that wins first.** If the alternative that accepts is
+  an enum rather than a reference, the slot denotes a member, not an
+  entity — there is no "which one" to answer.
+- **Two alternatives onto the same target.** Both readings pick out the
+  same declaration, so order decides nothing.
+- **A target group.** One namespace has nothing to be ambiguous between;
+  the collision it would warn about is an error at the declarations
+  instead.
+
+The one case it fires on is the one where order silently picks between
+two *different things*. Everything else is the union working as
+designed.
 
 ## Scope
 
@@ -476,6 +627,7 @@ it. That is a limit of the route, not a bug in the editor.
 | --- | --- | --- |
 | `not_cross_ref` | The symbol is not in the visible registry. | Fix the spelling, add the declaration, or move the reference into the right scope. |
 | `duplicate_cross_ref_target` | Two declarations use the same name in one scope. | Rename or remove one declaration. |
+| `union_ambiguous` (warning) | A name exists in two of a union slot's reference targets, so declaration order is picking which one. | Rename one declaration, or ask for the slot to be split into two single-kind keys. |
 | `cross_ref_outside_scope` | A scoped reference appears outside its required enclosing form. | Put the declaration and reference inside that scope form. |
 | `cyclic_cross_ref` | An acyclic reference chain loops back on itself. | Remove or change one edge in the cycle. |
 | `wrong_underlying` | The declaration or reference is not the expected value shape, often string vs symbol. | Match the plugin's declared type. |
@@ -498,8 +650,10 @@ When a cross-reference fails, do this mechanically:
 4. List the declarations visible from the reference's scope.
 5. Check exact symbol spelling and case.
 6. If the name exists twice, rename one declaration.
-7. If the kind is acyclic, draw the arrows and remove the loop.
-8. If the kind names a provider, the list in step 4 is what the
+7. If the slot is a union of reference kinds, check every target for the
+   name - not just the one you had in mind.
+8. If the kind is acyclic, draw the arrows and remove the loop.
+9. If the kind names a provider, the list in step 4 is what the
    provider extracted from the source string, so read the source
    instead of looking for declarations.
 
@@ -584,6 +738,52 @@ declaration:
 
 (track :sequence [p0])
 ```
+
+### Same Name, Two Targets
+
+Slot `:pipeline` is typed `pipeline-ref`, a union of
+`render-pipeline-ref | compute-pipeline-ref` in that order.
+
+```sjon
+(render-pipeline  :name same)
+(compute-pipeline :name same)
+
+(dispatch :pipeline same)
+```
+
+Two questions before you answer: does this validate, and which pipeline
+does `same` mean?
+
+It validates. `same` is the *render* pipeline, because that alternative
+is listed first. Neither declaration is a duplicate - duplicate checking
+is per target, and these are two targets. Likely diagnostic:
+`union_ambiguous`, at `warning` severity. Repair by renaming so the two
+targets do not collide:
+
+```sjon
+(render-pipeline  :name blit)
+(compute-pipeline :name reduce)
+
+(dispatch :pipeline blit)
+```
+
+### Overlapping Union, No Warning
+
+Slot `:size` is typed `byte-count | symbol`.
+
+```sjon
+(buffer :size 1024)
+(buffer :size default-size)
+```
+
+Both lines match a union whose alternatives overlap on shape, so is this
+the ambiguity case?
+
+No - clean, no diagnostic. `1024` matches `byte-count` and
+`default-size` matches the `symbol` half, and neither value names two
+different entities. `union_ambiguous` is about two *references* to two
+different things colliding on one name, not about a union having
+alternatives that could both accept.
 
 ### Outside Lexical Scope
 
@@ -689,17 +889,116 @@ Repair the source, and the reference becomes checkable again.
 <section class="mastery-quiz" data-lesson="cross-references">
   <h2>Mastery Check</h2>
   <ol class="mc-list">
+    <li class="mc-item" data-correct="0">
+      <p class="mc-q">Two forms of different kinds both declare <code>:name same</code>. Is that a <code>duplicate_cross_ref_target</code>?</p>
+      <ul class="mc-options">
+      <li>
+        <label><input type="radio" name="q-cross-references-0" value="0" /> <span>It depends on the schema — per target, each name is alone in its own namespace; but one cross-reference over both forms makes them one namespace, and then it is a duplicate.</span></label>
+        <p class="mc-explanation" hidden>Duplicate checking is per <em>namespace</em>, and how many namespaces exist is the schema's choice. Two single-target reference kinds give two; one kind whose <code>:target</code> lists both forms gives one.</p>
+      </li>
+      <li>
+        <label><input type="radio" name="q-cross-references-0" value="1" /> <span>Yes — a name may appear only once anywhere in the document.</span></label>
+        <p class="mc-explanation" hidden>Names are scoped to the namespace a cross-reference defines, not to the document. Two unrelated forms may each declare <code>intro</code> with no interaction at all.</p>
+      </li>
+      <li>
+        <label><input type="radio" name="q-cross-references-0" value="2" /> <span>No — never; duplicate checking is always per target form.</span></label>
+        <p class="mc-explanation" hidden>This was the whole rule before target groups existed, and it is still the common case — but a <code>:target [a b]</code> group deliberately merges the two namespaces so the collision <em>is</em> reported.</p>
+      </li>
+      </ul>
+      <p class="mc-feedback" hidden></p>
+    </li>
+    <li class="mc-item" data-correct="0">
+      <p class="mc-q">A slot reports <code>duplicate_cross_ref_target</code> across two different forms. What does that tell you about the schema?</p>
+      <ul class="mc-options">
+      <li>
+        <label><input type="radio" name="q-cross-references-1" value="0" /> <span>The two forms are in one namespace — a target group — so the schema says those names are meant to be unique across both.</span></label>
+        <p class="mc-explanation" hidden>One namespace is exactly what a target group declares. The fix is to rename one declaration, because the schema is asserting the names should not collide.</p>
+      </li>
+      <li>
+        <label><input type="radio" name="q-cross-references-1" value="1" /> <span>The plugin has a bug; duplicate checking should be per form.</span></label>
+        <p class="mc-explanation" hidden>It is a deliberate schema choice, not a bug. The alternative — a union of two reference kinds — keeps two namespaces and warns on each <em>reference</em> instead.</p>
+      </li>
+      <li>
+        <label><input type="radio" name="q-cross-references-1" value="2" /> <span>The two forms come from the same plugin.</span></label>
+        <p class="mc-explanation" hidden>Plugin origin has nothing to do with it. What matters is whether one cross-reference names both forms.</p>
+      </li>
+      </ul>
+      <p class="mc-feedback" hidden></p>
+    </li>
+    <li class="mc-item" data-correct="0">
+      <p class="mc-q">You get <code>union_ambiguous</code> on a reference. What would a target group have done with the same document?</p>
+      <ul class="mc-options">
+      <li>
+        <label><input type="radio" name="q-cross-references-2" value="0" /> <span>Reported an error at the two declarations instead, and left the reference alone.</span></label>
+        <p class="mc-explanation" hidden>The warning is about a <em>reference</em> with two readings; the group turns the same situation into an error about <em>declarations</em> that collided. Same document, different question asked.</p>
+      </li>
+      <li>
+        <label><input type="radio" name="q-cross-references-2" value="1" /> <span>Reported the same warning — the two shapes are equivalent.</span></label>
+        <p class="mc-explanation" hidden>They differ precisely here. A union keeps one namespace per alternative, so the names never collide and only references are ambiguous.</p>
+      </li>
+      <li>
+        <label><input type="radio" name="q-cross-references-2" value="2" /> <span>Accepted it silently, since a group has no ordering.</span></label>
+        <p class="mc-explanation" hidden>A group is not silent about it — it is the loudest of the two, and it complains earlier: at the declarations rather than at every use.</p>
+      </li>
+      </ul>
+      <p class="mc-feedback" hidden></p>
+    </li>
+    <li class="mc-item" data-correct="2">
+      <p class="mc-q">A union slot accepts either of two reference kinds, and a name exists in both targets. What happens?</p>
+      <ul class="mc-options">
+      <li>
+        <label><input type="radio" name="q-cross-references-3" value="0" /> <span>The document is rejected with <code>union_no_branch_matched</code>.</span></label>
+      </li>
+      <li>
+        <label><input type="radio" name="q-cross-references-3" value="1" /> <span>It validates silently; the last alternative wins.</span></label>
+      </li>
+      <li>
+        <label><input type="radio" name="q-cross-references-3" value="2" /> <span>It validates with a <code>union_ambiguous</code> warning — first match wins, and declaration order is what picks the entity.</span></label>
+      </li>
+      </ul>
+      <p class="mc-feedback" hidden></p>
+    </li>
+    <li class="mc-item" data-correct="1">
+      <p class="mc-q">Why is <code>union_ambiguous</code> a warning rather than an error?</p>
+      <ul class="mc-options">
+      <li>
+        <label><input type="radio" name="q-cross-references-4" value="0" /> <span>Because warnings are cheaper to compute than errors.</span></label>
+      </li>
+      <li>
+        <label><input type="radio" name="q-cross-references-4" value="1" /> <span>The behaviour is defined and the document is valid — what is fragile is that another tool resolving the name its own way would silently disagree.</span></label>
+      </li>
+      <li>
+        <label><input type="radio" name="q-cross-references-4" value="2" /> <span>Because the validator cannot tell whether the name is really ambiguous.</span></label>
+      </li>
+      </ul>
+      <p class="mc-feedback" hidden></p>
+    </li>
+    <li class="mc-item" data-correct="1">
+      <p class="mc-q">A slot is typed &quot;a byte count or a named constant&quot; and you write <code>1024</code>. Does that warn as ambiguous?</p>
+      <ul class="mc-options">
+      <li>
+        <label><input type="radio" name="q-cross-references-5" value="0" /> <span>Yes — any union whose alternatives overlap is ambiguous.</span></label>
+      </li>
+      <li>
+        <label><input type="radio" name="q-cross-references-5" value="1" /> <span>No — the alternatives overlap by design and neither names an entity; the warning is only about two references colliding on one name.</span></label>
+      </li>
+      <li>
+        <label><input type="radio" name="q-cross-references-5" value="2" /> <span>Yes, unless the plugin marks the union as ordered.</span></label>
+      </li>
+      </ul>
+      <p class="mc-feedback" hidden></p>
+    </li>
     <li class="mc-item" data-correct="1">
       <p class="mc-q">What are the two sides of a cross-reference?</p>
       <ul class="mc-options">
       <li>
-        <label><input type="radio" name="q-cross-references-0" value="0" /> <span>Reader side and writer side.</span></label>
+        <label><input type="radio" name="q-cross-references-6" value="0" /> <span>Reader side and writer side.</span></label>
       </li>
       <li>
-        <label><input type="radio" name="q-cross-references-0" value="1" /> <span>A declaration that introduces a name, and a reference that uses it.</span></label>
+        <label><input type="radio" name="q-cross-references-6" value="1" /> <span>A declaration that introduces a name, and a reference that uses it.</span></label>
       </li>
       <li>
-        <label><input type="radio" name="q-cross-references-0" value="2" /> <span>A schema side and a host side.</span></label>
+        <label><input type="radio" name="q-cross-references-6" value="2" /> <span>A schema side and a host side.</span></label>
       </li>
       </ul>
       <p class="mc-feedback" hidden></p>
@@ -708,13 +1007,13 @@ Repair the source, and the reference becomes checkable again.
       <p class="mc-q">Why can a reference appear before the form it names?</p>
       <ul class="mc-options">
       <li>
-        <label><input type="radio" name="q-cross-references-1" value="0" /> <span>The validator runs in two passes — it builds the registry first, then checks references.</span></label>
+        <label><input type="radio" name="q-cross-references-7" value="0" /> <span>The validator runs in two passes — it builds the registry first, then checks references.</span></label>
       </li>
       <li>
-        <label><input type="radio" name="q-cross-references-1" value="1" /> <span>Order is enforced; the reference must follow the declaration.</span></label>
+        <label><input type="radio" name="q-cross-references-7" value="1" /> <span>Order is enforced; the reference must follow the declaration.</span></label>
       </li>
       <li>
-        <label><input type="radio" name="q-cross-references-1" value="2" /> <span>Only when the reference is a string.</span></label>
+        <label><input type="radio" name="q-cross-references-7" value="2" /> <span>Only when the reference is a string.</span></label>
       </li>
       </ul>
       <p class="mc-feedback" hidden></p>
@@ -723,13 +1022,13 @@ Repair the source, and the reference becomes checkable again.
       <p class="mc-q">Why does a typo on a phrase reference produce <code>not_cross_ref</code> instead of <code>not_member</code>?</p>
       <ul class="mc-options">
       <li>
-        <label><input type="radio" name="q-cross-references-2" value="0" /> <span>They mean the same thing.</span></label>
+        <label><input type="radio" name="q-cross-references-8" value="0" /> <span>They mean the same thing.</span></label>
       </li>
       <li>
-        <label><input type="radio" name="q-cross-references-2" value="1" /> <span>Because the plugin author chose a different code.</span></label>
+        <label><input type="radio" name="q-cross-references-8" value="1" /> <span>Because the plugin author chose a different code.</span></label>
       </li>
       <li>
-        <label><input type="radio" name="q-cross-references-2" value="2" /> <span>The legal values come from the document's declarations, not from a closed plugin set — the diagnostic distinguishes &quot;no such reference&quot; from &quot;not in the member list&quot;.</span></label>
+        <label><input type="radio" name="q-cross-references-8" value="2" /> <span>The legal values come from the document's declarations, not from a closed plugin set — the diagnostic distinguishes &quot;no such reference&quot; from &quot;not in the member list&quot;.</span></label>
       </li>
       </ul>
       <p class="mc-feedback" hidden></p>
@@ -738,13 +1037,13 @@ Repair the source, and the reference becomes checkable again.
       <p class="mc-q">Why is <code>&quot;p0&quot;</code> not the same declaration as <code>p0</code>?</p>
       <ul class="mc-options">
       <li>
-        <label><input type="radio" name="q-cross-references-3" value="0" /> <span>Strings and symbols are different value kinds; cross-reference targets are symbols.</span></label>
+        <label><input type="radio" name="q-cross-references-9" value="0" /> <span>Strings and symbols are different value kinds; cross-reference targets are symbols.</span></label>
       </li>
       <li>
-        <label><input type="radio" name="q-cross-references-3" value="1" /> <span>They are the same — strings and symbols interchange.</span></label>
+        <label><input type="radio" name="q-cross-references-9" value="1" /> <span>They are the same — strings and symbols interchange.</span></label>
       </li>
       <li>
-        <label><input type="radio" name="q-cross-references-3" value="2" /> <span>Only when wrapped in a form.</span></label>
+        <label><input type="radio" name="q-cross-references-9" value="2" /> <span>Only when wrapped in a form.</span></label>
       </li>
       </ul>
       <p class="mc-feedback" hidden></p>
@@ -753,13 +1052,13 @@ Repair the source, and the reference becomes checkable again.
       <p class="mc-q">What is the first repair to try for <code>cross_ref_outside_scope</code>?</p>
       <ul class="mc-options">
       <li>
-        <label><input type="radio" name="q-cross-references-4" value="0" /> <span>Rename the declaration.</span></label>
+        <label><input type="radio" name="q-cross-references-10" value="0" /> <span>Rename the declaration.</span></label>
       </li>
       <li>
-        <label><input type="radio" name="q-cross-references-4" value="1" /> <span>Move the reference inside the enclosing scope form, or declare the name in the right scope.</span></label>
+        <label><input type="radio" name="q-cross-references-10" value="1" /> <span>Move the reference inside the enclosing scope form, or declare the name in the right scope.</span></label>
       </li>
       <li>
-        <label><input type="radio" name="q-cross-references-4" value="2" /> <span>Quote the symbol.</span></label>
+        <label><input type="radio" name="q-cross-references-10" value="2" /> <span>Quote the symbol.</span></label>
       </li>
       </ul>
       <p class="mc-feedback" hidden></p>
@@ -768,15 +1067,15 @@ Repair the source, and the reference becomes checkable again.
       <p class="mc-q">Where does a provider-backed kind get its legal names from?</p>
       <ul class="mc-options">
       <li>
-        <label><input type="radio" name="q-cross-references-5" value="0" /> <span>Whatever the provider finds in the environment - files on disk, a live database, a running service.</span></label>
+        <label><input type="radio" name="q-cross-references-11" value="0" /> <span>Whatever the provider finds in the environment - files on disk, a live database, a running service.</span></label>
         <p class="mc-explanation" hidden>That would be an environmental check, not validation. A provider never sees the filesystem, the network, or the clock - two hosts validating the same file have to reach the same answer.</p>
       </li>
       <li>
-        <label><input type="radio" name="q-cross-references-5" value="1" /> <span>A closed list the plugin writes down, like a member set.</span></label>
+        <label><input type="radio" name="q-cross-references-11" value="1" /> <span>A closed list the plugin writes down, like a member set.</span></label>
         <p class="mc-explanation" hidden>That is a member set (chapter 12). A provider route computes the list per document, from a string in it.</p>
       </li>
       <li>
-        <label><input type="radio" name="q-cross-references-5" value="2" /> <span>The string inside the document that the provider is handed, and nothing else.</span></label>
+        <label><input type="radio" name="q-cross-references-11" value="2" /> <span>The string inside the document that the provider is handed, and nothing else.</span></label>
         <p class="mc-explanation" hidden>Correct. The provider receives one string - the value under <code>:source-key</code> - and reports the names in it.</p>
       </li>
       </ul>
@@ -786,13 +1085,13 @@ Repair the source, and the reference becomes checkable again.
       <p class="mc-q">A provider rejects a shader source, and <code>cross_ref_extraction_failed</code> fires on that string. Why is the reference to a uniform not also reported?</p>
       <ul class="mc-options">
       <li>
-        <label><input type="radio" name="q-cross-references-6" value="0" /> <span>Because the member set was never computed, so the reference is unchecked - not accepted, and not rejected.</span></label>
+        <label><input type="radio" name="q-cross-references-12" value="0" /> <span>Because the member set was never computed, so the reference is unchecked - not accepted, and not rejected.</span></label>
       </li>
       <li>
-        <label><input type="radio" name="q-cross-references-6" value="1" /> <span>Because references are only checked once per document.</span></label>
+        <label><input type="radio" name="q-cross-references-12" value="1" /> <span>Because references are only checked once per document.</span></label>
       </li>
       <li>
-        <label><input type="radio" name="q-cross-references-6" value="2" /> <span>It is reported, as a second <code>not_cross_ref</code> on the same line.</span></label>
+        <label><input type="radio" name="q-cross-references-12" value="2" /> <span>It is reported, as a second <code>not_cross_ref</code> on the same line.</span></label>
       </li>
       </ul>
       <p class="mc-feedback" hidden></p>

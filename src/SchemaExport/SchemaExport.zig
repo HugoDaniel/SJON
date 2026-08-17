@@ -670,12 +670,19 @@ fn lowerKey(
         default_out = try lowerDefault(a, plugin, form, key, d, warnings);
     }
 
+    var requires_out: [][]const u8 = &.{};
+    if (key.requires.len != 0) {
+        requires_out = try a.alloc([]const u8, key.requires.len);
+        for (key.requires, 0..) |r, i| requires_out[i] = try a.dupe(u8, r);
+    }
+
     return .{
         .name = try a.dupe(u8, key.name),
         .optional = key.effectiveOptional(),
         .description = try a.dupe(u8, key.description),
         .value = shape,
         .default = default_out,
+        .requires = requires_out,
     };
 }
 
@@ -828,7 +835,7 @@ fn lowerValueKind(
                 "value-kind `{s}` cross-ref annotation surfaces target-form=`{s}` provider=`{s}` source-key=`{s}` scope-form=`{s}`; none are enforceable by JSON Schema",
                 .{
                     vk.name,
-                    cr.target_form,
+                    try cr.describeTargets(a),
                     p,
                     cr.source_key,
                     if (cr.scope_form) |sf| sf else "",
@@ -838,7 +845,7 @@ fn lowerValueKind(
                 "value-kind `{s}` cross-ref annotation surfaces target-form=`{s}` name-key=`{s}` acyclic={s} scope-form=`{s}`; none are enforceable by JSON Schema",
                 .{
                     vk.name,
-                    cr.target_form,
+                    try cr.describeTargets(a),
                     cr.name_key,
                     if (cr.acyclic) "true" else "false",
                     if (cr.scope_form) |sf| sf else "",
@@ -862,7 +869,7 @@ fn lowerValueKind(
         }
         return .{
             .cross_ref = .{
-                .target_form = try a.dupe(u8, cr.target_form),
+                .targets = try dupeTargets(a, cr.targets),
                 .name_key = try a.dupe(u8, cr.name_key),
                 .acyclic = cr.acyclic,
                 .scope_form = if (cr.scope_form) |sf| try a.dupe(u8, sf) else null,
@@ -905,6 +912,17 @@ fn lowerValueKind(
         .vector => try lowerVectorKind(a, schema, plugin, vk, warnings),
         .union_of => unreachable, // handled above
     };
+}
+
+/// Copy a cross-ref's target list onto `a`, entries included. The model
+/// owns its strings (the schema it was lowered from may outlive nothing),
+/// so a shallow slice copy would not do.
+fn dupeTargets(a: Allocator, targets: []const []const u8) Allocator.Error![]const []const u8 {
+    std.debug.assert(targets.len >= 1);
+    const out = try a.alloc([]const u8, targets.len);
+    for (targets, 0..) |t, i| out[i] = try a.dupe(u8, t);
+    std.debug.assert(out.len == targets.len);
+    return out;
 }
 
 fn lowerNumberKind(
@@ -983,6 +1001,7 @@ fn copyNumericBounds(a: Allocator, nb: Plugin.ValueKind.NumericBounds) Error!Mod
         .exclusive_min = nb.exclusive_min,
         .exclusive_max = nb.exclusive_max,
         .integer = nb.integer,
+        .multiple_of = if (nb.multiple_of) |b| try copyBound(a, b) else null,
     };
 }
 
@@ -1095,8 +1114,9 @@ fn lowerFormKind(
             .plugin_name = try a.dupe(u8, plugin.name),
             .kind_name = try a.dupe(u8, vk.name),
         });
-        const refs = try a.alloc(Model.FormRef, hs.names.len);
-        for (hs.names, 0..) |n, i| {
+        const refs = try a.alloc(Model.FormRef, hs.heads.len);
+        for (hs.heads, 0..) |entry, i| {
+            const n = entry.name;
             const owner = switch (schema.lookupForm(n, null)) {
                 .found => |hit| hit.plugin.name,
                 .not_found, .ambiguous => blk: {
@@ -1117,6 +1137,8 @@ fn lowerFormKind(
             refs[i] = .{
                 .plugin = try a.dupe(u8, owner),
                 .name = try a.dupe(u8, n),
+                .min = entry.min,
+                .max = entry.max,
             };
         }
         return .{ .form_heads = refs };
@@ -1159,18 +1181,31 @@ fn emitMemberSet(
     warnings: *std.ArrayList(Warnings.Warning),
     underlying: UnderlyingKind,
 ) Error!Model.ValueShape {
-    var any_rich = false;
+    var any_annotated = false;
+    var any_numeric = false;
     for (ms.members) |m| {
         if (m.label.len > 0 or m.description.len > 0 or m.deprecated or m.deprecation_message.len > 0) {
-            any_rich = true;
-            break;
+            any_annotated = true;
         }
+        // A digit-leading spelling forces the rich shape whether or not it
+        // carries annotations: it is written as a unit-bearing number, so
+        // the compact `enum` of `{"$sym": …}` entries cannot express it and
+        // would reject a document the validator accepts.
+        if (m.numeric_spelling != null) any_numeric = true;
     }
-    if (any_rich) {
+    if (any_annotated or any_numeric) {
         try warnings.append(a, .{
             .code = .rich_members_emitted_with_annotations,
             .severity = .info,
-            .message = try std.fmt.allocPrint(
+            .message = if (any_numeric and any_annotated) try std.fmt.allocPrint(
+                a,
+                "value-kind `{s}` member-set carries rich metadata and digit-leading spellings — emitted as per-member `oneOf` with title/description/deprecated annotations and `$num` wire shapes",
+                .{vk.name},
+            ) else if (any_numeric) try std.fmt.allocPrint(
+                a,
+                "value-kind `{s}` member-set carries digit-leading spellings — emitted as per-member `oneOf`, with each digit-leading member pinned to its `$num` wire shape rather than `$sym`",
+                .{vk.name},
+            ) else try std.fmt.allocPrint(
                 a,
                 "value-kind `{s}` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations",
                 .{vk.name},
@@ -1186,6 +1221,10 @@ fn emitMemberSet(
                 .description = try a.dupe(u8, m.description),
                 .deprecated = m.deprecated,
                 .deprecation_message = try a.dupe(u8, m.deprecation_message),
+                .numeric_spelling = if (m.numeric_spelling) |s| .{
+                    .magnitude = s.value,
+                    .unit = try a.dupe(u8, s.unit),
+                } else null,
             };
         }
         return switch (underlying) {
@@ -1359,6 +1398,14 @@ fn writeKeyJson(w: *std.json.Stringify, k: Model.Key) std.Io.Writer.Error!void {
         try w.objectField("default");
         try writeDefaultJson(w, d);
     }
+    // Omitted when empty so a schema with no dependencies serializes
+    // byte-identically to before.
+    if (k.requires.len != 0) {
+        try w.objectField("requires");
+        try w.beginArray();
+        for (k.requires) |r| try w.write(r);
+        try w.endArray();
+    }
     try w.endObject();
 }
 
@@ -1404,6 +1451,19 @@ fn writeShapeJson(w: *std.json.Stringify, shape: Model.ValueShape) std.Io.Writer
                 try w.write(r.plugin);
                 try w.objectField("name");
                 try w.write(r.name);
+                // Counts only when declared, so an unbounded head-set's IR
+                // is byte-identical to before. The `--target=intermediate`
+                // channel is a first-class consumer surface (the TS host's
+                // own export port reads it), so dropping a bound here would
+                // silently make it unable to see the feature.
+                if (r.min != 0) {
+                    try w.objectField("min");
+                    try w.write(r.min);
+                }
+                if (r.max) |mx| {
+                    try w.objectField("max");
+                    try w.write(mx);
+                }
                 try w.endObject();
             }
             try w.endArray();
@@ -1471,8 +1531,10 @@ fn writeShapeJson(w: *std.json.Stringify, shape: Model.ValueShape) std.Io.Writer
             try w.beginObject();
             try w.objectField("kind");
             try w.write("cross_ref");
-            try w.objectField("target_form");
-            try w.write(cr.target_form);
+            try w.objectField("targets");
+            try w.beginArray();
+            for (cr.targets) |t| try w.write(t);
+            try w.endArray();
             try w.objectField("name_key");
             try w.write(cr.name_key);
             try w.objectField("acyclic");
@@ -1564,6 +1626,19 @@ fn writeRichMembersJson(w: *std.json.Stringify, tag: []const u8, members: []cons
             try w.objectField("deprecation_message");
             try w.write(m.deprecation_message);
         }
+        // A digit-leading spelling has to reach an IR consumer: without
+        // it the consumer sees the name `2d` and cannot tell that a
+        // document writes it as a number rather than a symbol. The TS
+        // host's own export port reads this IR.
+        if (m.numeric_spelling) |s| {
+            try w.objectField("numeric_spelling");
+            try w.beginObject();
+            try w.objectField("magnitude");
+            try w.write(s.magnitude);
+            try w.objectField("unit");
+            try w.write(s.unit);
+            try w.endObject();
+        }
         try w.endObject();
     }
     try w.endArray();
@@ -1624,6 +1699,10 @@ fn writeBoundsJson(w: *std.json.Stringify, b: Model.NumericBounds) std.Io.Writer
     if (b.integer) {
         try w.objectField("integer");
         try w.write(true);
+    }
+    if (b.multiple_of) |mo| {
+        try w.objectField("multiple_of");
+        try writeBoundEntry(w, mo);
     }
     try w.endObject();
 }
@@ -1839,7 +1918,7 @@ test "lowering: head-set resolves plugin per head and emits info warning" {
             },
         },
         .value_kinds = &.{
-            .{ .name = "shape-form", .underlying = .form, .heads = .{ .names = &.{ "circle", "rect" } } },
+            .{ .name = "shape-form", .underlying = .form, .heads = .{ .heads = &.{ .{ .name = "circle" }, .{ .name = "rect" } } } },
         },
     };
     const schema = Schema.Schema.init(&.{p});

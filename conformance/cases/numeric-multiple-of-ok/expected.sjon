@@ -1,0 +1,3 @@
+; Clean. Every value divides its divisor exactly, including zero and the
+; negative one.
+(diagnostics)

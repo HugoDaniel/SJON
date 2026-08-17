@@ -6,6 +6,13 @@
 ;     a colour mark or a shape mark, but it's also fine to leave
 ;     both off.
 ;
+;   * `(anchor …)` — `:requires`, the third and last way a form relates
+;     its keys. Not a cardinality rule at all: `:offset` is meaningless
+;     without `:target`, so writing one demands the other. Exclusive
+;     groups bound *how many* may appear; a discriminant gates keys on a
+;     *value*; this gates on *presence*. Exports as 2020-12
+;     `dependentRequired`, which says exactly that.
+;
 ; Modelled on `phrase_xor_plugin` (src/Validator_tests.zig:3483-3504)
 ; and `phrase_atmostone_plugin` (3507-3528). M2 emits `oneOf` for the
 ; exactly_one case and `not:{allOf}` for the at_most_one case.
@@ -27,4 +34,11 @@
     (key :name shape :type string :optional true)
     (exclusive-group :cardinality at-most-one
       (alt :keys [color])
-      (alt :keys [shape]))))
+      (alt :keys [shape])))
+
+  (form :name anchor
+    :description "A point on a phrase. The offset and length are measured FROM :target, so neither means anything without it."
+    (key :name name :type symbol)
+    (key :name target :type symbol :optional true :description "The phrase this anchor is measured against.")
+    (key :name offset :type number :optional true :requires [target] :description "Distance from :target.")
+    (key :name length :type number :optional true :requires [target] :description "Extent from :offset.")))

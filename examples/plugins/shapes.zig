@@ -130,7 +130,7 @@ const value_kinds = [_]Plugin.ValueKind{
     .{
         .name = "shape-form",
         .underlying = .form,
-        .heads = .{ .names = &.{ "circle", "rect" } },
+        .heads = .{ .heads = &.{ .{ .name = "circle" }, .{ .name = "rect" } } },
         .description = "Form-as-slot: `(circle …)` or `(rect …)`. Used by " ++
             "`(badge :shape …)` to pin the focal element's identity.",
     },

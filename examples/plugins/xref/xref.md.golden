@@ -40,6 +40,22 @@ Opaque source blob. Its `:code` string is the member set for `:uniform-ref`, rea
 | `:name` | `symbol` | yes | — | — |
 | `:code` | `string` | yes | — | — |
 
+### `(render-pipeline …)`
+
+A raster pipeline. One half of the ambiguous pair.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:name` | `symbol` | yes | — | — |
+
+### `(compute-pipeline …)`
+
+A compute pipeline. The other half.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:name` | `symbol` | yes | — | — |
+
 ### `(edge …)`
 
 Directed edge between two `(node …)` declarations.
@@ -50,6 +66,8 @@ Directed edge between two `(node …)` declarations.
 | `:to` | `ref → (node :id …)` | yes | — | — |
 | `:phrase` | `ref → (phrase :name …)` | no | — | — |
 | `:uniform` | `ref → (shader :code via uniforms)` | no | — | — |
+| `:pipeline` | `render-pipeline-ref \| compute-pipeline-ref` | no | — | — |
+| `:group-pipeline` | `ref → (render-pipeline | compute-pipeline :name …)` | no | — | — |
 
 ## Value kinds
 
@@ -76,3 +94,27 @@ Type: `ref → (phrase :name …)`.
 Cross-ref to a uniform declared inside some `(shader …)`'s source.
 
 Type: `ref → (shader :code via uniforms)`.
+
+### render-pipeline-ref
+
+Cross-ref to a `(render-pipeline …)`.
+
+Type: `ref → (render-pipeline :name …)`.
+
+### compute-pipeline-ref
+
+Cross-ref to a `(compute-pipeline …)`.
+
+Type: `ref → (compute-pipeline :name …)`.
+
+### pipeline-ref
+
+Either pipeline. Tried in this order — render first.
+
+Type: `render-pipeline-ref | compute-pipeline-ref`.
+
+### pipeline-group-ref
+
+Either pipeline, in one namespace — a name defined by both is a duplicate.
+
+Type: `ref → (render-pipeline | compute-pipeline :name …)`.

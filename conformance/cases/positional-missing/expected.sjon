@@ -1,0 +1,6 @@
+; A floor breach is an end-of-children fact — you cannot know a head is
+; absent until the children run out — so it lands at the parent form's
+; head with the parent's path. Exactly where `missing_required_key`
+; lands, and for the same reason: there is no child to point at.
+(diagnostics
+  (diagnostic :code positional_missing :severity err :path [render-pipeline]))

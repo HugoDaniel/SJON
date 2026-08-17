@@ -59,6 +59,30 @@
         "base-vertex"
       ],
       "additionalProperties": false
+    },
+    "form.gpu.target": {
+      "type": "object",
+      "description": "A colour target's masks, written in hex.",
+      "properties": {
+        "$form": {
+          "const": "target"
+        },
+        "$ns": {
+          "const": "gpu"
+        },
+        "sample-mask": {
+          "type": "number",
+          "x-sjon-gpu-repr": "u32"
+        },
+        "write-mask": {
+          "type": "number",
+          "x-sjon-gpu-repr": "u32"
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -67,6 +91,9 @@
     },
     {
       "$ref": "#/$defs/form.gpu.draw"
+    },
+    {
+      "$ref": "#/$defs/form.gpu.target"
     }
   ]
 }

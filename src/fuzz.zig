@@ -197,6 +197,16 @@ test "fuzz Lexer.next: terminates at .eof, end >= start" {
             "1ex 1e9 1e9em 1.e2 1E-9em",
             "90deg5px 4PxRem 50%%",
             "1e+x",
+            // Hex integers — the `.hex_first_digit` / `.hex_body` states,
+            // the bare-prefix `.invalid` exit, and the neighbours the
+            // bare-zero gate protects (`10x`, `0_x`, `0.5x`).
+            "0xFF 0Xff 0xFFFF_FFFF -0x10 0x0",
+            "0x 0X 0x_F 0xGG 0xFFms 0xFFp2 0xFF_",
+            "10x 0_x 0.5x 1X 00x 0x0x0",
+            // Hyphenated units — the `-`-before-a-letter joiner, and the
+            // spellings that must still terminate at the hyphen.
+            "2d-array 5ms-per-frame 1a-b-c 2d-Array",
+            "1em-2 2d- 2d--a 2d-3d 5-3 (- 1 2) 2026-05-19",
             // Date literals — bounded lookahead in `.number_int`. Mix
             // valid and lookalike inputs so the fall-through paths
             // (`1900-1899` arithmetic, 5-digit years, underscores)
@@ -257,6 +267,12 @@ test "fuzz Parser.parse: returns a Tree, never panics" {
             "(a :kw :other)",
             "(/qualified/head x y)",
             "1.5 -2 0xdeadbeef",
+            // Hex integers through the exact-integer ladder: the i64/u64
+            // boundaries, the 2^64 overflow fallback, and a bare prefix
+            // reaching the parser as an `.invalid` token.
+            "(mask :bits 0xFF :wide 0xFFFFFFFFFFFFFFFF :over 0x1_0000000000000000)",
+            "0x7FFFFFFFFFFFFFFF 0x8000000000000000 -0x8000000000000000",
+            "(mask :bits 0x) (mask :bits 0xGG)",
             "\"unterminated",
             "(a #| nested? |#)",
             // Date literal parser corpus — exercises the parser's
@@ -498,6 +514,9 @@ test "fuzz parse → toBinary → fromBinary: preserves root count for clean tre
             "(scene :angle 90deg)",
             "(let [r 0.5em] (vec3 r r r))",
             "(a b c d e f g h i j)",
+            // Hex reaches the wire as `number_i64` / `number_u64`, so the
+            // round-trip must survive both widths and the negative form.
+            "(target :write-mask 0xFFFFFFFF :sample-mask 0xF :wide 0xFFFFFFFFFFFFFFFF :neg -0x10)",
         }, .{}),
     });
 }
@@ -1340,6 +1359,21 @@ test "fuzz ManifestLoader.load: parsed tree → Result or known error" {
             "(plugin :name glsl :version \"1.0.0\" :sjon \"1.2\"\n  (cross-ref-provider :name lines :description \"one per line\" :impl \"wasm:extract_lines\")\n  (form :name shader (key :name name :type symbol :optional false) (key :name src :type string :optional false))\n  (value-kind :name uniform-name :underlying symbol\n    :cross-ref (cross-ref :target shader :provider lines :source-key src))\n  (form :name bind (key :name uniform :type uniform-name :optional false)))",
             // member-set value-kind (closed symbol set).
             "(plugin :name e :version \"1.0.0\"\n  (value-kind :name tag :underlying symbol\n    :members (member-set :values [a b c])))",
+            // The `1.3` vocabulary in one well-formed anchor: per-head
+            // positional counts, a digit-leading member set, `:multiple-of`,
+            // a `scalar-or-ref :ref`, a multi-target cross-ref, and
+            // `:requires`. Same reasoning as the provider seed above — the
+            // interesting neighbourhood is the *combinations* the loader
+            // refuses (a group with `:acyclic` or `:provider`, `:min` above
+            // `:max` on a head, two spellings of one member, a `:requires`
+            // onto a required or excluded key), and those are one mutation
+            // away from a well-formed anchor and unreachable from noise.
+            "(plugin :name gpu :version \"1.0.0\" :sjon \"1.3\"\n  (value-kind :name stage :underlying form\n    :heads (head-set (head :name vertex :min 1 :max 1) (head :name constant :max 4)))\n  (value-kind :name dim :underlying symbol\n    :members (member-set :values [1d 2d 2d-array]))\n  (value-kind :name aligned :underlying number\n    :numeric (numeric-bounds :min 0 :integer true :multiple-of 256))\n  (form :name vertex (key :name entry :type symbol :optional true))\n  (form :name constant (key :name name :type symbol :optional true))\n  (form :name render-pipeline :positional stage (key :name dim :type dim :optional true) (key :name off :type aligned :optional true)))",
+            "(plugin :name gpu2 :version \"1.0.0\" :sjon \"1.3\"\n  (value-kind :name pipe-name :underlying symbol\n    :cross-ref (cross-ref :target render-pipeline))\n  (value-kind :name any-pipe :underlying symbol\n    :cross-ref (cross-ref :target [render-pipeline compute-pipeline]))\n  (value-kind :name budget :underlying scalar-or-ref\n    :scalar-or-ref (scalar-or-ref-shape :base number :ref pipe-name))\n  (form :name render-pipeline (key :name name :type symbol :optional false))\n  (form :name compute-pipeline (key :name name :type symbol :optional false))\n  (form :name dispatch (key :name pipeline :type any-pipe :optional false) (key :name cap :type budget :optional true) (key :name tag :type symbol :optional true) (key :name mode :type symbol :optional true :requires [tag])))",
+            // The refusing twin: every `1.3` load-time rejection at once, so
+            // the mutator starts from a manifest whose diagnostics are the
+            // interesting output rather than having to build one.
+            "(plugin :name bad :version \"1.0.0\" :sjon \"1.3\"\n  (value-kind :name empty-range :underlying form\n    :heads (head-set (head :name a :min 3 :max 1)))\n  (value-kind :name dup :underlying symbol\n    :members (member-set :values [2d 2.0d]))\n  (value-kind :name divisor :underlying number\n    :numeric (numeric-bounds :multiple-of -8))\n  (value-kind :name self :underlying scalar-or-ref\n    :scalar-or-ref (scalar-or-ref-shape :base number :ref number))\n  (value-kind :name empty-group :underlying symbol\n    :cross-ref (cross-ref :target []))\n  (value-kind :name cyclic :underlying symbol\n    :cross-ref (cross-ref :target [a b] :acyclic true))\n  (form :name a (key :name name :type symbol :optional false))\n  (form :name b (key :name name :type symbol :optional false))\n  (form :name needs (key :name x :type number :optional true :requires [ghost])))",
             // expr-func — mono signature.
             "(plugin :name fx :version \"1.0.0\"\n  (expr-func :name inc :arity (fixed 1) :params [number] :result number))",
             // slot-local nested forms (local_form_manifest_source).

@@ -46,7 +46,8 @@ test "ManifestLoader: parses (cross-ref :target …) on a symbol value-kind" {
     try testing.expectEqual(@as(usize, 1), r.plugin.value_kinds.len);
     const k = r.plugin.value_kinds[0];
     const cr = k.cross_ref orelse return error.TestUnexpectedResult;
-    try testing.expectEqualStrings("phrase", cr.target_form);
+    try testing.expectEqual(@as(usize, 1), cr.targets.len);
+    try testing.expectEqualStrings("phrase", cr.targets[0]);
     try testing.expectEqualStrings("name", cr.name_key);
 }
 
@@ -204,7 +205,8 @@ test "ManifestLoader: cross-ref provider route lands :provider and :source-key" 
     defer r.deinit();
     try testing.expect(!r.hasErrors());
     const cr = r.plugin.value_kinds[0].cross_ref orelse return error.TestUnexpectedResult;
-    try testing.expectEqualStrings("shader", cr.target_form);
+    try testing.expectEqual(@as(usize, 1), cr.targets.len);
+    try testing.expectEqualStrings("shader", cr.targets[0]);
     try testing.expectEqualStrings("uniforms", cr.provider.?);
     try testing.expectEqualStrings("body", cr.source_key);
     // The identity field keeps its default; nothing consults it on this route.
@@ -299,6 +301,131 @@ test "ManifestLoader: :source-key without :provider is invalid_manifest and drop
     const cr = r.plugin.value_kinds[0].cross_ref orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("src", cr.source_key);
     try testing.expect(cr.provider == null);
+}
+
+test "ManifestLoader: :target accepts a vector and normalises it to a list" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name pipeline-ref
+        \\    :underlying symbol
+        \\    :cross-ref (cross-ref :target [render-pipeline compute-pipeline])))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const cr = r.plugin.value_kinds[0].cross_ref orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), cr.targets.len);
+    try testing.expectEqualStrings("render-pipeline", cr.targets[0]);
+    try testing.expectEqualStrings("compute-pipeline", cr.targets[1]);
+    // Manifest order, not sorted: the order the author wrote is the order
+    // diagnostics list, and `soleTarget` is null for a group either way.
+    try testing.expect(cr.soleTarget() == null);
+}
+
+test "ManifestLoader: a one-element :target vector is a single-target cross-ref" {
+    // The two spellings converge, so nothing downstream can tell them
+    // apart — `[phrase]` must not become a *group* of one, which would key
+    // its own bucket and stop aliasing a plain `:target phrase`.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name phrase-name
+        \\    :underlying symbol
+        \\    :cross-ref (cross-ref :target [phrase])))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const cr = r.plugin.value_kinds[0].cross_ref orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("phrase", cr.soleTarget() orelse return error.TestUnexpectedResult);
+}
+
+test "ManifestLoader: an empty :target vector is invalid_manifest" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name nothing-ref
+        \\    :underlying symbol
+        \\    :cross-ref (cross-ref :target [])))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiag(r, .invalid_manifest, "empty `:target []`") != null);
+}
+
+test "ManifestLoader: a repeated :target entry is invalid_manifest" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name pipeline-ref
+        \\    :underlying symbol
+        \\    :cross-ref (cross-ref :target [render-pipeline render-pipeline])))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiag(r, .invalid_manifest, "twice") != null);
+}
+
+test "ManifestLoader: :acyclic true with several targets is invalid_manifest and drops :acyclic" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name node-ref
+        \\    :underlying symbol
+        \\    :cross-ref (cross-ref :target [group leaf] :acyclic true)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiag(r, .invalid_manifest, "`self` is not well defined") != null);
+    const cr = r.plugin.value_kinds[0].cross_ref orelse return error.TestUnexpectedResult;
+    try testing.expect(!cr.acyclic);
+}
+
+test "ManifestLoader: :acyclic true with a one-element vector is fine" {
+    // The exclusion is about a *group*, not about the vector spelling.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name node-ref
+        \\    :underlying symbol
+        \\    :cross-ref (cross-ref :target [node] :acyclic true)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const cr = r.plugin.value_kinds[0].cross_ref orelse return error.TestUnexpectedResult;
+    try testing.expect(cr.acyclic);
+}
+
+test "ManifestLoader: :provider with several targets is invalid_manifest and drops the route" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (cross-ref-provider :name uniforms)
+        \\  (value-kind :name uniform-name
+        \\    :underlying symbol
+        \\    :cross-ref (cross-ref :provider uniforms :target [vertex fragment])))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiag(r, .invalid_manifest, "one cross-ref per target") != null);
+    const cr = r.plugin.value_kinds[0].cross_ref orelse return error.TestUnexpectedResult;
+    // Dropped, not half-honoured: the spec that reaches the index took the
+    // identity route cleanly rather than a provider route it cannot run.
+    try testing.expect(cr.provider == null);
+    try testing.expectEqualStrings("src", cr.source_key);
 }
 
 test "ManifestLoader: identity-route cross-refs are untouched by the new keys" {
@@ -781,6 +908,491 @@ test "ManifestLoader: duplicate (member :name …) emits invalid_manifest" {
             std.mem.indexOf(u8, d.message, "duplicate member") != null) found = true;
     }
     try testing.expect(found);
+}
+
+// ---------------------------------------------------------------------------
+// Digit-leading member spellings (`1d`, `2d`) — format 1.3. `:values` and
+// `(member :name …)` are `member-name`-typed, so an element may arrive as a
+// unit-bearing number. Which numbers are *spellings* is a loader question,
+// hence the four rejections below rather than a meta-schema type.
+// ---------------------------------------------------------------------------
+
+fn findMember(kind: Plugin.ValueKind, name: []const u8) ?Plugin.ValueKind.MemberSet.Member {
+    const ms = kind.members orelse return null;
+    for (ms.members) |m| if (std.mem.eql(u8, m.name, name)) return m;
+    return null;
+}
+
+test "ManifestLoader: :values accepts digit-leading spellings alongside symbols" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name gpu :version "1.0.0"
+        \\  (value-kind :name view-dimension :underlying symbol
+        \\    :members (member-set :values [1d 2d cube 3d])))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const vk = r.plugin.value_kinds[0];
+    try testing.expectEqual(@as(usize, 4), vk.members.?.members.len);
+
+    // The digit-leading ones carry the `(value, unit)` match key; `cube`
+    // stays an ordinary symbol member with none.
+    const two = findMember(vk, "2d").?;
+    try testing.expectEqual(@as(u64, 2), two.numeric_spelling.?.value);
+    try testing.expectEqualStrings("d", two.numeric_spelling.?.unit);
+    try testing.expect(findMember(vk, "cube").?.numeric_spelling == null);
+    try testing.expect(findMember(vk, "1d") != null);
+    try testing.expect(findMember(vk, "3d") != null);
+}
+
+test "ManifestLoader: (member :name 2d …) carries its editor metadata too" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name gpu :version "1.0.0"
+        \\  (value-kind :name view-dimension :underlying symbol
+        \\    :members (member-set
+        \\      (member :name 2d :description "The default.")
+        \\      (member :name 3d :deprecated true))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const vk = r.plugin.value_kinds[0];
+    const two = findMember(vk, "2d").?;
+    try testing.expectEqual(@as(u64, 2), two.numeric_spelling.?.value);
+    try testing.expectEqualStrings("The default.", two.description);
+    try testing.expect(findMember(vk, "3d").?.deprecated);
+}
+
+test "ManifestLoader: a digit-leading spelling canonicalises its magnitude" {
+    // `02d` and `2.0d` declare the same member as `2d`. The name is
+    // re-rendered from the integer, so a manifest's incidental spelling
+    // does not reach the exported enum or a diagnostic.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name gpu :version "1.0.0"
+        \\  (value-kind :name a :underlying symbol :members (member-set :values [02d]))
+        \\  (value-kind :name b :underlying symbol :members (member-set :values [2.0d])))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    for (r.plugin.value_kinds) |vk| {
+        try testing.expectEqualStrings("2d", vk.members.?.members[0].name);
+        try testing.expectEqual(@as(u64, 2), vk.members.?.members[0].numeric_spelling.?.value);
+    }
+}
+
+test "ManifestLoader: a unitless number is not a member spelling" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name bad :underlying symbol
+        \\    :members (member-set :values [1 2 3])))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    var count: usize = 0;
+    for (r.diagnostics) |d| {
+        if (d.code == .invalid_manifest and
+            std.mem.indexOf(u8, d.message, "carries no unit") != null) count += 1;
+    }
+    try testing.expectEqual(@as(usize, 3), count); // one per element
+}
+
+test "ManifestLoader: a spelling's magnitude must be whole, non-negative, and in range" {
+    const a = testing.allocator;
+    for ([_][:0]const u8{
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name bad :underlying symbol
+        \\    :members (member-set (member :name -1d))))
+        ,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name bad :underlying symbol
+        \\    :members (member-set (member :name 1.5d))))
+        ,
+        // 2^53 + 2, the first even value above the cap.
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name bad :underlying symbol
+        \\    :members (member-set (member :name 9007199254740994d))))
+        ,
+    }) |src| {
+        var tree = try parseSource(a, src);
+        defer tree.deinit();
+        var r = try load(a, tree);
+        defer r.deinit();
+        var found: bool = false;
+        for (r.diagnostics) |d| {
+            if (d.code == .invalid_manifest and
+                std.mem.indexOf(u8, d.message, "whole non-negative magnitude") != null) found = true;
+        }
+        try testing.expect(found);
+    }
+}
+
+test "ManifestLoader: 2^53 exactly is a legal spelling magnitude" {
+    // The ±1 partner of the test above — the cap is inclusive.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name big :underlying symbol
+        \\    :members (member-set (member :name 9007199254740992d))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    try testing.expectEqual(
+        @as(u64, 1) << 53,
+        r.plugin.value_kinds[0].members.?.members[0].numeric_spelling.?.value,
+    );
+}
+
+test "ManifestLoader: a digit-leading spelling needs a symbol underlying" {
+    // On a `.string` underlying the members are string literals, so no
+    // numeric value can ever reach them — dead declaration, said out loud.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name bad :underlying string
+        \\    :members (member-set (member :name 2d))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    var found: bool = false;
+    for (r.diagnostics) |d| {
+        if (d.code == .invalid_manifest and
+            std.mem.indexOf(u8, d.message, "only reachable on `symbol`") != null) found = true;
+    }
+    try testing.expect(found);
+}
+
+test "ManifestLoader: duplicate detection compares the spelling's identity, not its text" {
+    // `2d` and `02d` canonicalise to the same name *and* the same
+    // `(value, unit)`. The check is on the pair, since that is what the
+    // validator matches on.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name dim :underlying symbol
+        \\    :members (member-set
+        \\      (member :name 2d)
+        \\      (member :name 02d :label "Second"))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    var found: bool = false;
+    for (r.diagnostics) |d| {
+        if (d.code == .invalid_manifest and
+            std.mem.indexOf(u8, d.message, "duplicate member `2d`") != null) found = true;
+    }
+    try testing.expect(found);
+}
+
+test "ManifestLoader: the compact :values list is scanned for duplicates too" {
+    // The scan used to run on `(member …)` children only, so the *common*
+    // spelling accepted a set silently smaller than it looked. Both halves
+    // are asserted: the byte-equal pair that was always wrong, and the
+    // canonicalising pair that only became possible with digit-leading
+    // members.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0" :sjon "1.3"
+        \\  (value-kind :name plain :underlying symbol
+        \\    :members (member-set :values [a b a]))
+        \\  (value-kind :name dim :underlying symbol
+        \\    :members (member-set :values [2d 2.0d])))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiagWithCode(r.diagnostics, .invalid_manifest, "duplicate member `a`"));
+    try testing.expect(findDiagWithCode(r.diagnostics, .invalid_manifest, "duplicate member `2d`"));
+}
+
+test "ManifestLoader: a distinct compact :values list is clean" {
+    // The negative space: three spellings that canonicalise apart, one of
+    // each shape, stay three members.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0" :sjon "1.3"
+        \\  (value-kind :name dim :underlying symbol
+        \\    :members (member-set :values [1d 2d cube])))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    try testing.expectEqual(@as(usize, 3), r.plugin.value_kinds[0].members.?.members.len);
+}
+
+test "ManifestLoader: a symbol member and a digit-leading one never collide" {
+    // The negative space of the test above: a member set may hold both
+    // shapes, and neither is mistaken for the other.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name dim :underlying symbol
+        \\    :members (member-set
+        \\      (member :name cube)
+        \\      (member :name 2d)
+        \\      (member :name cube-array))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    try testing.expectEqual(@as(usize, 3), r.plugin.value_kinds[0].members.?.members.len);
+}
+
+test "ManifestLoader: a value-kind diagnostic names its kind whatever the key order" {
+    // `:members` and `:heads` build while the kvpair loop is still running,
+    // so before `:name` got its own pass a manifest spelling `:members`
+    // first reported "value-kind ``" with the path `/members`. Key order
+    // inside a form is not significant anywhere else in SJON; both
+    // spellings below must produce the identical message and path.
+    const a = testing.allocator;
+    for ([_][:0]const u8{
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name status :underlying symbol :members (member-set)))
+        ,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :members (member-set) :name status :underlying symbol))
+        ,
+    }) |src| {
+        var tree = try parseSource(a, src);
+        defer tree.deinit();
+        var r = try load(a, tree);
+        defer r.deinit();
+        var found: bool = false;
+        for (r.diagnostics) |d| {
+            if (d.code != .invalid_manifest) continue;
+            if (std.mem.indexOf(u8, d.message, "no members") == null) continue;
+            try testing.expect(std.mem.indexOf(u8, d.message, "`status`") != null);
+            try testing.expectEqual(@as(usize, 2), d.path.len);
+            try testing.expectEqualStrings("status", d.path[0]);
+            try testing.expectEqualStrings("members", d.path[1]);
+            found = true;
+        }
+        try testing.expect(found);
+    }
+}
+
+test "ManifestLoader: a head-set diagnostic names its kind whatever the key order" {
+    // The `:heads` twin of the test above — same in-loop build, same fix.
+    const a = testing.allocator;
+    for ([_][:0]const u8{
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name slot :underlying form :heads (head-set)))
+        ,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :heads (head-set) :name slot :underlying form))
+        ,
+    }) |src| {
+        var tree = try parseSource(a, src);
+        defer tree.deinit();
+        var r = try load(a, tree);
+        defer r.deinit();
+        var found: bool = false;
+        for (r.diagnostics) |d| {
+            if (d.code != .invalid_manifest) continue;
+            if (std.mem.indexOf(u8, d.message, "no heads") == null) continue;
+            try testing.expect(std.mem.indexOf(u8, d.message, "`slot`") != null);
+            try testing.expectEqual(@as(usize, 2), d.path.len);
+            try testing.expectEqualStrings("slot", d.path[0]);
+            try testing.expectEqualStrings("heads", d.path[1]);
+            found = true;
+        }
+        try testing.expect(found);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// head-set — the two spellings and their four rejections. Deliberately
+// laid out as a mirror of the `member-set` block above: same shapes, same
+// message vocabulary ("mixes", "no heads", "duplicate head"), so a reader
+// who has learned one has learned the other.
+// ---------------------------------------------------------------------------
+
+test "ManifestLoader: head-set compact spelling lowers to unbounded heads" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name vertex)
+        \\  (form :name fragment)
+        \\  (value-kind :name stage :underlying form
+        \\    :heads (head-set :names [vertex fragment])))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const hs = r.plugin.value_kinds[0].heads orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), hs.heads.len);
+    try testing.expectEqualStrings("vertex", hs.heads[0].name);
+    try testing.expectEqualStrings("fragment", hs.heads[1].name);
+    // The compact spelling can't express a bound, so every entry is
+    // unbounded and the count sweep never runs for this kind.
+    try testing.expect(hs.isUnbounded());
+    for (hs.heads) |h| {
+        try testing.expectEqual(@as(u16, 0), h.min);
+        try testing.expectEqual(@as(?u16, null), h.max);
+    }
+}
+
+test "ManifestLoader: head-set rich shape carries min/max/description" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name vertex)
+        \\  (form :name fragment)
+        \\  (form :name constant)
+        \\  (value-kind :name stage :underlying form
+        \\    :heads (head-set
+        \\      (head :name vertex   :min 1 :max 1 :description "Exactly one.")
+        \\      (head :name fragment :max 1)
+        \\      (head :name constant))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const hs = r.plugin.value_kinds[0].heads orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 3), hs.heads.len);
+    try testing.expect(!hs.isUnbounded());
+    try testing.expectEqualStrings("vertex", hs.heads[0].name);
+    try testing.expectEqual(@as(u16, 1), hs.heads[0].min);
+    try testing.expectEqual(@as(?u16, 1), hs.heads[0].max);
+    try testing.expectEqualStrings("Exactly one.", hs.heads[0].description);
+    // `:max` alone leaves the floor at 0 — "at most one, possibly none".
+    try testing.expectEqual(@as(u16, 0), hs.heads[1].min);
+    try testing.expectEqual(@as(?u16, 1), hs.heads[1].max);
+    // A bare `(head …)` inside a rich set is still unbounded.
+    try testing.expectEqual(@as(u16, 0), hs.heads[2].min);
+    try testing.expectEqual(@as(?u16, null), hs.heads[2].max);
+}
+
+test "ManifestLoader: mixing :names and (head …) emits invalid_manifest" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name vertex)
+        \\  (form :name fragment)
+        \\  (value-kind :name stage :underlying form
+        \\    :heads (head-set
+        \\      :names [vertex]
+        \\      (head :name fragment))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiagWithCode(r.diagnostics, .invalid_manifest, "mixes"));
+}
+
+test "ManifestLoader: empty (head-set) emits invalid_manifest" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name stage :underlying form
+        \\    :heads (head-set)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiagWithCode(r.diagnostics, .invalid_manifest, "no heads"));
+}
+
+test "ManifestLoader: duplicate (head :name …) emits invalid_manifest" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name vertex)
+        \\  (value-kind :name stage :underlying form
+        \\    :heads (head-set
+        \\      (head :name vertex :max 1)
+        \\      (head :name vertex :max 2))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiagWithCode(r.diagnostics, .invalid_manifest, "duplicate head"));
+}
+
+test "ManifestLoader: head :min > :max emits invalid_manifest" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name vertex)
+        \\  (value-kind :name stage :underlying form
+        \\    :heads (head-set (head :name vertex :min 3 :max 1))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiagWithCode(r.diagnostics, .invalid_manifest, "empty range"));
+}
+
+test "ManifestLoader: head :min = :max is an exact count, not an empty range" {
+    // The ±1 companion to the test above: `:min 2 :max 2` is the
+    // "exactly two" spelling and must load clean.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name vertex)
+        \\  (value-kind :name stage :underlying form
+        \\    :heads (head-set (head :name vertex :min 2 :max 2))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const hs = r.plugin.value_kinds[0].heads orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u16, 2), hs.heads[0].min);
+    try testing.expectEqual(@as(?u16, 2), hs.heads[0].max);
+}
+
+test "ManifestLoader: negative and fractional head counts report wrong_underlying" {
+    // Reuses `emitNumericOutOfRange`, so the code is `wrong_underlying`
+    // and the prose is the same one `(fixed N)` produces — the condition
+    // is identical, and a second message shape for it would be drift.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name vertex)
+        \\  (form :name fragment)
+        \\  (value-kind :name stage :underlying form
+        \\    :heads (head-set
+        \\      (head :name vertex   :min -1)
+        \\      (head :name fragment :max 1.5))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    var min_reported = false;
+    var max_reported = false;
+    for (r.diagnostics) |d| {
+        if (d.code != .wrong_underlying) continue;
+        if (std.mem.indexOf(u8, d.message, "`:min` requires a non-negative integer") != null) min_reported = true;
+        if (std.mem.indexOf(u8, d.message, "`:max` requires a non-negative integer") != null) max_reported = true;
+    }
+    try testing.expect(min_reported);
+    try testing.expect(max_reported);
 }
 
 test "ManifestLoader: unit-shape :reject true loads with reject set" {
@@ -1996,6 +2608,87 @@ test "ManifestLoader: :underlying scalar-or-ref desugars to union [base symbol]"
     try testing.expectEqualStrings("symbol", us.alternatives[1].name);
 }
 
+test "ManifestLoader: scalar-or-ref :ref substitutes for the default symbol" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name count-value :underlying number)
+        \\  (value-kind :name define-ref :underlying symbol
+        \\    :cross-ref (cross-ref :target define))
+        \\  (value-kind :name count
+        \\    :underlying scalar-or-ref
+        \\    :scalar-or-ref (scalar-or-ref-shape :base count-value :ref define-ref)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const us = r.plugin.value_kinds[2].union_of orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), us.alternatives.len);
+    try testing.expectEqualStrings("count-value", us.alternatives[0].name);
+    // The whole feature: alternative 1 is the named kind, not `symbol`.
+    try testing.expectEqualStrings("define-ref", us.alternatives[1].name);
+}
+
+test "ManifestLoader: scalar-or-ref :ref accepts a qualified ref" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name count-value :underlying number)
+        \\  (value-kind :name count
+        \\    :underlying scalar-or-ref
+        \\    :scalar-or-ref (scalar-or-ref-shape :base count-value :ref other/define-ref)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    const us = r.plugin.value_kinds[1].union_of orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("define-ref", us.alternatives[1].name);
+    const ns = us.alternatives[1].namespace orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("other", ns);
+}
+
+test "ManifestLoader: scalar-or-ref :ref equal to :base emits invalid_manifest" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name count-value :underlying number)
+        \\  (value-kind :name count
+        \\    :underlying scalar-or-ref
+        \\    :scalar-or-ref (scalar-or-ref-shape :base count-value :ref count-value)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    var found = false;
+    for (r.diagnostics) |d| {
+        if (d.code == .invalid_manifest and
+            std.mem.indexOf(u8, d.message, "`:ref` equal to `:base`") != null) found = true;
+    }
+    try testing.expect(found);
+}
+
+test "ManifestLoader: scalar-or-ref :ref differing only in namespace is not a collision" {
+    // `qualifiedRefEql` is byte-equality on both halves: a bare name and a
+    // qualified one are different refs even when the namespace names this
+    // plugin, matching the loader's resolution rule elsewhere.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name count-value :underlying number)
+        \\  (value-kind :name count
+        \\    :underlying scalar-or-ref
+        \\    :scalar-or-ref (scalar-or-ref-shape :base count-value :ref p/count-value)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    for (r.diagnostics) |d| {
+        try testing.expect(std.mem.indexOf(u8, d.message, "`:ref` equal to `:base`") == null);
+    }
+}
+
 test "ManifestLoader: :underlying scalar-or-ref without :scalar-or-ref slot emits invalid_manifest" {
     const a = testing.allocator;
     var tree = try parseSource(a,
@@ -2083,6 +2776,300 @@ test "ManifestLoader: :numeric on non-number underlying emits numeric_bounds_inv
     defer r.deinit();
     try testing.expect(r.hasErrors());
     try testing.expect(findDiagWithCode(r.diagnostics, .numeric_bounds_invalid, "not `number`"));
+}
+
+test "ManifestLoader: :requires parses into the key's dependency list" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name entry
+        \\    (key :name binding :type number :optional false)
+        \\    (key :name buffer :type symbol :optional true)
+        \\    (key :name offset :type number :optional true :requires [buffer])))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const offset = r.plugin.forms[0].keys[2];
+    try testing.expectEqualStrings("offset", offset.name);
+    try testing.expectEqual(@as(usize, 1), offset.requires.len);
+    try testing.expectEqualStrings("buffer", offset.requires[0]);
+    // Absent `:requires` is an empty list, not null.
+    try testing.expectEqual(@as(usize, 0), r.plugin.forms[0].keys[1].requires.len);
+}
+
+test "ManifestLoader: :requires may name a key declared later" {
+    // The check is deferred to the end of `buildForm` precisely so
+    // declaration order does not matter.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name entry
+        \\    (key :name offset :type number :optional true :requires [buffer])
+        \\    (key :name buffer :type symbol :optional true)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+}
+
+test "ManifestLoader: a self-referencing :requires emits invalid_manifest" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name entry
+        \\    (key :name a :type number :optional true :requires [a])))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiagWithCode(r.diagnostics, .invalid_manifest, "requires itself"));
+}
+
+test "ManifestLoader: an unresolvable :requires emits invalid_manifest" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name entry
+        \\    (key :name a :type number :optional true :requires [nope])))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiagWithCode(r.diagnostics, .invalid_manifest, "does not declare"));
+}
+
+test "ManifestLoader: :requires naming an already-required key emits invalid_manifest" {
+    // The dependency can never fire: the key is always present, or the
+    // form already failed with missing_required_key.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name entry
+        \\    (key :name a :type number :optional true :requires [b])
+        \\    (key :name b :type symbol :optional false)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiagWithCode(r.diagnostics, .invalid_manifest, "can never fire"));
+}
+
+test "ManifestLoader: :requires across one exclusive group emits invalid_manifest" {
+    // The group says "at most one of these"; the dependency says "both".
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name entry
+        \\    (key :name a :type number :optional true :requires [b])
+        \\    (key :name b :type symbol :optional true)
+        \\    (exclusive-group :cardinality at-most-one
+        \\      (alt :keys [a])
+        \\      (alt :keys [b]))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiagWithCode(r.diagnostics, .invalid_manifest, "one exclusive group"));
+}
+
+test "ManifestLoader: a :requires cycle emits invalid_manifest" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name entry
+        \\    (key :name a :type number :optional true :requires [b])
+        \\    (key :name b :type symbol :optional true :requires [a])))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiagWithCode(r.diagnostics, .invalid_manifest, "cycle"));
+}
+
+test "ManifestLoader: a three-key :requires cycle is caught" {
+    // a -> b -> c -> a. A two-colour visited set would miss this; the
+    // grey/black distinction is what makes the back edge detectable.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name entry
+        \\    (key :name a :type number :optional true :requires [b])
+        \\    (key :name b :type number :optional true :requires [c])
+        \\    (key :name c :type number :optional true :requires [a])))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiagWithCode(r.diagnostics, .invalid_manifest, "cycle"));
+}
+
+test "ManifestLoader: a diamond :requires graph is not a cycle" {
+    // a requires b and c; both require d. Every node is reachable twice,
+    // which a naive "already visited means cycle" check would misreport.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name entry
+        \\    (key :name a :type number :optional true :requires [b c])
+        \\    (key :name b :type number :optional true :requires [d])
+        \\    (key :name c :type number :optional true :requires [d])
+        \\    (key :name d :type number :optional true)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+}
+
+test "ManifestLoader: a variant key may :requires a base key" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name topo :underlying symbol
+        \\    :members (member-set :values [strip list]))
+        \\  (form :name primitive :discriminant topology
+        \\    (key :name topology :type topo :optional false)
+        \\    (key :name cull :type symbol :optional true)
+        \\    (variant :when strip
+        \\      (key :name index-format :type symbol :optional true :requires [cull]))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+}
+
+test "ManifestLoader: a base key may NOT :requires a variant key" {
+    // That dependency would be conditional on the discriminant, which is
+    // what (variant …) is for. It reads as unresolvable from base scope.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name topo :underlying symbol
+        \\    :members (member-set :values [strip list]))
+        \\  (form :name primitive :discriminant topology
+        \\    (key :name topology :type topo :optional false)
+        \\    (key :name cull :type symbol :optional true :requires [index-format])
+        \\    (variant :when strip
+        \\      (key :name index-format :type symbol :optional true))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiagWithCode(r.diagnostics, .invalid_manifest, "does not declare"));
+}
+
+test "ManifestLoader: :multiple-of parses into a Bound, unit and exact_int included" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name aligned :underlying number
+        \\    :numeric (numeric-bounds :min 0 :integer true :multiple-of 256))
+        \\  (value-kind :name aligned-bytes :underlying number
+        \\    :unit (unit-shape :required true :allowed [b])
+        \\    :numeric (numeric-bounds :multiple-of 256b)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+
+    const plain = r.plugin.value_kinds[0].numeric.?.multiple_of orelse
+        return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(f64, 256), plain.value);
+    try testing.expectEqual(@as(?[]const u8, null), plain.unit);
+    // Reusing `loadBound` is what carries `exact_int` along, which is what
+    // keeps the divisibility check in integer space.
+    try testing.expect(plain.exact_int);
+
+    const united = r.plugin.value_kinds[1].numeric.?.multiple_of orelse
+        return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("b", united.unit.?);
+}
+
+test "ManifestLoader: :multiple-of 0 emits numeric_bounds_invalid" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name bad :underlying number
+        \\    :numeric (numeric-bounds :multiple-of 0)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiagWithCode(r.diagnostics, .numeric_bounds_invalid, "must be positive"));
+}
+
+test "ManifestLoader: a negative :multiple-of emits numeric_bounds_invalid" {
+    // `-3` divides exactly what `3` divides, so accepting it bought nothing
+    // — and it exported `"multipleOf": -3`, which JSON Schema 2020-12
+    // forbids and ajv refuses to compile. The one arm covers both signs.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name bad :underlying number
+        \\    :numeric (numeric-bounds :multiple-of -3)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiagWithCode(r.diagnostics, .numeric_bounds_invalid, "must be positive"));
+    try testing.expect(findDiagWithCode(r.diagnostics, .numeric_bounds_invalid, "-3"));
+}
+
+test "ManifestLoader: a fractional :multiple-of warns rather than erroring" {
+    // `:multiple-of 0.5` is meaningful, just approximate — divisibility is
+    // exact only in integer space. A warning steers the author to the exact
+    // path without rejecting a schema that works.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name quarter :underlying number
+        \\    :numeric (numeric-bounds :multiple-of 0.25)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    var found = false;
+    for (r.diagnostics) |d| {
+        if (d.code == .numeric_bounds_invalid and
+            std.mem.indexOf(u8, d.message, "approximate") != null)
+        {
+            try testing.expectEqual(Ast.Diagnostic.Severity.warning, d.severity);
+            found = true;
+        }
+    }
+    try testing.expect(found);
+    // The bound is still stored — a warning does not drop the constraint.
+    try testing.expect(r.plugin.value_kinds[0].numeric.?.multiple_of != null);
+}
+
+test "ManifestLoader: an integral :multiple-of warns about nothing" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name aligned :underlying number
+        \\    :numeric (numeric-bounds :multiple-of 4)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    for (r.diagnostics) |d| {
+        try testing.expect(d.code != .numeric_bounds_invalid);
+    }
 }
 
 test "ManifestLoader: :exclusive-min true without :min emits numeric_bounds_invalid" {

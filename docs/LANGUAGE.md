@@ -235,23 +235,36 @@ trivia SJON does not yet preserve — is covered in §4.2.
 
 A number is an optional leading `-`, an integer or fractional decimal
 representation, optional decimal exponent, optional unit suffix. The
-unit suffix is one or more ASCII letters, or a single `%`, immediately
-following the numeric portion with no intervening whitespace.
+unit suffix is one or more ASCII letters, optionally joined by hyphens,
+or a single `%`, immediately following the numeric portion with no
+intervening whitespace.
 
 ```
 0           1           -3
 0.5         -1.25       2.
 1e9         1.5e-10     1.5e+2
 4b          90deg       50%        250ms       1.5e2hz
+2d-array    5ms-per-frame
 ```
+
+**The hyphen rule.** Inside a unit, a `-` continues the suffix **only
+when the next byte is an ASCII letter**. Anything else ends the token.
+So `1em-2` lexes as two values — `1em` and `-2` — not as one number with
+the unit `em-2`, and `2d-` ends at `2d`. A hyphen can never open a unit
+either: the suffix always starts with a letter. That narrowness is
+deliberate — it is what lets `2d-array` be one token without changing how
+any previously-valid input reads. Digits are **not** admitted into a
+unit; `90deg5px` is still two numbers (below).
 
 Underscores may appear inside the numeric portion as digit grouping;
 they are stripped before parsing (`1_000_000` parses as `1000000.0`).
 The numeric portion is parsed to IEEE-754 `f64`. The unit, when
 present, is opaque metadata: SJON does not interpret it, does not
 convert between units, does not enforce a unit grammar beyond "ASCII
-letters or a single `%`". Plugins (§6) and downstream consumers
-choose which units they accept.
+letters, hyphen-joined, or a single `%`". Plugins (§6) and downstream
+consumers choose which units they accept — including a hyphenated one,
+so `(unit-shape :allowed [ms-per-frame])` is both declarable and
+writable.
 
 **Exponent vs. unit ambiguity.** `e` and `E` start an exponent only
 when the very next character is a digit or sign. Otherwise, `e`
@@ -264,6 +277,43 @@ rule is fixed: it does not depend on schema, plugin, or context.
 (`90deg`, `5px`), the same way `12foo` lexes as `.number .symbol`.
 Use whitespace to separate adjacent numeric values when the
 ambiguity would otherwise matter.
+
+**Hex integers.** A `0x` or `0X` prefix opens a hexadecimal integer:
+
+```
+hex-literal := [ "-" ] "0" ( "x" | "X" ) hex-digit { hex-digit | "_" }
+hex-digit   := [0-9a-fA-F]
+```
+
+```
+0xFF        0Xff        0xdeadBEEF
+0xFFFF_FFFF             -0x10
+```
+
+Both cases of the `x` and of the digits are accepted — `0XFF` and
+`0xff` are the same literal — and `_` groups digits as it does in
+decimal. A leading `-` is accepted (`-0x10` is `-16`).
+
+Hex is an **integer** literal and nothing else: no fraction, no
+exponent, and no unit suffix. The token ends at the first byte that
+is not a hex digit, so `0xFFms` is the number `0xFF` followed by the
+symbol `ms`, and `0xFFp2` is `0xFF` followed by `p2`.
+
+The prefix is recognised **only** when the numeric portion before it
+is exactly `0`, optionally signed. Everywhere else `x` is an ordinary
+unit letter, so `10x`, `00x`, and `0_x` are unit-bearing numbers with
+unit `x`, exactly as they were before hex existed.
+
+A prefix with no hex digit after it is a **parse error**, not a
+number: `0x`, `0x_F`, and `0xGG` each yield one diagnostic. (Before
+hex literals, `0xFF` lexed as the number `0` carrying the unit `xFF`
+— so a mask typo was silently zero in any slot that did not opt into
+unit rejection. Keeping that reading for the degenerate case would
+have kept the failure for the typo most likely to occur.)
+
+`sjon fmt` prints a hex literal in **decimal**: the printer formats
+from the value and has no access to the source. See §4.2 — values
+round-trip, spellings do not.
 
 ### 2.7 Reserved tokens
 
@@ -338,6 +388,11 @@ exact slice the lexer captured). The two are distinct kinds:
 50%         ; number_with_unit, unit "%"
 250ms       ; number_with_unit, unit "ms"
 ```
+
+Hex is a *spelling*, not a kind (§2.6): `0xFF` and `255` are the same
+number value, carry the same binary tag (§10), and export the same
+JSON. The difference survives only in the source text, and `sjon fmt`
+normalizes it away (§4.2).
 
 A unit-bearing number and a unitless number are *not interchangeable
 as values*. They print differently, encode differently in canonical
@@ -640,6 +695,25 @@ lossless binary comes back as escape-quoted text. The decoded bytes
 are identical (`"""hello"""` and `"hello"` are the same value), so
 nothing observable is lost — only the author's choice of delimiter.
 `"…"` is the only form any SJON tool hands back.
+
+**Numeric spelling is not preserved either.** The guarantee is on
+values, not on how they were written. Every canonical print emits one
+spelling per value:
+
+| Written | Printed |
+| --- | --- |
+| `1_000` | `1000` |
+| `1e3` | `1000` |
+| `0.0` | `0` |
+| `0xFF` | `255` |
+| `0Xff` | `255` |
+| `-0x10` | `-16` |
+
+The printer formats from the decoded value and has no access to the
+source, so keeping a spelling would need a carrier the value already
+determines — a pair of wire tags, or a tree-side side table that
+drifts the moment something builds a tree without the parser. Values
+round-trip; spellings do not.
 
 ### 4.3 Diagnostics and partial trees
 
@@ -1018,8 +1092,23 @@ pub const KeySpec = struct {
     default: ?Default = null,                // fallback for omitted optional keys; see §7.8
     description: []const u8 = "",
     local_forms: []const FormSpec = &.{},    // slot-local forms (only on .form slots); see below
+    requires: []const []const u8 = &.{},     // sibling keys this key's presence demands
 };
 ```
+
+`requires` is the third and last way a form relates its keys, and the
+only one about presence implying presence: if this key is present, every
+key it names must be too. One-directional — an *absent* dependent key
+constrains nothing. An unsatisfied dependency is `dependent_key_missing`,
+one per dependent key, naming every absent requirement at once.
+
+Presence follows the same rule exclusive groups use, on the same axis:
+author-written, or supplied by an overlay default when axis C is on
+(§7.8). Like every other closed-form shape rule, the sweep is suppressed
+by `FormSpec.open`. Scope, the five load-time rejections, and the
+chooser against `exclusive-group` / `variant` live in
+`docs/portable-manifest-v1.md` §5.1 — the manifest spec owns the
+declaration syntax; this section owns what the model means.
 
 A non-null `default` makes the key *effectively optional* regardless of
 the `optional` flag — the validator skips `missing_required_key` for
@@ -1080,9 +1169,32 @@ discriminant/variant, exclusive groups — a local may itself be
 discriminated and nest further `local_forms`), and nest no deeper than
 `Plugin.MAX_LOCAL_FORM_DEPTH`. A local head is **invisible** to global
 lookup — it exists only inside its slot. Contrast with `HeadSet` (§6.5),
-which *narrows* a slot to a closed set of **global** form heads by
+which *narrows* a slot to a closed set of allowed head **texts** by
 byte-equality; slot-local forms instead *add* slot-scoped, anonymous form
 bodies on top of the global catalog.
+
+The two **compose**, and in that order: the head-set decides whether the
+head is admissible, then the local-first resolution above decides what
+its body is checked against. A head-set therefore names head texts, not
+declarations — a name whose only `(form …)` is slot-local resolves
+perfectly well, and no global declaration is needed to "make it
+resolvable". The failure modes separate cleanly:
+
+- head **outside** the set → `not_head_member` (narrowing) *and*
+  `unknown_local_form` (descent) — two diagnostics, one per mechanism;
+- head **inside** the set with no form in either scope → just
+  `unknown_local_form`, from the descent.
+
+A head-set on a **positional** slot answers a second question the keyed
+case cannot ask: not only *which* heads are admissible but *how many* of
+each. A `(head :name X :min M :max N)` entry bounds the count of
+positional children carrying `X`, reported as `positional_missing` (floor,
+at the parent's head) and `positional_too_many` (ceiling, at the crossing
+child). Those bounds are read off the `:positional` declaration and
+nowhere else — see §6.5 for why reuse on a keyed or vector-element slot is
+inert rather than an error. A child counts towards a head only if its own
+head matches byte-for-byte, so a child that already failed
+`not_head_member` satisfies nobody's floor.
 
 The same local-first machinery also scopes a form's **positional** slot.
 Inline `(form …)` children placed directly under a `(form …)` — the
@@ -1196,6 +1308,7 @@ pub const NumericBounds = struct {
     exclusive_min: bool = false,
     exclusive_max: bool = false,
     integer: bool = false,                   // reject fractional / non-finite values
+    multiple_of: ?Bound = null,              // require an exact multiple of this divisor
 
     pub const Bound = struct {
         value: f64,
@@ -1222,15 +1335,28 @@ pub const MemberSet = struct {
         description: []const u8 = "",        // editor-facing help string
         deprecated: bool = false,            // true ⇒ warning on use (deprecated_member)
         deprecation_message: []const u8 = "",// optional replacement hint
+        numeric_spelling: ?NumericSpelling = null, // digit-leading spelling (`2d`); see below
+    };
+
+    pub const NumericSpelling = struct {
+        value: u64,                          // whole, non-negative, ≤ 2^53
+        unit: []const u8,                    // never empty
     };
 };
 
 pub const HeadSet = struct {
-    names: []const []const u8,               // closed set of allowed form heads; byte-equality
+    heads: []const Head,                     // closed set of allowed form heads; byte-equality
+
+    pub const Head = struct {
+        name: []const u8,                    // the head text matched against
+        min: u16 = 0,                        // inclusive floor on positional children with this head
+        max: ?u16 = null,                    // inclusive ceiling; null = unbounded
+        description: []const u8 = "",        // editor-facing help string
+    };
 };
 
 pub const CrossRef = struct {
-    target_form: []const u8,                 // forms contributing names
+    targets: []const []const u8,             // forms contributing names; ≥ 1, several = one namespace
     name_key: []const u8 = "name",           // symbol-valued name key on each target
     acyclic: bool = false,                   // true = reject cycles over self-edge keys
     scope_form: ?[]const u8 = null,          // null = whole forest; non-null = lexical scope form
@@ -1361,18 +1487,90 @@ Wire syntax for the rich form (`(member …)` positional children) lives
 in `docs/portable-manifest-v1.md` §4.4; the compact `:values [...]`
 shape is preserved unchanged for set-only declarations.
 
+#### Digit-leading member spellings
+
+Some enums name their members with a digit first — WebGPU's
+`GPUTextureDimension` is `"1d"`, `"2d"`, `"3d"`. None of those can be
+written as a bare symbol: the lexer reads a digit-leading token as a
+**number with a unit** (§2.6), so `2d` is `number_with_unit{2, "d"}`.
+
+A `.symbol` member-set may declare such a spelling anyway. The member
+carries a `numeric_spelling` — the parsed `(magnitude, unit)` pair — and
+`matchScalar`'s `.symbol` arm accepts a `number_with_unit` value in that
+slot when the pair matches:
+
+```sjon
+(value-kind :name texture-dimension :underlying symbol
+  :members (member-set :values [1d 2d 3d]))
+
+(texture :dimension 2d)      ; matches
+(texture :dimension 2.0d)    ; matches — same magnitude, same unit
+(texture :dimension 02d)     ; matches — the leading zero is not identity
+(texture :dimension 2.5d)    ; not_member — fractional, so not an integer key
+(texture :dimension 2)       ; wrong_underlying — no unit, not a spelling
+(texture :dimension 2b)      ; not_member — the unit is part of the identity
+```
+
+Four things this deliberately is and is not:
+
+- **Matching is on the pair, not on the text.** The binary walker has no
+  source text to compare against, so a text rule could not be dual-path;
+  the pair is also the better rule, since it settles `2.0d` and `02d`
+  without special cases.
+- **The value is accepted, not rewritten.** `2d` stays
+  `number_with_unit{2, "d"}` in the tree, in the binary IR, and in the
+  JSON bridge (`{"$num": [2, "d"]}`). Rewriting it into a symbol would
+  make node identity schema-dependent, which the JSON bridge (§9) and the
+  binary encoder (§10) both forbid by construction. A host that wants the
+  spelling maps the pair against the member list it already has.
+- **`Member.name` is the canonical spelling** (`"2d"`), so diagnostics,
+  `sjon export-schema`, LSP completions, and the member list a host reads
+  are all unchanged in shape. `02d` declares the member `2d`.
+- **The escape is off unless declared.** A kind whose members are all
+  ordinary symbols reports `wrong_underlying` for a unit-bearing number,
+  exactly as before. Cross-ref kinds are excluded outright: their member
+  set comes from document symbols under `:name-key`, which cannot be
+  digit-leading.
+
+The magnitude must be a whole, non-negative number at or below 2^53; a
+manifest declaring anything else is `invalid_manifest`, as is a spelling
+with no unit (`(member :name 2)`) and a digit-leading member on a
+non-`symbol` underlying. `docs/portable-manifest-v1.md` §4.4 has the full
+rejection list.
+
 `HeadSet` applies only to `.form` underlying — the form-as-slot
 pinning case (OpenAPI-style discriminator). The validator narrows
 the slot to a closed set of allowed form heads (e.g. a `:shape`
 slot that accepts only `(circle …)` or `(rect …)`). Comparison is
 byte-equality on the head identifier as written; namespace
 resolution is a host concern (the validator does not canonicalise
-qualified vs. bare heads against the head-set). `null` heads means
+qualified vs. bare heads against the head-set). The head-set
+resolves *nothing* — it decides only whether the head is
+admissible. Validating the matched form's body is the separate
+step in §7.2, which resolves local-first, so a head-set name backed
+by a slot-local `(form …)` needs no global declaration. `null` heads means
 "no narrowing" (any form head accepted), and an empty `names` list
 is treated identically — set `heads = null` rather than supply
 `&.{}`. Form values in slots whose kind has no `heads` continue
 to defer to runtime evaluation (§7.4); HeadSet is the one
 structural narrowing applied to forms.
+
+Each `Head` may additionally carry a **count**: `min` / `max` bound how
+many positional children of one form may use that head, reported as
+`positional_too_many` (at the crossing child) and `positional_missing`
+(at the parent form's head). The compact wire spelling
+`(head-set :names [a b c])` lowers to one unbounded entry per name, so
+there is a single shape to read; only the rich `(head …)` spelling can
+declare a count.
+
+Counts are enforced **at a form's `:positional` slot and are inert
+everywhere else** — a keyed slot holds one value, so `max` is trivially
+satisfied and `min` has no set to be missing from, and a
+`vector-shape :element` is a value rather than a child list. The same
+head-set kind therefore stays reusable across all three. `:open true`
+suppresses neither code: openness widens the *keyword* surface, and
+declaring `:positional <bounded-kind>` opts into the count. Wire syntax
+and the full rejection list live in `docs/portable-manifest-v1.md` §4.5.
 
 `VectorShape.element` is itself a kind name. Resolution shortcuts the
 primitive `ValueType` tags by reserved names (`"number"`, `"string"`,
@@ -1392,7 +1590,7 @@ contradictory); the loader rejects the clash — and an inverted
 
 `CrossRef` applies only to `.symbol` underlying. It changes a
 symbol kind's legal set from manifest-declared members to names found
-in the validated forest: every form resolving to `target_form`
+in the validated forest: every form resolving to a listed target
 contributes the symbol under `name_key`. With `scope_form = null`, the
 registry is forest-wide. A scope form narrows it to the nearest
 enclosing instance, so sibling scopes get independent registries.
@@ -1401,6 +1599,34 @@ target form whose effective type resolves back to the same cross-ref
 kind. Target, name-key, and scope resolution failures are schema
 diagnostics; missing names, duplicates, out-of-scope uses, and cycles
 are validation diagnostics (§7.6).
+
+**Target groups.** `targets` usually holds one form. Several declare that
+the listed forms share **one namespace**: a name from any of them
+satisfies a reference, and a name from two of them is
+`duplicate_cross_ref_target`. The names live in one registry, which is
+why nothing else about a cross-ref changes — scoping, duplicate
+detection, did-you-mean suggestions, and goto-definition all operate on a
+namespace, and a group is one namespace.
+
+This is a different shape from a `union_of` over two single-target
+cross-ref kinds, and the difference is the collision. A union gives each
+alternative its own namespace, so a name declared by both targets is
+legal in both and every reference to it has two readings — reported as
+`union_ambiguous` and resolved by declaration order. A group refuses the
+collision at the declarations, so no reference is ambiguous. The group is
+the right shape when the names are meant to be unique across the forms;
+the union when they are not.
+
+The listed targets are a **set**, not a list: their order is not part of
+the namespace's identity, and naming one form twice names it once. So
+`[a b]` and `[b a]` are the same namespace, and two kinds that spell one
+group differently collapse into one registry exactly as two kinds naming
+one form do. Nothing about a group reads its targets in order.
+
+`acyclic` and `provider` are rejected at manifest load on a group: cycle
+edges are defined over a target's *self*-referential keys, and an
+extracted member set is collected per target form — neither notion
+survives being spread over several forms.
 
 **The provider route.** `provider` replaces `name_key` as the source of
 names: instead of reading a symbol off each target instance, the host
@@ -1443,19 +1669,48 @@ leaking every branch's inner diagnostics. A union alternative cannot
 resolve to another union; aggregate validation emits `nested_union`
 so dispatch stays a flat loop.
 
+Declaration order is therefore **load-bearing whenever alternatives
+overlap**, which is usually the design: a union of `[byte-count symbol]`
+means "a count if it looks like one, otherwise a name", and reordering it
+would change what the slot means. One overlap is not a design decision,
+though. When two alternatives are *cross-ref* kinds pointing at different
+targets and the document registers one name in both, the slot has two
+readings that name two different entities, and order alone decides
+between them. Neither declaration is a duplicate — duplicate detection is
+per-target — so nothing else catches it. Validation emits
+`union_ambiguous` at `warning` severity: the document still validates and
+first match still wins, but a consumer resolving that reference through
+its own table rather than by alternative order will silently disagree.
+Rename one declaration, or split the slot into two single-kind keys. The
+warning is narrow on purpose — it stays quiet for plain-value overlap,
+and quiet when the alternative that wins is not itself a reference, since
+the slot then denotes a member rather than an entity.
+
 `scalar-or-ref` is a manifest-only **shorthand** over `UnionShape`, not a
 sixth `Underlying`. Writing `:underlying scalar-or-ref` with a
 `:scalar-or-ref (scalar-or-ref-shape :base <kind>)` slot desugars at load
-time to `union_of` with alternatives `[<base>, symbol]` — so the stored
+time to `union_of` with alternatives `[<base>, <ref>]` — so the stored
 kind is an ordinary union and the validator, exporter, and every
 downstream consumer inherit its behaviour for free. It captures the common
 "a literal value *or* a bare-symbol reference to one defined elsewhere"
-pattern: a value matching `<base>` takes the scalar alternative, a bare
-symbol takes the `symbol` (reference) alternative, and anything else
+pattern: a value matching `<base>` takes the scalar alternative, a
+symbol takes the reference alternative, and anything else
 falls through to `union_no_branch_matched`. `:underlying scalar-or-ref`
 without the `:scalar-or-ref` slot — or a `:scalar-or-ref` slot on a
 non-`scalar-or-ref` underlying — is rejected at manifest-load time with
 `invalid_manifest`.
+
+The optional `:ref` (manifest format 1.3) names the reference
+alternative. It defaults to the primitive `symbol`, which accepts any
+spelling and therefore leaves a misspelled reference *unchecked* —
+naming a cross-ref kind there makes that half checked instead. Because
+the desugar stores a plain union either way, a reference that resolves
+to nothing still reports `union_no_branch_matched` (naming both
+alternatives) rather than the branch's own `not_cross_ref`. `:ref` equal
+to `:base` is `invalid_manifest` at load, on byte-equality of both
+halves; whether `:ref` names a union kind is left to the aggregate
+`nested_union` pass, since value-kinds load in declaration order and a
+declaration-site check would be order-dependent.
 
 `UnitShape` applies only to `.number` underlying. Three keys:
 `:required`, `:allowed`, `:reject`. `:required true` rejects a bare
@@ -1470,13 +1725,15 @@ with a non-empty `:allowed` (which permits some) — the loader rejects either
 combination with `invalid_manifest`.
 
 `NumericBounds` applies only to `.number` underlying — orthogonal to
-`UnitShape`. Five keys: `:min`, `:max`, `:exclusive-min`,
-`:exclusive-max`, `:integer`. Inclusive by default; the
+`UnitShape`. Six keys: `:min`, `:max`, `:exclusive-min`,
+`:exclusive-max`, `:integer`, `:multiple-of`. Inclusive by default; the
 `:exclusive-min` / `:exclusive-max` booleans flip each end. The
 loader emits `numeric_bounds_invalid` at manifest-load time when
 the form is internally inconsistent — `:exclusive-min true` without
-`:min`, `:min > :max` (when both share a unit), or `:numeric`
-attached to a kind whose `:underlying` is not `number`.
+`:min`, `:min > :max` (when both share a unit), a non-positive or
+non-finite `:multiple-of`, or `:numeric` attached to a kind whose
+`:underlying` is not `number`. A *fractional* `:multiple-of` is the one warning in that
+set rather than an error (see below).
 
 Bound and value unit semantics (units are opaque per §2.6, no
 canonicalisation):
@@ -1503,6 +1760,31 @@ integer. `Tag.number_i64` / `Tag.number_u64` are trivially
 integer; `Tag.number` / `Tag.number_with_unit` must be finite
 (`!NaN`, `!±inf`) and equal their floor. Negative-zero passes:
 `@floor(-0.0) == -0.0` in IEEE-754.
+
+`:multiple-of <divisor>` requires the value to divide evenly — the
+alignment constraint a range and `:integer` cannot express between them.
+It carries a unit under the same rules as `:min` / `:max`. The value's
+sign is irrelevant (`-512` is a multiple of `256`); the divisor's is not,
+because a negative divisor has exactly the multiples its magnitude has and
+JSON Schema 2020-12 requires `multipleOf` to be strictly positive — so
+`:multiple-of -4` is rejected at load rather than exported as a schema no
+validator will compile.
+
+Divisibility follows the exact-precision rule above rather than
+undoing it: the test runs in **integer space** (`i128`) whenever the
+value and the divisor are both whole, so `9007199254740993` is odd and
+fails `:multiple-of 2` where an f64 remainder would round it even and
+accept. A fractional value under a whole divisor is never a multiple.
+A fractional *divisor* has no exact answer in binary floating point, so
+it falls back to an f64 remainder against a relative epsilon and the
+loader warns at the declaration — it works, it is simply approximate.
+
+The three numeric checks run in a fixed order and only the first
+failure is reported: `:integer`, then the range bounds, then
+divisibility. So `250.5` under `:integer true :multiple-of 4` reads as
+`number_not_integer`, and `-256` under `:min 0 :multiple-of 256` as
+`number_below_min`. The more basic violation is the one worth naming;
+otherwise an author is told to align a value that is not whole yet.
 
 `Repr` applies only to `.number` underlying — orthogonal to both
 `UnitShape` and `NumericBounds`; all three may co-exist and each is
@@ -1833,6 +2115,17 @@ rejects `(bag :radius "x")`, and `(bag :x 1 :x 2)` still emits
 map semantics regardless of openness. The relaxation covers
 undeclared shape, not declared slots.
 
+Per-head **positional counts** are on the declared-slot side of that
+line, so they survive openness too: `positional_too_many` and
+`positional_missing` both fire on an open form. That makes
+`positional_missing` the one end-of-form sweep in the skip list above's
+company that is *not* skipped, and the reason is the sentence just made —
+every item in that list is about keywords, which is the surface `:open`
+widens; a form that declares `:positional <bounded-kind>` has opted into
+its children's count. Its neighbours already behave this way:
+`not_head_member` and `duplicate_positional_flag` are positional rules
+and fire on open forms.
+
 ### 7.4 Type matching
 
 `matchValueAgainstType(value_node, expected_type)` is the
@@ -1849,12 +2142,25 @@ type-checking primitive. Outcomes:
   number when one was required, or a unit not in the `allowed` list.
 - **Member set mismatch** — expected a `MemberSet` (closed enum on a
   `.symbol` or `.string` `ValueKind`); got a value of the right
-  underlying that wasn't in the declared `values` list.
+  underlying that wasn't in the declared `values` list. A `.symbol`
+  member-set declaring a **digit-leading spelling** (§6.5) widens this
+  outcome: a unit-bearing number in that slot is `not_member` rather than
+  a tag mismatch, because the slot genuinely accepts that shape and
+  "`4d` is not one of [1d | 2d | 3d]" is the report an author can act on.
+  A kind declaring no digit-leading member is unaffected — a number
+  there is still a tag mismatch.
 - **Form-head set mismatch** — expected a `HeadSet` (closed set of
   allowed form heads on a `.form` `ValueKind`); got a form whose
-  head isn't in the declared `names` list. The diagnostic uses
+  head isn't among the declared entries. The diagnostic uses
   alternation prose (``form head `typo` not in set [point | rect]``)
   to distinguish the discriminator role from member narrowing.
+- **Positional count mismatch** — a `HeadSet.Head` on the enclosing
+  form's `:positional` slot declared a `min` / `max` the finished child
+  list does not satisfy. Not a `matchValueAgainstType` outcome: the
+  count is a property of the *sibling set*, not of any one value, so it
+  is tallied alongside the per-child match and swept at end-of-children
+  (§7.3). A child that failed one of the outcomes above counts towards
+  no head.
 
 A few deliberate concessions:
 
@@ -1997,12 +2303,17 @@ kind, or typed-vector element).
 | `unit_forbidden`          | a `number_with_unit` lands in a slot whose `UnitShape.reject` is true (bare numbers only) |
 | `not_member`              | a symbol/string value is not in the kind's `MemberSet.members`               |
 | `deprecated_member`       | a symbol/string value matched a `Member` whose `deprecated` is `true` (severity `warning`) |
-| `not_head_member`         | a form value's head is not in the kind's `HeadSet.names`                     |
+| `not_head_member`         | a form value's head is not in the kind's `HeadSet` entries                   |
+| `positional_too_many`     | more positional children carry one head than that `HeadSet.Head`'s `max` allows; reported at the crossing child, once per crossing |
+| `positional_missing`      | fewer positional children carry one head than that `HeadSet.Head`'s `min` requires; reported at the parent form's head, once per unsatisfied head |
 | `union_no_branch_matched` | a `union_of` value kind accepts none of its alternative kinds                |
 | `nested_union`            | a `union_of` alternative resolves to another union                           |
+| `union_ambiguous`         | a symbol is a registered name in two or more of a union's cross-ref alternatives, so declaration order picks the entity (severity `warning`) |
 | `number_below_min` / `number_above_max` | a numeric value crosses an inclusive bound                  |
 | `number_at_or_below_exclusive_min` / `number_at_or_above_exclusive_max` | a numeric value crosses an exclusive bound |
 | `number_not_integer`      | a numeric kind marked `:integer true` gets a fractional or non-finite value  |
+| `number_not_multiple`     | a numeric value is not an exact multiple of `:multiple-of`; checked after `:integer` and the range bounds |
+| `dependent_key_missing`   | a key declaring `:requires` is present while a key it names is absent; one per dependent key, naming every absent requirement |
 | `repr_out_of_range`       | a number doesn't fit its `:repr` GPU type — out of range, or non-integral under an integer type |
 | `numeric_bound_unit_mismatch` | a unit-bearing numeric bound cannot compare with the value's unit        |
 | `numeric_bounds_invalid`  | a manifest numeric-bounds declaration is internally inconsistent             |

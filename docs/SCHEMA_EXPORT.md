@@ -2,7 +2,7 @@
 
 A one-way exporter that converts a fully-resolved `Schema.Schema` into JSON Schema 2020-12 and TypeScript `.d.ts` types describing the **canonical JSON shape** of `sjon to-json` output. Use it to give downstream tools (editors, codegen pipelines, language servers, validators in other ecosystems) a machine-readable view of a plugin's forms without re-implementing the SJON parser, meta-schema, or aggregate-phase resolution rules.
 
-Output format version: **`x-sjon-export-version: 1`**. The exporter covers primitives, closed/open forms, typed/untyped vectors, compact members, and literal defaults; discriminated variants, exclusive groups, head-sets, unions, slot-local forms (inline anonymous union), and rich member-sets; numeric bounds, unit-bearing numbers (`$num` tuple via `prefixItems`), unitless numbers (`:reject`), GPU representation tags (`x-sjon-gpu-repr` + branded `F32`…`F16`), variable-arity vectors (`minItems`/`maxItems`), the `scalar-or-ref` shorthand (exported as its desugared union), string bounds (`minLength`/`maxLength`/`pattern`/`format`), cross-ref annotations (`x-sjon-cross-ref` carrying all four fields), the per-plugin layout (with cross-file `$ref` resolution), multi-key exclusive-group bundles, and positional flag-sets (`x-sjon-positional-flags`). Known limitations are listed under *What's not in this exporter* below.
+Output format version: **`x-sjon-export-version: 1`**. The exporter covers primitives, closed/open forms, typed/untyped vectors, compact members, and literal defaults; discriminated variants, exclusive groups, head-sets, unions, slot-local forms (inline anonymous union), and rich member-sets (including digit-leading spellings, pinned to their `$num` wire shape); numeric bounds (including `:multiple-of` → `multipleOf`), key dependencies (`:requires` → `dependentRequired`), per-head positional counts (`contains` / `minContains` / `maxContains`), unit-bearing numbers (`$num` tuple via `prefixItems`), unitless numbers (`:reject`), GPU representation tags (`x-sjon-gpu-repr` + branded `F32`…`F16`), variable-arity vectors (`minItems`/`maxItems`), the `scalar-or-ref` shorthand (exported as its desugared union), string bounds (`minLength`/`maxLength`/`pattern`/`format`), cross-ref annotations (`x-sjon-cross-ref` carrying the target, one form or a group of them, plus `name-key`, `acyclic`, and `scope-form` / `provider` + `source-key` when set), the per-plugin layout (with cross-file `$ref` resolution), multi-key exclusive-group bundles, and positional flag-sets (`x-sjon-positional-flags`). Known limitations are listed under *What's not in this exporter* below.
 
 ## Intended consumers
 
@@ -39,7 +39,8 @@ Headline 2020-12 features used:
 - `prefixItems` — encodes `number_with_unit` as `{"$num": [<magnitude>, <unit>]}`. The magnitude slot carries `minimum`/`maximum` when the source also declared `:numeric`; the unit slot carries an `enum` of the allowed unit strings.
 - `unevaluatedProperties: false` — closes discriminated and exclusive-group forms whose overlays live inside `allOf` branches.
 - `$ref` into `#/$defs/form.<plugin>.<name>` — head-set alternatives, top-level `oneOf`. In `--layout=per-plugin`, cross-plugin refs become `./<other>.schema.json#/$defs/form.<other>.<head>` relative file paths.
-- `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`/`minLength`/`maxLength`/`pattern`/`format` — numeric and string bounds emitted natively.
+- `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`/`multipleOf`/`minLength`/`maxLength`/`pattern`/`format` — numeric and string bounds emitted natively.
+- `dependentRequired` — key dependencies (`:requires`) emitted natively.
 
 ### TypeScript `.d.ts`
 
@@ -55,11 +56,13 @@ A self-describing JSON document mirroring `SchemaExport.Model` 1:1. Stable enoug
 ### Markdown reference pages (`--target=markdown`)
 
 Human-facing reference documentation rendered from the same descriptors
-that drive editor hover — forms with key tables, positional specs,
-variants and local forms, value kinds with member tables (deprecations
-carry their message), and expression functions with signatures. Asked
-for by name, never part of `both`. `--layout=per-plugin` with
-`--output=DIR` writes one `<plugin>.md` per plugin. Excerpt from the
+that drive editor hover — forms with key tables, positional specs (plus a
+Head/Count table when the slot's head-set carries counts, written in prose:
+"exactly 1", "at most 1", "any"), variants and local forms, value kinds
+with member tables (deprecations carry their message), and expression
+functions with signatures. Asked for by name, never part of `both`.
+`--layout=per-plugin` with `--output=DIR` writes one `<plugin>.md` per
+plugin. Excerpt from the
 `shapes` reference (`examples/plugins/shapes.md.golden` is the full
 pinned page):
 
@@ -119,6 +122,7 @@ Every construct lands in one of three buckets:
 | Positional `.none` | no `$children` property | no `$children` field | ENFORCED |
 | Positional `.any` | `properties.$children:{type:"array"}` | `$children?: unknown[]` | ENFORCED |
 | Positional `.kind(K)` | `properties.$children:{type:"array", items:<K>}` | `$children?: Array<K>` | ENFORCED |
+| Positional `.kind(K)` where `K`'s head-set carries counts | the above **plus** `$children.allOf:[{contains:<$ref>, minContains, maxContains}, …]`, one entry per bounded head | `$children?: Array<K>` with a `/** Positional counts (not expressible in TS): … */` comment | ENFORCED (schema) + DOCS-ONLY (TS) |
 
 ### Member sets
 
@@ -128,6 +132,10 @@ Every construct lands in one of three buckets:
 | Compact string enum | `{enum:["a","b"]}` | `"a" \| "b"` | ENFORCED |
 | Rich symbol enum | `{oneOf:[{const:{"$sym":"a"}, title, description, deprecated?, x-sjon-deprecation-message?}, …]}` | branded union + JSDoc `@member …` per arm | ENFORCED + ANNOTATED + DOCS-ONLY |
 | Rich string enum | `{oneOf:[{const:"a", title, description, …}, …]}` | string-literal union + JSDoc `@member …` per arm | ENFORCED + ANNOTATED + DOCS-ONLY |
+| Digit-leading members (`1d`, `2d-array`) | `{oneOf:[{const:{"$num":[1,"d"]}}, …]}`; a numeric spelling routes the whole set through the rich per-member path even when no member carries metadata | `readonly [1, "d"] \| readonly [2, "d-array"]` | ENFORCED |
+| Mixed set (digit-leading + ordinary) | each member keeps its own wire shape: `{"$num":[…]}` consts beside `{"$sym":"…"}` consts | `readonly [2, "d"] \| Symbol_<"cube">` | ENFORCED |
+
+A digit-leading member is a `number_with_unit` on the wire (LANGUAGE.md §6.5), so an `enum` of `{"$sym":"2d"}` would reject every document the validator accepts. That is why the const pins `$num`. Markdown is the one target the spelling does not move: it renders `one of: 1d, 2d, 3d`, which is what an author types.
 
 ### Discrimination and overlay
 
@@ -152,6 +160,8 @@ Every construct lands in one of three buckets:
 | `:numeric (numeric-bounds :min N :max M)` | `minimum:N, maximum:M` | JSDoc `@minimum`/`@maximum` | ENFORCED (schema) + DOCS-ONLY (TS) |
 | `:exclusive-min true` / `:exclusive-max true` | `exclusiveMinimum` / `exclusiveMaximum` instead of `minimum`/`maximum` | JSDoc `@exclusiveMinimum`/`@exclusiveMaximum` | ENFORCED (schema) + DOCS-ONLY (TS) |
 | `:integer true` | lifts to `type: "integer"` | JSDoc `@sjon-integer true` | ENFORCED (schema) |
+| `(key … :requires [b c])` | `dependentRequired: {"<key>": ["b", "c"]}` — an exact semantic match: 2020-12's `dependentRequired` is "if this property is present, these must be too" | JSDoc `@sjon-requires b, c` (a plain interface cannot express it — it would need a discriminated union over which keys are present) | ENFORCED (schema) + DOCS-ONLY (TS) |
+| `:multiple-of N` | `multipleOf: N` — an exact semantic match, not an annotation: 2020-12's `multipleOf` is "division by this keyword's value results in an integer", the same claim SJON makes | JSDoc `@sjon-multiple-of N` (TS has no divisibility constraint) | ENFORCED (schema) + DOCS-ONLY (TS) |
 | `:repr (repr-shape :type f32…f16)` | base `{type: "number"}` + `x-sjon-gpu-repr: "<tag>"` (the GPU range / integrality is **not** lowered to `minimum`/`maximum`/`type:integer` — generic validators ignore it) | branded alias `F32` … `F16` (from the prelude) | ANNOTATED + DOCS-ONLY (enforced by the SJON validator, not by the exported schema) |
 | Exact-int bound `>2^53` | `minimum`/`maximum` carries the lossy f64 value; `x-sjon-exact-bound: {min|max: "<digits>"}` carries the full-precision digit string | JSDoc note `[exact-int >2^53]` | ENFORCED (lossy in non-bigint validators) + ANNOTATED |
 | `:string-bounds (string-bounds :min-len M :max-len N :pattern …)` | `minLength`/`maxLength` (codepoint count via `x-sjon-length-unit: "codepoint"`); `pattern` (with `x-sjon-pattern-engine: "deferred-in-sjon-runtime"` because SJON v1 doesn't execute regex) | JSDoc `@minLength`/`@maxLength`/`@pattern` | ENFORCED (schema; regex engine differs) + DOCS-ONLY (TS) |
@@ -172,10 +182,14 @@ Every construct lands in one of three buckets:
 | SJON | JSON Schema | TS | Bucket |
 |---|---|---|---|
 | `:cross-ref (cross-ref :target T :name-key K)` | `{type: "object", required: ["$sym"], properties: {$sym: {type: "string"}}}` (envelope only) + `x-sjon-cross-ref: {target-form: T, name-key: K, acyclic: false}` | `CrossRef<"T">` brand + JSDoc `@sjon-cross-ref target=T name-key=K acyclic=false` | ENFORCED (envelope) + ANNOTATED + DOCS-ONLY |
+| `:cross-ref (cross-ref :target [A B] :name-key K)` (target group) | same envelope + `x-sjon-cross-ref: {target-forms: ["A", "B"], name-key: K, acyclic: false}`. The singular `target-form` key is **absent**, so a consumer that only knows it finds nothing rather than reading a group as one target | `CrossRef<"A"> \| CrossRef<"B">` + JSDoc `@sjon-cross-ref target=A \| B name-key=K acyclic=false` | ENFORCED (envelope) + ANNOTATED + DOCS-ONLY |
 | `:acyclic true` | annotation `acyclic: true` | JSDoc `acyclic=true` | ANNOTATED + DOCS-ONLY |
 | `:scope <form>` | annotation `scope-form: "<form>"` | JSDoc `scope-form=<form>` | ANNOTATED + DOCS-ONLY |
+| `:provider P :source-key K` | annotations `provider: "P"`, `source-key: "K"` | JSDoc `provider=P source-key=K` | ANNOTATED + DOCS-ONLY |
 
 None of the membership / cycle / scope rules are enforceable by JSON Schema; the `cross_ref_annotation_only` info warning lands per-slot.
+
+A target group is one namespace over several forms, where a union over two cross-ref kinds is two namespaces (LANGUAGE.md §6.5). The export tells them apart: a group is one slot schema carrying one `x-sjon-cross-ref` with `target-forms`, while a union is an `anyOf` of two slots, each carrying its own singular annotation. The TypeScript type is the same union either way, since TS has no way to say "one namespace".
 
 ### Head-sets and unions
 
@@ -184,7 +198,9 @@ None of the membership / cycle / scope rules are enforceable by JSON Schema; the
 | Head-set (`:heads [a b]`) | `{oneOf:[{$ref:"#/$defs/form.<plugin>.<head>"}, …], x-sjon-head-set:[…]}` | `{readonly $form: "a"} \| {readonly $form: "b"}` | ENFORCED + ANNOTATED |
 | Union (`:union (union-shape :alternatives [a b])`) | `{anyOf:[<schema-a>, <schema-b>], x-sjon-union-alternatives:["a", "b"]}` | `<a-type> \| <b-type>` | ENFORCED (acceptance) + ANNOTATED (first-match dispatch order) |
 | `scalar-or-ref` shorthand (`:underlying scalar-or-ref` + `:scalar-or-ref (… :base B)`) | desugars to `union [B symbol]` at load, then exports as any union does: `{anyOf:[<B>, <symbol envelope>], x-sjon-union-alternatives:["B", "symbol"]}` | `<B-type> \| Symbol_` | ENFORCED (acceptance) + ANNOTATED |
+| …with `:ref R` naming the reference half | desugars to `union [B R]`, so the second alternative exports as whatever kind `R` is. With `R` a cross-ref kind: `{anyOf:[<B>, <$sym envelope + x-sjon-cross-ref>], x-sjon-union-alternatives:["B", "R"]}` | `<B-type> \| CrossRef<"<target>">`; the checked reference reaches the `.d.ts` with no export-side code | ENFORCED (acceptance) + ANNOTATED |
 | First-match dispatch order | — | — | NOT EXPOSED — `anyOf` accepts as long as one alternative matches; the SJON validator picks the first one. |
+| Union over two cross-ref kinds | `{anyOf:[<$sym envelope + x-sjon-cross-ref A>, <… B>], …}` | `CrossRef<"A"> \| CrossRef<"B">` | ENFORCED (envelope) + ANNOTATED — both targets survive into the type, and each branch keeps its own `x-sjon-cross-ref`. What does *not* survive is `union_ambiguous`: it is a document-time observation (this name is registered in both targets), and export has no document. |
 | Slot-local forms (`(key … :type form (form …) …)`) | `{anyOf:[<inline form-a>, …, {type:"object", required:["$form"]}], x-sjon-local-forms:[…]}` | `<inline-a> \| … \| { readonly $form: string }` | ENFORCED (acceptance) + ANNOTATED |
 
 ### Slot-local forms
@@ -204,7 +220,8 @@ Constructs SJON validates but JSON Schema cannot enforce. The exporter still emi
 
 | Construct | What's not enforced | Annotation |
 |---|---|---|
-| Cross-references | Closed-set membership ("symbol must be one of the names declared elsewhere"). | `x-sjon-cross-ref.target-form` + `name-key` |
+| Cross-references | Closed-set membership ("symbol must be one of the names declared elsewhere"). | `x-sjon-cross-ref.target-form` (or `target-forms` for a group) + `name-key` |
+| Target groups | That the listed forms share one namespace, so a name declared by two of them is an error (`duplicate_cross_ref_target`). The exported envelope is the same `{$sym}` object a single target gets. | `x-sjon-cross-ref.target-forms` |
 | `acyclic: true` cross-refs | Cycle detection. | `x-sjon-cross-ref.acyclic: true` |
 | `scope-form` cross-refs | Lexical scoping of the cross-ref registry. | `x-sjon-cross-ref.scope-form` |
 | Expression slots / defaults | Expression evaluation and result type. | `x-sjon-expr`, `x-sjon-default-expression` |
@@ -217,6 +234,7 @@ Constructs SJON validates but JSON Schema cannot enforce. The exporter still emi
 | Custom string formats (`path`, `semver`) | JSON Schema's `format` vocabulary doesn't list these. | `x-sjon-format: "path|semver"` |
 | Lowering hooks | Hook output validation. | `x-sjon-lowering` |
 | Positional flag-sets (`:positional (flag-set …)`) | Closed-set membership for positional keyword flags — `$children` widens to a plain array, so JSON Schema can't express "a keyword flag drawn from this closed set" (nor reject a repeat). | `x-sjon-positional-flags: [{name, description?, link?}, …]` |
+| Per-head positional counts, in TypeScript | "exactly one element of this union in an array" — no tuple or template construction reaches a per-member count over a heterogeneous array, so the `.d.ts` accepts child lists the SJON validator rejects (`positional_too_many` / `positional_missing`). JSON Schema *does* enforce it, via `contains`; this row is the TS half only. | `/** Positional counts (not expressible in TS): vertex: 1; fragment: 0..1 */` above `$children` |
 | Slot-local forms (open branch) | Local-first resolution, shadowing, and a local's required keys — the inline union's trailing open branch accepts any `{$form}` object, so an under-specified or out-of-set local still validates. | `x-sjon-local-forms: […]` |
 | Plugin version pinning | — | (none — out of scope) |
 | Comment / trivia preservation | — | (canonical JSON drops trivia) |
@@ -336,9 +354,23 @@ See `examples/plugins/kit-xor/`, `examples/plugins/audio/`, and `examples/plugin
 
 `examples/plugins/units/` exercises `:unit (unit-shape :required true :allowed […])` with the bounded-magnitude case (a `0deg..360deg` angle whose magnitude bound rides inside `prefixItems[0]`).
 
-### `xref` — cross-refs in four flavours
+### `head-counts` — per-head positional counts
 
-`examples/plugins/xref/` declares a bare cross-ref, an acyclic cross-ref (with a self-edge through `(node :parent ...)`), a scope-form-scoped cross-ref pointed at `(piece …)` as the registry root, and a provider-route cross-ref reading `(shader :code …)` through the `uniforms` provider. All four produce identical wire shapes (a `{$sym: string}` object); the difference lands in the `x-sjon-cross-ref` annotation, which gains `provider` / `source-key` on the fourth (omitted on the other three, like `scope-form`).
+`examples/plugins/head-counts/` declares a head-set whose entries carry `:min` / `:max` (`vertex` exactly once, `fragment` at most once, `constant` unbounded) and puts the same kind on three slots: a positional slot, a keyed slot where the counts ride along inertly, and an open form where they still fire. The bounded slot emits one `allOf` entry per bounded head (`{contains: {$ref: …}, minContains, maxContains}`) beside the plain `items`. The unbounded head gets no entry, so a document may carry any number of `(constant …)`; `minItems`/`maxItems` would have rejected exactly that, which is why they are the wrong keyword here. `hosts/web` compiles this schema under ajv and drives it over the same documents the validator judges, so the encoding is checked rather than asserted.
+
+### `dimensions` — digit-leading enum members
+
+`examples/plugins/dimensions/` is the WebGPU case: `GPUTextureDimension` is spelled `1d`, `2d`, `3d`, and `GPUTextureViewDimension` mixes those with ordinary members (`cube`, `cube-array`) and one hyphenated spelling (`2d-array`). The compact `:values [1d 2d 3d]` form and the rich `(member …)` form both export as a per-member `oneOf`, each digit-leading member pinned to `{"$num": [<magnitude>, "<unit>"]}`. The `.d.ts` reads `readonly [1, "d"] | readonly [2, "d"] | readonly [3, "d"]`.
+
+### `scalar-or-ref` — the shorthand, checked and unchecked
+
+`examples/plugins/scalar-or-ref/` declares both halves of the contrast: `(scalar-or-ref-shape :base dim-value)`, whose reference half is the primitive `symbol`, and `(scalar-or-ref-shape :base dim-value :ref define-ref)`, whose reference half is a cross-ref kind. The difference is invisible on a correct document and visible on a misspelling, which is why the fixture ships both. It is also visible in the export with no export-side code: the first slot is `number | Symbol_`, the second `number | CrossRef<"define">`.
+
+### `xref` — cross-refs in five flavours
+
+`examples/plugins/xref/` declares a bare cross-ref, an acyclic cross-ref (with a self-edge through `(node :parent ...)`), a scope-form-scoped cross-ref pointed at `(piece …)` as the registry root, a provider-route cross-ref reading `(shader :code …)` through the `uniforms` provider, and a target group naming `(render-pipeline …)` and `(compute-pipeline …)` at once. All five produce identical wire shapes (a `{$sym: string}` object); the difference lands in the `x-sjon-cross-ref` annotation, which gains `provider` / `source-key` on the fourth and swaps `target-form` for `target-forms` on the fifth (both omitted elsewhere, like `scope-form`).
+
+The group sits directly beneath a union over two cross-ref kinds pointed at the same two forms, so the fixture shows the two shapes side by side: two targets, one namespace or two. `example.sjon` carries both diagnostics that fall out. `duplicate_cross_ref_target` is an error at the declarations, because one namespace cannot hold the name twice; `union_ambiguous` is a warning at the reference, because two namespaces both hold it and declaration order picks.
 
 The provider route is the one slot whose member set is not merely unenforceable but *unknowable* at export time — it does not exist until a host runs an extraction pre-pass over a document, which export has none of. `cross_ref_unenforceable`'s message says so. This fixture is also the only manifest-sourced one that emits a Markdown golden (`xref.md.golden`), which is how the CLI-only Markdown renderer gets covered against a real manifest rather than only the static `shapes` plugin.
 

@@ -1,0 +1,200 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "head-counts",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "vertex",
+          "description": "The vertex stage of a pipeline.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "entry",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            }
+          ]
+        },
+        {
+          "name": "fragment",
+          "description": "The fragment stage. Optional — a depth-only pass has none.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "entry",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            }
+          ]
+        },
+        {
+          "name": "constant",
+          "description": "A pipeline-overridable constant. Any number of these.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "name",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            },
+            {
+              "name": "value",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "number"
+              }
+            }
+          ]
+        },
+        {
+          "name": "render-pipeline",
+          "description": "A pipeline whose sections are counted, not just typed.",
+          "open": false,
+          "positional": {
+            "kind": {
+              "kind": "form_heads",
+              "refs": [
+                {
+                  "plugin": "head-counts",
+                  "name": "vertex",
+                  "min": 1,
+                  "max": 1
+                },
+                {
+                  "plugin": "head-counts",
+                  "name": "fragment",
+                  "max": 1
+                },
+                {
+                  "plugin": "head-counts",
+                  "name": "constant"
+                }
+              ]
+            }
+          },
+          "keys": [
+            {
+              "name": "name",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            }
+          ]
+        },
+        {
+          "name": "section-holder",
+          "description": "Same kind, keyed slot — the counts ride along inertly here.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "section",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "form_heads",
+                "refs": [
+                  {
+                    "plugin": "head-counts",
+                    "name": "vertex",
+                    "min": 1,
+                    "max": 1
+                  },
+                  {
+                    "plugin": "head-counts",
+                    "name": "fragment",
+                    "max": 1
+                  },
+                  {
+                    "plugin": "head-counts",
+                    "name": "constant"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "scratch-pipeline",
+          "description": "Open form, same bounded slot: `:open true` does not silence the counts.",
+          "open": true,
+          "positional": {
+            "kind": {
+              "kind": "form_heads",
+              "refs": [
+                {
+                  "plugin": "head-counts",
+                  "name": "vertex",
+                  "min": 1,
+                  "max": 1
+                },
+                {
+                  "plugin": "head-counts",
+                  "name": "fragment",
+                  "max": 1
+                },
+                {
+                  "plugin": "head-counts",
+                  "name": "constant"
+                }
+              ]
+            }
+          },
+          "keys": []
+        }
+      ],
+      "value_kinds": [
+        {
+          "name": "pipeline-section",
+          "description": "One section of a render pipeline, with how many of each are allowed.",
+          "shape": {
+            "kind": "form_heads",
+            "refs": [
+              {
+                "plugin": "head-counts",
+                "name": "vertex",
+                "min": 1,
+                "max": 1
+              },
+              {
+                "plugin": "head-counts",
+                "name": "fragment",
+                "max": 1
+              },
+              {
+                "plugin": "head-counts",
+                "name": "constant"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `pipeline-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin_name": "head-counts",
+      "kind_name": "pipeline-section"
+    }
+  ]
+}

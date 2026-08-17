@@ -1,0 +1,37 @@
+; The four things a target group cannot carry. Each is `invalid_manifest`
+; — the same class as the route exclusions — and each *drops* the
+; offending key rather than half-honouring it, so what reaches the index
+; is always one coherent reading.
+;
+;   `empty-ref`    an empty `:target []` accepts nothing and rejects
+;                  everything; a cross-ref with no target is a typo.
+;   `repeat-ref`   a repeated entry adds nothing to a namespace and hides
+;                  a likely typo in the entry it duplicates.
+;   `cyclic-ref`   `:acyclic true` follows edges on a target's *self*-
+;                  referential keys, and `self` is not well defined
+;                  across a group. Same argument that already rejects
+;                  `:provider` beside `:acyclic`.
+;   `extract-ref`  `:provider` collects an extracted member set per
+;                  target form, so a group would make one form owe
+;                  extractions to several buckets at once. Declare one
+;                  cross-ref per target instead — the message says so.
+(plugin :name gpu :version "1.0.0" :sjon "1.3"
+  (cross-ref-provider :name uniforms)
+
+  (value-kind :name empty-ref :underlying symbol
+    :cross-ref (cross-ref :target []))
+
+  (value-kind :name repeat-ref :underlying symbol
+    :cross-ref (cross-ref :target [render-pipeline render-pipeline]))
+
+  (value-kind :name cyclic-ref :underlying symbol
+    :cross-ref (cross-ref :target [render-pipeline compute-pipeline] :acyclic true))
+
+  (value-kind :name extract-ref :underlying symbol
+    :cross-ref (cross-ref :provider uniforms :target [render-pipeline compute-pipeline]))
+
+  (form :name render-pipeline
+    (key :name name :type symbol))
+
+  (form :name compute-pipeline
+    (key :name name :type symbol)))

@@ -4,6 +4,9 @@
 //
 // Export warnings:
 //   [info union_emitted_via_anyof] value-kind `dim` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info union_emitted_via_anyof] value-kind `checked-dim` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [warn cross_ref_unenforceable] value-kind `define-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
+//   [info cross_ref_annotation_only] value-kind `define-ref` cross-ref annotation surfaces target-form=`define` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
 
 export type Keyword<S extends string = string> = { readonly $kw: S };
 export type Symbol_<S extends string = string> = { readonly $sym: S };
@@ -20,6 +23,14 @@ export type F16 = number & { readonly __sjonRepr?: "f16" };
 
 // ----- plugin: scalar-or-ref -----
 
+/** A named constant a dimension may reference. */
+export interface ScalarOrRef_Define {
+  $form: "define";
+  $ns: "scalar-or-ref";
+  name: Symbol_;
+  value: number;
+}
+
 /** A compute dispatch sized on three axes; each axis is a literal or a named reference. */
 export interface ScalarOrRef_Dispatch {
   $form: "dispatch";
@@ -29,6 +40,16 @@ export interface ScalarOrRef_Dispatch {
   z?: number | Symbol_;
 }
 
+/** As (dispatch …), but every axis reference is checked against a (define …). */
+export interface ScalarOrRef_CheckedDispatch {
+  $form: "checked-dispatch";
+  $ns: "scalar-or-ref";
+  x: number | CrossRef<"define">;
+  y?: number | CrossRef<"define">;
+}
+
 export type SjonScalarOrRef =
-  | ScalarOrRef_Dispatch;
+  | ScalarOrRef_Define
+  | ScalarOrRef_Dispatch
+  | ScalarOrRef_CheckedDispatch;
 

@@ -64,6 +64,55 @@
       "message": "value-kind `uniform-ref` cross-ref annotation surfaces target-form=`shader` provider=`uniforms` source-key=`code` scope-form=``; none are enforceable by JSON Schema",
       "plugin": "xref",
       "kind": "uniform-ref"
+    },
+    {
+      "code": "union_emitted_via_anyof",
+      "severity": "info",
+      "message": "value-kind `pipeline-ref` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`",
+      "plugin": "xref",
+      "kind": "pipeline-ref"
+    },
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `render-pipeline-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin": "xref",
+      "kind": "render-pipeline-ref"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `render-pipeline-ref` cross-ref annotation surfaces target-form=`render-pipeline` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "plugin": "xref",
+      "kind": "render-pipeline-ref"
+    },
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `compute-pipeline-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin": "xref",
+      "kind": "compute-pipeline-ref"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `compute-pipeline-ref` cross-ref annotation surfaces target-form=`compute-pipeline` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "plugin": "xref",
+      "kind": "compute-pipeline-ref"
+    },
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `pipeline-group-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin": "xref",
+      "kind": "pipeline-group-ref"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `pipeline-group-ref` cross-ref annotation surfaces target-form=`render-pipeline | compute-pipeline` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "plugin": "xref",
+      "kind": "pipeline-group-ref"
     }
   ],
   "$defs": {
@@ -205,6 +254,64 @@
       ],
       "additionalProperties": false
     },
+    "form.xref.render-pipeline": {
+      "type": "object",
+      "description": "A raster pipeline. One half of the ambiguous pair.",
+      "properties": {
+        "$form": {
+          "const": "render-pipeline"
+        },
+        "$ns": {
+          "const": "xref"
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "$form",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "form.xref.compute-pipeline": {
+      "type": "object",
+      "description": "A compute pipeline. The other half.",
+      "properties": {
+        "$form": {
+          "const": "compute-pipeline"
+        },
+        "$ns": {
+          "const": "xref"
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "$form",
+        "name"
+      ],
+      "additionalProperties": false
+    },
     "form.xref.edge": {
       "type": "object",
       "description": "Directed edge between two `(node …)` declarations.",
@@ -232,6 +339,26 @@
             "acyclic": false
           }
         },
+        "group-pipeline": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false,
+          "x-sjon-cross-ref": {
+            "target-forms": [
+              "render-pipeline",
+              "compute-pipeline"
+            ],
+            "name-key": "name",
+            "acyclic": false
+          }
+        },
         "phrase": {
           "type": "object",
           "properties": {
@@ -249,6 +376,48 @@
             "acyclic": false,
             "scope-form": "piece"
           }
+        },
+        "pipeline": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "render-pipeline",
+                "name-key": "name",
+                "acyclic": false
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "compute-pipeline",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "render-pipeline-ref",
+            "compute-pipeline-ref"
+          ]
         },
         "to": {
           "type": "object",
@@ -307,6 +476,12 @@
     },
     {
       "$ref": "#/$defs/form.xref.shader"
+    },
+    {
+      "$ref": "#/$defs/form.xref.render-pipeline"
+    },
+    {
+      "$ref": "#/$defs/form.xref.compute-pipeline"
     },
     {
       "$ref": "#/$defs/form.xref.edge"

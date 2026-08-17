@@ -4,6 +4,170 @@ All notable, breaking, or contract-affecting changes land here, documented
 plainly. The stable surfaces — the binary wire format and the diagnostic-code
 enum — are versioned and corpus-gated; nothing changes them silently.
 
+## Unreleased
+
+## 1.2.0 — 2026-08-17
+
+The contract at a glance: no wire-format change (still v5), diagnostic codes
+append-only (five new: `positional_too_many`, `positional_missing`,
+`dependent_key_missing`, `union_ambiguous`, `number_not_multiple`), manifest
+format 1.2 → 1.3, and the conformance corpus grown to 354 cases. Nine plans
+answering a downstream host's (PNGine) adaptation asks, plus a same-day
+long-tail audit across their interactions — `docs/plans/asks/README.md`
+carries the full ledger, including where a plan and the shipped code
+diverged.
+
+### Added
+
+- **Positional cardinality — `(head-set (head :name … :min … :max …))`.** A
+  head inside a head-set may bound how many positional children carry it, not
+  just which heads are allowed. Fewer than the floor trips
+  `positional_missing`; more than the ceiling, `positional_too_many` — both
+  counted per form instance, and inert on a head-set used anywhere other than
+  a `:positional` slot (a keyed slot or a `vector-shape :element` have no
+  count to bound). JSON Schema exports the bound as one `contains` +
+  `minContains` / `maxContains` per bounded head (not `minItems` /
+  `maxItems`, which bound the array's total length); the Markdown target
+  gains a small Head/Count table beneath the existing positional-children
+  sentence. Manifest format 1.2 → 1.3 (shared with `scalar-or-ref-shape`
+  below — one bump, taken by whichever landed first).
+- **Digit-leading enum members (`1d`, `2d`) and hyphen-joined units
+  (`2d-array`, `ms-per-frame`).** A `member-set`'s `:values` may declare a
+  numeric spelling directly (`[1d 2d 3d]`), and the lexer's unit alphabet now
+  admits a hyphen followed by another letter run, so a previously
+  undeclarable unit like `ms-per-frame` both lexes and can appear in a
+  `member-set`. Matching is integer-keyed (not text- or float-keyed), so
+  `2d`, `2.0d`, and `02d` collapse to one member at both load and match time,
+  while `2.5d` cannot round into one. A digit-leading member is a
+  `number_with_unit` on the wire, so the exported schema routes through the
+  existing rich `oneOf` encoding (`{"$num": [2, "d"]}`) rather than a bare
+  `$sym` enum — the encoding changed even though `Member.name` (and the
+  Markdown rendering) did not. `@sjon/schema` can declare and serialize a
+  digit-leading member. No wire-format change, no new diagnostic code, no
+  format bump.
+- **Hex integer literals (`0xFF`).** See "Behavior changes" below — this is
+  the one ask in the series that changes what an existing document means.
+- **Union match ambiguity — `union_ambiguous`.** A `warning`-severity
+  diagnostic fires when a value matches more than one alternative's *name*
+  (not just its shape) inside a union, naming every claimant. Emitted after a
+  successful first-match dispatch (joining `deprecated_member` and
+  `string_pattern_unsupported`'s existing after-the-match advisory family),
+  so matcher dispatch itself is unchanged. A poisoned bucket (a failed
+  cross-ref provider) is not a claimant, and two cross-ref kinds that resolve
+  to the same target count as one claim, not two — both narrowings guard
+  against warning on a union that is not actually ambiguous.
+- **Multi-target cross-refs — `(cross-ref :target [a b])`.** A cross-ref may
+  name several target forms as one namespace instead of one, registering
+  into a single shared bucket rather than several independent ones. The
+  bucket key is a sorted, de-duplicated set of canonical target names, so
+  declaration order never changes behavior and a target named twice collapses
+  to one key. A form may carry at most one provider-route registration, so
+  `:provider` does not compose with a target group (a fourth
+  `invalid_manifest` exclusion, alongside empty/duplicate/incoherent
+  targets). JSON Schema emits `target-forms` (an array) for a group instead
+  of the singular `target-form`; the TypeScript export emits a union of
+  `CrossRef<…>` brands. `@sjon/schema`'s `s.crossRef` now accepts one target
+  or a list. No new diagnostic code, no wire-format change; format bump
+  shared with the two entries above.
+- **Key dependency — `(key … :requires [b])`.** Presence of one key implies
+  presence of another; violated on a tree or Binary IR document as
+  `dependent_key_missing`. Exports to JSON Schema's native
+  `dependentRequired`. Suppressed on an `:open true` form, consistent with
+  every other end-of-form sweep (`missing_required_key`, the discriminant
+  gate, exclusive groups) — the form's *declared* keys still get checked,
+  but presence of an undeclared key is never assessed. A self-referential
+  `:requires` is rejected at load with its own diagnostic rather than
+  surfacing as a generic cycle.
+- **`scalar-or-ref-shape :ref <kind>`.** Names the reference half of a
+  scalar-or-ref shorthand explicitly, so a misspelled reference is caught
+  (as a union match failure) instead of silently accepted as the bare
+  scalar. Pure load-time desugar — no validator or wire change. Manifest
+  format bump shared with the positional-cardinality entry above.
+- **`(numeric-bounds :multiple-of N)` — divisibility bounds.** A number
+  outside the multiple trips `number_not_multiple`; a manifest-declared
+  non-integer divisor is accepted but validates approximately, reusing the
+  existing `numeric_bounds_invalid` warning channel rather than spending a
+  new wire-stable code on the nuance (the corpus asserts both severities
+  side by side). Exports to JSON Schema's native `multipleOf`, and reaches
+  the `--target=intermediate` IR and `@sjon/schema`'s `.multipleOf(n)`.
+- **Head-set names resolving to slot-local forms, and emitted positional
+  atoms.** Two asks in the series (`docs/plans/asks/07-…` and `09-…`)
+  turned out to need no SJON change — both already worked as asked, and are
+  now pinned by corpus cases (the former) and documented (the latter) so
+  the behavior cannot silently regress.
+
+### Behavior changes
+
+- **`0x` now opens a hex integer, so `0xFF` is 255 where it used to be
+  0.** This changes what an existing document *means*, which is why it is
+  called out here rather than left to the release notes. Before, the lexer
+  read `0xFF` as one number token with the value `0` and the unit `xFF`:
+  loud in a slot whose value-kind rejected units, and **silent everywhere
+  else** — a plain `:type number` slot accepted the zero without a
+  diagnostic, and `(+ 0xFF 1)` evaluated to `1`. Any document that wrote a
+  hex-looking literal was already wrong; it is now read the way it was
+  written.
+
+  Scope of the change is deliberately narrow. The prefix is recognised
+  only when the numeric portion before it is exactly `0`, optionally
+  signed, so `10x`, `00x`, `0_x`, `0.5x`, and `1X` all keep their unit and
+  lex byte-identically. A hex literal carries no unit, no fraction, and no
+  exponent, and reaches the existing `number_i64` / `number_u64` tags — so
+  there is **no wire-format change, no new diagnostic code, and no
+  validator change**; every `:numeric`, `:repr`, and `:unit` refinement
+  judges a hex value exactly as it judges a decimal one.
+
+  A `0x` prefix with no hex digit after it (`0x`, `0x_F`, `0xGG`) is now a
+  parse diagnostic — `unspecified`, the same channel `1e+` already used —
+  instead of the number zero with unit `x`. One diagnostic per typo: the
+  token spans only the prefix, so `GG` still lexes as an ordinary symbol.
+
+- **`sjon fmt` rewrites a hex literal to decimal.** `0xFFFFFFFF` comes
+  back as `4294967295`. The printer formats from the decoded value and has
+  no access to the source, so this is the same normalization that has
+  always turned `1_000` into `1000` and `1e3` into `1000` — but it is
+  visible on exactly the idiom hex exists to serve, so: values
+  round-trip, spellings do not (`docs/LANGUAGE.md` §4.2). Preserving the
+  spelling would need a new carrier for something the value already
+  determines (a wire-bumped tag pair, or a tree-side table that drifts the
+  moment anything builds a tree without the parser). If that ever proves
+  intolerable, the tag pair is the honest fix and a deliberate,
+  version-gated change.
+
+### Fixed
+
+Found by a same-day sweep of the nine asks' *interactions*, after each had
+shipped and passed on its own — `docs/plans/asks/README.md`'s "Post-series
+audit" section. None changed the wire format or the diagnostic-code enum;
+both are corpus-gated and mirrored in `hosts/typescript-parity`.
+
+- **A target group's bucket key was order-sensitive.** `[a b]` and `[b a]`
+  declared one namespace but keyed two: a duplicated name was reported once
+  per spelling, `cross_ref_target_collapse` went silent between them, and
+  `union_ambiguous` could fire on a slot whose two readings picked the same
+  entity. The key is now a sorted, de-duplicated set, so declaration order
+  and repeated targets no longer change behavior; a single (non-group)
+  target still keys on exactly the canonical form name.
+- **A negative `:multiple-of` exported an invalid schema.** `-3` validated
+  correctly at runtime but emitted `"multipleOf": -3`, which JSON Schema
+  2020-12 forbids and ajv refuses to compile. Both the value's sign and the
+  divisor's sign now share the same zero-arm handling on export.
+- **The duplicate-member scan ran on one authoring shape only.** `(member
+  …)` children were checked for byte-equal duplicates; the compact `:values
+  [...]` spelling was not, so a set that looked smaller than it was — most
+  visibly `[2d 2.0d]`, which canonicalises to one member — slipped through
+  silently. Both shapes are checked the same way now.
+- **`@sjon/schema` gained `.multipleOf(n)`.** The one host `:multiple-of`
+  left behind (`hosts/schema` models numeric bounds already; the other three
+  hosts got it in the same commit as the feature). Refuses a non-positive
+  divisor at the call site, matching the loader.
+- **OOM and fuzz coverage for the series' new allocating paths.** Five new
+  OOM-stress loops (the loader, both validation walkers separately, and
+  `validateCrossRefs`) and fuzz seeds for the 1.3 manifest vocabulary — the
+  series itself had added none, leaving head-set entries, `:requires`
+  lists, numeric member spellings, and the target-group bucket key
+  unexercised under a failing allocator or the fuzz harness.
+
 ## 1.1.0 — 2026-08-15
 
 The contract at a glance: binary wire format v5 (vectors carry their

@@ -59,7 +59,7 @@ pub fn main() !void {
             .{
                 .name = "event",
                 .underlying = .form,
-                .heads = .{ .names = &.{ "n", "rest" } },
+                .heads = .{ .heads = &.{ .{ .name = "n" }, .{ .name = "rest" } } },
             },
             .{
                 .name = "note-or-event",

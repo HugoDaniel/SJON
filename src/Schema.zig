@@ -437,6 +437,97 @@ pub const Schema = struct {
         return try std.fmt.allocPrint(a, "{s}/{s}", .{ hit.plugin.name, hit.form.name });
     }
 
+    /// The name-registry **bucket** a cross-ref's names live in, or null
+    /// when the cross-ref cannot contribute one (see below). Allocates on
+    /// `a` only for a multi-target group; a single-target cross-ref pays
+    /// exactly what `canonicalFormName` costs, which is what it paid
+    /// before groups existed.
+    ///
+    /// One target → the canonical `<plugin>/<form>` name, so every
+    /// pre-group schema keys its bucket exactly as it always did.
+    ///
+    /// Several targets → one synthetic key naming each canonical target,
+    /// space-separated. That is the whole of the multi-target design: the
+    /// listed targets' instances all register into *this* bucket, so
+    /// duplicate detection, lookup, poisoning, did-you-mean, and the LSP
+    /// consumers stay single-bucket operations and need no change. A
+    /// space cannot occur in a symbol, so a group key can never collide
+    /// with a canonical form name.
+    ///
+    /// **The key is a set, not a list: sorted and de-duplicated.** A group
+    /// declares that its targets share one namespace, and a namespace has
+    /// no order — so `[a b]` and `[b a]` are the same bucket, and
+    /// `[a p/a]` (one form under two spellings, which the loader's
+    /// spelling-keyed repeat check cannot see) is the same bucket as
+    /// `:target a`. Keying on the written order instead made one namespace
+    /// register twice, which reported one duplicate name as two errors,
+    /// hid `cross_ref_target_collapse` between two spellings of one group,
+    /// and made `union_ambiguous` warn that order picks the entity when
+    /// both readings picked the same one. Sorting also means a group reads
+    /// the same way in every message whichever kind's declaration produced
+    /// it; the author's own order is still what `describeTargets` renders.
+    ///
+    /// **All-or-nothing.** If any listed target fails to resolve, the
+    /// whole cross-ref contributes nothing — the same rule an unresolvable
+    /// `:provider` already follows (`Validator.collectCrossRefTargets`).
+    /// Registering the resolvable subset would accept references while
+    /// silently excluding names the author listed; and there is no cascade
+    /// to avoid, because `checkCrossRef` has already emitted
+    /// `unknown_cross_ref_target` at `.err` for the offending entry, so
+    /// the document fails validation either way.
+    ///
+    /// This function is the single source of truth for the key, shared by
+    /// the aggregate collapse check and both index-build walks. Two
+    /// implementations of it would be a silent divergence: references
+    /// would be looked up in a bucket nothing registered into.
+    pub fn crossRefBucketKey(
+        self: Schema,
+        a: Allocator,
+        cr: Plugin.ValueKind.CrossRef,
+    ) Allocator.Error!?[]const u8 {
+        std.debug.assert(cr.targets.len >= 1);
+        if (cr.targets.len == 1) return try self.canonicalFormName(a, cr.targets[0]);
+
+        // The per-target names are scaffolding for the joined key, so they
+        // are freed here rather than left for the caller's arena to absorb:
+        // every call site passes a different allocator (index arena,
+        // aggregate scratch, an LSP request arena, a test's GPA), and only
+        // one thing should come back owned.
+        var parts: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (parts.items) |part| a.free(part);
+            parts.deinit(a);
+        }
+        for (cr.targets) |t| {
+            const canonical = (try self.canonicalFormName(a, t)) orelse return null;
+            try parts.append(a, canonical);
+        }
+        std.debug.assert(parts.items.len == cr.targets.len);
+
+        // Set semantics, in two steps: sort so the written order cannot
+        // fork the bucket, then drop the neighbours sorting has made equal
+        // so two spellings of one form cannot name it twice. The freed
+        // duplicates are the `defer` above's to release, so shrink the list
+        // by swapping them to the tail rather than overwriting them.
+        std.mem.sort([]const u8, parts.items, {}, lessThanStr);
+        var write: usize = 1;
+        var read: usize = 1;
+        while (read < parts.items.len) : (read += 1) {
+            if (std.mem.eql(u8, parts.items[read], parts.items[write - 1])) continue;
+            std.mem.swap([]const u8, &parts.items[write], &parts.items[read]);
+            write += 1;
+        }
+        std.debug.assert(write >= 1);
+        std.debug.assert(write <= cr.targets.len);
+        return try std.mem.join(a, " ", parts.items[0..write]);
+    }
+
+    /// Byte order over the bucket key's canonical parts. Any total order
+    /// would do — what the key needs is *a* fixed one.
+    fn lessThanStr(_: void, x: []const u8, y: []const u8) bool {
+        return std.mem.lessThan(u8, x, y);
+    }
+
     /// Same rule, one vocabulary over: a `:provider` spelling resolves to
     /// the canonical `<plugin>/<provider>` name that keys the extraction
     /// table. Null on `not_found` / `ambiguous`, where
@@ -818,12 +909,20 @@ fn optStrEql(a: ?[]const u8, b: ?[]const u8) bool {
     return std.mem.eql(u8, a.?, b.?);
 }
 
-/// One target form, one member set: the registry is keyed by canonical
-/// target and built first-wins, so a second `(cross-ref …)` naming the
-/// same target contributes nothing. Silent when the two specs agree —
-/// that is ordinary aliasing — and a `.warning` naming both when they
-/// don't, because the loser's references are then checked against a set
-/// its own declaration had no part in building.
+/// One bucket, one member set: the registry is keyed by
+/// `Schema.crossRefBucketKey` and built first-wins, so a second
+/// `(cross-ref …)` landing in the same bucket contributes nothing. Silent
+/// when the two specs agree — that is ordinary aliasing — and a
+/// `.warning` naming both when they don't, because the loser's references
+/// are then checked against a set its own declaration had no part in
+/// building.
+///
+/// The bucket, not the target, is what collapses. For a single-target
+/// cross-ref the two are the same thing, which is why this reads as
+/// "one target form, one member set" for every schema written before
+/// groups existed. Two kinds that list the *same* group of targets share
+/// a bucket and so can collapse; a group and a single-target kind on one
+/// of its members cannot, because their keys differ.
 ///
 /// Mirrors `Validator.collectCrossRefTargets`' skips exactly: an
 /// unresolvable target or provider never reaches the registry, so it
@@ -838,7 +937,7 @@ fn checkTargetCollapse(
     kind: *const Plugin.ValueKind,
     cr: Plugin.ValueKind.CrossRef,
 ) Allocator.Error!void {
-    const canonical = (try schema.canonicalFormName(a, cr.target_form)) orelse return;
+    const bucket = (try schema.crossRefBucketKey(a, cr)) orelse return;
     const provider: ?[]const u8 = if (cr.provider) |pv|
         (try schema.canonicalProviderName(a, pv)) orelse return
     else
@@ -851,7 +950,7 @@ fn checkTargetCollapse(
         .scope = if (cr.scope_form) |sf| try schema.canonicalFormName(a, sf) else null,
     };
 
-    const gop = try winners.getOrPut(a, canonical);
+    const gop = try winners.getOrPut(a, bucket);
     if (!gop.found_existing) {
         gop.value_ptr.* = mine;
         return;
@@ -859,16 +958,23 @@ fn checkTargetCollapse(
     const won = gop.value_ptr.*;
     if (won.agreesWith(mine)) return;
 
+    // A group's bucket key is not a form name, so it cannot be introduced
+    // as one; single-target messages are unchanged, byte for byte.
+    const subject = if (cr.targets.len == 1)
+        try std.fmt.allocPrint(a, "form `{s}`", .{bucket})
+    else
+        try std.fmt.allocPrint(a, "the target group `{s}`", .{bucket});
+
     try diags.append(a, .{
         .span = .{ .start = 0, .end = 0 },
         .message = try std.fmt.allocPrint(
             a,
-            "value-kind `{s}` cross-references form `{s}`, whose members are already " ++
+            "value-kind `{s}` cross-references {s}, whose members are already " ++
                 "collected by value-kind `{s}` in plugin `{s}` using {s}; this kind's {s} " ++
                 "is ignored, and its references are checked against the other kind's names",
             .{
                 kind.name,
-                canonical,
+                subject,
                 won.kind,
                 won.plugin,
                 try won.describe(a),
@@ -889,8 +995,29 @@ fn checkCrossRef(
     kind: *const Plugin.ValueKind,
     cr: Plugin.ValueKind.CrossRef,
 ) Allocator.Error!void {
-    // `:target` may be bare (`phrase`) or qualified (`audio/phrase`).
-    const target_split = Plugin.splitQualified(cr.target_form);
+    // Per *entry*: a group whose second target is a typo reports that
+    // entry, names it, and leaves the first entry's verdict alone. The
+    // aggregate pass collects rather than aborts, so all of them land.
+    for (cr.targets) |target| try checkCrossRefTarget(schema, a, diags, plugin, kind, cr, target);
+
+    // `:scope` and `:provider` are properties of the cross-ref, not of any
+    // one target, so they are checked once however many targets there are.
+    // (`:source-key` is read on *every* target, but its type check belongs
+    // to the target and lives in `checkCrossRefTarget`.)
+    try checkCrossRefScopeAndProvider(schema, a, diags, plugin, kind, cr);
+}
+
+fn checkCrossRefTarget(
+    schema: Schema,
+    a: Allocator,
+    diags: *std.ArrayList(Ast.Diagnostic),
+    plugin: *const Plugin.Plugin,
+    kind: *const Plugin.ValueKind,
+    cr: Plugin.ValueKind.CrossRef,
+    target: []const u8,
+) Allocator.Error!void {
+    // A `:target` entry may be bare (`phrase`) or qualified (`audio/phrase`).
+    const target_split = Plugin.splitQualified(target);
     const target_ns = target_split.namespace;
     const target_name = target_split.name;
     switch (schema.lookupForm(target_name, target_ns)) {
@@ -900,7 +1027,7 @@ fn checkCrossRef(
                 .message = try std.fmt.allocPrint(
                     a,
                     "value-kind `{s}` cross-ref `:target {s}` does not resolve to any form",
-                    .{ kind.name, cr.target_form },
+                    .{ kind.name, target },
                 ),
                 .severity = .err,
                 .code = .unknown_cross_ref_target,
@@ -912,7 +1039,7 @@ fn checkCrossRef(
                 .span = .{ .start = 0, .end = 0 },
                 .message = try ambiguityMessage(
                     a,
-                    &.{ "value-kind `", kind.name, "` cross-ref `:target ", cr.target_form, "`" },
+                    &.{ "value-kind `", kind.name, "` cross-ref `:target ", target, "`" },
                     amb.slice(),
                     &.{ "; qualify with `<ns>/", target_name, "`" },
                 ),
@@ -1006,9 +1133,18 @@ fn checkCrossRef(
             }
         },
     }
+}
 
+fn checkCrossRefScopeAndProvider(
+    schema: Schema,
+    a: Allocator,
+    diags: *std.ArrayList(Ast.Diagnostic),
+    plugin: *const Plugin.Plugin,
+    kind: *const Plugin.ValueKind,
+    cr: Plugin.ValueKind.CrossRef,
+) Allocator.Error!void {
     // `:scope <form>` must resolve to a form (qualified or bare). Same
-    // bare/qualified split as `:target` above.
+    // bare/qualified split as a `:target` entry.
     if (cr.scope_form) |sf| {
         const scope_split = Plugin.splitQualified(sf);
         const scope_ns = scope_split.namespace;
@@ -1643,7 +1779,14 @@ pub fn collectAcyclicSpecs(
         for (plugin.value_kinds) |*kind| {
             const cr = kind.cross_ref orelse continue;
             if (!cr.acyclic) continue;
-            const q = Plugin.splitQualified(cr.target_form);
+            // Cycle edges are defined over a target's *self*-referential
+            // keys, so "self" has to be one form. The loader rejects
+            // `:acyclic true` on a group for exactly this reason; reading
+            // through `soleTarget` states the assumption where it is
+            // relied on instead of leaving a bare `targets[0]` that a
+            // later widening could quietly make wrong.
+            const sole = cr.soleTarget() orelse continue;
+            const q = Plugin.splitQualified(sole);
             const form_hit = switch (self.lookupForm(q.name, q.namespace)) {
                 .found => |h| h,
                 else => continue,
@@ -2156,7 +2299,7 @@ test "validateCrossRefs: resolved target with default :name-key" {
             .{
                 .name = "phrase-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "phrase" },
+                .cross_ref = .{ .targets = &.{"phrase"} },
             },
         },
     };
@@ -2166,6 +2309,160 @@ test "validateCrossRefs: resolved target with default :name-key" {
     try testing.expectEqual(@as(usize, 0), diags.len);
 }
 
+test "validateCrossRefs: a group reports each unresolvable entry, naming it" {
+    // Per *entry*, not per cross-ref: a group with two typos is two
+    // authoring mistakes and gets two diagnostics, each naming the entry it
+    // is about. The aggregate phase collects rather than aborting, so a
+    // resolvable entry beside them changes nothing.
+    const gpu: Plugin.Plugin = .{
+        .name = "gpu",
+        .forms = &.{
+            .{ .name = "render-pipeline", .keys = &.{
+                .{ .name = "name", .value_type = .symbol, .optional = false },
+            } },
+        },
+        .value_kinds = &.{
+            .{
+                .name = "pipeline-ref",
+                .underlying = .symbol,
+                .cross_ref = .{ .targets = &.{ "render-pipeline", "compute-pipeline", "ghost" } },
+            },
+        },
+    };
+    const schema = Schema.init(&.{gpu});
+    const diags = try schema.validateCrossRefs(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+
+    var unknown: usize = 0;
+    var named_compute = false;
+    var named_ghost = false;
+    for (diags) |d| {
+        if (d.code != .unknown_cross_ref_target) continue;
+        unknown += 1;
+        if (std.mem.indexOf(u8, d.message, "compute-pipeline") != null) named_compute = true;
+        if (std.mem.indexOf(u8, d.message, "ghost") != null) named_ghost = true;
+    }
+    try testing.expectEqual(@as(usize, 2), unknown);
+    try testing.expect(named_compute);
+    try testing.expect(named_ghost);
+}
+
+test "validateCrossRefs: a group with one bad entry contributes no bucket" {
+    // All-or-nothing: `crossRefBucketKey` returns null, so the kind cannot
+    // win or lose a collapse — which is what keeps `checkTargetCollapse` in
+    // step with the index it is describing.
+    const gpu: Plugin.Plugin = .{
+        .name = "gpu",
+        .forms = &.{
+            .{ .name = "render-pipeline", .keys = &.{
+                .{ .name = "name", .value_type = .symbol, .optional = false },
+            } },
+        },
+        .value_kinds = &.{
+            .{
+                .name = "pipeline-ref",
+                .underlying = .symbol,
+                .cross_ref = .{ .targets = &.{ "render-pipeline", "ghost" } },
+            },
+        },
+    };
+    const schema = Schema.init(&.{gpu});
+    try testing.expect((try schema.crossRefBucketKey(testing.allocator, schema.plugins[0].value_kinds[0].cross_ref.?)) == null);
+}
+
+test "crossRefBucketKey: one target keys on the canonical form name" {
+    // The compatibility claim the whole design rests on: nothing about a
+    // pre-group schema's bucket key changes.
+    const audio: Plugin.Plugin = .{
+        .name = "audio",
+        .forms = &.{.{ .name = "phrase" }},
+        .value_kinds = &.{
+            .{ .name = "phrase-name", .underlying = .symbol, .cross_ref = .{ .targets = &.{"phrase"} } },
+        },
+    };
+    const schema = Schema.init(&.{audio});
+    const key = (try schema.crossRefBucketKey(testing.allocator, schema.plugins[0].value_kinds[0].cross_ref.?)).?;
+    defer testing.allocator.free(key);
+    try testing.expectEqualStrings("audio/phrase", key);
+}
+
+test "crossRefBucketKey: a group keys on every canonical target, space-joined" {
+    const gpu: Plugin.Plugin = .{
+        .name = "gpu",
+        .forms = &.{ .{ .name = "render-pipeline" }, .{ .name = "compute-pipeline" } },
+        .value_kinds = &.{
+            .{
+                .name = "pipeline-ref",
+                .underlying = .symbol,
+                .cross_ref = .{ .targets = &.{ "render-pipeline", "compute-pipeline" } },
+            },
+        },
+    };
+    const schema = Schema.init(&.{gpu});
+    const key = (try schema.crossRefBucketKey(testing.allocator, schema.plugins[0].value_kinds[0].cross_ref.?)).?;
+    defer testing.allocator.free(key);
+    // Sorted, not written-order: `compute` precedes `render` here even
+    // though the manifest lists them the other way round. A space cannot
+    // occur in a symbol, so this can never collide with a canonical form
+    // name however the forms are spelled.
+    try testing.expectEqualStrings("gpu/compute-pipeline gpu/render-pipeline", key);
+    try testing.expect(std.mem.indexOfScalar(u8, key, ' ') != null);
+}
+
+test "crossRefBucketKey: the written order does not fork the bucket" {
+    // A group declares one namespace, and a namespace has no order. Keyed
+    // on the written order, `[a b]` and `[b a]` were two buckets over the
+    // same names — which double-reported one duplicate name, hid the
+    // collapse warning between them, and made `union_ambiguous` fire on a
+    // slot whose two readings picked the same entity.
+    const gpu: Plugin.Plugin = .{
+        .name = "gpu",
+        .forms = &.{ .{ .name = "render-pipeline" }, .{ .name = "compute-pipeline" } },
+        .value_kinds = &.{
+            .{
+                .name = "forwards",
+                .underlying = .symbol,
+                .cross_ref = .{ .targets = &.{ "render-pipeline", "compute-pipeline" } },
+            },
+            .{
+                .name = "backwards",
+                .underlying = .symbol,
+                .cross_ref = .{ .targets = &.{ "compute-pipeline", "render-pipeline" } },
+            },
+        },
+    };
+    const schema = Schema.init(&.{gpu});
+    const fwd = (try schema.crossRefBucketKey(testing.allocator, schema.plugins[0].value_kinds[0].cross_ref.?)).?;
+    defer testing.allocator.free(fwd);
+    const bwd = (try schema.crossRefBucketKey(testing.allocator, schema.plugins[0].value_kinds[1].cross_ref.?)).?;
+    defer testing.allocator.free(bwd);
+    try testing.expectEqualStrings(fwd, bwd);
+}
+
+test "crossRefBucketKey: one form under two spellings is one target" {
+    // The loader's repeat check compares spellings, so `[phrase audio/phrase]`
+    // reaches here as two entries naming one form. De-duplicating after
+    // canonicalisation is what keeps that group's bucket the same one
+    // `:target phrase` uses — and keeps the rendered target from naming the
+    // same form twice.
+    const audio: Plugin.Plugin = .{
+        .name = "audio",
+        .forms = &.{.{ .name = "phrase" }},
+        .value_kinds = &.{
+            .{
+                .name = "phrase-name",
+                .underlying = .symbol,
+                .cross_ref = .{ .targets = &.{ "phrase", "audio/phrase" } },
+            },
+        },
+    };
+    const schema = Schema.init(&.{audio});
+    const key = (try schema.crossRefBucketKey(testing.allocator, schema.plugins[0].value_kinds[0].cross_ref.?)).?;
+    defer testing.allocator.free(key);
+    try testing.expectEqualStrings("audio/phrase", key);
+    try testing.expect(std.mem.indexOfScalar(u8, key, ' ') == null);
+}
+
 test "validateCrossRefs: unknown target emits unknown_cross_ref_target" {
     const p: Plugin.Plugin = .{
         .name = "p",
@@ -2173,7 +2470,7 @@ test "validateCrossRefs: unknown target emits unknown_cross_ref_target" {
             .{
                 .name = "ref",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "missing" },
+                .cross_ref = .{ .targets = &.{"missing"} },
             },
         },
     };
@@ -2199,7 +2496,7 @@ test "validateCrossRefs: OOM mid-walk leaves no partial diagnostic behind" {
     const p: Plugin.Plugin = .{
         .name = "p",
         .value_kinds = &.{
-            .{ .name = "ref", .underlying = .symbol, .cross_ref = .{ .target_form = "missing" } },
+            .{ .name = "ref", .underlying = .symbol, .cross_ref = .{ .targets = &.{"missing"} } },
         },
     };
     const schema = Schema.init(&.{p});
@@ -2240,7 +2537,7 @@ test "validateCrossRefs: ambiguous target emits ambiguous_cross_ref_target" {
             .{
                 .name = "phrase-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "phrase" },
+                .cross_ref = .{ .targets = &.{"phrase"} },
             },
         },
     };
@@ -2271,7 +2568,7 @@ test "validateCrossRefs: qualified target resolves to one specific plugin" {
             .{
                 .name = "phrase-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "a/phrase" },
+                .cross_ref = .{ .targets = &.{"a/phrase"} },
             },
         },
     };
@@ -2291,7 +2588,7 @@ test "validateCrossRefs: name-key not on target emits cross_ref_name_key_unknown
             .{
                 .name = "ref",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "phrase", .name_key = "label" },
+                .cross_ref = .{ .targets = &.{"phrase"}, .name_key = "label" },
             },
         },
     };
@@ -2312,7 +2609,7 @@ test "validateCrossRefs: name-key with non-symbol type emits cross_ref_name_key_
             .{
                 .name = "ref",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "phrase" },
+                .cross_ref = .{ .targets = &.{"phrase"} },
             },
         },
     };
@@ -2334,7 +2631,7 @@ test "validateCrossRefs: named symbol-underlying value-kind on name-key resolves
             .{
                 .name = "ref",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "phrase", .name_key = "label" },
+                .cross_ref = .{ .targets = &.{"phrase"}, .name_key = "label" },
             },
         },
     };
@@ -2361,7 +2658,7 @@ test "validateCrossRefs: provider route with a string source-key resolves cleanl
             .{
                 .name = "uniform-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader", .provider = "uniforms" },
+                .cross_ref = .{ .targets = &.{"shader"}, .provider = "uniforms" },
             },
         },
     };
@@ -2381,7 +2678,7 @@ test "validateCrossRefs: unknown provider emits unknown_cross_ref_provider" {
             .{
                 .name = "uniform-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader", .provider = "nope" },
+                .cross_ref = .{ .targets = &.{"shader"}, .provider = "nope" },
             },
         },
     };
@@ -2411,7 +2708,7 @@ test "validateCrossRefs: bare provider claimed by two plugins emits ambiguous_cr
             .{
                 .name = "uniform-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader", .provider = "uniforms" },
+                .cross_ref = .{ .targets = &.{"shader"}, .provider = "uniforms" },
             },
         },
     };
@@ -2438,7 +2735,7 @@ test "validateCrossRefs: qualified provider picks one plugin out of a collision"
             .{
                 .name = "uniform-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader", .provider = "a/uniforms" },
+                .cross_ref = .{ .targets = &.{"shader"}, .provider = "a/uniforms" },
             },
         },
     };
@@ -2459,7 +2756,7 @@ test "validateCrossRefs: source-key not on target emits cross_ref_source_key_unk
             .{
                 .name = "uniform-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader", .provider = "uniforms", .source_key = "body" },
+                .cross_ref = .{ .targets = &.{"shader"}, .provider = "uniforms", .source_key = "body" },
             },
         },
     };
@@ -2481,7 +2778,7 @@ test "validateCrossRefs: non-string source-key emits cross_ref_source_key_unknow
             .{
                 .name = "uniform-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader", .provider = "uniforms" },
+                .cross_ref = .{ .targets = &.{"shader"}, .provider = "uniforms" },
             },
         },
     };
@@ -2510,7 +2807,7 @@ test "validateCrossRefs: a string_bounds-refined named kind satisfies :source-ke
             .{
                 .name = "uniform-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader", .provider = "uniforms" },
+                .cross_ref = .{ .targets = &.{"shader"}, .provider = "uniforms" },
             },
         },
     };
@@ -2535,7 +2832,7 @@ test "validateCrossRefs: the provider route never checks :name-key" {
             .{
                 .name = "uniform-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader", .provider = "uniforms" },
+                .cross_ref = .{ .targets = &.{"shader"}, .provider = "uniforms" },
             },
         },
     };
@@ -2572,12 +2869,12 @@ test "validateCrossRefs: identity and provider routes on one target collapse" {
             .{
                 .name = "shader-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader" },
+                .cross_ref = .{ .targets = &.{"shader"} },
             },
             .{
                 .name = "uniform-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader", .provider = "uniforms" },
+                .cross_ref = .{ .targets = &.{"shader"}, .provider = "uniforms" },
             },
         },
     };
@@ -2616,12 +2913,12 @@ test "validateCrossRefs: declaration order decides which route wins" {
             .{
                 .name = "uniform-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader", .provider = "uniforms" },
+                .cross_ref = .{ .targets = &.{"shader"}, .provider = "uniforms" },
             },
             .{
                 .name = "shader-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader" },
+                .cross_ref = .{ .targets = &.{"shader"} },
             },
         },
     };
@@ -2641,8 +2938,8 @@ test "validateCrossRefs: two kinds aliasing one target identically stay silent" 
         .name = "gl",
         .forms = &.{collapseShaderForm()},
         .value_kinds = &.{
-            .{ .name = "vertex-ref", .underlying = .symbol, .cross_ref = .{ .target_form = "shader" } },
-            .{ .name = "fragment-ref", .underlying = .symbol, .cross_ref = .{ .target_form = "shader" } },
+            .{ .name = "vertex-ref", .underlying = .symbol, .cross_ref = .{ .targets = &.{"shader"} } },
+            .{ .name = "fragment-ref", .underlying = .symbol, .cross_ref = .{ .targets = &.{"shader"} } },
         },
     };
     const schema = Schema.init(&.{p});
@@ -2663,12 +2960,12 @@ test "validateCrossRefs: two provider-route kinds agreeing stay silent" {
             .{
                 .name = "uniform-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader", .provider = "uniforms" },
+                .cross_ref = .{ .targets = &.{"shader"}, .provider = "uniforms" },
             },
             .{
                 .name = "uniform-ref",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader", .provider = "gl/uniforms" },
+                .cross_ref = .{ .targets = &.{"shader"}, .provider = "gl/uniforms" },
             },
         },
     };
@@ -2686,11 +2983,11 @@ test "validateCrossRefs: same route, different :name-key collapses" {
             .{ .name = "alias", .value_type = .symbol, .optional = false },
         } }},
         .value_kinds = &.{
-            .{ .name = "by-name", .underlying = .symbol, .cross_ref = .{ .target_form = "shader" } },
+            .{ .name = "by-name", .underlying = .symbol, .cross_ref = .{ .targets = &.{"shader"} } },
             .{
                 .name = "by-alias",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader", .name_key = "alias" },
+                .cross_ref = .{ .targets = &.{"shader"}, .name_key = "alias" },
             },
         },
     };
@@ -2700,6 +2997,46 @@ test "validateCrossRefs: same route, different :name-key collapses" {
     try testing.expectEqual(@as(usize, 1), diags.len);
     try testing.expectEqual(Ast.Diagnostic.Code.cross_ref_target_collapse, diags[0].code);
     try testing.expectEqualStrings("by-alias", diags[0].path[1]);
+}
+
+test "validateCrossRefs: one group spelled two ways still collapses" {
+    // The collapse check reports the *bucket*, so it only sees these two
+    // kinds as one registry if the key ignores the written order. Keyed on
+    // the order, each got a bucket of its own, both honoured their own
+    // `:name-key`, and this warning — the one that tells the author their
+    // `:name-key alias` is ignored — went silent.
+    const p: Plugin.Plugin = .{
+        .name = "gl",
+        .forms = &.{
+            .{ .name = "shader", .keys = &.{
+                .{ .name = "name", .value_type = .symbol, .optional = false },
+                .{ .name = "alias", .value_type = .symbol, .optional = false },
+            } },
+            .{ .name = "kernel", .keys = &.{
+                .{ .name = "name", .value_type = .symbol, .optional = false },
+                .{ .name = "alias", .value_type = .symbol, .optional = false },
+            } },
+        },
+        .value_kinds = &.{
+            .{
+                .name = "by-name",
+                .underlying = .symbol,
+                .cross_ref = .{ .targets = &.{ "shader", "kernel" } },
+            },
+            .{
+                .name = "by-alias",
+                .underlying = .symbol,
+                .cross_ref = .{ .targets = &.{ "kernel", "shader" }, .name_key = "alias" },
+            },
+        },
+    };
+    const schema = Schema.init(&.{p});
+    const diags = try schema.validateCrossRefs(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 1), diags.len);
+    try testing.expectEqual(Ast.Diagnostic.Code.cross_ref_target_collapse, diags[0].code);
+    try testing.expectEqualStrings("by-alias", diags[0].path[1]);
+    try testing.expect(std.mem.indexOf(u8, diags[0].message, "the target group") != null);
 }
 
 test "validateCrossRefs: a differing :scope collapses too" {
@@ -2712,11 +3049,11 @@ test "validateCrossRefs: a differing :scope collapses too" {
             .{ .name = "pass", .keys = &.{} },
         },
         .value_kinds = &.{
-            .{ .name = "global-ref", .underlying = .symbol, .cross_ref = .{ .target_form = "shader" } },
+            .{ .name = "global-ref", .underlying = .symbol, .cross_ref = .{ .targets = &.{"shader"} } },
             .{
                 .name = "scoped-ref",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader", .scope_form = "pass" },
+                .cross_ref = .{ .targets = &.{"shader"}, .scope_form = "pass" },
             },
         },
     };
@@ -2740,11 +3077,11 @@ test "validateCrossRefs: a differing :acyclic alone does not collapse" {
             .{ .name = "base", .value_type = .{ .named = .{ .name = "strict-ref" } }, .optional = true },
         } }},
         .value_kinds = &.{
-            .{ .name = "loose-ref", .underlying = .symbol, .cross_ref = .{ .target_form = "shader" } },
+            .{ .name = "loose-ref", .underlying = .symbol, .cross_ref = .{ .targets = &.{"shader"} } },
             .{
                 .name = "strict-ref",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader", .acyclic = true },
+                .cross_ref = .{ .targets = &.{"shader"}, .acyclic = true },
             },
         },
     };
@@ -2763,13 +3100,13 @@ test "validateCrossRefs: every loser is compared against the first winner" {
         .forms = &.{collapseShaderForm()},
         .cross_ref_providers = &.{.{ .name = "uniforms" }},
         .value_kinds = &.{
-            .{ .name = "first", .underlying = .symbol, .cross_ref = .{ .target_form = "shader" } },
+            .{ .name = "first", .underlying = .symbol, .cross_ref = .{ .targets = &.{"shader"} } },
             .{
                 .name = "second",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader", .provider = "uniforms" },
+                .cross_ref = .{ .targets = &.{"shader"}, .provider = "uniforms" },
             },
-            .{ .name = "third", .underlying = .symbol, .cross_ref = .{ .target_form = "shader" } },
+            .{ .name = "third", .underlying = .symbol, .cross_ref = .{ .targets = &.{"shader"} } },
         },
     };
     const schema = Schema.init(&.{p});
@@ -2784,7 +3121,7 @@ test "validateCrossRefs: collapse spans plugins, in load order" {
         .name = "gl",
         .forms = &.{collapseShaderForm()},
         .value_kinds = &.{
-            .{ .name = "shader-name", .underlying = .symbol, .cross_ref = .{ .target_form = "shader" } },
+            .{ .name = "shader-name", .underlying = .symbol, .cross_ref = .{ .targets = &.{"shader"} } },
         },
     };
     const second: Plugin.Plugin = .{
@@ -2794,7 +3131,7 @@ test "validateCrossRefs: collapse spans plugins, in load order" {
             .{
                 .name = "uniform-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "gl/shader", .provider = "uniforms" },
+                .cross_ref = .{ .targets = &.{"gl/shader"}, .provider = "uniforms" },
             },
         },
     };
@@ -2819,11 +3156,11 @@ test "validateCrossRefs: a spec the registry never sees cannot collapse" {
         .name = "gl",
         .forms = &.{collapseShaderForm()},
         .value_kinds = &.{
-            .{ .name = "shader-name", .underlying = .symbol, .cross_ref = .{ .target_form = "shader" } },
+            .{ .name = "shader-name", .underlying = .symbol, .cross_ref = .{ .targets = &.{"shader"} } },
             .{
                 .name = "uniform-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "shader", .provider = "nope" },
+                .cross_ref = .{ .targets = &.{"shader"}, .provider = "nope" },
             },
         },
     };
@@ -2846,11 +3183,11 @@ test "validateCrossRefs: distinct targets never collapse" {
         },
         .cross_ref_providers = &.{.{ .name = "uniforms" }},
         .value_kinds = &.{
-            .{ .name = "shader-name", .underlying = .symbol, .cross_ref = .{ .target_form = "shader" } },
+            .{ .name = "shader-name", .underlying = .symbol, .cross_ref = .{ .targets = &.{"shader"} } },
             .{
                 .name = "buffer-field",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "buffer", .provider = "uniforms" },
+                .cross_ref = .{ .targets = &.{"buffer"}, .provider = "uniforms" },
             },
         },
     };
@@ -2869,7 +3206,7 @@ test "validateCrossRefs: unresolved target and unresolved provider both diagnose
             .{
                 .name = "uniform-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "nope", .provider = "also-nope" },
+                .cross_ref = .{ .targets = &.{"nope"}, .provider = "also-nope" },
             },
         },
     };
@@ -2894,7 +3231,7 @@ test "validateCrossRefs: :acyclic true without self-edge emits acyclic_without_s
             .{
                 .name = "phrase-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "phrase", .acyclic = true },
+                .cross_ref = .{ .targets = &.{"phrase"}, .acyclic = true },
             },
         },
     };
@@ -2918,7 +3255,7 @@ test "validateCrossRefs: :acyclic true with scalar self-edge resolves cleanly" {
             .{
                 .name = "phrase-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "phrase", .acyclic = true },
+                .cross_ref = .{ .targets = &.{"phrase"}, .acyclic = true },
             },
         },
     };
@@ -2941,7 +3278,7 @@ test "validateCrossRefs: :acyclic true with vector self-edge resolves cleanly" {
             .{
                 .name = "phrase-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "phrase", .acyclic = true },
+                .cross_ref = .{ .targets = &.{"phrase"}, .acyclic = true },
             },
             .{
                 .name = "phrase-name-list",
@@ -2968,7 +3305,7 @@ test "validateCrossRefs: unknown :scope emits unknown_cross_ref_scope" {
             .{
                 .name = "phrase-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "phrase", .scope_form = "nope" },
+                .cross_ref = .{ .targets = &.{"phrase"}, .scope_form = "nope" },
             },
         },
     };
@@ -3006,7 +3343,7 @@ test "validateCrossRefs: ambiguous bare :scope emits ambiguous_cross_ref_scope" 
             .{
                 .name = "phrase-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "b/phrase", .scope_form = "track" },
+                .cross_ref = .{ .targets = &.{"b/phrase"}, .scope_form = "track" },
             },
         },
     };
@@ -3043,7 +3380,7 @@ test "validateCrossRefs: qualified :scope resolves cleanly" {
             .{
                 .name = "phrase-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "b/phrase", .scope_form = "b/track" },
+                .cross_ref = .{ .targets = &.{"b/phrase"}, .scope_form = "b/track" },
             },
         },
     };
@@ -3078,7 +3415,7 @@ test "validateCrossRefs: :acyclic true with vector-only self-edge resolves clean
             .{
                 .name = "phrase-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "phrase", .acyclic = true },
+                .cross_ref = .{ .targets = &.{"phrase"}, .acyclic = true },
             },
             .{
                 .name = "phrase-name-list",
@@ -3108,7 +3445,7 @@ test "validateCrossRefs: :acyclic true with vector-of-primitive element diagnose
             .{
                 .name = "phrase-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "phrase", .acyclic = true },
+                .cross_ref = .{ .targets = &.{"phrase"}, .acyclic = true },
             },
             .{
                 .name = "tag-list",
@@ -3140,7 +3477,7 @@ test "validateCrossRefs: :acyclic true walking past vector hop into a non-loopin
             .{
                 .name = "phrase-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "phrase", .acyclic = true },
+                .cross_ref = .{ .targets = &.{"phrase"}, .acyclic = true },
             },
             .{
                 .name = "tag-list",
@@ -3172,7 +3509,7 @@ test "validateCrossRefs: :acyclic true with .named primitive type short-circuits
             .{
                 .name = "phrase-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "phrase", .acyclic = true },
+                .cross_ref = .{ .targets = &.{"phrase"}, .acyclic = true },
             },
         },
     };
@@ -3508,7 +3845,7 @@ test "collectAcyclicSpecs: kinds without :acyclic are skipped" {
             .{
                 .name = "ref",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "phrase", .acyclic = false },
+                .cross_ref = .{ .targets = &.{"phrase"}, .acyclic = false },
             },
         },
     };
@@ -3529,7 +3866,7 @@ test "collectAcyclicSpecs: scalar self-edge produces a spec with canonicalised t
             .{
                 .name = "phrase-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "phrase", .acyclic = true },
+                .cross_ref = .{ .targets = &.{"phrase"}, .acyclic = true },
             },
         },
     };
@@ -3547,7 +3884,7 @@ test "collectAcyclicSpecs: scalar self-edge produces a spec with canonicalised t
 }
 
 test "collectAcyclicSpecs: qualified target_form parses ns/name and canonicalises" {
-    // `cr.target_form = "demo/phrase"` exercises the slash-handling branch
+    // `cr.targets = &.{"demo/phrase"}` exercises the slash-handling branch
     // at the head of collectAcyclicSpecs. The canonical name matches the
     // bare-target case because lookupForm returns the same `(plugin, form)`.
     const p: Plugin.Plugin = .{
@@ -3560,7 +3897,7 @@ test "collectAcyclicSpecs: qualified target_form parses ns/name and canonicalise
             .{
                 .name = "phrase-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "demo/phrase", .acyclic = true },
+                .cross_ref = .{ .targets = &.{"demo/phrase"}, .acyclic = true },
             },
         },
     };
@@ -3580,7 +3917,7 @@ test "collectAcyclicSpecs: target unresolved silently dropped" {
             .{
                 .name = "ref",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "missing", .acyclic = true },
+                .cross_ref = .{ .targets = &.{"missing"}, .acyclic = true },
             },
         },
     };
@@ -3603,7 +3940,7 @@ test "collectAcyclicSpecs: target found but no self-edge keys → spec dropped" 
             .{
                 .name = "phrase-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "phrase", .acyclic = true },
+                .cross_ref = .{ .targets = &.{"phrase"}, .acyclic = true },
             },
         },
     };
@@ -3630,7 +3967,7 @@ test "collectAcyclicSpecs: bare scope_form canonicalises to <plugin>/<form>" {
                 .name = "phrase-name",
                 .underlying = .symbol,
                 .cross_ref = .{
-                    .target_form = "phrase",
+                    .targets = &.{"phrase"},
                     .acyclic = true,
                     .scope_form = "track",
                 },
@@ -3662,7 +3999,7 @@ test "collectAcyclicSpecs: qualified scope_form canonicalises identically" {
                 .name = "phrase-name",
                 .underlying = .symbol,
                 .cross_ref = .{
-                    .target_form = "phrase",
+                    .targets = &.{"phrase"},
                     .acyclic = true,
                     .scope_form = "lexical/track",
                 },
@@ -3692,7 +4029,7 @@ test "collectAcyclicSpecs: unresolved scope_form leaves scope_form null on the s
                 .name = "phrase-name",
                 .underlying = .symbol,
                 .cross_ref = .{
-                    .target_form = "phrase",
+                    .targets = &.{"phrase"},
                     .acyclic = true,
                     .scope_form = "missing",
                 },
@@ -3721,7 +4058,7 @@ test "collectAcyclicSpecs: name_key is not treated as an outgoing edge" {
             .{
                 .name = "phrase-name",
                 .underlying = .symbol,
-                .cross_ref = .{ .target_form = "phrase", .acyclic = true },
+                .cross_ref = .{ .targets = &.{"phrase"}, .acyclic = true },
             },
         },
     };

@@ -63,6 +63,33 @@
     :underlying string
     :description "SPDX license identifier (e.g. CC0-1.0, Apache-2.0). Free-form strings accepted with a warning.")
 
+  ; A member spelling. Usually a bare symbol, but an enum whose name
+  ; starts with a digit (`1d`, `2d`, `50%`) lexes as a unit-bearing
+  ; number, so the slot admits both shapes and the loader decides which
+  ; numbers are spellings — `2d` is one, a bare `2` is not. The `number`
+  ; primitive accepts a unit-bearing literal, which is what makes the
+  ; union enough here.
+  (value-kind :name member-name
+    :underlying union
+    :description "A member spelling: a bare symbol, or a digit-leading spelling that lexes as a unit-bearing number (1d, 2d)."
+    :union (union-shape :alternatives [symbol number]))
+
+  (value-kind :name member-name-list
+    :underlying vector
+    :description "Vector of member spellings."
+    :vector (vector-shape :element member-name))
+
+  ; A `(cross-ref :target …)`: one form head, or a vector of them. A
+  ; vector declares that the listed forms share **one** namespace — a
+  ; name from any of them satisfies a reference, and a name from two of
+  ; them is `duplicate_cross_ref_target`. The loader normalises both
+  ; spellings to a list and enforces what a group cannot carry
+  ; (`:acyclic`, `:provider`, duplicates, an empty vector).
+  (value-kind :name form-target
+    :underlying union
+    :description "A cross-ref target: one form head, or a vector of heads sharing one namespace."
+    :union (union-shape :alternatives [symbol symbol-list]))
+
   ; A vector of type references (for expr-func :params).
   (value-kind :name type-list
     :underlying vector
@@ -179,6 +206,10 @@
     :underlying form
     :description "Slot pinned to a (head-set …) form."
     :heads (head-set :names [head-set]))
+  (value-kind :name head-decl
+    :underlying form
+    :description "A (head …) sub-form inside (head-set …)."
+    :heads (head-set :names [head]))
   (value-kind :name cross-ref-shape-ref
     :underlying form
     :description "Slot pinned to a (cross-ref …) form."
@@ -267,13 +298,17 @@
     (key :name allowed  :type symbol-list :optional true))
 
   (form :name numeric-bounds
-    :description "Range / integrality constraints on a :number underlying."
+    :description "Range / integrality / divisibility constraints on a :number underlying."
     :open false
     (key :name min           :type number  :optional true)
     (key :name max           :type number  :optional true)
     (key :name exclusive-min :type boolean :optional true)
     (key :name exclusive-max :type boolean :optional true)
-    (key :name integer       :type boolean :optional true))
+    (key :name integer       :type boolean :optional true)
+    ; The divisor, e.g. `:multiple-of 256` for a 256-byte-aligned offset.
+    ; Must be non-zero and finite; a fractional divisor loads with a
+    ; warning, since divisibility is exact only in integer space.
+    (key :name multiple-of   :type number  :optional true))
 
   (form :name string-bounds
     :description "Length / pattern / format constraints on a :string underlying."
@@ -289,9 +324,10 @@
     (key :name type :type repr-type-tag :optional false))
 
   (form :name scalar-or-ref-shape
-    :description "Shorthand for `union [<base> symbol]` — a scalar kind or a symbolic reference. Desugars at load time."
+    :description "Shorthand for `union [<base> <ref>]` — a scalar kind or a symbolic reference. Desugars at load time. `:ref` defaults to the primitive `symbol` (an unchecked name); naming a cross-ref kind there makes the reference half checked."
     :open false
-    (key :name base :type type-ref :optional false))
+    (key :name base :type type-ref :optional false)
+    (key :name ref :type type-ref :optional true))
 
   (form :name member-set
     :description "Closed-set membership for :symbol or :string underlyings."
@@ -300,12 +336,12 @@
     ; `:values` is optional because an author may declare members via
     ; `(member …)` positional children instead. The loader rejects
     ; mixing both shapes in one `(member-set …)`.
-    (key :name values :type symbol-list :optional true))
+    (key :name values :type member-name-list :optional true))
 
   (form :name member
     :description "One entry in a (member-set …). Carries optional editor metadata."
     :open false
-    (key :name name                 :type symbol  :optional false)
+    (key :name name                 :type member-name :optional false)
     (key :name label                :type string  :optional true)
     (key :name description          :type string  :optional true)
     (key :name deprecated           :type boolean :optional true)
@@ -324,9 +360,22 @@
     :positional flag-decl)
 
   (form :name head-set
-    :description "Closed-set head-name pinning for :form underlyings."
+    :description "Closed-set head-name pinning for :form underlyings, optionally with per-head counts."
     :open false
-    (key :name names :type symbol-list :optional false))
+    :positional head-decl
+    ; `:names` is optional because an author may declare heads via
+    ; `(head …)` positional children instead — the only spelling that
+    ; can carry `:min` / `:max`. The loader rejects mixing both shapes
+    ; in one `(head-set …)`, exactly as it does for `(member-set …)`.
+    (key :name names :type symbol-list :optional true))
+
+  (form :name head
+    :description "One entry in a (head-set …). Carries optional positional-count bounds and editor metadata."
+    :open false
+    (key :name name        :type symbol :optional false)
+    (key :name min         :type number :optional true)
+    (key :name max         :type number :optional true)
+    (key :name description :type string :optional true))
 
   ; Two mutually exclusive routes to the member set: identity
   ; (`:name-key`, the default) and provider (`:provider` + `:source-key`).
@@ -336,7 +385,7 @@
   (form :name cross-ref
     :description "Document-spanning name-reference constraint for :symbol underlyings."
     :open false
-    (key :name target     :type symbol  :optional false)
+    (key :name target     :type form-target :optional false)
     (key :name name-key   :type symbol  :optional true)
     (key :name acyclic    :type boolean :optional true)
     (key :name scope      :type symbol  :optional true)
@@ -378,6 +427,10 @@
     ; (e.g. `:default (pi)`) without the validator descending into it.
     (key :name default     :type any      :optional true :walk-opaque true)
     (key :name walk-opaque :type boolean  :optional true)
+    ; Sibling keys this key's presence demands. One-directional; the
+    ; loader rejects self-references, unresolvable names, requirements
+    ; that can never fire, same-exclusive-group pairs, and cycles.
+    (key :name requires    :type symbol-list :optional true)
     (key :name description :type string   :optional true))
 
   ; ---- expression function declarations -----------------------------

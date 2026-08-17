@@ -73,12 +73,45 @@ export type AnyNode = Node<unknown, unknown>;
 export type ShapeRecord = Record<string, AnyNode>;
 
 /**
- * Distribute a member union into a union of single-member symbol brands —
+ * Distribute a member union into a union of single-member value brands —
  * `MemberSymbol<"a" | "b">` is `Symbol_<"a"> | Symbol_<"b">`, matching the
  * `Symbol_<"a"> | Symbol_<"b">` that `tsTypes.ts` emits (not the collapsed
  * `Symbol_<"a" | "b">`).
+ *
+ * A **digit-leading** member (`2d`, `2d-array`, `50%`) is the exception, and
+ * the exception is forced by the wire rather than chosen: such a spelling
+ * lexes as a unit-bearing *number*, so the document carries `{$num:[2,"d"]}`
+ * where an ordinary member carries `{$sym:"2d"}`. Branding it `Symbol_<"2d">`
+ * would type a value the engine rejects, so it brands as `SjonUnit` instead
+ * and `v.unit(2, "d")` is what fits the slot.
+ *
+ * The brand keys on the **unit**, not the magnitude — `SjonUnit` has always
+ * been unit-keyed, so `s.symbolMembers(["1d", "2d", "3d"])` accepts any
+ * `v.unit(n, "d")` at the type level and the validator is what reports `4d`
+ * as `not_member`. Narrowing that would mean a magnitude-keyed brand this
+ * package does not have.
  */
-export type MemberSymbol<E extends string> = E extends string ? Symbol_<E> : never;
+export type MemberSymbol<E extends string> = E extends string
+  ? E extends `${MemberDigit}${string}`
+    ? SjonUnit<MemberUnit<E>>
+    : Symbol_<E>
+  : never;
+
+type MemberDigit = '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9';
+
+/**
+ * The unit tail of a digit-leading member spelling: `"2d"` → `"d"`,
+ * `"2d-array"` → `"d-array"`, `"50%"` → `"%"`. Walks off the magnitude one
+ * character at a time and stops at the first byte the lexer would not take
+ * as part of a number, which is exactly where `Lexer.number_unit` starts.
+ * `-` is deliberately *not* a magnitude character: a member spelling is
+ * never negative (the loader rejects it), and `2-d` is two tokens.
+ */
+type MemberUnit<S extends string> = S extends `${infer C}${infer Rest}`
+  ? C extends MemberDigit | '.' | '_'
+    ? MemberUnit<Rest>
+    : S
+  : never;
 
 /**
  * A *typed nested-form* field node (`s.formOf(Inner)`). It is structurally a
@@ -139,6 +172,10 @@ export interface NumberNode extends Node<number> {
   gt(value: number): NumberNode;
   lt(value: number): NumberNode;
   int(): NumberNode;
+  /** Divisibility: the value must be an exact multiple of `divisor`. The
+   *  alignment constraint a range and `int()` cannot express between them
+   *  ("a byte offset aligned to 256"). The divisor must be positive. */
+  multipleOf(divisor: number): NumberNode;
 }
 
 /** `s.string()` — a `string` leaf with length/pattern/format refinements. */

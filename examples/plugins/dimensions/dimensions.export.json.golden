@@ -1,0 +1,199 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "dimensions",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "texture",
+          "description": "A texture and the view it is sampled through.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "name",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            },
+            {
+              "name": "dimension",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "symbol_members_rich",
+                "members": [
+                  {
+                    "name": "1d",
+                    "numeric_spelling": {
+                      "magnitude": 1,
+                      "unit": "d"
+                    }
+                  },
+                  {
+                    "name": "2d",
+                    "numeric_spelling": {
+                      "magnitude": 2,
+                      "unit": "d"
+                    }
+                  },
+                  {
+                    "name": "3d",
+                    "numeric_spelling": {
+                      "magnitude": 3,
+                      "unit": "d"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "name": "view",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "symbol_members_rich",
+                "members": [
+                  {
+                    "name": "1d",
+                    "numeric_spelling": {
+                      "magnitude": 1,
+                      "unit": "d"
+                    }
+                  },
+                  {
+                    "name": "2d",
+                    "label": "2D",
+                    "description": "The default view dimension.",
+                    "numeric_spelling": {
+                      "magnitude": 2,
+                      "unit": "d"
+                    }
+                  },
+                  {
+                    "name": "2d-array",
+                    "description": "A hyphenated digit-leading spelling — one token only because a `-` may join two letter runs inside a unit.",
+                    "numeric_spelling": {
+                      "magnitude": 2,
+                      "unit": "d-array"
+                    }
+                  },
+                  {
+                    "name": "cube"
+                  },
+                  {
+                    "name": "cube-array"
+                  },
+                  {
+                    "name": "3d",
+                    "numeric_spelling": {
+                      "magnitude": 3,
+                      "unit": "d"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": [
+        {
+          "name": "texture-dimension",
+          "description": "GPUTextureDimension, spelled the way the WebGPU spec spells it.",
+          "shape": {
+            "kind": "symbol_members_rich",
+            "members": [
+              {
+                "name": "1d",
+                "numeric_spelling": {
+                  "magnitude": 1,
+                  "unit": "d"
+                }
+              },
+              {
+                "name": "2d",
+                "numeric_spelling": {
+                  "magnitude": 2,
+                  "unit": "d"
+                }
+              },
+              {
+                "name": "3d",
+                "numeric_spelling": {
+                  "magnitude": 3,
+                  "unit": "d"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "view-dimension",
+          "description": "GPUTextureViewDimension — digit-leading and ordinary members in one set.",
+          "shape": {
+            "kind": "symbol_members_rich",
+            "members": [
+              {
+                "name": "1d",
+                "numeric_spelling": {
+                  "magnitude": 1,
+                  "unit": "d"
+                }
+              },
+              {
+                "name": "2d",
+                "label": "2D",
+                "description": "The default view dimension.",
+                "numeric_spelling": {
+                  "magnitude": 2,
+                  "unit": "d"
+                }
+              },
+              {
+                "name": "2d-array",
+                "description": "A hyphenated digit-leading spelling — one token only because a `-` may join two letter runs inside a unit.",
+                "numeric_spelling": {
+                  "magnitude": 2,
+                  "unit": "d-array"
+                }
+              },
+              {
+                "name": "cube"
+              },
+              {
+                "name": "cube-array"
+              },
+              {
+                "name": "3d",
+                "numeric_spelling": {
+                  "magnitude": 3,
+                  "unit": "d"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "code": "rich_members_emitted_with_annotations",
+      "severity": "info",
+      "message": "value-kind `texture-dimension` member-set carries digit-leading spellings — emitted as per-member `oneOf`, with each digit-leading member pinned to its `$num` wire shape rather than `$sym`",
+      "plugin_name": "dimensions",
+      "kind_name": "texture-dimension"
+    },
+    {
+      "code": "rich_members_emitted_with_annotations",
+      "severity": "info",
+      "message": "value-kind `view-dimension` member-set carries rich metadata and digit-leading spellings — emitted as per-member `oneOf` with title/description/deprecated annotations and `$num` wire shapes",
+      "plugin_name": "dimensions",
+      "kind_name": "view-dimension"
+    }
+  ]
+}

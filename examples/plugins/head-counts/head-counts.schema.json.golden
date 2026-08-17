@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 1,
+  "x-sjon-export-warnings": [
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `pipeline-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin": "head-counts",
+      "kind": "pipeline-section"
+    }
+  ],
+  "$defs": {
+    "form.head-counts.vertex": {
+      "type": "object",
+      "description": "The vertex stage of a pipeline.",
+      "properties": {
+        "$form": {
+          "const": "vertex"
+        },
+        "$ns": {
+          "const": "head-counts"
+        },
+        "entry": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "$form",
+        "entry"
+      ],
+      "additionalProperties": false
+    },
+    "form.head-counts.fragment": {
+      "type": "object",
+      "description": "The fragment stage. Optional — a depth-only pass has none.",
+      "properties": {
+        "$form": {
+          "const": "fragment"
+        },
+        "$ns": {
+          "const": "head-counts"
+        },
+        "entry": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "$form",
+        "entry"
+      ],
+      "additionalProperties": false
+    },
+    "form.head-counts.constant": {
+      "type": "object",
+      "description": "A pipeline-overridable constant. Any number of these.",
+      "properties": {
+        "$form": {
+          "const": "constant"
+        },
+        "$ns": {
+          "const": "head-counts"
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "$form",
+        "name",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "form.head-counts.render-pipeline": {
+      "type": "object",
+      "description": "A pipeline whose sections are counted, not just typed.",
+      "properties": {
+        "$form": {
+          "const": "render-pipeline"
+        },
+        "$ns": {
+          "const": "head-counts"
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "$children": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/form.head-counts.vertex"
+              },
+              {
+                "$ref": "#/$defs/form.head-counts.fragment"
+              },
+              {
+                "$ref": "#/$defs/form.head-counts.constant"
+              }
+            ],
+            "x-sjon-head-set": [
+              "vertex",
+              "fragment",
+              "constant"
+            ]
+          },
+          "allOf": [
+            {
+              "contains": {
+                "$ref": "#/$defs/form.head-counts.vertex"
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "$ref": "#/$defs/form.head-counts.fragment"
+              },
+              "minContains": 0,
+              "maxContains": 1
+            }
+          ]
+        }
+      },
+      "required": [
+        "$form",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "form.head-counts.section-holder": {
+      "type": "object",
+      "description": "Same kind, keyed slot — the counts ride along inertly here.",
+      "properties": {
+        "$form": {
+          "const": "section-holder"
+        },
+        "$ns": {
+          "const": "head-counts"
+        },
+        "section": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/form.head-counts.vertex"
+            },
+            {
+              "$ref": "#/$defs/form.head-counts.fragment"
+            },
+            {
+              "$ref": "#/$defs/form.head-counts.constant"
+            }
+          ],
+          "x-sjon-head-set": [
+            "vertex",
+            "fragment",
+            "constant"
+          ]
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "additionalProperties": false
+    },
+    "form.head-counts.scratch-pipeline": {
+      "type": "object",
+      "description": "Open form, same bounded slot: `:open true` does not silence the counts.",
+      "properties": {
+        "$form": {
+          "const": "scratch-pipeline"
+        },
+        "$ns": {
+          "const": "head-counts"
+        },
+        "$children": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/form.head-counts.vertex"
+              },
+              {
+                "$ref": "#/$defs/form.head-counts.fragment"
+              },
+              {
+                "$ref": "#/$defs/form.head-counts.constant"
+              }
+            ],
+            "x-sjon-head-set": [
+              "vertex",
+              "fragment",
+              "constant"
+            ]
+          },
+          "allOf": [
+            {
+              "contains": {
+                "$ref": "#/$defs/form.head-counts.vertex"
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "$ref": "#/$defs/form.head-counts.fragment"
+              },
+              "minContains": 0,
+              "maxContains": 1
+            }
+          ]
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.head-counts.vertex"
+    },
+    {
+      "$ref": "#/$defs/form.head-counts.fragment"
+    },
+    {
+      "$ref": "#/$defs/form.head-counts.constant"
+    },
+    {
+      "$ref": "#/$defs/form.head-counts.render-pipeline"
+    },
+    {
+      "$ref": "#/$defs/form.head-counts.section-holder"
+    },
+    {
+      "$ref": "#/$defs/form.head-counts.scratch-pipeline"
+    }
+  ]
+}

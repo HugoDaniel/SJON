@@ -385,13 +385,31 @@ fn buildValueKind(
     var string_bounds_idx: ?Ast.NodeIndex = null;
     var repr_idx: ?Ast.NodeIndex = null;
     var scalar_or_ref_idx: ?Ast.NodeIndex = null;
+    var members_idx: ?Ast.NodeIndex = null;
     var is_scalar_or_ref = false;
 
+    // `:name` in its own pass, before anything that reports against it.
+    // Two of the shapes below — `:members` and `:heads` — build *inside*
+    // the loop and their diagnostics name the kind, so a manifest that
+    // spells `:members` before `:name` used to get "value-kind ``" and a
+    // path missing its first step. Ordering inside a form is not
+    // significant anywhere else in SJON and must not be here either;
+    // `hosts/typescript-parity`'s `buildValueKind` already ran this pass,
+    // so this is the reference catching up to the port. Last-wins on a
+    // repeated `:name`, as the single loop was.
     for (hdr.children) |ci| {
         if (tree.tagOf(ci) != .kvpair) continue;
         const kv = tree.kvpairHeader(ci);
         if (std.mem.eql(u8, kv.key, "name")) {
             kind.name = try a.dupe(u8, tree.symbolText(kv.value));
+        }
+    }
+
+    for (hdr.children) |ci| {
+        if (tree.tagOf(ci) != .kvpair) continue;
+        const kv = tree.kvpairHeader(ci);
+        if (std.mem.eql(u8, kv.key, "name")) {
+            // Bound in the pass above.
         } else if (std.mem.eql(u8, kv.key, "underlying")) {
             // `scalar-or-ref` is a surface shorthand, not a real Underlying
             // variant — it desugars to `union [<base> symbol]` after the
@@ -418,9 +436,10 @@ fn buildValueKind(
         } else if (std.mem.eql(u8, kv.key, "scalar-or-ref")) {
             scalar_or_ref_idx = kv.value;
         } else if (std.mem.eql(u8, kv.key, "members")) {
+            members_idx = kv.value;
             kind.members = try buildMemberSet(a, tree, kv.value, kind.name, diags);
         } else if (std.mem.eql(u8, kv.key, "heads")) {
-            kind.heads = try buildHeadSet(a, tree, kv.value);
+            kind.heads = try buildHeadSet(a, tree, kv.value, kind.name, diags);
         } else if (std.mem.eql(u8, kv.key, "cross-ref")) {
             cross_ref_idx = kv.value;
         } else if (std.mem.eql(u8, kv.key, "union")) {
@@ -472,8 +491,8 @@ fn buildValueKind(
         if (scalar_or_ref_idx) |si| {
             // Pure load-time desugar: store an ordinary `.union_of` so the
             // validator, exporter, and every downstream consumer see a
-            // plain `union [<base> symbol]`.
-            kind.union_of = try buildScalarOrRefShape(a, tree, si);
+            // plain `union [<base> <ref>]`.
+            kind.union_of = try buildScalarOrRefShape(a, tree, si, kind.name, diags);
             kind.underlying = .union_of;
         } else {
             // `:underlying scalar-or-ref` without the `:scalar-or-ref (…)`
@@ -484,36 +503,73 @@ fn buildValueKind(
         // `:scalar-or-ref` present but `:underlying` isn't `scalar-or-ref`.
         try emitDiag(a, diags, .invalid_manifest, tree.spanOf(si), &.{ kind.name, "scalar-or-ref" }, "value-kind `{s}` declares `:scalar-or-ref` but `:underlying` is `{s}`, not `scalar-or-ref`", .{ kind.name, @tagName(kind.underlying) });
     }
+    // Last, so the underlying it quotes is the final one — a
+    // `scalar-or-ref` kind reads as `union_of` here, which is what it is.
+    if (members_idx) |mi| if (kind.members) |ms| {
+        try checkMemberSetConsistency(a, tree, mi, kind, ms, diags);
+    };
     return kind;
 }
 
-/// Desugar `(scalar-or-ref-shape :base <kind>)` into a `union [<base>
-/// symbol]` UnionShape. `scalar-or-ref` is a load-time shorthand — the
-/// stored kind is an ordinary `.union_of`, so the validator
-/// (try-each-alternative), the exporter (`oneOf` / `Base | Symbol_<…>`),
-/// and every downstream consumer inherit for free; the `symbol`
-/// alternative resolves via the union machinery's primitive shortcut.
+/// Desugar `(scalar-or-ref-shape :base <kind> :ref <kind>?)` into a
+/// `union [<base> <ref>]` UnionShape. `scalar-or-ref` is a load-time
+/// shorthand — the stored kind is an ordinary `.union_of`, so the
+/// validator (try-each-alternative), the exporter (`oneOf` /
+/// `Base | Symbol_<…>`), and every downstream consumer inherit for free.
+///
+/// `:ref` defaults to the primitive `symbol`, which is what the shorthand
+/// meant before the key existed and resolves via the union machinery's
+/// primitive shortcut — an *unchecked* name, accepting any spelling. A
+/// `:ref` naming a cross-ref kind instead makes the reference half
+/// checked, so a misspelling is `not_cross_ref` rather than silently
+/// fine. The default is load-bearing for compatibility; do not change it.
+///
+/// Only one rejection lives here: `:ref` equal to `:base`, which spells a
+/// single-alternative union twice (`UnionShape` requires ≥2 distinct
+/// alternatives). Whether `:ref` names a *union* kind is deliberately
+/// **not** checked here — value-kinds are appended in declaration order
+/// (see the `buildValueKind` call site), so this function sees only the
+/// kinds declared above it and a check would accept or reject the same
+/// manifest depending on where the union sits. `Schema.validateUnions`
+/// resolves every alternative against the complete aggregated catalog and
+/// emits `nested_union` there, order-independently.
+///
 /// A missing `:base` is only reachable on a manifest that bypassed
 /// meta-validation (the meta-schema marks `:base` required); the
-/// degenerate `[symbol]` fallback keeps the tree well-formed.
+/// degenerate `[symbol]` fallback keeps the tree well-formed and ignores
+/// any `:ref`, since substituting into an already-malformed kind buys
+/// nothing.
 fn buildScalarOrRefShape(
     a: Allocator,
     tree: *const Ast.Tree,
     idx: Ast.NodeIndex,
+    kind_name: []const u8,
+    diags: *std.ArrayList(Ast.Diagnostic),
 ) Error!Plugin.ValueKind.UnionShape {
     const hdr = tree.formHeader(idx);
     var base: ?Plugin.QualifiedRef = null;
+    var ref: Plugin.QualifiedRef = .{ .name = "symbol", .namespace = null };
+    var ref_span: ?Ast.Span = null;
     for (hdr.children) |ci| {
         if (tree.tagOf(ci) != .kvpair) continue;
         const kv = tree.kvpairHeader(ci);
         if (std.mem.eql(u8, kv.key, "base")) {
             base = try parseQualifiedRef(a, tree.symbolText(kv.value));
+        } else if (std.mem.eql(u8, kv.key, "ref")) {
+            ref = try parseQualifiedRef(a, tree.symbolText(kv.value));
+            ref_span = tree.spanOf(ci);
         }
     }
     const alts = if (base) |b| two: {
+        if (qualifiedRefEql(b, ref)) {
+            // `union [x x]` is one alternative spelled twice. Anchor on the
+            // `:ref` kvpair — it is the key that made the pair degenerate,
+            // and `:base` is the one the author meant to keep.
+            try emitDiag(a, diags, .invalid_manifest, ref_span orelse tree.spanOf(idx), &.{ kind_name, "scalar-or-ref" }, "value-kind `{s}` declares `:ref` equal to `:base` (`{s}`); a scalar-or-ref needs two distinct alternatives", .{ kind_name, ref.name });
+        }
         const slice = try a.alloc(Plugin.QualifiedRef, 2);
         slice[0] = b;
-        slice[1] = .{ .name = "symbol", .namespace = null };
+        slice[1] = ref;
         break :two slice;
     } else one: {
         const slice = try a.alloc(Plugin.QualifiedRef, 1);
@@ -521,6 +577,19 @@ fn buildScalarOrRefShape(
         break :one slice;
     };
     return .{ .alternatives = alts };
+}
+
+/// Byte-equality on both halves of a `QualifiedRef`. Matches the
+/// resolution rule elsewhere in the loader: a bare name and a qualified
+/// one are different refs even when the qualified one names this plugin,
+/// because namespace canonicalisation is a host concern.
+fn qualifiedRefEql(x: Plugin.QualifiedRef, y: Plugin.QualifiedRef) bool {
+    if (!std.mem.eql(u8, x.name, y.name)) return false;
+    if (x.namespace) |xn| {
+        const yn = y.namespace orelse return false;
+        return std.mem.eql(u8, xn, yn);
+    }
+    return y.namespace == null;
 }
 
 fn buildForm(
@@ -675,7 +744,181 @@ fn buildForm(
         }
     }
 
+    // Deferred to here, not done in `buildKey`: a key may require one
+    // declared *after* it, and a variant key may require a base key, so
+    // neither scope is complete until the whole form is.
+    try checkRequiresConsistency(a, hdr.head_span, spec, null, diags);
+    if (spec.variants) |vs| {
+        for (vs) |v| try checkRequiresConsistency(a, hdr.head_span, spec, v, diags);
+    }
+
     return spec;
+}
+
+/// Reject `:requires` declarations that cannot mean anything useful.
+/// Runs once per scope: `variant == null` checks the form's base keys
+/// against the base key set; a non-null `variant` checks that variant's
+/// keys against its own keys *plus* the base keys (both are
+/// unconditionally in scope once the variant is active).
+///
+/// Five conditions, all `invalid_manifest`:
+///
+///   * **Self-reference.** `:requires [a]` on key `a` is satisfied by its
+///     own presence and constrains nothing.
+///   * **Unresolvable.** The named key is not declared in this scope.
+///     Catches typos, and catches a base key reaching for a variant key —
+///     that dependency would be conditional on the discriminant, which is
+///     what `(variant …)` is for.
+///   * **Already required.** Requiring a key that is not
+///     `effectiveOptional` can never fire: the key is always present, or
+///     the form already failed with `missing_required_key`.
+///   * **Same exclusive group.** The group says "at most one of these",
+///     the dependency says "both". Unsatisfiable.
+///   * **Cycle.** `a` requires `b` and `b` requires `a` is satisfiable
+///     only by writing both or neither — an `exclusive-group` bundle,
+///     spelled worse. Detected by three-colour DFS.
+fn checkRequiresConsistency(
+    a: Allocator,
+    span: Ast.Span,
+    spec: Plugin.FormSpec,
+    variant: ?Plugin.Variant,
+    diags: *std.ArrayList(Ast.Diagnostic),
+) Error!void {
+    const scope_keys = if (variant) |v| v.keys else spec.keys;
+    const groups = if (variant) |v| v.exclusive_groups else spec.exclusive_groups;
+
+    for (scope_keys) |k| {
+        for (k.requires) |req| {
+            if (std.mem.eql(u8, req, k.name)) {
+                try emitDiag(a, diags, .invalid_manifest, span, &.{ spec.name, k.name, "requires" }, "form `{s}` key `:{s}` requires itself", .{ spec.name, k.name });
+                continue;
+            }
+            const target = lookupRequiresTarget(spec, variant, req) orelse {
+                try emitDiag(a, diags, .invalid_manifest, span, &.{ spec.name, k.name, "requires" }, "form `{s}` key `:{s}` requires `:{s}`, which this form does not declare", .{ spec.name, k.name, req });
+                continue;
+            };
+            if (!target.effectiveOptional()) {
+                try emitDiag(a, diags, .invalid_manifest, span, &.{ spec.name, k.name, "requires" }, "form `{s}` key `:{s}` requires `:{s}`, which is already required; the dependency can never fire", .{ spec.name, k.name, req });
+                continue;
+            }
+            if (sameExclusiveGroup(groups, k.name, req)) {
+                try emitDiag(a, diags, .invalid_manifest, span, &.{ spec.name, k.name, "requires" }, "form `{s}` key `:{s}` requires `:{s}`, but both are in one exclusive group; the group forbids what the dependency demands", .{ spec.name, k.name, req });
+            }
+        }
+    }
+
+    try checkRequiresCycles(a, span, spec, scope_keys, diags);
+}
+
+/// Resolve a `:requires` name within its declaring scope. A base key
+/// (`variant == null`) sees base keys only; a variant key sees that
+/// variant's keys first, then the base keys.
+fn lookupRequiresTarget(
+    spec: Plugin.FormSpec,
+    variant: ?Plugin.Variant,
+    name: []const u8,
+) ?Plugin.KeySpec {
+    if (variant) |v| {
+        for (v.keys) |vk| {
+            if (std.mem.eql(u8, vk.name, name)) return vk;
+        }
+    }
+    for (spec.keys) |bk| {
+        if (std.mem.eql(u8, bk.name, name)) return bk;
+    }
+    return null;
+}
+
+/// True when both names appear in one `(exclusive-group …)` — in the same
+/// alternative or in different ones. Either way the group constrains how
+/// many may be present at once, which is what makes the dependency
+/// unsatisfiable.
+fn sameExclusiveGroup(
+    groups: []const Plugin.ExclusiveGroup,
+    x: []const u8,
+    y: []const u8,
+) bool {
+    for (groups) |g| {
+        var has_x = false;
+        var has_y = false;
+        for (g.alternatives) |alt| {
+            for (alt.keys) |k| {
+                if (std.mem.eql(u8, k, x)) has_x = true;
+                if (std.mem.eql(u8, k, y)) has_y = true;
+            }
+        }
+        if (has_x and has_y) return true;
+    }
+    return false;
+}
+
+/// Three-colour DFS over the `:requires` graph within one scope, the same
+/// shape `Schema.checkLoweringCycles` runs over the produces-graph.
+/// Bounded by `MAX_FORM_KEYS` nodes, so the explicit stack is a fixed
+/// array and the walk cannot recurse.
+///
+/// Edges leaving the scope (a variant key requiring a base key) resolve to
+/// no index here and are skipped: they cannot close a cycle, because base
+/// keys never reach back into a variant.
+fn checkRequiresCycles(
+    a: Allocator,
+    span: Ast.Span,
+    spec: Plugin.FormSpec,
+    scope_keys: []const Plugin.KeySpec,
+    diags: *std.ArrayList(Ast.Diagnostic),
+) Error!void {
+    const n = @min(scope_keys.len, Plugin.MAX_FORM_KEYS);
+    if (n == 0) return;
+
+    const Colour = enum { white, grey, black };
+    var colour: [Plugin.MAX_FORM_KEYS]Colour = @splat(.white);
+    // (node, next-edge-index) pairs; one frame per node on the path, so
+    // depth is bounded by `n`.
+    var stack: [Plugin.MAX_FORM_KEYS]struct { node: usize, edge: usize } = undefined;
+
+    for (0..n) |root| {
+        if (colour[root] != .white) continue;
+        var top: usize = 0;
+        stack[0] = .{ .node = root, .edge = 0 };
+        colour[root] = .grey;
+        while (true) {
+            const fr = &stack[top];
+            const reqs = scope_keys[fr.node].requires;
+            if (fr.edge >= reqs.len) {
+                colour[fr.node] = .black;
+                if (top == 0) break;
+                top -= 1;
+                continue;
+            }
+            const req = reqs[fr.edge];
+            fr.edge += 1;
+            const next = indexOfKey(scope_keys[0..n], req) orelse continue;
+            // A self-loop is technically a cycle, but it already has its
+            // own, more specific diagnostic — reporting both would say the
+            // same thing twice in different words.
+            if (next == fr.node) continue;
+            switch (colour[next]) {
+                .black => {},
+                .grey => {
+                    // Back edge to a node on the current path.
+                    try emitDiag(a, diags, .invalid_manifest, span, &.{ spec.name, scope_keys[fr.node].name, "requires" }, "form `{s}` has a `:requires` cycle through `:{s}` and `:{s}`; a mutual dependency is an exclusive-group bundle, not a dependency", .{ spec.name, scope_keys[fr.node].name, req });
+                    colour[next] = .black; // report once per cycle.
+                },
+                .white => {
+                    colour[next] = .grey;
+                    top += 1;
+                    stack[top] = .{ .node = next, .edge = 0 };
+                },
+            }
+        }
+    }
+}
+
+fn indexOfKey(keys: []const Plugin.KeySpec, name: []const u8) ?usize {
+    for (keys, 0..) |k, i| {
+        if (std.mem.eql(u8, k.name, name)) return i;
+    }
+    return null;
 }
 
 fn buildVariant(
@@ -1000,6 +1243,11 @@ fn buildKey(
             // `:default (pi)` pass without a spurious `unknown_form`.
             // See docs/portable-manifest-v1.md §5 and Validator.zig.
             spec.walk_opaque = (tree.tagOf(kv.value) == .boolean_true);
+        } else if (std.mem.eql(u8, kv.key, "requires")) {
+            // Validated against the sibling key set in
+            // `checkRequiresConsistency`, once the whole form is built —
+            // a key may require one declared after it.
+            spec.requires = try parseSymbolList(a, tree, kv.value);
         } else if (std.mem.eql(u8, kv.key, "description")) {
             spec.description = try a.dupe(u8, tree.stringText(kv.value));
         }
@@ -1700,6 +1948,29 @@ fn buildUnitShape(
 /// `invalid_manifest` so the validator never sees an incoherent shape.
 /// No-op unless `:reject` is set; an unset `reject` keeps the old
 /// required/allowed behaviour untouched.
+/// A digit-leading member spelling only means something on a `.symbol`
+/// underlying, where the validator's escape reads a unit-bearing number
+/// in a symbol slot. On a `.string` underlying the members are string
+/// literals and no numeric value can reach them, so the spelling is dead
+/// declaration — say so rather than let it sit there looking effective.
+///
+/// Deferred past the kvpair loop like every other cross-check: `:members`
+/// may be spelled before `:underlying`.
+fn checkMemberSetConsistency(
+    a: Allocator,
+    tree: *const Ast.Tree,
+    idx: Ast.NodeIndex,
+    kind: Plugin.ValueKind,
+    ms: Plugin.ValueKind.MemberSet,
+    diags: *std.ArrayList(Ast.Diagnostic),
+) Error!void {
+    if (kind.underlying == .symbol) return;
+    for (ms.members) |m| {
+        if (m.numeric_spelling == null) continue;
+        try emitDiag(a, diags, .invalid_manifest, tree.spanOf(idx), &.{ kind.name, "members" }, "value-kind `{s}` declares the digit-leading member `{s}`, but its `:underlying` is `{s}` — a digit-leading spelling is only reachable on `symbol`", .{ kind.name, m.name, @tagName(kind.underlying) });
+    }
+}
+
 fn checkUnitShapeConsistency(
     a: Allocator,
     tree: *const Ast.Tree,
@@ -1796,6 +2067,8 @@ fn buildNumericBounds(
             bounds.exclusive_max = (tree.tagOf(kv.value) == .boolean_true);
         } else if (std.mem.eql(u8, kv.key, "integer")) {
             bounds.integer = (tree.tagOf(kv.value) == .boolean_true);
+        } else if (std.mem.eql(u8, kv.key, "multiple-of")) {
+            bounds.multiple_of = try loadBound(a, tree, kv.value);
         }
     }
     return bounds;
@@ -1869,6 +2142,29 @@ fn checkNumericBoundsConsistency(
             try emitDiag(a, diags, .numeric_bounds_invalid, span, &.{ kind.name, "numeric" }, "value-kind `{s}` `:numeric` has empty range: :min {d} > :max {d}", .{ kind.name, mn.value, mx.value });
         }
     };
+    if (bounds.multiple_of) |mo| {
+        // Non-positive and non-finite divisors are errors: the check
+        // divides by this value, and "every number is a multiple of 0" is
+        // not a reading anyone wants either. A *negative* divisor is
+        // rejected for a second reason — it means exactly what its
+        // magnitude means, so nothing is gained by allowing it, and
+        // JSON Schema 2020-12 requires `multipleOf` to be strictly
+        // positive. Accepted here it exported a schema no validator will
+        // compile, which is a worse failure than the one being avoided.
+        if (mo.value <= 0) {
+            try emitDiag(a, diags, .numeric_bounds_invalid, span, &.{ kind.name, "numeric", "multiple-of" }, "value-kind `{s}` `:numeric` sets `:multiple-of {d}`; the divisor must be positive", .{ kind.name, mo.value });
+        } else if (!std.math.isFinite(mo.value)) {
+            try emitDiag(a, diags, .numeric_bounds_invalid, span, &.{ kind.name, "numeric", "multiple-of" }, "value-kind `{s}` `:numeric` sets a non-finite `:multiple-of`; the divisor must be finite", .{kind.name});
+        } else if (@floor(mo.value) != mo.value) {
+            // A *warning*, not an error: `:multiple-of 0.5` is meaningful,
+            // just approximate. Divisibility runs in exact integer space
+            // only when both sides are whole, so a fractional divisor falls
+            // back to an f64 remainder against an epsilon. Saying so at the
+            // declaration steers authors to the exact path — which every
+            // alignment rule is already on.
+            try emitWarning(a, diags, .numeric_bounds_invalid, span, &.{ kind.name, "numeric", "multiple-of" }, "value-kind `{s}` `:numeric` sets a fractional `:multiple-of {d}`; divisibility is then approximate (integer divisors are exact)", .{ kind.name, mo.value });
+        }
+    }
 }
 
 /// One parsed `(string-bounds …)` field. `value_raw` preserves the
@@ -2028,14 +2324,14 @@ fn buildMemberSet(
     diags: *std.ArrayList(Ast.Diagnostic),
 ) Error!Plugin.ValueKind.MemberSet {
     const hdr = tree.formHeader(idx);
-    var compact_values: ?[]const []const u8 = null;
+    var compact_values: ?[]const Plugin.ValueKind.MemberSet.Member = null;
     var rich_count: usize = 0;
     for (hdr.children) |ci| {
         switch (tree.tagOf(ci)) {
             .kvpair => {
                 const kv = tree.kvpairHeader(ci);
                 if (std.mem.eql(u8, kv.key, "values")) {
-                    compact_values = try parseSymbolList(a, tree, kv.value);
+                    compact_values = try parseMemberNameList(a, tree, kv.value, kind_name, diags);
                 }
             },
             .form => rich_count += 1,
@@ -2049,9 +2345,7 @@ fn buildMemberSet(
     }
 
     if (compact_values) |values| {
-        const out = try a.alloc(Plugin.ValueKind.MemberSet.Member, values.len);
-        for (values, 0..) |n, i| out[i] = .{ .name = n };
-        return .{ .members = out };
+        return .{ .members = values };
     }
 
     if (rich_count > 0) {
@@ -2059,9 +2353,9 @@ fn buildMemberSet(
         var wi: usize = 0;
         for (hdr.children) |ci| {
             if (tree.tagOf(ci) != .form) continue;
-            out[wi] = try parseMemberDecl(a, tree, ci);
+            out[wi] = try parseMemberDecl(a, tree, ci, kind_name, diags);
             for (out[0..wi]) |prior| {
-                if (std.mem.eql(u8, prior.name, out[wi].name)) {
+                if (sameMemberIdentity(prior, out[wi])) {
                     try emitDiag(a, diags, .invalid_manifest, tree.spanOf(ci), &.{ kind_name, "members" }, "value-kind `{s}` `:members` declares duplicate member `{s}`", .{ kind_name, out[wi].name });
                     break;
                 }
@@ -2075,13 +2369,35 @@ fn buildMemberSet(
     return .{ .members = &.{} };
 }
 
+/// True when two members name the same thing. Byte-equal names is the
+/// long-standing test; a digit-leading pair adds the second half, because
+/// `(member :name 2d)` and `(member :name 02d)` canonicalise to the same
+/// `name` *and* the same `(value, unit)` — but a future spelling change
+/// could make the names differ while the identity the validator matches
+/// on stays the same. The identity is the pair, so compare the pair.
+fn sameMemberIdentity(
+    x: Plugin.ValueKind.MemberSet.Member,
+    y: Plugin.ValueKind.MemberSet.Member,
+) bool {
+    if (x.numeric_spelling) |xs| {
+        const ys = y.numeric_spelling orelse return false;
+        return xs.value == ys.value and std.mem.eql(u8, xs.unit, ys.unit);
+    }
+    if (y.numeric_spelling != null) return false;
+    return std.mem.eql(u8, x.name, y.name);
+}
+
 /// Parse one `(member :name X :label "…" …)` form into a `Member`.
-/// The meta-schema enforces `:name` is required and symbol-typed; this
-/// helper trusts that and reads the other fields opportunistically.
+/// The meta-schema enforces `:name` is required; since format 1.3 it is
+/// `member-name`-typed, so the spelling may be a symbol *or* a
+/// digit-leading unit-bearing number — `parseMemberName` owns that split
+/// and its rejections. The other fields are read opportunistically.
 fn parseMemberDecl(
     a: Allocator,
     tree: *const Ast.Tree,
     idx: Ast.NodeIndex,
+    kind_name: []const u8,
+    diags: *std.ArrayList(Ast.Diagnostic),
 ) Error!Plugin.ValueKind.MemberSet.Member {
     const hdr = tree.formHeader(idx);
     var m: Plugin.ValueKind.MemberSet.Member = .{ .name = "" };
@@ -2089,7 +2405,9 @@ fn parseMemberDecl(
         if (tree.tagOf(ci) != .kvpair) continue;
         const kv = tree.kvpairHeader(ci);
         if (std.mem.eql(u8, kv.key, "name")) {
-            m.name = try a.dupe(u8, tree.symbolText(kv.value));
+            const spelled = try parseMemberName(a, tree, kv.value, kind_name, diags);
+            m.name = spelled.name;
+            m.numeric_spelling = spelled.numeric_spelling;
         } else if (std.mem.eql(u8, kv.key, "label")) {
             m.label = try a.dupe(u8, tree.stringText(kv.value));
         } else if (std.mem.eql(u8, kv.key, "description")) {
@@ -2103,29 +2421,142 @@ fn parseMemberDecl(
     return m;
 }
 
+/// Build a `HeadSet` from either wire spelling of `:heads`, mirroring
+/// `buildMemberSet` exactly:
+///
+///   * Compact — `(head-set :names [a b c])`, one unbounded entry per
+///     bare name.
+///   * Rich — `(head-set (head :name a :min 1 :max 1) …)`, each
+///     `(head …)` positional child parsed as a full `Head`. This is the
+///     only spelling that can carry counts.
+///
+/// Four `invalid_manifest` conditions, all shaped after `member-set`'s:
+/// mixing the two spellings, declaring neither, a duplicate `:name`, and
+/// `:min > :max`. A fifth — a `:min` / `:max` that is negative,
+/// fractional, or above `u16` — reuses `emitNumericOutOfRange`, so it
+/// reads `wrong_underlying` like every other out-of-range integer the
+/// loader meets (`(fixed N)`, `(range :min …)`); the condition is
+/// identical and a second message shape for it would be the drift.
+///
+/// Diagnostics are the contract, not an abort: a rejected set still
+/// returns whatever the author spelled so downstream validation keeps
+/// flowing, and an empty result means "no narrowing" to the validator.
 fn buildHeadSet(
     a: Allocator,
     tree: *const Ast.Tree,
     idx: Ast.NodeIndex,
+    kind_name: []const u8,
+    diags: *std.ArrayList(Ast.Diagnostic),
 ) Error!Plugin.ValueKind.HeadSet {
     const hdr = tree.formHeader(idx);
-    var names: []const []const u8 = &.{};
+    var compact_names: ?[]const []const u8 = null;
+    var rich_count: usize = 0;
+    for (hdr.children) |ci| {
+        switch (tree.tagOf(ci)) {
+            .kvpair => {
+                const kv = tree.kvpairHeader(ci);
+                if (std.mem.eql(u8, kv.key, "names")) {
+                    compact_names = try parseSymbolList(a, tree, kv.value);
+                }
+            },
+            .form => rich_count += 1,
+            else => {},
+        }
+    }
+
+    if (compact_names != null and rich_count > 0) {
+        try emitDiag(a, diags, .invalid_manifest, hdr.head_span, &.{ kind_name, "heads" }, "value-kind `{s}` `:heads` mixes `:names` and `(head …)` children — pick one shape", .{kind_name});
+    }
+
+    if (compact_names) |names| {
+        const out = try a.alloc(Plugin.ValueKind.HeadSet.Head, names.len);
+        for (names, 0..) |n, i| out[i] = .{ .name = n };
+        return .{ .heads = out };
+    }
+
+    if (rich_count > 0) {
+        const out = try a.alloc(Plugin.ValueKind.HeadSet.Head, rich_count);
+        var wi: usize = 0;
+        for (hdr.children) |ci| {
+            if (tree.tagOf(ci) != .form) continue;
+            out[wi] = try parseHeadDecl(a, tree, ci, kind_name, diags);
+            for (out[0..wi]) |prior| {
+                if (std.mem.eql(u8, prior.name, out[wi].name)) {
+                    try emitDiag(a, diags, .invalid_manifest, tree.spanOf(ci), &.{ kind_name, "heads" }, "value-kind `{s}` `:heads` declares duplicate head `{s}`", .{ kind_name, out[wi].name });
+                    break;
+                }
+            }
+            if (out[wi].max) |mx| {
+                if (out[wi].min > mx) {
+                    try emitDiag(a, diags, .invalid_manifest, tree.spanOf(ci), &.{ kind_name, "heads", out[wi].name }, "value-kind `{s}` head `{s}` declares an empty range (`:min {d}` > `:max {d}`)", .{ kind_name, out[wi].name, out[wi].min, mx });
+                }
+            }
+            wi += 1;
+        }
+        return .{ .heads = out };
+    }
+
+    try emitDiag(a, diags, .invalid_manifest, hdr.head_span, &.{ kind_name, "heads" }, "value-kind `{s}` `:heads` declares no heads (need `:names …` or `(head …)` children)", .{kind_name});
+    return .{ .heads = &.{} };
+}
+
+/// Parse one `(head :name X :min 1 :max 1 :description "…")` form into a
+/// `Head`. The meta-schema enforces `:name` is required and symbol-typed
+/// and that the counts are numbers; the `u16` / non-negative / integral
+/// narrowing is this loader's own, as it is for `(fixed N)`.
+fn parseHeadDecl(
+    a: Allocator,
+    tree: *const Ast.Tree,
+    idx: Ast.NodeIndex,
+    kind_name: []const u8,
+    diags: *std.ArrayList(Ast.Diagnostic),
+) Error!Plugin.ValueKind.HeadSet.Head {
+    const hdr = tree.formHeader(idx);
+    var h: Plugin.ValueKind.HeadSet.Head = .{ .name = "" };
+    // Two passes' worth of information in one: the counts are reported
+    // against the head's own name, which may be spelled after them.
     for (hdr.children) |ci| {
         if (tree.tagOf(ci) != .kvpair) continue;
         const kv = tree.kvpairHeader(ci);
-        if (std.mem.eql(u8, kv.key, "names")) {
-            names = try parseSymbolList(a, tree, kv.value);
+        if (std.mem.eql(u8, kv.key, "name")) {
+            h.name = try a.dupe(u8, tree.symbolText(kv.value));
+        } else if (std.mem.eql(u8, kv.key, "description")) {
+            h.description = try a.dupe(u8, tree.stringText(kv.value));
         }
     }
-    return .{ .names = names };
+    for (hdr.children) |ci| {
+        if (tree.tagOf(ci) != .kvpair) continue;
+        const kv = tree.kvpairHeader(ci);
+        const is_min = std.mem.eql(u8, kv.key, "min");
+        if (!is_min and !std.mem.eql(u8, kv.key, "max")) continue;
+        const n = numericValue(tree, kv.value);
+        if (boundedInt(u16, n)) |v| {
+            if (is_min) h.min = v else h.max = v;
+        } else {
+            try emitNumericOutOfRange(
+                a,
+                diags,
+                tree.spanOf(kv.value),
+                try pathConcat(a, &.{ kind_name, "heads", h.name }, &.{kv.key}),
+                kv.key,
+                std.math.maxInt(u16),
+                n,
+            );
+        }
+    }
+    return h;
 }
 
-/// Parse `(cross-ref :target <symbol> :name-key <symbol>?)` into a
-/// `Plugin.ValueKind.CrossRef`. Per-plugin shape check: the owning kind
+/// Parse `(cross-ref :target <symbol|[symbol…]> :name-key <symbol>?)` into
+/// a `Plugin.ValueKind.CrossRef`. Per-plugin shape check: the owning kind
 /// must have `:underlying symbol`. Cross-plugin resolution of `:target`
 /// and `:name-key` typing happens later in the schema-aggregate phase
 /// (`Schema.validateCrossRefs`) — at this layer we only have one plugin
 /// at a time.
+///
+/// Both `:target` spellings normalise to a list here, so nothing
+/// downstream has to know which one the author wrote. What *is* decided
+/// here is everything a group cannot carry — see the exclusions below.
 fn buildCrossRef(
     a: Allocator,
     tree: *const Ast.Tree,
@@ -2134,12 +2565,14 @@ fn buildCrossRef(
     diags: *std.ArrayList(Ast.Diagnostic),
 ) Error!Plugin.ValueKind.CrossRef {
     const hdr = tree.formHeader(idx);
-    var cr: Plugin.ValueKind.CrossRef = .{ .target_form = "" };
+    var cr: Plugin.ValueKind.CrossRef = .{ .targets = &.{} };
     // Track *written* keys, not values: `:name-key name` and `:source-key
     // src` are indistinguishable from their defaults once landed, and the
     // exclusions below are about what the author spelled.
     var saw_name_key = false;
     var saw_source_key = false;
+    var wrote_target_vector = false;
+    var span_target: Ast.Span = .{ .start = 0, .end = 0 };
     var span_name_key: Ast.Span = .{ .start = 0, .end = 0 };
     var span_source_key: Ast.Span = .{ .start = 0, .end = 0 };
     var span_acyclic: Ast.Span = .{ .start = 0, .end = 0 };
@@ -2147,7 +2580,16 @@ fn buildCrossRef(
         if (tree.tagOf(ci) != .kvpair) continue;
         const kv = tree.kvpairHeader(ci);
         if (std.mem.eql(u8, kv.key, "target")) {
-            cr.target_form = try a.dupe(u8, tree.symbolText(kv.value));
+            span_target = tree.spanOf(kv.value);
+            // The meta-schema types `:target` as `form-target`, a union of
+            // `symbol` and `symbol-list`, so both shapes arrive here and a
+            // third one already reported `union_no_branch_matched`.
+            cr.targets = switch (tree.tagOf(kv.value)) {
+                .vector => try parseSymbolList(a, tree, kv.value),
+                .symbol => try Plugin.ValueKind.CrossRef.dupeOne(a, tree.symbolText(kv.value)),
+                else => &.{},
+            };
+            wrote_target_vector = tree.tagOf(kv.value) == .vector;
         } else if (std.mem.eql(u8, kv.key, "name-key")) {
             cr.name_key = try a.dupe(u8, tree.symbolText(kv.value));
             saw_name_key = true;
@@ -2192,6 +2634,57 @@ fn buildCrossRef(
     if (kind.underlying != .symbol) {
         try emitDiag(a, diags, .wrong_underlying, tree.spanOf(idx), &.{ kind.name, "cross-ref" }, "value-kind `{s}` declares `:cross-ref` but `:underlying` is `{s}`, not `symbol`", .{ kind.name, @tagName(kind.underlying) });
     }
+
+    // Target-group exclusions. Same `invalid_manifest` class as the route
+    // exclusions above — an internally incoherent shape — and, like them,
+    // every offending key is *dropped* rather than half-honoured, so
+    // downstream only ever sees a spec that took one coherent reading.
+    if (wrote_target_vector) {
+        if (cr.targets.len == 0) {
+            try emitDiag(a, diags, .invalid_manifest, span_target, &.{ kind.name, "cross-ref", "target" }, "value-kind `{s}` `:cross-ref` has an empty `:target []` — a cross-ref with no target accepts nothing and rejects everything", .{kind.name});
+        }
+        // O(n²) over a hand-written list of form heads.
+        for (cr.targets, 0..) |t, i| {
+            for (cr.targets[i + 1 ..]) |u| {
+                if (!std.mem.eql(u8, t, u)) continue;
+                try emitDiag(a, diags, .invalid_manifest, span_target, &.{ kind.name, "cross-ref", "target" }, "value-kind `{s}` `:cross-ref` lists target `{s}` twice; the group is one namespace, so the repeat adds nothing and hides a likely typo", .{ kind.name, t });
+                break;
+            }
+        }
+        if (cr.targets.len > 1) {
+            // `:acyclic` — cycle edges are defined over a target form's
+            // *self*-referential keys, and "self" is not well defined
+            // across a group. Mirrors the `:provider` + `:acyclic`
+            // rejection above, for the same reason: the check could not be
+            // computed honestly, so `acyclic_without_self_edge` could not
+            // be either.
+            if (cr.acyclic) {
+                try emitDiag(a, diags, .invalid_manifest, span_acyclic, &.{ kind.name, "cross-ref", "acyclic" }, "value-kind `{s}` `:cross-ref` sets `:acyclic true` with {d} targets — cycle edges are defined over one target form's self-referential keys, and `self` is not well defined across a group", .{ kind.name, cr.targets.len });
+                cr.acyclic = false;
+            }
+            // `:provider` — the *registration* would still be coherent
+            // (each instance's source extracted into the group's one
+            // namespace), but a form could then owe extractions to several
+            // buckets at once, which the binary walk's single-pass form
+            // frame carries one of. Supporting it means either a per-form
+            // width ceiling on schema data or a tree/binary divergence,
+            // and neither is worth a shape nobody has asked for. Rejected
+            // rather than silently half-honoured.
+            if (cr.provider) |pv| {
+                try emitDiag(a, diags, .invalid_manifest, span_target, &.{ kind.name, "cross-ref", "provider" }, "value-kind `{s}` `:cross-ref` sets `:provider {s}` with {d} targets — an extracted member set is collected per target form, so declare one cross-ref per target instead", .{ kind.name, pv, cr.targets.len });
+                cr.provider = null;
+                cr.source_key = "src";
+            }
+        }
+    }
+    // `:target` is `:optional false`, so a missing one is already a
+    // `missing_required_key` from meta-validation — but this function must
+    // stay total, and `CrossRef.targets` is documented `.len >= 1`. One
+    // unnameable target keeps the invariant and reproduces the behaviour
+    // the pre-slice code had for the same input: `canonicalFormName("")`
+    // resolves to nothing, so the kind rejects every reference.
+    if (cr.targets.len == 0) cr.targets = try Plugin.ValueKind.CrossRef.dupeOne(a, "");
+    std.debug.assert(cr.targets.len >= 1);
     return cr;
 }
 
@@ -2526,6 +3019,109 @@ fn parseTypeList(a: Allocator, tree: *const Ast.Tree, idx: Ast.NodeIndex) Error!
     const out = try a.alloc(Plugin.ValueType, elements.len);
     for (elements, 0..) |ei, i| {
         out[i] = try parseValueType(a, tree, ei);
+    }
+    return out;
+}
+
+/// Read one member spelling — the shared reader behind a `:values`
+/// element and `(member :name …)`.
+///
+/// Two shapes reach here, because `member-name` is a union of `symbol`
+/// and `number`:
+///
+///   * a bare symbol (`loop`, `cube-array`) — an ordinary member;
+///   * a unit-bearing number (`1d`, `2d`, `50%`) — a *digit-leading*
+///     spelling, which the lexer cannot hand over as a symbol. `name`
+///     becomes its canonical spelling (so `02d` declares `2d`) and
+///     `numeric_spelling` carries the `(value, unit)` identity the
+///     validator matches on.
+///
+/// Two `invalid_manifest` rejections, both of them loader-side on
+/// purpose: the meta-schema can only say "symbol or number", and *which*
+/// numbers are spellings is a semantic question. This is the `(fixed N)`
+/// precedent (`manifests/meta.sjon`).
+///
+///   * a number with **no unit** (`2`) — a bare magnitude is not a name;
+///   * a unit-bearing number whose magnitude is negative, fractional, or
+///     above `MAX_SPELLING_VALUE` — the range where the canonical
+///     spelling has one text form in every host.
+///
+/// Always returns a member, rejected or not: diagnostics are the
+/// contract, not an abort, and a rejected spelling lands as a plain
+/// symbol member that no document value can match (a bare `2` is never a
+/// symbol lexeme), so the set keeps its shape without gaining a member
+/// that silently works.
+fn parseMemberName(
+    a: Allocator,
+    tree: *const Ast.Tree,
+    idx: Ast.NodeIndex,
+    kind_name: []const u8,
+    diags: *std.ArrayList(Ast.Diagnostic),
+) Error!Plugin.ValueKind.MemberSet.Member {
+    const Spelling = Plugin.ValueKind.MemberSet.NumericSpelling;
+    switch (tree.tagOf(idx)) {
+        .symbol => return .{ .name = try a.dupe(u8, tree.symbolText(idx)) },
+        .number_with_unit => {
+            const nv = tree.numberWithUnitOf(idx);
+            const key = Spelling.keyOf(nv.value) orelse {
+                try emitDiag(a, diags, .invalid_manifest, tree.spanOf(idx), &.{ kind_name, "members" }, "value-kind `{s}` member spelling `{d}{s}` needs a whole non-negative magnitude at or below {d}", .{ kind_name, nv.value, nv.unit, Spelling.MAX_SPELLING_VALUE });
+                return .{ .name = try std.fmt.allocPrint(a, "{d}{s}", .{ nv.value, nv.unit }) };
+            };
+            return .{
+                .name = try Spelling.canonical(a, key, nv.unit),
+                .numeric_spelling = .{ .value = key, .unit = try a.dupe(u8, nv.unit) },
+            };
+        },
+        // Unitless number — `.number`, `.number_i64`, `.number_u64`.
+        .number, .number_i64, .number_u64 => {
+            const text = try renderUnitlessNumber(a, tree, idx);
+            try emitDiag(a, diags, .invalid_manifest, tree.spanOf(idx), &.{ kind_name, "members" }, "value-kind `{s}` member spelling `{s}` carries no unit; a digit-leading member needs a letter tail, e.g. `1d`", .{ kind_name, text });
+            return .{ .name = text };
+        },
+        // The meta-schema admits only symbol / number here, so anything
+        // else already reported `wrong_underlying`. Keep the walk total.
+        else => return .{ .name = "" },
+    }
+}
+
+/// Render a unitless numeric node for a diagnostic message. Tag-true so
+/// an exact-integer literal reads as the author wrote it rather than
+/// through f64.
+fn renderUnitlessNumber(a: Allocator, tree: *const Ast.Tree, idx: Ast.NodeIndex) Error![]const u8 {
+    return switch (tree.tagOf(idx)) {
+        .number_i64 => try std.fmt.allocPrint(a, "{d}", .{tree.numberI64Of(idx)}),
+        .number_u64 => try std.fmt.allocPrint(a, "{d}", .{tree.numberU64Of(idx)}),
+        .number => try std.fmt.allocPrint(a, "{d}", .{tree.numberOf(idx)}),
+        else => unreachable, // caller gated on the unitless numeric tags
+    };
+}
+
+/// Read a `:values [loop 1d 2d]` vector into members. Replaces
+/// `parseSymbolList` at this one call site — since format 1.3 an element
+/// may be a digit-leading spelling, which is not a symbol node.
+fn parseMemberNameList(
+    a: Allocator,
+    tree: *const Ast.Tree,
+    idx: Ast.NodeIndex,
+    kind_name: []const u8,
+    diags: *std.ArrayList(Ast.Diagnostic),
+) Error![]const Plugin.ValueKind.MemberSet.Member {
+    const elements = tree.vectorElements(idx);
+    const out = try a.alloc(Plugin.ValueKind.MemberSet.Member, elements.len);
+    for (elements, 0..) |ei, i| {
+        out[i] = try parseMemberName(a, tree, ei, kind_name, diags);
+        // The same scan `buildMemberSet` runs over `(member …)` children,
+        // on the spelling that gets it wrong more easily. `:values` is the
+        // common shape, and since a digit-leading member canonicalises,
+        // `[2d 2.0d]` reads as two members and is one — a set silently
+        // smaller than it looks, where the rich path said so. Byte-equal
+        // duplicates report here too: they always should have.
+        for (out[0..i]) |prior| {
+            if (sameMemberIdentity(prior, out[i])) {
+                try emitDiag(a, diags, .invalid_manifest, tree.spanOf(ei), &.{ kind_name, "members" }, "value-kind `{s}` `:members` declares duplicate member `{s}`", .{ kind_name, out[i].name });
+                break;
+            }
+        }
     }
     return out;
 }

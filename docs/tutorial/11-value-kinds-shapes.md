@@ -306,9 +306,9 @@ value site instead of a wrong number downstream.
 ## Numeric Bounds
 
 A numeric bound refinement applies to a number-underlying kind and
-constrains the value's magnitude or integrality, orthogonal to any
-unit shape. The plugin may pin a minimum, maximum, either-exclusive,
-or require integer values.
+constrains the value's magnitude, integrality, or divisibility,
+orthogonal to any unit shape. The plugin may pin a minimum, maximum,
+either-exclusive, require integer values, or require a multiple.
 
 Example contracts:
 
@@ -316,6 +316,7 @@ Example contracts:
 opacity:          number, range [0, 1]
 iteration-count:  number, min 1, integer
 duration-ms:      number, unit required ms, range [0ms, 10000ms]
+buffer-offset:    number, min 0, integer, multiple of 256
 ```
 
 Accepted values for `opacity`:
@@ -339,6 +340,7 @@ family:
 - `number_at_or_below_exclusive_min` — `:exclusive-min true` and value ≤ `:min`.
 - `number_at_or_above_exclusive_max` — `:exclusive-max true` and value ≥ `:max`.
 - `number_not_integer`          — `:integer true` and value is fractional or non-finite.
+- `number_not_multiple`         — `:multiple-of N` and the value does not divide evenly by `N`.
 - `numeric_bound_unit_mismatch` — bound carries a unit but the value either has none or carries a different unit.
 
 Comparison preserves exact precision when both the bound and the
@@ -347,6 +349,58 @@ of `9007199254740992` correctly fires `number_above_max`, even
 though both round to the same f64). For everyday plugins this
 just works; the corner only matters when the bound itself
 approaches 2^53.
+
+### Divisibility, and the order the checks run in
+
+`:multiple-of` is the one bound that a range and `:integer` cannot
+express between them. "A byte offset aligned to 256" is not "between 0
+and X" and not merely "a whole number" — it is a multiple of 256, and
+before this existed a plugin had to check it in host code after
+validation passed.
+
+```text
+buffer-offset: number, min 0, integer, multiple of 256
+```
+
+```sjon
+(binding :offset 0)      ; ✓ zero divides by anything
+(binding :offset 512)    ; ✓
+(binding :offset 250)    ; ✗ number_not_multiple
+```
+
+Divisibility is exact, not approximate: a value above 2^53 is compared
+in whole numbers rather than being rounded to a float first, so an odd
+number stays odd. (If a plugin ever declares a *fractional* divisor like
+`multiple of 0.25`, that one case is approximate — binary floating point
+has no exact answer — and the plugin author is warned when the schema
+loads. You will not see this in practice; alignment rules use whole
+numbers.) A divisor of zero or below is refused outright rather than
+warned about: dividing by zero has no answer at all, and a negative
+divisor accepts exactly what its magnitude accepts.
+
+Now the part worth learning, because it decides which diagnostic you
+get. The three checks run in a fixed order — **integrality, then range,
+then divisibility** — and only the first failure is reported. Predict
+each of these against the contract above:
+
+```sjon
+(binding :offset 250.5)
+(binding :offset -256)
+(binding :offset 250)
+```
+
+The first is `number_not_integer`. It also fails the alignment rule, but
+being fractional is the more basic problem, and telling you to align a
+number that is not whole yet would be useless advice.
+
+The second is `number_below_min`. `-256` *is* a genuine multiple of 256,
+so the only thing wrong with it is that it is negative.
+
+The third is `number_not_multiple` — the value is whole and in range, so
+divisibility is what is left.
+
+The practical consequence: fix what the diagnostic says and re-run. A
+second complaint may be waiting behind the first.
 
 ## Representation
 

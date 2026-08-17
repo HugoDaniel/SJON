@@ -1,0 +1,6 @@
+; One diagnostic, on the misspelling. The other two lines take one branch
+; each and are clean. `MAX_BONE` is a well-formed symbol, so it would have
+; satisfied the default `symbol` ref half; with `:ref define-ref` it has to
+; name a real `(define …)` and does not.
+(diagnostics
+  (diagnostic :code union_no_branch_matched :path [mesh bones]))

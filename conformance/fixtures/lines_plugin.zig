@@ -54,12 +54,12 @@ pub const plugin: Plugin.Plugin = .{
         .{
             .name = "uniform-name",
             .underlying = .symbol,
-            .cross_ref = .{ .target_form = "shader", .provider = "lines" },
+            .cross_ref = .{ .targets = &.{"shader"}, .provider = "lines" },
         },
         .{
             .name = "overflow-name",
             .underlying = .symbol,
-            .cross_ref = .{ .target_form = "counter", .provider = "lines-overflow" },
+            .cross_ref = .{ .targets = &.{"counter"}, .provider = "lines-overflow" },
         },
     },
     .forms = &.{

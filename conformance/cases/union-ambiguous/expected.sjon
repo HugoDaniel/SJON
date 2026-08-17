@@ -1,0 +1,10 @@
+; One warning, at the reference — not at either declaration. Both
+; declarations are individually fine; it is the *reference* that has two
+; readings, so that is where the repair decision is made (rename one
+; declaration, or split the slot into two single-kind keys).
+;
+; Pathed at the value like the rest of the post-match advisory family
+; (`deprecated_member`, `string_pattern_unsupported`), and `warning`
+; severity so the document still validates.
+(diagnostics
+  (diagnostic :code union_ambiguous :severity warning :path [dispatch pipeline]))

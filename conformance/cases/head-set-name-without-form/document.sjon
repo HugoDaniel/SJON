@@ -1,0 +1,32 @@
+; The boundary of the head-set answer: a name IN the head-set with no form
+; anywhere — not global, not slot-local. `ghost` is listed in
+; `(head-set :names [buffer storage-texture ghost])`, so head narrowing admits
+; it; the descent that follows then has nothing to descend into.
+;
+; The result is ONE diagnostic, and which one is the lesson: the head-set
+; never resolves a name, so it raises nothing here. `unknown_local_form` comes
+; from the form-head resolution step, after the narrowing succeeded. Contrast
+; a head OUTSIDE the set, which trips both mechanisms and reports twice
+; (`not_head_member` + `unknown_local_form`, see `not-head-member`).
+;
+; So a head-set name does need a form — for the *descent*, not for the
+; head-set — and a slot-local one in scope satisfies it (see
+; `positional-local-headset-no-global`).
+(plugin :name p :version "1.0.0"
+  (value-kind :name bgl-entry-item :underlying form
+    :heads (head-set :names [entry]))
+  (value-kind :name bgl-resource :underlying form
+    :heads (head-set :names [buffer storage-texture ghost]))
+  (form :name bind-group-layout
+    :positional bgl-entry-item
+    (key :name name :type symbol)
+    (form :name entry
+      :positional bgl-resource
+      (key :name binding :type number)
+      (form :name buffer
+        (key :name type :type symbol))
+      (form :name storage-texture
+        (key :name format :type symbol)))))
+
+(bind-group-layout :name bgl0
+  (entry :binding 0 (ghost :x 1)))

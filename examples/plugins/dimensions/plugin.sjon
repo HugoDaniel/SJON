@@ -1,0 +1,55 @@
+; Digit-leading enum members — the WebGPU case, and PNGine's migration
+; reference.
+;
+; `GPUTextureDimension` is spelled `"1d"`, `"2d"`, `"3d"` in the WebGPU
+; spec. None of those can be written as a bare SJON symbol: the lexer sees
+; a digit-leading token and reads it as a unit-bearing number (value `2`,
+; unit `d`). Before format 1.3 a host had two options, both bad — ship the
+; enum as numbers with a comment (`:view-dimension 3 ; cube`, one lookup
+; table per author to memorise) or as strings, giving up member checking.
+;
+; Now a `:symbol` member-set may declare such a spelling directly. Two
+; things to know about how it works:
+;
+;   * **`name` is the spelling, matching is on the pair.** The member is
+;     named `2d` for diagnostics, exports, and completions, but the
+;     validator compares the value's parsed `(magnitude, unit)` pair — so
+;     `2d`, `2.0d`, and `02d` are all the same member, and `2.5d` is not
+;     any of them. Text comparison could not say that, and the binary
+;     walker has no source text to compare against.
+;
+;   * **The value stays a number.** It is *accepted* in a symbol slot, not
+;     rewritten: the tree, the binary IR, and the JSON bridge all carry
+;     `{"$num": [2, "d"]}`. That is why the exported JSON Schema pins
+;     `$num` for these members and `$sym` for the ordinary ones — a schema
+;     claiming `{"$sym": "2d"}` would reject a document the validator
+;     accepts.
+;
+; A mixed set is the realistic shape: `GPUTextureViewDimension` has
+; digit-leading members *and* ordinary ones side by side.
+
+(plugin :name dimensions :version "1.0.0" :sjon "1.3"
+  (value-kind :name texture-dimension
+    :description "GPUTextureDimension, spelled the way the WebGPU spec spells it."
+    :underlying symbol
+    :members (member-set :values [1d 2d 3d]))
+
+  (value-kind :name view-dimension
+    :description "GPUTextureViewDimension — digit-leading and ordinary members in one set."
+    :underlying symbol
+    :members (member-set
+      (member :name 1d)
+      (member :name 2d
+        :label "2D"
+        :description "The default view dimension.")
+      (member :name 2d-array
+        :description "A hyphenated digit-leading spelling — one token only because a `-` may join two letter runs inside a unit.")
+      (member :name cube)
+      (member :name cube-array)
+      (member :name 3d)))
+
+  (form :name texture
+    :description "A texture and the view it is sampled through."
+    (key :name name      :type symbol)
+    (key :name dimension :type texture-dimension :optional true)
+    (key :name view      :type view-dimension    :optional true)))

@@ -1,0 +1,12 @@
+; Seven `invalid_manifest`s. Three come from `bad-unitless` — one per element
+; of `[1 2 3]`, since each is its own bad spelling — then one each for the
+; magnitude, the underlying, and the duplicate in each of the two authoring
+; shapes.
+(diagnostics
+  (diagnostic :code invalid_manifest :path [bad-unitless members])
+  (diagnostic :code invalid_manifest :path [bad-unitless members])
+  (diagnostic :code invalid_manifest :path [bad-unitless members])
+  (diagnostic :code invalid_manifest :path [bad-magnitude members])
+  (diagnostic :code invalid_manifest :path [bad-underlying members])
+  (diagnostic :code invalid_manifest :path [bad-duplicate members])
+  (diagnostic :code invalid_manifest :path [bad-duplicate-compact members]))

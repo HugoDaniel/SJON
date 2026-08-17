@@ -1,0 +1,8 @@
+; Five diagnostics for four bad lines: 1 + 2 + 1 + 1. A host that emitted one
+; per missing *requirement* rather than per dependent key would produce eight.
+(diagnostics
+  (diagnostic :code dependent_key_missing :path [entry])
+  (diagnostic :code dependent_key_missing :path [entry])
+  (diagnostic :code dependent_key_missing :path [entry])
+  (diagnostic :code dependent_key_missing :path [span])
+  (diagnostic :code dependent_key_missing :path [span]))

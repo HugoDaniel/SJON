@@ -313,10 +313,17 @@ runnable end-to-end example (`zig build demo-binary`).
 ## Unit-suffixed numbers
 
 Numbers can carry an optional unit suffix — `4b`, `90deg`, `50%`,
-`250ms`, `1.5e2hz`. The lexer's number FSM accepts ASCII letters or a
-single `%` after the numeric portion; the parser splits at the first
-non-numeric byte and stores `(value: f64, unit: ?[]const u8)` on the
-node.
+`250ms`, `1.5e2hz`, `2d-array`. The lexer's number FSM accepts ASCII
+letters, a `-` joining two letter runs, or a single `%` after the numeric
+portion; the parser splits at the first non-numeric byte and stores
+`(value: f64, unit: ?[]const u8)` on the node.
+
+**Lexer rule for `-` inside a unit.** A `-` continues the unit only when
+the next byte is a letter, and it can never open one: a `-` reaching the
+unit state always has a letter before it. So `2d-array` and
+`5ms-per-frame` are one token each, while `1em-2` stays `1em` then `-2`
+and `2d-` ends at `2d`. Subtraction between a unit-bearing number and a
+number is unaffected, because its right operand starts with a digit.
 
 **Lexer rule for `e`/`E`.** When the lexer encounters `e`/`E` from
 inside `.number_int` or `.number_frac`, it peeks the next byte: if it's
@@ -325,6 +332,25 @@ the `e`/`E` is the first character of a unit (`1em`, `0.5em`). The
 sentinel-terminated source guarantees the lookahead is always safe.
 A new `.number_exp_first_digit` state requires at least one digit
 after a sign — `1e+x` stays invalid.
+
+**Hex integers.** `x`/`X` from `.number_int` opens a hex literal, but only
+when the numeric portion so far is exactly `0`, optionally signed. So
+`0xFF` and `-0x10` are hex, while `10x`, `00x`, `0_x`, and `0.5x` keep
+their unit and lex byte-identically to before. A hex literal is
+`[0-9a-fA-F_]+` with no fraction, no exponent, and no unit, so `0xFFp2` is
+`0xFF` then `p2`. A prefix with no hex digit after it (`0x`, `0xGG`) is
+`.invalid`, which routes to `handleInvalidToken` the way `1e+` already
+does, rather than yielding the number zero with unit `x`. The parser reads
+the digit run in base 16 through the same `i64` → `u64` ladder decimal
+integers take, so a hex literal lands on the existing number tags: no new
+tag, no wire change, and every `:numeric` / `:repr` / `:unit` refinement
+judges it as it judges a decimal. `Parser.parseNumberAs` carries the same
+branch, because it is the `pub` re-read behind `:repr` and works from the
+source lexeme rather than the decoded value; its float arm goes through
+hex-float syntax (`0xFFp0`) so the value is correctly rounded rather than
+accumulated digit-by-digit. The printer has no source access and formats
+from the value, so `sjon fmt` writes a hex literal back as decimal (§4.2
+of LANGUAGE.md): values round-trip, spellings do not.
 
 **AST representation.** The SoA `Tree` distinguishes the two cases via
 `Tag`: `Tag.number` keeps the existing `Data.immediate = @bitCast(f64)`

@@ -1,0 +1,24 @@
+; A name from neither target is `not_cross_ref`, and the message names the
+; whole group rather than one entry — the reference is against the group.
+;
+; The did-you-mean candidates a host offers here span *both* targets for
+; free, because a group's names all live in one bucket. That is the
+; payoff of registering into a synthetic bucket instead of searching each
+; target's bucket at lookup time.
+(plugin :name gpu :version "1.0.0" :sjon "1.3"
+  (value-kind :name pipeline-ref :underlying symbol
+    :cross-ref (cross-ref :target [render-pipeline compute-pipeline]))
+
+  (form :name render-pipeline
+    (key :name name :type symbol))
+
+  (form :name compute-pipeline
+    (key :name name :type symbol))
+
+  (form :name dispatch
+    (key :name pipeline :type pipeline-ref)))
+
+(render-pipeline  :name blit)
+(compute-pipeline :name reduce)
+
+(dispatch :pipeline blot)

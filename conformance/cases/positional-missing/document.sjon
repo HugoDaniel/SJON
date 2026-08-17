@@ -1,0 +1,25 @@
+; Same schema again, with no `(vertex …)` at all against `:min 1`.
+(plugin :name gfx :version "1.0.0"
+  (value-kind :name pipeline-section
+    :description "One section of a render pipeline."
+    :underlying form
+    :heads (head-set
+      (head :name vertex   :min 1 :max 1)
+      (head :name fragment :max 1)
+      (head :name constant)))
+
+  (form :name vertex
+    (key :name entry :type symbol))
+  (form :name fragment
+    (key :name entry :type symbol))
+  (form :name constant
+    (key :name name  :type symbol)
+    (key :name value :type number))
+
+  (form :name render-pipeline
+    :positional pipeline-section
+    (key :name name :type symbol)))
+
+(render-pipeline :name main
+  (fragment :entry fs_main)
+  (constant :name gamma :value 2.2))

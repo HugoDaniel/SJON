@@ -1,0 +1,39 @@
+; `2d-array` — `GPUTextureViewDimension`'s remaining member, and the one
+; that needed a lexer change rather than only a schema change.
+;
+; Before, `2d-array` was TWO tokens: a `number_with_unit` (magnitude 2,
+; unit `d`) and a positional symbol `-array`. One intended atom produced
+; two diagnostics — a `wrong_underlying` on the keyword and a
+; `positional_not_allowed` on the stray symbol.
+;
+; Now a `-` inside a unit joins two letter runs when the next byte is a
+; letter, so the unit is `d-array` and the whole thing is one member. The
+; rule is deliberately that narrow: `1em-2` below still lexes as `1em`
+; then `-2`, which is why `:gap` holds a plain number and the `-2` after
+; it is a separate positional child.
+(plugin :name gpu :version "1.0.0" :sjon "1.3"
+  (value-kind :name view-dimension :underlying symbol
+    :members (member-set :values [1d 2d 2d-array cube cube-array 3d]))
+
+  (value-kind :name frame-rate :underlying number
+    :unit (unit-shape :required true :allowed [ms-per-frame]))
+
+  (form :name texture
+    :positional any
+    (key :name name :type symbol)
+    (key :name view :type view-dimension :optional true)
+    (key :name gap  :type number         :optional true)
+    (key :name pace :type frame-rate     :optional true)))
+
+(texture :name atlas  :view 2d-array)
+(texture :name plain  :view 2d)
+(texture :name cubed  :view cube-array)
+
+; `1em-2` is two values, so `:gap` takes `1em`… except `:gap` is a plain
+; number and `1em` carries a unit, which a plain `number` slot accepts.
+; The `-2` that follows is a positional child.
+(texture :name split :gap 1em-2)
+
+; A hyphenated unit is now reachable on an ordinary unit-shape too — this
+; was declarable before and unwritable, because no literal could carry it.
+(texture :name paced :pace 16ms-per-frame)

@@ -50,17 +50,17 @@ test "MetaSchema: plugin is named meta" {
 }
 
 test "MetaSchema: form / value-kind counts match meta.sjon" {
-    try testing.expectEqual(@as(usize, 27), plugin.forms.len);
-    try testing.expectEqual(@as(usize, 32), plugin.value_kinds.len);
+    try testing.expectEqual(@as(usize, 28), plugin.forms.len);
+    try testing.expectEqual(@as(usize, 36), plugin.value_kinds.len);
     try testing.expectEqual(@as(usize, 0), plugin.expr_funcs.len);
 }
 
-test "MetaSchema: numeric-bounds form is registered with five optional keys" {
+test "MetaSchema: numeric-bounds form is registered with six optional keys" {
     var found: bool = false;
     for (plugin.forms) |f| {
         if (std.mem.eql(u8, f.name, "numeric-bounds")) {
             found = true;
-            try testing.expectEqual(@as(usize, 5), f.keys.len);
+            try testing.expectEqual(@as(usize, 6), f.keys.len);
             for (f.keys) |k| try testing.expect(k.optional);
         }
     }
@@ -112,11 +112,11 @@ test "MetaSchema: plugin-decl heads include the four declaration heads" {
         if (std.mem.eql(u8, k.name, "plugin-decl")) {
             found_plugin_decl = true;
             const heads = k.heads orelse @panic("plugin-decl missing heads");
-            try testing.expectEqual(@as(usize, 4), heads.names.len);
-            try testing.expectEqualStrings("value-kind", heads.names[0]);
-            try testing.expectEqualStrings("form", heads.names[1]);
-            try testing.expectEqualStrings("expr-func", heads.names[2]);
-            try testing.expectEqualStrings("cross-ref-provider", heads.names[3]);
+            try testing.expectEqual(@as(usize, 4), heads.heads.len);
+            try testing.expectEqualStrings("value-kind", heads.heads[0].name);
+            try testing.expectEqualStrings("form", heads.heads[1].name);
+            try testing.expectEqualStrings("expr-func", heads.heads[2].name);
+            try testing.expectEqualStrings("cross-ref-provider", heads.heads[3].name);
         }
     }
     try testing.expect(found_plugin_decl);
@@ -189,8 +189,8 @@ test "MetaSchema: key form accepts inline (form …) positionals via key-local-d
         found_kind = true;
         try testing.expectEqual(Plugin.ValueKind.Underlying.form, k.underlying);
         const heads = k.heads orelse @panic("key-local-decl missing heads");
-        try testing.expectEqual(@as(usize, 1), heads.names.len);
-        try testing.expectEqualStrings("form", heads.names[0]);
+        try testing.expectEqual(@as(usize, 1), heads.heads.len);
+        try testing.expectEqualStrings("form", heads.heads[0].name);
     }
     try testing.expect(found_kind);
 }
@@ -220,11 +220,11 @@ test "MetaSchema: form meta-form admits inline (form …) positionals via form-c
         found_kind = true;
         try testing.expectEqual(Plugin.ValueKind.Underlying.form, k.underlying);
         const heads = k.heads orelse @panic("form-child-decl missing heads");
-        try testing.expectEqual(@as(usize, 4), heads.names.len);
-        try testing.expectEqualStrings("key", heads.names[0]);
-        try testing.expectEqualStrings("variant", heads.names[1]);
-        try testing.expectEqualStrings("exclusive-group", heads.names[2]);
-        try testing.expectEqualStrings("form", heads.names[3]);
+        try testing.expectEqual(@as(usize, 4), heads.heads.len);
+        try testing.expectEqualStrings("key", heads.heads[0].name);
+        try testing.expectEqualStrings("variant", heads.heads[1].name);
+        try testing.expectEqualStrings("exclusive-group", heads.heads[2].name);
+        try testing.expectEqualStrings("form", heads.heads[3].name);
     }
     try testing.expect(found_kind);
 }

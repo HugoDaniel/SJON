@@ -244,6 +244,150 @@ test('schema-export round-trip: existing bounds manifest produces a valid schema
   assert.ok(profile, 'missing $defs/form.bounds.profile entry');
 });
 
+test('schema-export round-trip: ajv enforces per-head positional counts', async () => {
+  // The one claim in the bounds encoding that cannot be checked by reading
+  // the exporter: that `contains` + `minContains` / `maxContains` actually
+  // *bites* in a real 2020-12 validator, rather than merely being the
+  // keyword the spec names. So compile the head-counts schema and drive
+  // ajv over the same three documents the SJON validator judges.
+  const manifestPath = path.join(examplesDir, 'head-counts/plugin.sjon');
+  if (!existsSync(manifestPath)) return; // fixture removed; nothing to test
+  const manifestSrc = readFileSync(manifestPath, 'utf8');
+  const host = await SjonHost.load(wasmPath);
+  const result = host.exportSchema(manifestSrc, {
+    projectRoot: null,
+    projectFile: null,
+    target: 'json-schema',
+  });
+  assert.ok(result.aggregated?.jsonSchema, 'missing jsonSchema bytes');
+  const schema = JSON.parse(result.aggregated.jsonSchema);
+  const ajv = new Ajv2020({ strict: false, allErrors: true });
+  addFormats(ajv);
+  // Compile through a `$ref` into the document's own `$defs`, not the
+  // extracted sub-schema: the `contains` entries this test is about are
+  // themselves `$ref`s into `$defs`, so a detached sub-schema cannot
+  // resolve them.
+  const validate = ajv.compile({
+    $schema: schema.$schema,
+    $defs: schema.$defs,
+    $ref: '#/$defs/form.head-counts.render-pipeline',
+  });
+
+  const vertex = { $form: 'vertex', $ns: 'head-counts', entry: { $sym: 'vs' } };
+  const fragment = { $form: 'fragment', $ns: 'head-counts', entry: { $sym: 'fs' } };
+  const constant = {
+    $form: 'constant',
+    $ns: 'head-counts',
+    name: { $sym: 'gamma' },
+    value: 2.2,
+  };
+  const pipeline = (children: unknown[]) => ({
+    $form: 'render-pipeline',
+    $ns: 'head-counts',
+    name: { $sym: 'main' },
+    $children: children,
+  });
+
+  assert.equal(
+    validate(pipeline([vertex, fragment, constant, constant])),
+    true,
+    `inside every bound, ajv should accept: ${JSON.stringify(validate.errors)}`,
+  );
+  // `:max 1` on fragment — a second one must be rejected. If `maxContains`
+  // were dropped (or written as `maxItems`), this would pass.
+  assert.equal(
+    validate(pipeline([vertex, fragment, fragment])),
+    false,
+    'over :max: expected reject',
+  );
+  // `:min 1` on vertex — none at all must be rejected.
+  assert.equal(validate(pipeline([fragment])), false, 'under :min: expected reject');
+  // The unbounded head really is unbounded: four constants are fine, which
+  // is what `minItems`/`maxItems` would have wrongly rejected.
+  assert.equal(
+    validate(pipeline([vertex, constant, constant, constant, constant])),
+    true,
+    `unbounded head should stay unbounded: ${JSON.stringify(validate.errors)}`,
+  );
+});
+
+test('schema-export round-trip: ajv accepts a digit-leading member as $num, not $sym', async () => {
+  // A digit-leading member is *accepted* in a symbol slot, never rewritten,
+  // so a document carries `{"$num": [2, "d"]}` where an ordinary member
+  // carries `{"$sym": "cube"}`. That makes the exported schema the one
+  // place this feature can be silently wrong: a `$sym` const for `2d`
+  // compiles perfectly and rejects every document the validator accepts.
+  // Reading the exporter cannot catch that; driving ajv can.
+  const manifestPath = path.join(examplesDir, 'dimensions/plugin.sjon');
+  if (!existsSync(manifestPath)) return; // fixture removed; nothing to test
+  const manifestSrc = readFileSync(manifestPath, 'utf8');
+  const host = await SjonHost.load(wasmPath);
+  const result = host.exportSchema(manifestSrc, {
+    projectRoot: null,
+    projectFile: null,
+    target: 'json-schema',
+  });
+  assert.ok(result.aggregated?.jsonSchema, 'missing jsonSchema bytes');
+  const schema = JSON.parse(result.aggregated.jsonSchema);
+  const ajv = new Ajv2020({ strict: false, allErrors: true });
+  addFormats(ajv);
+  const validate = ajv.compile({
+    $schema: schema.$schema,
+    $defs: schema.$defs,
+    $ref: '#/$defs/form.dimensions.texture',
+  });
+
+  const texture = (fields: Record<string, unknown>) => ({
+    $form: 'texture',
+    $ns: 'dimensions',
+    name: { $sym: 'albedo' },
+    ...fields,
+  });
+
+  // The wire shape a document actually produces.
+  assert.equal(
+    validate(texture({ dimension: { $num: [2, 'd'] } })),
+    true,
+    `$num encoding should be accepted: ${JSON.stringify(validate.errors)}`,
+  );
+  // The shape a `$sym` export would have demanded. No document can produce
+  // it — `2d` never lexes as a symbol — so it must NOT validate, or the
+  // schema is describing something the language cannot write.
+  assert.equal(
+    validate(texture({ dimension: { $sym: '2d' } })),
+    false,
+    '$sym spelling of a digit-leading member should be rejected',
+  );
+  // Still a closed set.
+  assert.equal(
+    validate(texture({ dimension: { $num: [4, 'd'] } })),
+    false,
+    'undeclared magnitude should be rejected',
+  );
+  // The unit is part of the identity on this side too.
+  assert.equal(
+    validate(texture({ dimension: { $num: [2, 'b'] } })),
+    false,
+    'declared magnitude with the wrong unit should be rejected',
+  );
+  // A mixed set keeps both shapes working, each in its own encoding.
+  assert.equal(
+    validate(texture({ view: { $sym: 'cube' } })),
+    true,
+    `ordinary member should stay $sym: ${JSON.stringify(validate.errors)}`,
+  );
+  assert.equal(
+    validate(texture({ view: { $num: [3, 'd'] } })),
+    true,
+    `digit-leading member of a mixed set: ${JSON.stringify(validate.errors)}`,
+  );
+  assert.equal(
+    validate(texture({ view: { $sym: 'sphere' } })),
+    false,
+    'undeclared symbol member should be rejected',
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Corpus walk: one test per example-plugin fixture under examples/plugins/*/.
 // Skipped silently when no fixtures exist (pre-§F state).

@@ -123,6 +123,11 @@ export type DiagnosticCode =
   | 'number_at_or_below_exclusive_min'
   | 'number_at_or_above_exclusive_max'
   | 'number_not_integer'
+  // Value is not an exact multiple of `:multiple-of` (manifest format
+  // 1.3). Checked after `:integer` and after the range bounds, so the
+  // more basic violation is the one reported. Divisibility is decided in
+  // exact integer space whenever both sides are whole.
+  | 'number_not_multiple'
   | 'numeric_bound_unit_mismatch'
   | 'numeric_bounds_invalid'
   // GPU representation tag (`:repr`). A `.number` value outside its
@@ -160,6 +165,13 @@ export type DiagnosticCode =
   | 'exclusive_bundle_partial'
   | 'exclusive_bundle_collision'
   | 'exclusive_group_invalid'
+  // A key carrying `:requires [b c]` is present while one or more of the
+  // keys it names is absent (manifest format 1.3). The third inter-key
+  // mechanism: `exclusive-group` bounds how many of a set may appear,
+  // `(variant …)` gates keys on the discriminant's value, this gates one
+  // key's requirement on another key's presence. One-directional, and
+  // suppressed by `:open true` like every other closed-form shape rule.
+  | 'dependent_key_missing'
   // Discriminated-form family. Validate-time: `missing_discriminant_key`
   // when a closed discriminated form carries no discriminant kvpair, so no
   // variant can be selected — one emit, in place of the pile of
@@ -178,6 +190,28 @@ export type DiagnosticCode =
   // Rejected outright so union dispatch stays a flat loop. Emitted by
   // `validateUnions` in plugin.ts.
   | 'nested_union'
+  // Severity `warning`. A symbol in a `:underlying union` slot is a
+  // registered name in two or more of the union's cross-ref-backed
+  // alternatives, so which entity the slot denotes is decided by the order
+  // the alternatives were declared in. The document still validates —
+  // first match still wins. Deliberately narrow: gated on cross-ref-backed
+  // alternatives (a union overlapping on plain values is *designed* for
+  // first-match), silent when the winning alternative is not itself a
+  // reference, and deduplicated by bucket so two kinds pointing at one
+  // target do not read as two entities.
+  | 'union_ambiguous'
+  // Per-head positional counts from a `(head :name … :min … :max …)`
+  // entry. `positional_too_many` lands on the child that crosses the
+  // ceiling (one report per crossing, not per extra child);
+  // `positional_missing` at the parent form's head, where
+  // `missing_required_key` lands, because a floor breach is an
+  // end-of-children fact with no child to point at. Neither is
+  // suppressed by `:open true` — openness widens the *keyword* surface,
+  // and `:positional <bounded-kind>` opts into the count. Counts apply
+  // only at a form's `:positional` slot; the same kind reused on a keyed
+  // or vector-element slot carries its bounds inertly.
+  | 'positional_too_many'
+  | 'positional_missing'
   // v1.1 manifest-metadata diagnostics. All emitted by the manifest
   // loader; mirror src/ManifestLoader.zig + src/Ast.zig.
   // `plugin_wasm_self_hash_malformed` is err-severity (well-formedness);

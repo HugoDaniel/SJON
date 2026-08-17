@@ -1,0 +1,3 @@
+; Every bound satisfied: one vertex, one fragment, two unbounded
+; constants. Clean.
+(diagnostics)

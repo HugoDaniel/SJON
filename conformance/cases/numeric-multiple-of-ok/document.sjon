@@ -1,0 +1,31 @@
+; `:multiple-of N` — the divisibility constraint a range and an integrality
+; flag cannot express between them. A WebGPU uniform binding offset must land
+; on a 256-byte boundary: that is not "between 0 and X" and not merely "a
+; whole number", it is a multiple of 256.
+;
+; The accept side. Zero is a multiple of everything, a negative value is
+; judged on magnitude (-512 divides by 256 exactly), and a bound carrying a
+; unit demands a byte-equal one on the value — the same rule `:min` and
+; `:max` already follow.
+(plugin :name gfx :version "1.0.0" :sjon "1.3"
+  (value-kind :name aligned-offset
+    :underlying number
+    :description "Byte offset into a buffer binding; WebGPU requires 256-byte alignment for uniform bindings."
+    :numeric (numeric-bounds :integer true :multiple-of 256))
+
+  (value-kind :name aligned-bytes
+    :underlying number
+    :description "A byte quantity carrying its unit, aligned to 256."
+    :unit    (unit-shape :required true :allowed [b])
+    :numeric (numeric-bounds :multiple-of 256b))
+
+  (form :name entry
+    (key :name binding :type number)
+    (key :name offset  :type aligned-offset :optional true)
+    (key :name span    :type aligned-bytes  :optional true)))
+
+(entry :binding 0 :offset 512)
+(entry :binding 1 :offset 256)
+(entry :binding 2 :offset 0)
+(entry :binding 3 :offset -512)
+(entry :binding 4 :span 512b)

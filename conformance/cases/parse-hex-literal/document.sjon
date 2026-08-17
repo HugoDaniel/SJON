@@ -1,0 +1,46 @@
+; Hex integer literals, with their exact values asserted by the schema
+; rather than by an evaluator — so all four hosts check them natively.
+;
+; `0xFF` used to lex as the number zero carrying the unit `xFF`, so a mask
+; typo was silent in every slot that did not opt into unit rejection. A
+; degenerate `:min N :max N` bound is the tightest way to say "this literal
+; means exactly N" without an `(values …)` block: any other reading, and
+; especially the old zero, fails the bound.
+;
+; Between them the four keys pin both cases of the `x` and of the digits,
+; `_` as digit grouping, a leading sign, and the width past i64.max where
+; the exact-integer tags stop being interchangeable with f64.
+(plugin :name p :version "1.0.0"
+  (value-kind :name is-255
+    :underlying number
+    :description "Exactly 255 — the value `0xFF` and `0Xff` both denote."
+    :numeric (numeric-bounds :integer true :min 255 :max 255))
+
+  (value-kind :name is-u32-max
+    :underlying number
+    :description "Exactly 4294967295, however it is spelled."
+    :numeric (numeric-bounds :integer true :min 4294967295 :max 4294967295))
+
+  (value-kind :name is-minus-16
+    :underlying number
+    :description "Exactly -16 — a hex literal may carry a leading sign."
+    :numeric (numeric-bounds :integer true :min -16 :max -16))
+
+  (value-kind :name is-u64-max
+    :underlying number
+    :description "Exactly 18446744073709551615, which only an exact-integer tag can hold."
+    :numeric (numeric-bounds :integer true :min 18446744073709551615 :max 18446744073709551615))
+
+  (form :name probe
+    (key :name lower   :type is-255)
+    (key :name upper   :type is-255)
+    (key :name grouped :type is-u32-max)
+    (key :name signed  :type is-minus-16)
+    (key :name widest  :type is-u64-max)))
+
+(probe
+  :lower   0xFF
+  :upper   0Xff
+  :grouped 0xFFFF_FFFF
+  :signed  -0x10
+  :widest  0xFFFFFFFFFFFFFFFF)

@@ -1,0 +1,4 @@
+; Path is empty — the index pass walks outside path tracking (same as
+; `cross-ref-duplicate`, the single-target case).
+(diagnostics
+  (diagnostic :code duplicate_cross_ref_target :path []))

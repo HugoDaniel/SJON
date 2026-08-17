@@ -1,0 +1,14 @@
+; All three are `invalid_manifest` — the manifest itself is wrong, and
+; that is the code the loader already uses for `(member-set …)`'s
+; equivalent rejections. A fourth condition, a count that is negative /
+; fractional / over `u16`, reports `wrong_underlying` instead: it reuses
+; the same out-of-range check `(fixed N)` and `(range :min …)` go
+; through, and the condition is identical.
+;
+; Three reports, not one: the loader keeps going after a bad head-set
+; rather than abandoning the manifest at the first, so all three
+; conditions surface in one pass.
+(diagnostics
+  (diagnostic :code invalid_manifest :severity err :path [mixed heads])
+  (diagnostic :code invalid_manifest :severity err :path [duplicated heads])
+  (diagnostic :code invalid_manifest :severity err :path [backwards heads vertex]))

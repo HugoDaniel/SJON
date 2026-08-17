@@ -134,6 +134,7 @@ fn writeForm(w: *Writer, f: *const Model.Form, heading: []const u8) Writer.Error
             try w.writeAll("`");
             try writeConstraintSuffix(w, shape);
             try w.writeAll(".\n");
+            try writeChildCounts(w, shape);
         },
     }
     if (f.positional_flags) |flags| {
@@ -207,6 +208,16 @@ fn writeKeyRow(w: *Writer, k: Model.Key) Writer.Error!void {
     try w.writeAll(" | ");
     var any = false;
     try writeConstraintsCell(w, k.value, &any);
+    if (k.requires.len != 0) {
+        try sep(w, &any);
+        try w.writeAll("requires ");
+        for (k.requires, 0..) |r, i| {
+            if (i != 0) try w.writeAll(", ");
+            try w.writeAll("`:");
+            try w.writeAll(r);
+            try w.writeAll("`");
+        }
+    }
     if (!any and k.description.len == 0) try w.writeAll("—");
     if (k.description.len > 0) {
         if (any) try w.writeAll("<br>");
@@ -269,10 +280,20 @@ fn writeTypeText(w: *Writer, shape: Model.ValueShape, pipes: PipeStyle) Writer.E
         .expr => try w.writeAll("expr"),
         // Provider route reads a `:{source-key}` string and hands it to a
         // named extractor; identity route reads a `:{name-key}` symbol.
-        .cross_ref => |x| if (x.provider) |p|
-            try w.print("ref → ({s} :{s} via {s})", .{ x.target_form, x.source_key orelse "", p })
-        else
-            try w.print("ref → ({s} :{s} …)", .{ x.target_form, x.name_key }),
+        .cross_ref => |x| {
+            try w.writeAll("ref → (");
+            // A group reads as a disjunction in the head position, which
+            // is where the choice actually is: `(a | b :name …)`. One
+            // target prints exactly what it always did.
+            for (x.targets, 0..) |t, i| {
+                if (i > 0) try w.writeAll(" | ");
+                try w.writeAll(t);
+            }
+            if (x.provider) |p|
+                try w.print(" :{s} via {s})", .{ x.source_key orelse "", p })
+            else
+                try w.print(" :{s} …)", .{x.name_key});
+        },
         .union_of => |alts| {
             for (alts, 0..) |alt, i| {
                 if (i > 0) try pipe(w, pipes);
@@ -376,6 +397,11 @@ fn writeNumericBounds(w: *Writer, nb: Model.NumericBounds, any: *bool) Writer.Er
         try w.print("max {s}{d}", .{ if (nb.exclusive_max) "<" else "", b.value });
         if (b.unit) |u| try w.print(" {s}", .{u});
     }
+    if (nb.multiple_of) |b| {
+        try sep(w, any);
+        try w.print("×{d}", .{b.value});
+        if (b.unit) |u| try w.print(" {s}", .{u});
+    }
     if (nb.repr) |r| {
         try sep(w, any);
         try w.print("repr {s}", .{@tagName(r)});
@@ -430,6 +456,49 @@ fn writeDefaultText(w: *Writer, d: Model.Default) Writer.Error!void {
 }
 
 /// Positional-line variant of the constraints cell (no table context).
+/// Per-head positional counts as a small table under the "Positional
+/// children:" sentence, emitted only when some head declares a bound.
+///
+/// The plan called for "a bounds column in the positional table"; the
+/// positional surface is a *sentence*, not a table, so the counts get a
+/// table of their own rather than a column in one that doesn't exist. The
+/// wording is prose rather than `min..max` notation because this is the
+/// one export target read by a human at a terminal — "exactly 1" and "at
+/// most 1" are the same facts a `1..1` / `0..1` reader has to translate.
+fn writeChildCounts(w: *Writer, shape: Model.ValueShape) Writer.Error!void {
+    const refs = switch (shape) {
+        .form_heads => |r| r,
+        else => return,
+    };
+    var any = false;
+    for (refs) |ref| {
+        if (ref.isBounded()) {
+            any = true;
+            break;
+        }
+    }
+    if (!any) return;
+
+    try w.writeAll("\n| Head | Count |\n| --- | --- |\n");
+    for (refs) |ref| {
+        try w.print("| `{s}` | ", .{ref.name});
+        if (ref.max) |mx| {
+            if (ref.min == mx) {
+                try w.print("exactly {d}", .{mx});
+            } else if (ref.min == 0) {
+                try w.print("at most {d}", .{mx});
+            } else {
+                try w.print("{d} to {d}", .{ ref.min, mx });
+            }
+        } else if (ref.min != 0) {
+            try w.print("at least {d}", .{ref.min});
+        } else {
+            try w.writeAll("any");
+        }
+        try w.writeAll(" |\n");
+    }
+}
+
 fn writeConstraintSuffix(w: *Writer, shape: Model.ValueShape) Writer.Error!void {
     var any = false;
     var probe: std.Io.Writer.Discarding = .init(&.{});
@@ -497,6 +566,58 @@ test "markdown export renders a form's keys with type, default, constraints" {
     try testing.expect(std.mem.indexOf(u8, page, "### `(circle …)`") != null);
     try testing.expect(std.mem.indexOf(u8, page, "| `:radius` | `number` | no | `4` | integer; min 0 |") != null);
     try testing.expect(std.mem.indexOf(u8, page, "| `:label` | `string` | yes | — | — |") != null);
+}
+
+test "bounded positional heads render as a count table" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const heads = [_]Model.FormRef{
+        .{ .plugin = "gfx", .name = "vertex", .min = 1, .max = 1 },
+        .{ .plugin = "gfx", .name = "fragment", .max = 1 },
+        .{ .plugin = "gfx", .name = "spread", .min = 2 },
+        .{ .plugin = "gfx", .name = "ranged", .min = 1, .max = 3 },
+        .{ .plugin = "gfx", .name = "constant" },
+    };
+    const forms = [_]Model.Form{.{
+        .name = "render-pipeline",
+        .keys = &.{},
+        .positional = .{ .kind = .{ .form_heads = &heads } },
+    }};
+    const page = try emitOne(arena.allocator(), .{
+        .name = "gfx",
+        .forms = &forms,
+        .value_kinds = &.{},
+    });
+    // Prose, not `min..max`: this is the one target a human reads at a
+    // terminal, and every reader of `1..1` has to translate it anyway.
+    try testing.expect(std.mem.indexOf(u8, page, "| `vertex` | exactly 1 |") != null);
+    try testing.expect(std.mem.indexOf(u8, page, "| `fragment` | at most 1 |") != null);
+    try testing.expect(std.mem.indexOf(u8, page, "| `spread` | at least 2 |") != null);
+    try testing.expect(std.mem.indexOf(u8, page, "| `ranged` | 1 to 3 |") != null);
+    // Unbounded heads still get a row, so the table is the whole set —
+    // a head absent from it would read as "not accepted".
+    try testing.expect(std.mem.indexOf(u8, page, "| `constant` | any |") != null);
+}
+
+test "an all-unbounded positional head-set emits no count table" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const heads = [_]Model.FormRef{
+        .{ .plugin = "gfx", .name = "vertex" },
+        .{ .plugin = "gfx", .name = "fragment" },
+    };
+    const forms = [_]Model.Form{.{
+        .name = "loose",
+        .keys = &.{},
+        .positional = .{ .kind = .{ .form_heads = &heads } },
+    }};
+    const page = try emitOne(arena.allocator(), .{
+        .name = "gfx",
+        .forms = &forms,
+        .value_kinds = &.{},
+    });
+    try testing.expect(std.mem.indexOf(u8, page, "Positional children:") != null);
+    try testing.expect(std.mem.indexOf(u8, page, "| Head | Count |") == null);
 }
 
 test "deprecated members carry their deprecation message" {

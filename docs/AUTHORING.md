@@ -185,15 +185,20 @@ checks against the slot's declared type accordingly.
 
 ## 4. Numbers and units
 
-A number can carry a **unit suffix**: one or more ASCII letters,
-or a single `%`, glued to the end with no whitespace.
+A number can carry a **unit suffix**: one or more ASCII letters
+(hyphens may join two letter runs), or a single `%`, glued to the end
+with no whitespace.
 
 ```sjon
 0           1           -3                 ; numbers, no unit
 0.5         -1.25       1.5e-10            ; numbers, no unit
 4b          90deg       50%                ; numbers with unit
 250ms       1.5e2hz                        ; numbers with unit
+2d-array    5ms-per-frame                  ; hyphen-joined units
 ```
+
+A hyphen only continues a unit when a **letter** follows it, so `1em-2`
+is two values (`1em` and `-2`), not one number with the unit `em-2`.
 
 Units are **opaque** to the substrate. SJON does not interpret
 `b` as beats, `deg` as degrees, or `ms` as milliseconds — it
@@ -234,6 +239,50 @@ Digit grouping is allowed:
 ```
 
 Underscores are stripped before parsing.
+
+### Write masks in hex
+
+A `0x` prefix opens a hexadecimal integer, so a bit mask can be
+written the way the spec you are transcribing writes it:
+
+```sjon
+(target :write-mask 0xFFFFFFFF :sample-mask 0xF)
+```
+
+instead of:
+
+```sjon
+(target :write-mask 4294967295 :sample-mask 15)
+```
+
+Both documents mean exactly the same thing. Case is free on the `x`
+and on the digits, and `_` groups hex digits the way it groups decimal
+ones:
+
+```sjon
+0xFF        0Xff        0xdeadBEEF         ; all fine
+0xFFFF_FFFF                                ; = 4294967295
+-0x10                                      ; = -16
+```
+
+Three things to know:
+
+**Hex is an integer.** No fraction, no exponent, no unit. The token
+ends at the first non-hex byte, so `0xFFms` is `0xFF` followed by the
+symbol `ms` — not a masked value with a unit.
+
+**`0x` alone is an error.** `0x`, `0x_F`, and `0xGG` are parse
+diagnostics. Before hex literals existed `0xFF` lexed as the number
+`0` carrying the unit `xFF`, so a mask typo was *silently zero* unless
+the slot happened to reject units. That is the failure hex removes, and
+leaving `0x` readable as zero would have kept it for the likeliest
+typo.
+
+**`sjon fmt` rewrites hex to decimal.** The formatter works from the
+value and never sees your source, so `0xFFFFFFFF` comes back as
+`4294967295` — the same normalization that turns `1_000` into `1000`.
+If you want the hex spelling to survive in a file, keep `sjon fmt`
+off it.
 
 ---
 
@@ -807,9 +856,10 @@ which constraint applies. The common refinements are:
 - **Unit shape** — required unit presence and an allowed list
   of unit suffixes. `duration` might require a unit drawn from
   `s | ms | b`.
-- **Numeric bounds** — range and integrality constraints on
-  number-underlying kinds. `opacity` might be "number in
-  [0, 1]"; `iteration-count` might be "integer ≥ 1".
+- **Numeric bounds** — range, integrality, and divisibility
+  constraints on number-underlying kinds. `opacity` might be
+  "number in [0, 1]"; `iteration-count` might be "integer ≥ 1";
+  `buffer-offset` might be "256-byte aligned".
 - **String bounds** — length and closed format checks on
   string-underlying kinds. `slug` might require 1–64 codepoints;
   `email-address` might use the `email` format.
@@ -848,6 +898,15 @@ Worked examples of writing to each:
 (layer :opacity 1.5)              ; ✗ above maximum
 (layer :opacity -0.1)             ; ✗ below minimum
 
+; Slot typed `buffer-offset` (number, integer, 256-byte aligned).
+; Alignment is the constraint a range and "must be whole" cannot
+; express between them.
+(binding :offset 0)               ; ✓ zero divides by anything
+(binding :offset 512)             ; ✓
+(binding :offset 250)             ; ✗ not a multiple of 256
+(binding :offset 250.5)           ; ✗ not an integer — reported FIRST,
+                                  ;   before the alignment complaint
+
 ; Slot typed `projection` (symbol underlying, members [ortho, perspective]).
 (camera :projection ortho)        ; ✓
 (camera :projection perspective)  ; ✓
@@ -876,6 +935,47 @@ The key insight: a value kind is the plugin's way of saying
 "I want this slot to be more specific than just a number." You
 don't define them as an author — you write values that satisfy
 them.
+
+### When a name can come from more than one form
+
+Sometimes a slot should accept a name declared by either of two forms —
+"any pipeline", where a pipeline is a `(render-pipeline …)` or a
+`(compute-pipeline …)`. A plugin can write that two ways, and as an author
+you can tell which one you are looking at from the diagnostics you get.
+
+A **target group** (`:target [render-pipeline compute-pipeline]`) puts
+both forms in *one* namespace. Every name resolves regardless of which
+form declared it, and declaring the same name in both is an error at the
+declarations:
+
+```sjon
+(render-pipeline  :name blit)
+(compute-pipeline :name reduce)
+
+(dispatch :pipeline blit)         ; ✓ resolves
+(dispatch :pipeline reduce)       ; ✓ resolves — same slot, other form
+(dispatch :pipeline blot)         ; ✗ not_cross_ref, spanning both forms
+
+(render-pipeline  :name same)
+(compute-pipeline :name same)     ; ✗ duplicate_cross_ref_target
+```
+
+A **union of two cross-reference kinds** keeps them in *two* namespaces.
+The same names resolve, but `same` is now legal in both, and the reference
+becomes ambiguous instead:
+
+```sjon
+(render-pipeline  :name same)
+(compute-pipeline :name same)     ; ✓ two namespaces, no collision
+(dispatch :pipeline same)         ; ⚠ union_ambiguous — resolves to the
+                                  ;   first alternative the plugin listed
+```
+
+Neither is more correct in general; they answer different questions. If
+you hit `duplicate_cross_ref_target` across two forms, the schema says
+those names are meant to be unique together, and the fix is to rename one.
+If you hit `union_ambiguous`, the schema says they are not, and the fix is
+either to rename anyway or to use a slot that names one kind.
 
 ### Cross-references whose names come from inside a string
 
@@ -918,6 +1018,56 @@ there would be claiming to know a member set it never computed. In an
 editor this arrives as a hint rather than an error, because nothing in
 your file is wrong.
 
+### When a name could come from more than one form
+
+A slot can be typed as a *union* of two reference kinds — "this names
+either a render pipeline or a compute pipeline". Alternatives are tried
+in the order the plugin declared them, and the first one that accepts
+wins. Usually you never notice, because the name exists in only one of
+them:
+
+```sjon
+(render-pipeline  :name blit)
+(compute-pipeline :name reduce)
+
+(dispatch :pipeline blit)     ; ✓ the render pipeline
+(dispatch :pipeline reduce)   ; ✓ the compute pipeline
+```
+
+Now name them both the same thing:
+
+```sjon
+(render-pipeline  :name same)
+(compute-pipeline :name same)
+
+(dispatch :pipeline same)     ; ⚠ union_ambiguous
+```
+
+Neither declaration is a duplicate — duplicate names are caught *per
+target*, and these are two different targets, so each is alone in its
+own namespace. But the reference now has two readings, and the only
+thing choosing between them is which alternative the plugin author
+happened to list first. SJON picks the render pipeline; a tool that
+resolves the name through its own table may well pick the other, and
+neither of you would ever find out.
+
+It is a **warning**, not an error: your document is valid and the
+behaviour is defined. It is telling you that the definition is
+accidental. Two repairs, and which one is right depends on what you
+meant:
+
+- **Rename one declaration.** Right when the collision was an accident
+  and the two things are unrelated.
+- **Split the slot.** Right when both names are deliberate and it is
+  the *slot* that was overloaded — `:render-pipeline` and
+  `:compute-pipeline` as separate keys, each with one reference kind.
+
+You will not see this warning for a union that merely overlaps. `1024`
+in a slot typed "a byte count or a named constant" matches the count
+half and that is the design. The warning is specifically about two
+*names of two different things* colliding, which is the case where order
+is deciding something nobody decided.
+
 ---
 
 ## 12. Common patterns
@@ -935,6 +1085,34 @@ declares a default.
 (circle :center [0 0] :radius 1 :color "red")   ; ✓
 (circle :radius 1)                               ; ✗ missing :center
 ```
+
+### Keys that require other keys
+
+Some keys are only meaningful next to another. A byte `:offset` into no
+buffer describes nothing, so a plugin can declare that writing one
+demands the other:
+
+```sjon
+; :offset and :size each require :buffer.
+(entry :binding 0)                               ; ✓ neither written
+(entry :binding 0 :buffer uniforms)              ; ✓ the requirement alone
+(entry :binding 0 :buffer uniforms :offset 256)  ; ✓ satisfied
+(entry :binding 0 :offset 256)                   ; ✗ dependent_key_missing
+```
+
+The rule runs one way. `:buffer` on its own is fine — it is `:offset`
+that drags `:buffer` in, never the reverse. And you get one diagnostic
+per key that went unsatisfied, listing everything it was missing, so a
+key needing three absent keys tells you all three at once.
+
+This is one of three ways a plugin relates a form's keys, and the
+message tells you which you hit:
+
+| You see | The rule was |
+| --- | --- |
+| `dependent_key_missing` | "if this key, then also that one" |
+| `mutually_exclusive_keys_present` / `required_one_of_missing` | "how many of these may appear" |
+| `unknown_key` on a key that exists elsewhere | "this key applies only for a certain *value* of another key" (a variant) |
 
 ### Defaults and effective values
 
@@ -980,6 +1158,66 @@ declared but could not be evaluated by the active host.
 (camera :projection "ortho")                     ; ✗ string, not symbol
 ```
 
+### When the enum's name starts with a digit
+
+Some enums name their members with a digit first. WebGPU's
+`GPUTextureDimension` is `"1d"`, `"2d"`, `"3d"`; its view dimensions add
+`cube` and `cube-array`. A plugin can declare those directly:
+
+```sjon
+(texture :name albedo :dimension 2d :view cube)
+```
+
+You write the spelling the spec uses — no quoting, no numeric lookup
+table. Three things worth knowing, because they follow from *how* it
+works rather than from the enum:
+
+**Spelling is forgiving, magnitude is not.** `2d`, `2.0d`, and `02d` are
+all the member `2d`: the schema matches the value's magnitude and unit,
+not its text. `2.5d` is not `2d` — a fractional magnitude matches nothing.
+
+**The unit is part of the name.** `2b` is not `2d`. If a plugin declares
+`[1d 2d 3d]`, only the `d` tail counts.
+
+**A bare number is not a member.** `:dimension 2` is a *number*, not the
+spelling `2d`, so it fails as a type mismatch rather than as a bad enum
+value. The letter tail is what makes a digit-leading token a name.
+
+When you get it wrong the diagnostic names the set, the same way it does
+for ordinary symbol members:
+
+```
+error: not_member: form `texture` keyword `:dimension` expects
+       `texture-dimension`, got `4d` (allowed: `1d`, `2d`, `3d`)
+```
+
+### A number or a named constant
+
+A slot typed `scalar-or-ref` takes either a literal or a bare symbol
+naming one declared elsewhere:
+
+```sjon
+(define :name MAX_BONES :value 128)
+
+(mesh :bones 128)                                ; ✓ the literal
+(mesh :bones MAX_BONES)                          ; ✓ the reference
+(mesh :bones "128")                              ; ✗ neither branch
+```
+
+Watch the misspelling. Whether `MAX_BONE` is caught depends on how the
+plugin declared the slot:
+
+```sjon
+(mesh :bones MAX_BONE)
+```
+
+If the shorthand names a `:ref` kind, this fails —
+`union_no_branch_matched`, naming both alternatives. If it does not, the
+reference half is a plain unchecked symbol and this **validates clean**,
+silently referring to nothing. If you are writing the plugin, prefer the
+checked form; if you are reading someone else's, that is the difference
+between a typo caught at validate time and one caught at runtime.
+
 ### Form-as-slot (head-set) pin
 
 ```sjon
@@ -1017,6 +1255,75 @@ no `:positional` needed, since inline locals imply it:
 Add a `head-set` on `:positional` to close the slot to exactly those
 heads. Full semantics: LANGUAGE.md §6.3.1 and portable-manifest-v1.md
 §5.2.
+
+The two work together, and a head-set does **not** force you to declare
+anything globally: you don't need a global form to name a head in a
+head-set, you need a form the validator can find *from that slot*. A
+local one counts.
+
+```sjon
+; The head-set lists `storage-texture`; the only (form :name
+; storage-texture …) is a local of `entry`. That is enough — no global
+; declaration, no placeholder form.
+(form :name bind-group-layout :positional bgl-entry-item
+  (form :name entry :positional bgl-resource
+    (form :name buffer          (key :name type   :type symbol))
+    (form :name storage-texture (key :name format :type symbol))))
+```
+
+If a head-set names something with no form *anywhere*, the head is
+allowed in and then has nothing to be checked against —
+`unknown_local_form` at the slot. That's one diagnostic, and it comes
+from looking up the body, not from the head-set.
+
+#### …and how many of each
+
+On a `:positional` slot, a head-set can also bound the count. Spell the
+heads out with `(head …)` children instead of `:names`, and each one may
+carry `:min` / `:max`:
+
+```sjon
+(value-kind :name pipeline-section :underlying form
+  :heads (head-set
+    (head :name vertex   :min 1 :max 1)   ; exactly one
+    (head :name fragment :max 1)          ; at most one — none is fine
+    (head :name constant)))               ; any number
+
+(form :name render-pipeline :positional pipeline-section
+  (key :name name :type symbol))
+```
+
+```sjon
+(render-pipeline :name main
+  (vertex :entry vs) (fragment :entry fs)
+  (constant :name gamma :value 2.2))             ; ✓
+
+(render-pipeline :name main
+  (vertex :entry vs)
+  (fragment :entry fs) (fragment :entry alt))    ; ✗ positional_too_many, on the second (fragment …)
+
+(render-pipeline :name main
+  (fragment :entry fs))                          ; ✗ positional_missing, on (render-pipeline …)
+```
+
+The two codes land in different places on purpose. A ceiling breach
+points at the child that crossed it — that's the line to delete. A floor
+breach has no child to point at, so it lands on the parent form's head,
+the same place a missing required key does.
+
+Three things worth knowing before you rely on it:
+
+- `:names [a b c]` cannot carry a count. The two spellings are exclusive
+  (mixing them is `invalid_manifest`), so adding a bound to one head means
+  writing all of them as `(head …)` children.
+- **`:open true` does not turn the counts off.** Openness is about
+  keywords; a form that declares `:positional <bounded-kind>` has opted
+  into its children's count regardless.
+- **The counts only mean something on `:positional`.** Reuse the same kind
+  on a `(key :type pipeline-section)` slot or a
+  `(vector-shape :element pipeline-section)` and the bounds ride along
+  inertly — a keyed slot holds one value, so there is nothing to count.
+  That is deliberate: it keeps a bounded kind shareable.
 
 ### Embedding multi-line code
 
@@ -1181,6 +1488,7 @@ see most while writing.
 | `unknown_key` | unknown keyword `:width` in form `canvas` | The key isn't declared on this form. | Typo, or use a sibling key. Try `:w` instead of `:width`. |
 | `duplicate_key` | duplicate keyword `:bpm` in form `scene` | Same `:k` appears twice. | Remove or rename the duplicate. |
 | `missing_required_key` | form `circle` is missing required keyword `:radius` | A required key isn't present. | Add it. |
+| `dependent_key_missing` | form `entry` keyword `:offset` requires `:buffer`, which is absent | A key you wrote demands sibling keys you didn't. | Add the named keys, or drop the one that needs them. |
 | `positional_not_allowed` | form `circle` does not accept positional children | Form is declared `positional = none`. | Wrap the child in the right key, or move it under a parent that allows children. |
 | `wrong_underlying` | form `scene` keyword `:bpm` expects number, got string | Slot's value type doesn't match. | Look at the slot's declared type; convert the value. |
 | `arity_mismatch` | expression `lerp` expects exactly 3 argument(s), got 2 | Wrong argument count to an expression. | Add or remove arguments. |
@@ -1198,6 +1506,14 @@ A few more that show up around the keyword-pairing rule (§7):
   closed-set list. Re-check the plugin's enum.
 - `not_head_member` — a form's head isn't in the slot's
   allowed list (HeadSet). Use one of the pinned heads.
+- `positional_too_many` — more positional children carry this head than
+  the head-set's `:max` allows. Reported on the child that crossed the
+  ceiling: delete or merge it, or raise the bound. Fires once per
+  crossing, so the count in the message is the real total.
+- `positional_missing` — fewer carry it than `:min` requires. Reported on
+  the parent form's head, since there's no child to point at: add the
+  missing child, or lower the bound. Neither code is silenced by
+  `:open true`.
 - `unit_required` / `unit_not_allowed` — the slot's `UnitShape`
   either requires a suffix you omitted (bare `90` when the slot
   wants `90deg`) or rejects the suffix you supplied (`90%` when

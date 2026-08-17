@@ -1,0 +1,11 @@
+; Four rejections, one per offending declaration. The paths are the
+; loader's `[<kind> cross-ref <key>]` shape.
+;
+; No document body: a manifest carrying `invalid_manifest` errors does not
+; register its forms, so any instance below would add an `unknown_form`
+; that says nothing about this case.
+(diagnostics
+  (diagnostic :code invalid_manifest :path [empty-ref cross-ref target])
+  (diagnostic :code invalid_manifest :path [repeat-ref cross-ref target])
+  (diagnostic :code invalid_manifest :path [cyclic-ref cross-ref acyclic])
+  (diagnostic :code invalid_manifest :path [extract-ref cross-ref provider]))

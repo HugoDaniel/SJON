@@ -1,0 +1,5 @@
+; One diagnostic, and the path carries the kind's name as its first step
+; — which is the whole assertion. A host that reads `:name` only in the
+; shape loop reports `[members]` here.
+(diagnostics
+  (diagnostic :code invalid_manifest :path [mode members]))

@@ -5,4 +5,4 @@
 //! import `root.zig`, so we keep the constant in this leaf file to
 //! avoid version-string drift across the three describe outputs).
 
-pub const string = "1.1.0";
+pub const string = "1.2.0";

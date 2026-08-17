@@ -374,6 +374,48 @@ const MASTERY_QUIZZES = {
       ],
       correct: 1,
     },
+    {
+      q: 'Why is `10x` not a hex literal?',
+      options: [
+        'It is — `10x` is 16 in hexadecimal.',
+        'The `0x` prefix is only recognised after a lone `0`, so elsewhere `x` is an ordinary unit letter: `10x` is the number 10 with unit `x`.',
+        'Hex needs at least two digits after the prefix.',
+      ],
+      correct: 1,
+      explanations: [
+        'No — there is no `0x` prefix here at all. The lexeme is the digits `10` followed by the unit letter `x`.',
+        'Correct, and the narrowness is the point: gating the prefix on a bare `0` (optionally signed) is what lets hex be added without changing how a single pre-existing document reads.',
+        'Hex needs exactly one digit minimum — `0xF` is fine. The digit count is not what disqualifies `10x`.',
+      ],
+    },
+    {
+      q: '`2d-array` is one value and `1em-2` is two. What single rule decides both?',
+      options: [
+        'Hyphens are allowed inside a unit, and `2` is not a valid unit character.',
+        'Inside a unit, a hyphen continues the suffix only when the next byte is an ASCII letter — otherwise it ends the token.',
+        'The lexer looks the unit up against a table of known units.',
+      ],
+      correct: 1,
+      explanations: [
+        'Close, but stated backwards: the rule is about what follows the hyphen, not about which bytes may appear in a unit. A trailing `2d-` also ends at `2d`, and nothing about `2` being invalid explains that.',
+        'Correct, and the narrowness is the point: it is the smallest rule that gets `2d-array` while leaving every previously-valid input reading exactly as it did.',
+        'Units are opaque to the substrate — SJON never interprets one, so there is no table to consult. A plugin decides which units it accepts, long after lexing.',
+      ],
+    },
+    {
+      q: 'What does `sjon fmt` print for `0xFF`, and why?',
+      options: [
+        '`0xFF` — the formatter preserves the source spelling of every literal.',
+        '`255` — the formatter works from the value and never sees your source, the same reason `1_000` prints as `1000`.',
+        'It refuses to format a file containing hex.',
+      ],
+      correct: 1,
+      explanations: [
+        'The formatter has no access to the source text; it prints from the parsed tree. No numeric spelling survives it — not underscores, not exponents, not hex.',
+        'Correct. Values round-trip; spellings do not (`LANGUAGE.md` §4.2). Keeping the hex spelling would need a carrier for something the value already determines.',
+        'It formats normally — hex is an ordinary integer literal by the time the printer sees it.',
+      ],
+    },
   ],
   'forms-and-keyword-pairing': [
     {
@@ -598,6 +640,48 @@ const MASTERY_QUIZZES = {
       ],
       correct: 1,
     },
+    {
+      q: '`:offset` declares `requires :buffer`. The document writes `(entry :binding 0 :buffer uniforms)` - the requirement, but not the dependent key. Is that an error?',
+      options: [
+        'No - the rule runs one way. Only writing `:offset` demands `:buffer`.',
+        'Yes - the two keys must always appear together.',
+        'Yes - `:buffer` is meaningless without something measured from it.',
+      ],
+      correct: 0,
+      explanations: [
+        'Correct. An absent dependent key constrains nothing, so writing only the key that others depend on is always fine.',
+        'That would be a mutual dependency, which is really an exclusive-group bundle - and a plugin declaring it in both directions is rejected at load.',
+        'Reasonable as design taste, but not what the rule says. The dependency points from `:offset` to `:buffer`, not back.',
+      ],
+    },
+    {
+      q: 'A form writes two keys that both require the same absent key: `(entry :binding 0 :offset 256 :size 64)`, where both require `:buffer`. How many diagnostics?',
+      options: [
+        'One - there is a single missing key.',
+        'Two - one per key whose requirement went unsatisfied.',
+        'Three - two dependents plus the missing key itself.',
+      ],
+      correct: 1,
+      explanations: [
+        'The count follows the dependent keys, not the missing ones. Contrast one key missing three requirements, which IS a single diagnostic.',
+        'Correct. One per unsatisfied dependent key. The mirror rule: one key missing several requirements gets one diagnostic naming them all, because that is one problem.',
+        'The absent key is not reported on its own - it is optional, so nothing requires it except the two keys that were written.',
+      ],
+    },
+    {
+      q: 'A plugin needs to express "`:strip-index-format` applies only when `:topology` is `triangle-strip`". Which of the three mechanisms?',
+      options: [
+        'A key dependency - `:strip-index-format` requires `:topology`.',
+        'A discriminated form with a `triangle-strip` variant.',
+        'An exclusive group over `:topology` and `:strip-index-format`.',
+      ],
+      correct: 1,
+      explanations: [
+        'Close, and a plugin may add this too - but a dependency only demands that `:topology` be *present*, not that it hold a particular value. The wording names a value.',
+        'Correct. The rule names a specific value (`triangle-strip`), and that is the tell: values mean variants. A group counts; a dependency says "then also".',
+        'A group bounds how many of a set may appear. Nothing here is about counting.',
+      ],
+    },
   ],
   'value-kinds-shapes': [
     {
@@ -670,6 +754,48 @@ const MASTERY_QUIZZES = {
         'Units are a separate axis (`unit_*`); a repr failure is `repr_out_of_range`.',
       ],
     },
+    {
+      q: 'A slot is typed `buffer-offset: number, min 0, integer, multiple of 256`. The document writes `250.5`. Which single diagnostic fires?',
+      options: [
+        '`number_not_multiple` - it is not a multiple of 256.',
+        '`number_not_integer` - integrality is checked before divisibility.',
+        'All three, one per violated constraint.',
+      ],
+      correct: 1,
+      explanations: [
+        'It is not a multiple either, but that is not what is reported. The checks run integrality, then range, then divisibility, and only the first failure is named.',
+        'Correct. Being fractional is the more basic problem - telling you to align a number that is not whole yet would be useless advice. Fix it and re-run; a second complaint may be waiting.',
+        'Only the first failure is reported. Fix it and re-run to see whether another is waiting behind it.',
+      ],
+    },
+    {
+      q: 'Same slot (`min 0, integer, multiple of 256`). The document writes `-256`. Which diagnostic?',
+      options: [
+        '`number_below_min` - it is negative.',
+        '`number_not_multiple` - a negative number cannot be a multiple.',
+        'None - `-256` divides by 256 exactly.',
+      ],
+      correct: 0,
+      explanations: [
+        'Correct. `-256` is a genuine multiple of 256, so the only thing wrong with it is the sign - and range is checked before divisibility anyway.',
+        'Sign is irrelevant to divisibility: `-512` is a multiple of `256`. What fails here is `:min 0`.',
+        'It does divide exactly, which is why divisibility is not the complaint. But it is still below the minimum.',
+      ],
+    },
+    {
+      q: 'A plugin declares `:multiple-of -256`. What happens when the schema loads?',
+      options: [
+        'It is refused: the divisor must be positive.',
+        'It loads and behaves as `:multiple-of 256`, since sign is irrelevant to divisibility.',
+        'It loads with a warning, like a fractional divisor does.',
+      ],
+      correct: 0,
+      explanations: [
+        'Correct. The *value* may be negative - `-512` is a multiple of `256` - but the *divisor* may not. A negative divisor accepts exactly what its magnitude accepts, so nothing is lost, and JSON Schema requires `multipleOf` to be positive, so the exported schema would be one no validator will compile.',
+        'That reasoning is right about the value and wrong about the divisor. It would work, which is why it was tempting; it is refused because the exported schema could not represent it.',
+        'The warning case is a *fractional* divisor, which works and is only approximate. A non-positive divisor does not work at all.',
+      ],
+    },
   ],
   'value-kinds-refinements': [
     {
@@ -682,11 +808,48 @@ const MASTERY_QUIZZES = {
       correct: 0,
     },
     {
+      q: '`2d` is a legal member of a *symbol* member set, yet `2d` is not a symbol. How does that work?',
+      options: [
+        'The lexer makes an exception for `d` and reads `2d` as a symbol.',
+        'The schema stores the member as a `(magnitude, unit)` pair and matches the number against it — the value stays a unit-bearing number.',
+        'The validator rewrites the value into the symbol `2d` before matching.',
+      ],
+      correct: 1,
+      explanations: [
+        'There is no such exception, and there could not be a useful one: the unit alphabet is not a list of enum names.',
+        'Correct. A digit-leading spelling is *accepted* in a symbol slot, never rewritten — the tree, the binary IR, and the JSON bridge all keep `{"$num": [2, "d"]}`. That is why matching is on the pair, which also makes `2.0d` and `02d` the same member.',
+        "Rewriting would make a node's identity depend on the schema, which the JSON bridge and the binary encoder both forbid: `parse → validate` and `parse → binary → validate` would disagree about the tag.",
+      ],
+    },
+    {
+      q: 'Why do `:dimension 2b` and `:dimension 2` fail differently against `members 1d | 2d | 3d`?',
+      options: [
+        'They do not — both are `not_member`.',
+        '`2b` is `not_member` (a unit-bearing number is the right shape, wrong member); `2` is `wrong_underlying` (a bare number is not a spelling at all).',
+        '`2b` is `unit_not_allowed` and `2` is `not_member`.',
+      ],
+      correct: 1,
+      explanations: [
+        'The two fail one layer apart, and the codes say so — which is the point of reporting `not_member` here rather than a blanket tag mismatch.',
+        'Correct. Declaring a digit-leading member is what makes the slot accept unit-bearing numbers at all; the unit is part of the identity, so `2b` gets the "which ones are allowed" report. A unitless number never enters that path.',
+        '`unit_not_allowed` belongs to `(unit-shape :allowed …)` on a number-underlying kind — a different refinement entirely.',
+      ],
+    },
+    {
       q: 'What does `union_no_branch_matched` tell you to reread?',
       options: [
         'The plugin manifest version.',
         'The list of alternatives the message names — the slot accepts each shape; rewrite the value to fit one of them.',
         'The whole document from scratch.',
+      ],
+      correct: 1,
+    },
+    {
+      q: 'When two union alternatives can both accept the same value, which one wins?',
+      options: [
+        'The most specific alternative, decided by shape.',
+        'Whichever the plugin declared first — order is the whole rule.',
+        'Neither; an overlapping union is rejected at load.',
       ],
       correct: 1,
     },
@@ -709,6 +872,48 @@ const MASTERY_QUIZZES = {
       correct: 0,
     },
     {
+      q: 'A head declares `(head :name fragment :max 1)` and a form carries four `(fragment …)` children. Where does the diagnostic land, and how many do you get?',
+      options: [
+        'One `positional_too_many`, on the second `(fragment …)` — the one that crossed the ceiling.',
+        'Three `positional_too_many`, one per child past the ceiling.',
+        'One `positional_too_many`, on the parent form.',
+      ],
+      correct: 0,
+      explanations: [
+        'Correct. The count crosses `:max` exactly once, so the report fires on that transition — and it names the real total (4), not the ceiling.',
+        'That would bury every other diagnostic on the form under duplicates of one fact.',
+        'The parent is where a *floor* breach lands, since that one has no child to point at. A ceiling breach does.',
+      ],
+    },
+    {
+      q: 'A form declares `:open true` and a bounded `:positional` head-set. Which rules still apply?',
+      options: [
+        'Both counts still apply — `:open` widens the *keyword* surface only.',
+        'Neither — `:open` turns off every end-of-form check.',
+        'Only `positional_too_many`; the floor sweep is suppressed like other end-of-form sweeps.',
+      ],
+      correct: 0,
+      explanations: [
+        "Correct. Openness is about accepting unknown keywords; a form that declares `:positional <bounded-kind>` opted into its children's count.",
+        'It turns off the keyword ones — required keys, the discriminant gate, exclusive groups. Positional rules like `not_head_member` already fire on open forms.',
+        'That would half-enforce one declaration: max checked, min not.',
+      ],
+    },
+    {
+      q: 'The same bounded head-set kind is used on a `:positional` slot and on a `(key :type …)` slot. Where do its `:min` / `:max` counts apply?',
+      options: [
+        'Only at the `:positional` slot; on the keyed slot they ride along inertly.',
+        'At both — a bound is part of the kind, so it travels with it.',
+        'Nowhere; declaring a bound on a shared kind is rejected at load.',
+      ],
+      correct: 0,
+      explanations: [
+        'Correct. A keyed slot holds one value, so `:max 1` is trivially true and `:min 1` has no set to be missing from. Inert rather than an error, so a bounded kind stays shareable.',
+        'A keyed slot has no repeated population to count, so there would be nothing for the bound to mean.',
+        'Rejecting reuse would make a bounded head-set kind un-shareable for no gain.',
+      ],
+    },
+    {
       q: 'A slot typed `dim: scalar-or-ref, base dim-value` (a number base). Which value takes the reference branch?',
       options: [
         'The string `"WORKGROUP_SIZE"`.',
@@ -718,8 +923,36 @@ const MASTERY_QUIZZES = {
       correct: 1,
       explanations: [
         'A quoted string is neither a number nor a symbol, so it fires `union_no_branch_matched`.',
-        'Correct. `scalar-or-ref` expands to `union dim-value | symbol`; a bare symbol takes the reference branch.',
+        'Correct. With no `ref` named, `scalar-or-ref` expands to `union dim-value | symbol`; a bare symbol takes the reference branch.',
         'A keyword is not one of the branches; the reference branch is a bare symbol.',
+      ],
+    },
+    {
+      q: 'A `scalar-or-ref` slot names no `ref` kind, so the reference half is the plain `symbol` type. The document misspells a constant as `WORKGROUP_SIZ`. What happens at validate time?',
+      options: [
+        'It validates clean - any symbol satisfies the reference half.',
+        'It fires `not_cross_ref` - the constant does not exist.',
+        'It fires `union_no_branch_matched` - neither branch accepts it.',
+      ],
+      correct: 0,
+      explanations: [
+        'Correct. The reference half only asked for a symbol, and a misspelling is still a symbol. Nothing checked that a constant by that name exists; the mistake surfaces when the host tries to resolve it.',
+        'Nothing declared the reference half as a cross-reference, so there is no target list to check against.',
+        'The symbol branch accepts it, so the union matched. A string would fail this way.',
+      ],
+    },
+    {
+      q: 'The plugin instead declares the slot as `scalar-or-ref, base bone-count, ref define-ref`, where `define-ref` is a cross-reference kind. The document writes `MAX_BONE` and no `(define :name MAX_BONE ...)` exists. Which diagnostic?',
+      options: [
+        '`not_cross_ref` - the reference half is what failed.',
+        '`union_no_branch_matched`, naming both alternatives.',
+        '`wrong_underlying` - a symbol was supplied where a number belongs.',
+      ],
+      correct: 1,
+      explanations: [
+        'Reasonable, but a union does not forward one branch’s private reason. That is the general rule for unions, and the shorthand is a union underneath.',
+        'Correct. The shorthand desugars to an ordinary union, and a union reports that no alternative matched, listing what it tried. The second alternative is where a real name was expected.',
+        'A symbol is a legal shape here - it is the reference branch. What failed is that it names nothing.',
       ],
     },
     {
@@ -733,11 +966,108 @@ const MASTERY_QUIZZES = {
       explanations: [
         'A slot-local set narrows the choices, so an arbitrary head is not accepted.',
         'Correct. The head matches no local form and no global form, so the slot-scoped `unknown_local_form` fires - more specific than `unknown_form`.',
-        '`not_head_member` is for a head set (a closed list of global heads); a slot that defines forms inline reports `unknown_local_form`.',
+        '`not_head_member` is for a head set (a closed list of allowed head spellings); a slot that defines forms inline reports `unknown_local_form`.',
+      ],
+    },
+    {
+      q: 'A head set lists `ghost`, but no form named `ghost` is declared anywhere - not locally, not globally. The document writes `(ghost :x 1)` in that slot. How many diagnostics?',
+      options: [
+        'Two - `not_head_member` and `unknown_local_form`.',
+        'One - `unknown_local_form`.',
+        'One - `not_head_member`.',
+      ],
+      correct: 1,
+      explanations: [
+        'Two diagnostics is what an out-of-set head produces, because both steps fail. Here the head IS in the set, so the head set is satisfied.',
+        'Correct. The head set admitted `ghost` (it compares spelling against its list), and the complaint came from the next step, which found no form to check the body against.',
+        'A head set never reports an undeclared name - it resolves nothing. It compared `ghost` against its list, found it, and passed.',
+      ],
+    },
+    {
+      q: 'A head set names `storage-texture`, whose only `(form ...)` declaration is a slot-local of the form you are inside. Does that work?',
+      options: [
+        'Yes - the head set checks spelling, and the body then resolves local-first.',
+        'No - head set names must be declared globally.',
+        'Only if the local form is also listed in the head set twice.',
+      ],
+      correct: 0,
+      explanations: [
+        'Correct. The head set names spellings, not declarations; a local form in scope at the slot is what the body is checked against.',
+        'A common misreading. It leads to declaring placeholder global forms that do nothing - the head set never consults a global catalog.',
+        'Head set entries are a set of spellings; repeating one changes nothing.',
       ],
     },
   ],
   'cross-references': [
+    {
+      q: 'Two forms of different kinds both declare `:name same`. Is that a `duplicate_cross_ref_target`?',
+      options: [
+        'It depends on the schema — per target, each name is alone in its own namespace; but one cross-reference over both forms makes them one namespace, and then it is a duplicate.',
+        'Yes — a name may appear only once anywhere in the document.',
+        'No — never; duplicate checking is always per target form.',
+      ],
+      correct: 0,
+      explanations: [
+        "Duplicate checking is per *namespace*, and how many namespaces exist is the schema's choice. Two single-target reference kinds give two; one kind whose `:target` lists both forms gives one.",
+        'Names are scoped to the namespace a cross-reference defines, not to the document. Two unrelated forms may each declare `intro` with no interaction at all.',
+        'This was the whole rule before target groups existed, and it is still the common case — but a `:target [a b]` group deliberately merges the two namespaces so the collision *is* reported.',
+      ],
+    },
+    {
+      q: 'A slot reports `duplicate_cross_ref_target` across two different forms. What does that tell you about the schema?',
+      options: [
+        'The two forms are in one namespace — a target group — so the schema says those names are meant to be unique across both.',
+        'The plugin has a bug; duplicate checking should be per form.',
+        'The two forms come from the same plugin.',
+      ],
+      correct: 0,
+      explanations: [
+        'One namespace is exactly what a target group declares. The fix is to rename one declaration, because the schema is asserting the names should not collide.',
+        'It is a deliberate schema choice, not a bug. The alternative — a union of two reference kinds — keeps two namespaces and warns on each *reference* instead.',
+        'Plugin origin has nothing to do with it. What matters is whether one cross-reference names both forms.',
+      ],
+    },
+    {
+      q: 'You get `union_ambiguous` on a reference. What would a target group have done with the same document?',
+      options: [
+        'Reported an error at the two declarations instead, and left the reference alone.',
+        'Reported the same warning — the two shapes are equivalent.',
+        'Accepted it silently, since a group has no ordering.',
+      ],
+      correct: 0,
+      explanations: [
+        'The warning is about a *reference* with two readings; the group turns the same situation into an error about *declarations* that collided. Same document, different question asked.',
+        'They differ precisely here. A union keeps one namespace per alternative, so the names never collide and only references are ambiguous.',
+        'A group is not silent about it — it is the loudest of the two, and it complains earlier: at the declarations rather than at every use.',
+      ],
+    },
+    {
+      q: 'A union slot accepts either of two reference kinds, and a name exists in both targets. What happens?',
+      options: [
+        'The document is rejected with `union_no_branch_matched`.',
+        'It validates silently; the last alternative wins.',
+        'It validates with a `union_ambiguous` warning — first match wins, and declaration order is what picks the entity.',
+      ],
+      correct: 2,
+    },
+    {
+      q: 'Why is `union_ambiguous` a warning rather than an error?',
+      options: [
+        'Because warnings are cheaper to compute than errors.',
+        'The behaviour is defined and the document is valid — what is fragile is that another tool resolving the name its own way would silently disagree.',
+        'Because the validator cannot tell whether the name is really ambiguous.',
+      ],
+      correct: 1,
+    },
+    {
+      q: 'A slot is typed "a byte count or a named constant" and you write `1024`. Does that warn as ambiguous?',
+      options: [
+        'Yes — any union whose alternatives overlap is ambiguous.',
+        'No — the alternatives overlap by design and neither names an entity; the warning is only about two references colliding on one name.',
+        'Yes, unless the plugin marks the union as ordered.',
+      ],
+      correct: 1,
+    },
     {
       q: 'What are the two sides of a cross-reference?',
       options: [

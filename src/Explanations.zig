@@ -255,6 +255,39 @@ const table = [_]Entry{
     .{ .code = .multiple_defaulted_alternatives_in_group, .short = "Exclusive group has more than one alternative with a `:default`." },
     .{ .code = .required_one_of_missing, .short = "`exactly-one` exclusive group has zero alternatives present." },
     .{ .code = .exclusive_group_invalid, .short = "Exclusive group declaration is malformed (overlapping alts, missing keys, …)." },
+    .{
+        .code = .dependent_key_missing,
+        .short = "A key that is present requires sibling keys that are absent.",
+        .long =
+        \\A key declared as `(key :name offset … :requires [buffer])` may only
+        \\appear alongside the keys it names. Writing `:offset` without
+        \\`:buffer` fires this; writing neither is fine, because the rule only
+        \\applies once the dependent key is present.
+        \\
+        \\The message lists every absent requirement at once, so a key with
+        \\three unmet dependencies produces one diagnostic naming three, not
+        \\three separate complaints.
+        \\
+        \\Two repairs. Supply the keys it names — usually right, since the
+        \\dependent key is typically meaningless without them (a `:offset`
+        \\into no buffer describes nothing). Or drop the dependent key, if it
+        \\was written by mistake.
+        \\
+        \\**Which of the three mechanisms is this?** A form has three ways to
+        \\relate keys, and picking the wrong one is the common mistake:
+        \\
+        \\  * `:requires` — presence implies presence. "If `:offset` is here,
+        \\    `:buffer` must be too." One-directional; the reverse is fine.
+        \\  * `(exclusive-group …)` — bounds *how many* of a set may appear.
+        \\    "At most one of `:color` / `:gradient`." Symmetric.
+        \\  * `(variant …)` — gates keys on another key's **value**, not its
+        \\    presence. "`:strip-index-format` applies only when `:topology`
+        \\    is `triangle-strip`."
+        \\
+        \\If your rule mentions a specific value, you want a variant. If it
+        \\counts, you want a group. If it says "then also", you want this.
+        ,
+    },
 
     // --- Types
     .{ .code = .wrong_underlying, .short = "Value's structural shape does not match the declared `:underlying`." },
@@ -268,10 +301,120 @@ const table = [_]Entry{
     .{ .code = .not_member, .short = "Closed `(member-set …)` does not include this value." },
     .{ .code = .deprecated_member, .short = "Member is declared `:deprecated true` — accepted, but the LSP marks it deprecated." },
     .{ .code = .not_head_member, .short = "Form's head is not in the kind's `(head-set …)` whitelist." },
+    .{
+        .code = .positional_too_many,
+        .short = "More positional children carry this head than the `(head-set …)` entry's `:max` allows.",
+        .long =
+        \\A `(head-set …)` says which heads a positional slot accepts. A
+        \\`(head …)` entry inside one can also say **how many**:
+        \\
+        \\```
+        \\(value-kind :name pipeline-section :underlying form
+        \\  :heads (head-set
+        \\    (head :name vertex   :min 1 :max 1)
+        \\    (head :name fragment :max 1)
+        \\    (head :name constant)))
+        \\```
+        \\
+        \\`vertex` exactly once, `fragment` at most once, `constant` any
+        \\number of times. A second `(fragment …)` under a form whose
+        \\`:positional` is that kind reports here.
+        \\
+        \\The diagnostic lands on the child that crosses the ceiling, not
+        \\on the parent, so the squiggle is on the line to delete. You get
+        \\one per form regardless of how far over you went — the crossing
+        \\child names the real count, so the message stays honest without
+        \\repeating itself down the rest of the list.
+        \\
+        \\Two ways to fix it, and which one is right depends on what you
+        \\meant. Delete or merge the extra child, if the duplicate was a
+        \\mistake. Or raise the bound in the manifest, if the schema was
+        \\stricter than the domain.
+        \\
+        \\`:open true` does not silence this. Openness widens which
+        \\*keywords* a form accepts; it says nothing about its positional
+        \\children, and the neighbouring positional rules
+        \\(`not_head_member`, `duplicate_positional_flag`) fire on open
+        \\forms too.
+        \\
+        \\Bounds count only at a form's `:positional` slot. The same kind
+        \\reused on a `(key …)` slot or as a `vector-shape :element` carries
+        \\them inertly — a keyed slot holds one value, and a vector element
+        \\is a value rather than a child list.
+        ,
+    },
+    .{
+        .code = .positional_missing,
+        .short = "Fewer positional children carry this head than the `(head-set …)` entry's `:min` requires.",
+        .long =
+        \\The floor half of a `(head …)` count bound. Given
+        \\`(head :name vertex :min 1)` on the kind a form's `:positional`
+        \\names, a form with no `(vertex …)` child reports here.
+        \\
+        \\It is an end-of-children fact — you cannot know a head is absent
+        \\until the children run out — so it lands at the parent form's
+        \\head with the parent's path, exactly where `missing_required_key`
+        \\lands and for the same reason: there is no child to point at. One
+        \\diagnostic per unsatisfied head, each naming the head, the floor,
+        \\and what was actually found.
+        \\
+        \\The repair is to add the missing child, or to lower `:min` if the
+        \\schema was stricter than the domain. `:min 0` (the default) means
+        \\the head is allowed but not required.
+        \\
+        \\`:open true` does not silence this either, which makes it the one
+        \\end-of-form sweep openness leaves alone. Every other one —
+        \\required keys, the discriminant gate, exclusive groups, key
+        \\dependencies — is about *keywords*, and that is the surface
+        \\`:open` widens. Positional children are a different surface, and
+        \\declaring `:positional <bounded-kind>` opts into their count.
+        ,
+    },
     .{ .code = .not_flag_member, .short = "Positional keyword flag is not in the form's `:positional (flag-set …)` set." },
     .{ .code = .duplicate_positional_flag, .short = "A declared positional keyword flag is repeated on one form, e.g. `(task :done :done)`." },
     .{ .code = .union_no_branch_matched, .short = "No alternative in a `(union-shape …)` accepted the value." },
     .{ .code = .nested_union, .short = "Union alternative resolves to another union — flatten the alternatives." },
+    .{
+        .code = .union_ambiguous,
+        .short = "A name is registered by two cross-ref alternatives of one union, so declaration order decides which.",
+        .long =
+        \\A warning, not an error. The document validates and the union's
+        \\rule is unchanged: alternatives are tried in declaration order and
+        \\the first one that accepts wins. What this reports is that a
+        \\*second* reading exists.
+        \\
+        \\Given a union of two reference kinds:
+        \\
+        \\```
+        \\(value-kind :name pipeline-ref :underlying union
+        \\  :union (union-shape :alternatives [render-pipeline-ref compute-pipeline-ref]))
+        \\```
+        \\
+        \\a document that names both a `(render-pipeline :name same)` and a
+        \\`(compute-pipeline :name same)` makes `(dispatch :pipeline same)`
+        \\resolvable two ways. Neither declaration is a duplicate —
+        \\duplicate detection is per-target, and these are different targets
+        \\— so nothing else complains.
+        \\
+        \\Why that is worth a warning: SJON picks by alternative order, and
+        \\a consumer that resolves the same reference through its own table
+        \\may well pick by something else. Two mechanisms, two answers, and
+        \\the disagreement is silent. Order is doing work the author never
+        \\chose.
+        \\
+        \\Two repairs. Rename one of the declarations, which is right when
+        \\the collision was an accident. Or split the slot into two keys
+        \\with one reference kind each, which is right when both entities
+        \\legitimately keep the name and the *slot* was overloaded.
+        \\
+        \\It stays quiet in the cases where order is the design. A union
+        \\like `[byte-count symbol]` overlaps on purpose and names no
+        \\entity, so nothing warns. Nor does a union whose winning
+        \\alternative is a plain member set — the slot then denotes a
+        \\member, not a reference. Only two *references* to differently-named
+        \\entities trip it.
+        ,
+    },
 
     // --- Expressions
     .{ .code = .arity_mismatch, .short = "Expression function called with the wrong number of arguments." },
@@ -425,6 +568,35 @@ const table = [_]Entry{
     .{ .code = .number_at_or_below_exclusive_min, .short = "Number value ≤ `:min` when `:exclusive-min true`." },
     .{ .code = .number_at_or_above_exclusive_max, .short = "Number value ≥ `:max` when `:exclusive-max true`." },
     .{ .code = .number_not_integer, .short = "Value violates `:integer true` (fractional or non-finite)." },
+    .{
+        .code = .number_not_multiple,
+        .short = "Value is not an exact multiple of `:multiple-of`.",
+        .long =
+        \\`:multiple-of N` in a `(numeric-bounds …)` block says the value must
+        \\divide evenly by `N`. It is the alignment constraint a range and an
+        \\integrality flag cannot express between them: a byte offset that must
+        \\land on a 256-byte boundary is not "between 0 and X" and not merely
+        \\"an integer", it is a multiple of 256.
+        \\
+        \\Three checks run in order, and only the first failure is reported. So
+        \\`250.5` under `:integer true :multiple-of 4` is `number_not_integer`,
+        \\`-256` under `:min 0 :multiple-of 256` is `number_below_min`, and you
+        \\see this code only once the value is otherwise acceptable. Fix the
+        \\reported problem and re-run; a second one may be waiting.
+        \\
+        \\Divisibility is decided in exact integer space whenever the value and
+        \\the divisor are both whole numbers, so a value above 2^53 answers
+        \\correctly rather than being rounded first. A *fractional* divisor
+        \\(`:multiple-of 0.25`) is compared with a small tolerance instead —
+        \\binary floating point has no exact answer there — and the schema
+        \\author is warned about it at the declaration. Alignment rules use
+        \\whole divisors, so this caveat rarely applies in practice.
+        \\
+        \\Negative values are fine: `-512` is a multiple of `256`. If the
+        \\divisor carries a unit, the value must carry a byte-equal one, the
+        \\same rule `:min` and `:max` follow.
+        ,
+    },
     .{ .code = .numeric_bound_unit_mismatch, .short = "Bound carries a unit but the validated value does not match it." },
     .{ .code = .numeric_bounds_invalid, .short = "`(numeric-bounds …)` declaration is internally inconsistent." },
     .{ .code = .repr_out_of_range, .short = "Number value does not fit its value-kind's `:repr` GPU type (out of range, or non-integral under `u16`/`u32`/`i32`)." },

@@ -1,0 +1,26 @@
+; Scope: a *variant* key may require a **base** key. Both are unconditionally
+; in scope once the variant is active, and they live in separate presence
+; bitsets, so this is the case that exercises the base-scope fallback.
+;
+; The reverse is rejected at manifest-load time: a base key requiring a
+; variant key would make the dependency conditional on the discriminant,
+; which is what `(variant …)` is already for.
+;
+; Note also the interaction with variant selection. `:index-format` cannot be
+; present under `triangle-list` at all, so nothing depends on anything there
+; and the dependency simply does not arise.
+(plugin :name gfx :version "1.0.0" :sjon "1.3"
+  (value-kind :name topology-kind :underlying symbol
+    :members (member-set :values [triangle-list triangle-strip]))
+
+  (form :name primitive
+    :discriminant topology
+    (key :name topology :type topology-kind :optional false)
+    (key :name cull     :type symbol        :optional true)
+    (variant :when triangle-strip
+      (key :name index-format :type symbol :optional true :requires [cull]))))
+
+(primitive :topology triangle-strip :cull back :index-format uint16)  ; satisfied
+(primitive :topology triangle-strip :cull back)                       ; dependent absent
+(primitive :topology triangle-list)                                   ; variant inactive
+(primitive :topology triangle-strip :index-format uint16)             ; unmet

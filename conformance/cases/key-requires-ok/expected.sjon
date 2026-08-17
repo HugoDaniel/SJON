@@ -1,0 +1,4 @@
+; Clean. The third line is the one worth stating as an expectation rather
+; than an absence: `:buffer` without `:offset` must not fire, because the
+; dependency runs one way only.
+(diagnostics)

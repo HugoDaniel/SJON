@@ -7,12 +7,22 @@ title: 'Discriminated and Exclusive Forms'
 
 Chapter 9 covered the basics of a form schema: keys, required vs
 optional, defaults, positional policy, and open forms. This chapter adds
-two structural patterns that plugins use to keep one head's vocabulary
+the three structural patterns plugins use to keep one head's vocabulary
 manageable: a single form name with several variant shapes selected by a
-discriminant key, and forms that declare a bundle of keys as mutually
-exclusive. Both patterns produce their own family of diagnostic codes,
-and both interact with the keyword-pairing rule from chapter 5 in ways
-worth knowing before you read the error messages.
+discriminant key, forms that declare a bundle of keys as mutually
+exclusive, and keys that demand other keys. Each produces its own family
+of diagnostic codes, and the first two interact with the keyword-pairing
+rule from chapter 5 in ways worth knowing before you read the error
+messages.
+
+The three are easy to confuse, so hold on to the distinction from the
+start — it is what tells you which part of the plugin to reread:
+
+| Pattern | Constrains | Reads as |
+| --- | --- | --- |
+| Discriminated form | which keys *exist*, given another key's **value** | "`:step` only when `:kind` is `kick`" |
+| Exclusive group | **how many** of a set may appear | "at most one of `:color`, `:gradient`" |
+| Key dependency | one key's presence demanding another's | "if `:offset`, then also `:buffer`" |
 
 ## Discriminated Forms
 
@@ -238,6 +248,69 @@ bundles fail validation as `oneOf` mismatch — they don't produce a
 validator (or the IR's warning list) for the more specific
 diagnostic.
 
+## Key Dependencies
+
+The third pattern is the smallest. A key may declare that its presence
+demands other keys:
+
+```text
+(entry ...)
+  :binding number required
+  :buffer  buffer-ref optional
+  :offset  byte-count optional, requires :buffer
+  :size    byte-count optional, requires :buffer
+```
+
+The reason is usually that the dependent key is *measured from* the one
+it needs. A byte offset into no buffer describes nothing.
+
+```sjon
+(entry :binding 0 :buffer uniforms :offset 256)   ; satisfied
+(entry :binding 0)                                ; neither written
+(entry :binding 0 :buffer uniforms)               ; the requirement alone
+```
+
+All three are clean. That last one is worth pausing on, because the rule
+runs **one way only**: `:offset` drags `:buffer` in, never the reverse.
+Writing only the key that others depend on is always fine.
+
+The failure:
+
+```sjon
+(entry :binding 0 :offset 256)
+```
+
+Likely diagnostic: `dependent_key_missing`, naming `:buffer`.
+
+Two counting rules, and they pull in opposite directions. Write two
+dependent keys with the same requirement missing and you get **two**
+diagnostics, one per key that went unsatisfied:
+
+```sjon
+(entry :binding 0 :offset 256 :size 64)   ; two diagnostics
+```
+
+But a single key missing *several* of its requirements produces **one**
+diagnostic naming them all. A key with three unmet dependencies has one
+problem, not three.
+
+### Choosing Between The Three
+
+Now the whole point of putting these in one chapter. Given a constraint
+in prose, which pattern is it?
+
+- If the rule names a specific **value** — "only when the mode is
+  `stream`" — it is a **variant**.
+- If the rule **counts** — "exactly one of", "at most one of" — it is an
+  **exclusive group**.
+- If the rule says "then also" — it is a **key dependency**.
+
+They compose, too: a key can sit inside an exclusive group *and* carry a
+dependency. The one combination a plugin cannot declare is a key
+requiring another key in its own exclusive group — the group forbids
+exactly what the dependency demands, so the plugin is rejected at load
+rather than producing a form nobody can write correctly.
+
 ## Exercises
 
 Discriminated-form drill. Use the `(track ...)` summary above:
@@ -289,6 +362,38 @@ Repair by supplying one:
 ```sjon
 (phrase :name p5 :events [(n A4 0.5b)])
 ```
+
+Key-dependency drill. Use the `(entry ...)` summary above:
+
+```sjon
+(entry :binding 0 :offset 256)
+```
+
+`:offset` requires `:buffer`, which is absent. Two repairs, and which one
+is right depends on what you meant. Supply the requirement:
+
+```sjon
+(entry :binding 0 :buffer uniforms :offset 256)
+```
+
+Or drop the dependent key, if the offset was written by mistake:
+
+```sjon
+(entry :binding 0)
+```
+
+Pick-the-mechanism drill. Each of these is a constraint stated in prose.
+Which of the three patterns would a plugin use for it?
+
+1. "A texture binding may declare a sampler or a comparison sampler, but
+   not both."
+2. "`:mip-level-count` is only meaningful on a `2d` texture."
+3. "If you give `:array-layer`, you must also give `:array-layer-count`."
+
+Answers: (1) counts, so an **exclusive group** — `at-most-one`. (2)
+names a *value* of another key, so a **variant** on a discriminated form.
+(3) says "then also", so a **key dependency** — `:array-layer` declares
+`:requires [array-layer-count]`.
 
 <section class="mastery-quiz" data-lesson="discriminated-and-exclusive-forms">
   <h2>Mastery Check</h2>
@@ -349,6 +454,60 @@ Repair by supplying one:
       </li>
       <li>
         <label><input type="radio" name="q-discriminated-and-exclusive-forms-3" value="2" /> <span>Only <code>at-most-one</code> groups fire.</span></label>
+      </li>
+      </ul>
+      <p class="mc-feedback" hidden></p>
+    </li>
+    <li class="mc-item" data-correct="0">
+      <p class="mc-q"><code>:offset</code> declares <code>requires :buffer</code>. The document writes <code>(entry :binding 0 :buffer uniforms)</code> - the requirement, but not the dependent key. Is that an error?</p>
+      <ul class="mc-options">
+      <li>
+        <label><input type="radio" name="q-discriminated-and-exclusive-forms-4" value="0" /> <span>No - the rule runs one way. Only writing <code>:offset</code> demands <code>:buffer</code>.</span></label>
+        <p class="mc-explanation" hidden>Correct. An absent dependent key constrains nothing, so writing only the key that others depend on is always fine.</p>
+      </li>
+      <li>
+        <label><input type="radio" name="q-discriminated-and-exclusive-forms-4" value="1" /> <span>Yes - the two keys must always appear together.</span></label>
+        <p class="mc-explanation" hidden>That would be a mutual dependency, which is really an exclusive-group bundle - and a plugin declaring it in both directions is rejected at load.</p>
+      </li>
+      <li>
+        <label><input type="radio" name="q-discriminated-and-exclusive-forms-4" value="2" /> <span>Yes - <code>:buffer</code> is meaningless without something measured from it.</span></label>
+        <p class="mc-explanation" hidden>Reasonable as design taste, but not what the rule says. The dependency points from <code>:offset</code> to <code>:buffer</code>, not back.</p>
+      </li>
+      </ul>
+      <p class="mc-feedback" hidden></p>
+    </li>
+    <li class="mc-item" data-correct="1">
+      <p class="mc-q">A form writes two keys that both require the same absent key: <code>(entry :binding 0 :offset 256 :size 64)</code>, where both require <code>:buffer</code>. How many diagnostics?</p>
+      <ul class="mc-options">
+      <li>
+        <label><input type="radio" name="q-discriminated-and-exclusive-forms-5" value="0" /> <span>One - there is a single missing key.</span></label>
+        <p class="mc-explanation" hidden>The count follows the dependent keys, not the missing ones. Contrast one key missing three requirements, which IS a single diagnostic.</p>
+      </li>
+      <li>
+        <label><input type="radio" name="q-discriminated-and-exclusive-forms-5" value="1" /> <span>Two - one per key whose requirement went unsatisfied.</span></label>
+        <p class="mc-explanation" hidden>Correct. One per unsatisfied dependent key. The mirror rule: one key missing several requirements gets one diagnostic naming them all, because that is one problem.</p>
+      </li>
+      <li>
+        <label><input type="radio" name="q-discriminated-and-exclusive-forms-5" value="2" /> <span>Three - two dependents plus the missing key itself.</span></label>
+        <p class="mc-explanation" hidden>The absent key is not reported on its own - it is optional, so nothing requires it except the two keys that were written.</p>
+      </li>
+      </ul>
+      <p class="mc-feedback" hidden></p>
+    </li>
+    <li class="mc-item" data-correct="1">
+      <p class="mc-q">A plugin needs to express &quot;<code>:strip-index-format</code> applies only when <code>:topology</code> is <code>triangle-strip</code>&quot;. Which of the three mechanisms?</p>
+      <ul class="mc-options">
+      <li>
+        <label><input type="radio" name="q-discriminated-and-exclusive-forms-6" value="0" /> <span>A key dependency - <code>:strip-index-format</code> requires <code>:topology</code>.</span></label>
+        <p class="mc-explanation" hidden>Close, and a plugin may add this too - but a dependency only demands that <code>:topology</code> be <em>present</em>, not that it hold a particular value. The wording names a value.</p>
+      </li>
+      <li>
+        <label><input type="radio" name="q-discriminated-and-exclusive-forms-6" value="1" /> <span>A discriminated form with a <code>triangle-strip</code> variant.</span></label>
+        <p class="mc-explanation" hidden>Correct. The rule names a specific value (<code>triangle-strip</code>), and that is the tell: values mean variants. A group counts; a dependency says &quot;then also&quot;.</p>
+      </li>
+      <li>
+        <label><input type="radio" name="q-discriminated-and-exclusive-forms-6" value="2" /> <span>An exclusive group over <code>:topology</code> and <code>:strip-index-format</code>.</span></label>
+        <p class="mc-explanation" hidden>A group bounds how many of a set may appear. Nothing here is about counting.</p>
       </li>
       </ul>
       <p class="mc-feedback" hidden></p>

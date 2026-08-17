@@ -1,0 +1,4 @@
+; Clean parse, and each value is the integer its hex spelling denotes.
+(diagnostics)
+(values
+  (value :index 0 :result [255 255 4294967295 -16 0 3735928559 18446744073709551615]))

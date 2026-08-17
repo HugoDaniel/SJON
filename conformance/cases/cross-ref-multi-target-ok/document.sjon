@@ -1,0 +1,36 @@
+; `(cross-ref :target [a b])` — two forms, one namespace.
+;
+; The point of the group is that `:pipeline` does not care *which* form
+; defined the name it references: `blit` comes from a render pipeline and
+; `reduce` from a compute one, and both resolve through the same slot.
+; Before this existed, the only way to write it was a `:union` of two
+; cross-ref kinds — which resolves the same documents but reports a
+; misspelling as "no alternative matched" and cannot detect a name
+; defined by both forms at all.
+;
+; `:render` is deliberately here too: it targets `render-pipeline` alone,
+; so this document also pins that a group member keeps its own, narrower
+; namespace. `reduce` would NOT be accepted there.
+(plugin :name gpu :version "1.0.0" :sjon "1.3"
+  (value-kind :name pipeline-ref :underlying symbol
+    :description "A render or compute pipeline, in one namespace."
+    :cross-ref (cross-ref :target [render-pipeline compute-pipeline]))
+
+  (value-kind :name render-only-ref :underlying symbol
+    :cross-ref (cross-ref :target render-pipeline))
+
+  (form :name render-pipeline
+    (key :name name :type symbol))
+
+  (form :name compute-pipeline
+    (key :name name :type symbol))
+
+  (form :name dispatch
+    (key :name pipeline :type pipeline-ref)
+    (key :name render   :type render-only-ref :optional true)))
+
+(render-pipeline  :name blit)
+(compute-pipeline :name reduce)
+
+(dispatch :pipeline blit :render blit)
+(dispatch :pipeline reduce)

@@ -1,0 +1,5 @@
+; Clean. `2d-array` is one member; `1em-2` is `1em` (accepted by the plain
+; `number` slot) plus a positional `-2` the form accepts via `:positional
+; any`; and `16ms-per-frame` satisfies a unit-shape that had no writable
+; literal before.
+(diagnostics)
