@@ -117,9 +117,15 @@ pub const Discriminator = struct {
 };
 
 /// One variant gate. `keys` lists the variant-only keys; backends emit
-/// them as additional optional properties with annotations.
+/// them as additional optional properties with annotations. `when` is the
+/// discriminant value list that selects the variant (`Plugin.Variant.when`,
+/// `.len >= 1`): a one-value variant emits exactly as it did when `:when`
+/// took one symbol (`const` / `Symbol_<"a">` / `"when": "a"`), a
+/// multi-value one guards the same single branch with an enum
+/// (`enum` / `Symbol_<"a" | "b">` / `"when": ["a", "b"]`) — the shape does
+/// not multiply the output.
 pub const Variant = struct {
-    when: []const u8,
+    when: []const []const u8,
     keys: []const Key,
 };
 
@@ -182,20 +188,43 @@ pub const ValueShape = union(enum) {
     vector: VectorShape,
     /// Any form with the matching head set (form-as-slot).
     form_any,
-    /// Closed set of accepted form heads. Each entry carries the head's
-    /// `name` plus the owning `plugin`, pre-resolved by the lowering
-    /// pass via `Schema.lookupForm`. The JSON Schema backend uses the
-    /// qualified pair to build a `$ref` into `#/$defs/form.<plugin>.<name>`;
-    /// the TS backend uses `name` alone for `{$form: "<name>"}` discrimination.
-    form_heads: []const FormRef,
-    /// Slot-local forms (`KeySpec.local_forms`): the slot resolves these
-    /// fully-lowered `Form`s local-first, then falls back additively to the
-    /// global catalog. Backends emit an *inline* anonymous union — one object
+    /// **Closed** set of accepted form heads — the slot rejects any head
+    /// outside it (`not_head_member`), so backends emit `oneOf` with no
+    /// open branch. Each entry carries the head's `name` and a `body`
+    /// saying how the lowering pass resolved it *at the slot this shape
+    /// was lowered for*: a `$ref` into `#/$defs` for a global, the
+    /// inline body for a slot-local, a head-pin for neither. The TS
+    /// backend uses `name` alone for `{$form: "<name>"}` discrimination
+    /// on a global and the inline literal on a local.
+    ///
+    /// A head-set slot that also declares locals lands here, **not** in
+    /// `form_locals`: the validator applies both mechanisms in order
+    /// (narrow by head text, then resolve the narrowed head local-first),
+    /// so the export has to say both. Overwriting one with the other is
+    /// what dropped the narrowing, the `x-sjon-head-set` annotation and
+    /// the per-head `contains` bounds from every such slot before S7b.
+    ///
+    /// The payload is a struct rather than a bare `[]const FormRef`
+    /// because the set carries a bound of its own. S1's per-head counts
+    /// ride on each `FormRef` precisely because they *are* per-head;
+    /// `:min-children` / `:max-children` belong to the set, and there is
+    /// nowhere else for them to live that does not amount to a parallel
+    /// array the backends would have to keep aligned by hand.
+    form_heads: HeadSetShape,
+    /// **Open** slot-local union: the slot resolves these fully-lowered
+    /// `Form`s local-first and then falls back additively to *any* global
+    /// form, so backends emit an inline anonymous union — one object
     /// schema per local `Form` (reusing the per-form body emitters, so a
     /// discriminated local still gets its if/then) plus a trailing open
-    /// generic branch for the additive global fallback. Distinct from
-    /// `form_heads` (a closed `$ref` set into `#/$defs`): locals have no
-    /// global `$def`, so their bodies are emitted in place.
+    /// generic branch for the fallback.
+    ///
+    /// This is the shape of a locals slot with **no** head-set: a keyed
+    /// `:type form` slot (the loader rejects keyed locals on any other
+    /// type, `ManifestLoader.zig:1312`, so a keyed locals slot is always
+    /// this one) and a positional slot whose `:positional` is `.any` —
+    /// including the implied `.any` the loader writes when locals appear
+    /// with no `:positional` at all. Add a head-set and the slot closes,
+    /// which is `form_heads` above.
     form_locals: []const Form,
     /// Any safe expression.
     expr,
@@ -351,10 +380,59 @@ pub const CrossRef = struct {
     source_key: ?[]const u8 = null,
 };
 
-/// A pre-resolved reference to a form's `$defs` entry. `plugin` is the
-/// empty string when the lowering pass couldn't resolve the head (the
-/// exporter still emits the `name`-only annotation and a warning so the
-/// downstream artifact records the source's intent).
+/// The exporter's mirror of `Plugin.ValueKind.HeadSet`: the resolved
+/// members, plus the count over the whole set.
+///
+/// Two levels of bound reach the backends, and only one of them lives on
+/// a member. `FormRef.min` / `.max` are per head; `min_children` /
+/// `max_children` count children of *any* head in the set, which is the
+/// claim per-head bounds structurally cannot make. Both are meaningful
+/// only where this shape reached the model through a form's
+/// `:positional` slot — the scope rule in
+/// `docs/portable-manifest-v1.md` §4.5.
+///
+/// `0` / `null` is "unbounded", so a head-set written before S10 exports
+/// byte-identically, which is what keeps the goldens honest.
+pub const HeadSetShape = struct {
+    refs: []const FormRef,
+    min_children: u16 = 0,
+    max_children: ?u16 = null,
+
+    /// True when the set itself declares a count worth emitting.
+    /// `FormRef.isBounded`'s counterpart, one level up.
+    pub fn isBounded(self: HeadSetShape) bool {
+        return self.min_children != 0 or self.max_children != null;
+    }
+
+    /// True when *anything* here declares a count — some head, or the
+    /// set. The `$children` backends gate their bounds emission on this,
+    /// so an all-unbounded head-set emits no bounds block at all.
+    pub fn anyBounded(self: HeadSetShape) bool {
+        if (self.isBounded()) return true;
+        for (self.refs) |r| {
+            if (r.isBounded()) return true;
+        }
+        return false;
+    }
+
+    /// True when the slot demands at least one positional child — some
+    /// head's `:min`, or the set's `:min-children`. Distinct from
+    /// `anyBounded` because a ceiling-only slot is bounded and demands
+    /// nothing, and the difference decides whether `$children` is
+    /// `required`.
+    pub fn hasFloor(self: HeadSetShape) bool {
+        if (self.min_children > 0) return true;
+        for (self.refs) |r| {
+            if (r.min > 0) return true;
+        }
+        return false;
+    }
+};
+
+/// One accepted head of a head-set, pre-resolved by the lowering pass
+/// against the slot the head-set was lowered for. `plugin` is the
+/// owning plugin for a `.global` head and the enclosing plugin for a
+/// `.local` one; it is the empty string only for `.unresolved`.
 pub const FormRef = struct {
     plugin: []const u8,
     name: []const u8,
@@ -367,6 +445,38 @@ pub const FormRef = struct {
     /// before bounds existed, which is what keeps the goldens honest.
     min: u16 = 0,
     max: ?u16 = null,
+    /// What this head resolves to. Defaulted to `.global` so every
+    /// construction site that predates slot-aware resolution keeps its
+    /// meaning; only `lowerFormKind` sets anything else.
+    body: Body = .global,
+
+    /// The three ways a head-set member can resolve, in the order the
+    /// validator tries them (`Validator.validateFormHead` step 0).
+    ///
+    /// A head-set kind is plugin-wide and reusable, so *which* of these
+    /// applies is a property of the **slot**, not of the kind: the same
+    /// `bgl-resource` can be `.local` on a slot that declares the body
+    /// inline and `.unresolved` on one that does not. That is why the
+    /// lowering threads the slot's registry rather than resolving once
+    /// per kind — see `SchemaExport.Context.locals`.
+    pub const Body = union(enum) {
+        /// A unique global form. Backends emit a `$ref` into
+        /// `#/$defs/form.<plugin>.<name>`.
+        global,
+        /// A slot-local form (`FormSpec.local_forms`) shadowing — or
+        /// standing in for — the global catalog. Locals have no global
+        /// `$def`, so the body is emitted *in place*, the same way
+        /// `ValueShape.form_locals` emits its arms.
+        local: *const Form,
+        /// Nothing in scope resolves this head: no slot-local body, no
+        /// unique global. Backends emit a head-pinned open object
+        /// (`{properties: {$form: {const: <name>}}, required: [$form]}`)
+        /// and **never** a `$ref` — the pre-slot-aware exporter wrote
+        /// the empty-plugin sentinel into the path (`#/$defs/form..ghost`),
+        /// and an unresolvable `$ref` makes ajv reject the whole
+        /// document at compile time rather than the one slot.
+        unresolved,
+    };
 
     /// True when this entry declares a count worth emitting.
     pub fn isBounded(self: FormRef) bool {

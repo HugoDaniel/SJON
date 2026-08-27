@@ -10,7 +10,7 @@
 ; The accept side, including the case that shows the rule is one-directional:
 ; `:buffer` alone is fine. An absent dependent key constrains nothing, so
 ; only writing `:offset` turns the requirement on.
-(plugin :name gfx :version "1.0.0" :sjon "1.3"
+(plugin :name gfx :version "1.0.0"
   (value-kind :name byte-count :underlying number
     :numeric (numeric-bounds :min 0 :integer true))
   (value-kind :name buffer-ref :underlying symbol

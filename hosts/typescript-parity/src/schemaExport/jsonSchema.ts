@@ -37,10 +37,11 @@ import type {
   ModelPlugin,
   ModelStringBounds,
   ModelUnitShape,
+  ModelFormRef,
   ModelValueShape,
   ModelVariant,
 } from './model.ts';
-import { isBoundedRef } from './model.ts';
+import { anyBoundedInSet, headSetHasFloor, isBoundedRef, isBoundedSet, refBody } from './model.ts';
 import type { Warning } from './warnings.ts';
 import { assertNever, isRecord } from '../internal.ts';
 
@@ -146,6 +147,14 @@ function buildForm(
   for (const k of form.keys) {
     if (!k.optional) required.push(escapeFieldName(k.name));
   }
+  // A positional floor also makes `$children` required. The JSON bridge
+  // omits `$children` entirely for a childless form, so `minContains` —
+  // which lives inside the `$children` subschema — is unreachable for the
+  // one document that breaches the floor hardest. Ceilings need nothing:
+  // an absent array cannot exceed one. Mirrors Zig's `shapeHasChildFloor`.
+  if (form.positional.kind === 'kind' && shapeHasChildFloor(form.positional.shape)) {
+    required.push('$children');
+  }
   const out: Record<string, unknown> = { type: 'object', properties, required };
   // `dependentRequired` is 2020-12's exact encoding of `:requires`. Emitted
   // only when some key declares one, so a dependency-free schema serializes
@@ -184,7 +193,9 @@ function buildForm(
     out['x-sjon-discriminant'] = {
       key: form.discriminator.keyName,
       variants: form.discriminator.variants.map((v) => ({
-        when: v.when,
+        // The manifest's own spelling: one value bare, several as a list —
+        // so a single-value variant's annotation is unchanged.
+        when: v.when.length === 1 ? v.when[0]! : [...v.when],
         keys: v.keys.map((k) => k.name),
       })),
     };
@@ -254,11 +265,13 @@ function buildExclusiveGroup(g: ModelExclusiveGroup): Record<string, unknown> {
   return { not: { anyOf: pairs } };
 }
 
-/** One `{if, then}` entry: when the discriminant equals this variant's
- *  `:when`, the variant's keys become known properties (and its required ones
- *  required). The `const` is `{$sym: …}` because a discriminant is
- *  symbol-underlying by construction — `validateForms` rejects anything else
- *  before export runs. */
+/** One `{if, then}` entry: when the discriminant is one of this variant's
+ *  `:when` values, the variant's keys become known properties (and its
+ *  required ones required). Each value is `{$sym: …}` because a discriminant
+ *  is symbol-underlying by construction — `validateForms` rejects anything
+ *  else before export runs. One value guards with `const`, several with
+ *  `enum` — one branch either way, so a multi-value variant does not multiply
+ *  the `allOf`. */
 function buildVariantOverlay(
   discKey: string,
   variant: ModelVariant,
@@ -274,9 +287,13 @@ function buildVariantOverlay(
     const required = variant.keys.filter((k) => !k.optional).map((k) => escapeFieldName(k.name));
     if (required.length > 0) then['required'] = required;
   }
+  const gate =
+    variant.when.length === 1
+      ? { const: { $sym: variant.when[0]! } }
+      : { enum: variant.when.map((w) => ({ $sym: w })) };
   return {
     if: {
-      properties: { [discKey]: { const: { $sym: variant.when } } },
+      properties: { [discKey]: gate },
       required: [discKey],
     },
     then,
@@ -336,24 +353,71 @@ function serializeDefault(def: NonNullable<ModelKey['default']>): unknown {
  * emits no `allOf` and stays byte-identical. Mirrors Zig's
  * `writeChildrenBounds`.
  */
+/**
+ * True when `shape` demands at least one positional child — i.e. some head
+ * declares a `:min`. Separate from `isBoundedRef` because a ceiling-only
+ * head-set is bounded but demands nothing. Mirrors Zig's
+ * `shapeHasChildFloor`.
+ */
+function shapeHasChildFloor(shape: ModelValueShape): boolean {
+  if (shape.kind !== 'form_heads') return false;
+  return headSetHasFloor(shape);
+}
+
 function buildChildrenBounds(
   shape: ModelValueShape,
   ctx: EmitContext,
 ): readonly Record<string, unknown>[] | null {
   if (shape.kind !== 'form_heads') return null;
-  const bounded = shape.heads.filter(isBoundedRef);
-  if (bounded.length === 0) return null;
-  return bounded.map((head) => {
+  if (!anyBoundedInSet(shape)) return null;
+  const out: Record<string, unknown>[] = [];
+  for (const head of shape.heads) {
+    if (!isBoundedRef(head)) continue;
     const entry: Record<string, unknown> = {
-      contains:
-        ctx.filterPlugin && head.plugin && head.plugin !== ctx.filterPlugin
-          ? { $ref: `./${head.plugin}.schema.json#/$defs/form.${head.plugin}.${head.name}` }
-          : { $ref: `#/$defs/form.${head.plugin || ''}.${head.name}` },
+      contains: headContains(head, ctx),
       minContains: head.min ?? 0,
     };
     if (head.max !== undefined) entry['maxContains'] = head.max;
-    return entry;
-  });
+    out.push(entry);
+  }
+  // The set's bound is one more entry in the same `allOf`, whose
+  // `contains` is the `anyOf` of the members' — "a child whose head is in
+  // the set", which is what the validator tallies. Mirrors Zig.
+  if (isBoundedSet(shape)) {
+    const entry: Record<string, unknown> = {
+      contains: { anyOf: shape.heads.map((h) => headContains(h, ctx)) },
+      minContains: shape.minChildren ?? 0,
+    };
+    if (shape.maxChildren !== undefined) entry['maxContains'] = shape.maxChildren;
+    out.push(entry);
+  }
+  return out;
+}
+
+/**
+ * The `contains` subschema for one head — a `$ref` for a global, a
+ * head-pin otherwise. Shared by the per-head entries and the set's
+ * `anyOf` so the two levels count children the same way; two spellings of
+ * "a child carrying this head" would be a place for them to disagree.
+ * Mirrors Zig's `writeHeadContains`.
+ */
+function headContains(head: ModelFormRef, ctx: EmitContext): Record<string, unknown> {
+  if (refBody(head).kind !== 'global') return headPin(head.name);
+  if (ctx.filterPlugin && head.plugin && head.plugin !== ctx.filterPlugin) {
+    return { $ref: `./${head.plugin}.schema.json#/$defs/form.${head.plugin}.${head.name}` };
+  }
+  return { $ref: `#/$defs/form.${head.plugin || ''}.${head.name}` };
+}
+
+/**
+ * `{type: object, properties: {$form: {const: <head>}}, required: [$form]}`
+ * — "a form with this head, body unspecified". Two callers, both cases
+ * where a head is accepted but has no schema to point at. Never a `$ref`:
+ * an unresolvable one makes a 2020-12 validator reject the whole document
+ * at compile time. Mirrors Zig's `writeHeadPin`.
+ */
+function headPin(head: string): Record<string, unknown> {
+  return { type: 'object', properties: { $form: { const: head } }, required: ['$form'] };
 }
 
 function buildShape(shape: ModelValueShape, ctx: EmitContext): unknown {
@@ -440,14 +504,32 @@ function buildShape(shape: ModelValueShape, ctx: EmitContext): unknown {
     case 'form_any':
       return { type: 'object', required: ['$form'], properties: { $form: { type: 'string' } } };
     case 'form_heads': {
+      // `oneOf` over one branch per accepted head — a `$ref` for a
+      // global, the inline body for a slot-local, a head-pin for a head
+      // nothing in scope resolves. No trailing open branch: a head-set
+      // slot is closed (an out-of-set head is `not_head_member`).
       const refs = shape.heads.map((head) => {
+        const body = refBody(head);
+        if (body.kind === 'local') {
+          return buildForm(
+            ctx.plugin ?? { name: '', version: '', description: '', forms: [], valueKinds: [] },
+            body.form,
+            ctx,
+          );
+        }
+        if (body.kind === 'unresolved') return headPin(head.name);
         if (ctx.filterPlugin && head.plugin && head.plugin !== ctx.filterPlugin) {
           return { $ref: `./${head.plugin}.schema.json#/$defs/form.${head.plugin}.${head.name}` };
         }
         return { $ref: `#/$defs/form.${head.plugin || ''}.${head.name}` };
       });
-      const headSetAnnotation = shape.heads.map((h) => h.name);
-      return { oneOf: refs, 'x-sjon-head-set': headSetAnnotation };
+      const out: Record<string, unknown> = {
+        oneOf: refs,
+        'x-sjon-head-set': shape.heads.map((h) => h.name),
+      };
+      const locals = shape.heads.filter((h) => refBody(h).kind === 'local').map((h) => h.name);
+      if (locals.length > 0) out['x-sjon-local-forms'] = locals;
+      return out;
     }
     case 'form_locals': {
       // Inline anonymous union: one full object schema per local form

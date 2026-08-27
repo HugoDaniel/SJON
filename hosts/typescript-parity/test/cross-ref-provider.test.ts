@@ -368,7 +368,7 @@ test('collapse: distinct targets never collapse', () => {
 
 test('group: the written order does not fork the bucket', () => {
   const { schema } = schemaOf(
-    '(plugin :name gl :version "1.0.0" :sjon "1.3"' +
+    '(plugin :name gl :version "1.0.0"' +
       ' (form :name shader (key :name name :type symbol :optional false))' +
       ' (form :name kernel (key :name name :type symbol :optional false))' +
       ' (value-kind :name forwards :underlying symbol :cross-ref (cross-ref :target [shader kernel]))' +
@@ -388,7 +388,7 @@ test('group: one form under two spellings is one target', () => {
   // The loader's repeat check compares spellings, so this list reaches the
   // key as two entries naming one form.
   const { schema } = schemaOf(
-    '(plugin :name gl :version "1.0.0" :sjon "1.3"' +
+    '(plugin :name gl :version "1.0.0"' +
       ' (form :name shader (key :name name :type symbol :optional false))' +
       ' (value-kind :name both :underlying symbol :cross-ref (cross-ref :target [shader gl/shader])))',
   );
@@ -400,7 +400,7 @@ test('group: one form under two spellings is one target', () => {
 
 test('group: one group spelled two ways still collapses', () => {
   const { schema } = schemaOf(
-    '(plugin :name gl :version "1.0.0" :sjon "1.3"' +
+    '(plugin :name gl :version "1.0.0"' +
       ' (form :name shader (key :name name :type symbol :optional false) (key :name alias :type symbol :optional false))' +
       ' (form :name kernel (key :name name :type symbol :optional false) (key :name alias :type symbol :optional false))' +
       ' (value-kind :name by-name :underlying symbol :cross-ref (cross-ref :target [shader kernel]))' +

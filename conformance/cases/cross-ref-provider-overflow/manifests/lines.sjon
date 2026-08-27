@@ -9,7 +9,7 @@
 ; Both exports live in one `lines.wasm`; declaring two providers over one
 ; binary is ordinary (the `double.wasm` fixture does the same for five
 ; expr-funcs).
-(plugin :name lines :version "1.0.0" :sjon "1.2"
+(plugin :name lines :version "1.0.0"
   (cross-ref-provider :name lines-overflow
     :description "Emits as many names as its source asks for."
     :impl "wasm:extract_lines_overflow")

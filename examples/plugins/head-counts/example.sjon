@@ -1,4 +1,4 @@
-; Example usage of the `head-counts` plugin — the documents that satisfy
+; Example usage of the `head-counts` plugin: the documents that satisfy
 ; every bound. The three that *break* one are siblings, so this file stays
 ; a valid document (the schema-export round-trip feeds it to ajv):
 ;
@@ -16,7 +16,7 @@
   (constant :name exposure :value 1.0))
 
 ; The `:max 1` heads are ceilings, not requirements. A depth-only pass has
-; no fragment stage and no constants — also clean, because `vertex` is the
+; no fragment stage and no constants, also clean, because `vertex` is the
 ; only head carrying a floor.
 
 (render-pipeline :name depth-only
@@ -24,9 +24,29 @@
 
 ; The same `pipeline-section` kind on a KEYED slot. `:max 1` is trivially
 ; satisfied there (a keyed slot holds one value) and `:min 1` has no set to
-; be missing from, so neither count fires — this is the scope rule, and it
+; be missing from, so neither count fires. This is the scope rule, and it
 ; is why a bounded kind stays shareable. The head-set's *narrowing* still
 ; applies: `(section-holder :section (nope))` would be `not_head_member`.
 ; It is only the counts that go quiet.
 
 (section-holder :section (fragment :entry fs_main))
+
+; ---- the count over the whole set ----------------------------------------
+;
+; `(bgl-entry …)` is `:min-children 1 :max-children 1` over three heads
+; each `:max 1`: exactly one resource, and not two of the same. Every
+; per-head bound here is a ceiling, so an entry with one of each and an
+; entry with none both satisfy all three, which is precisely why the set
+; needs a bound of its own. The two failing shapes are in
+; `example-set-bounds.sjon`.
+
+(bgl-entry :binding 0 (buffer  :type uniform))
+(bgl-entry :binding 1 (sampler :type filtering))
+(bgl-entry :binding 2 (texture :sample-type float))
+
+; A ceiling-only set bound, on the compact `:names` spelling. No floor, so
+; a `(data …)` with no generator is clean: the direction that breaks if
+; `contains` is emitted without an explicit `minContains: 0`.
+
+(data :name empty)
+(data :name solid (cube :size 2))

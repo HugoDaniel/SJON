@@ -1,4 +1,4 @@
-//! SJON quickstart — Rust consumer via wasmtime.
+//! SJON quickstart: a Rust consumer via wasmtime.
 //!
 //! This file is reference material. Drop it into a Cargo project that
 //! depends on `sjon-host`:

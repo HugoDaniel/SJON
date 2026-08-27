@@ -2,10 +2,10 @@
 //!
 //! Surfaced by `sjon explain CODE` and the `help:` footer in rich
 //! diagnostics. Every code in the wire-stable enum has an entry; the
-//! audit test below enforces it — a new code without an entry fails
+//! audit test below enforces it: a new code without an entry fails
 //! `zig build test`.
 //!
-//! Memory: the table holds only string literals — no allocations,
+//! Memory: the table holds only string literals, so no allocations and
 //! no per-call buffers.
 
 const std = @import("std");
@@ -16,13 +16,13 @@ pub const Entry = struct {
     /// One-line summary. Always present.
     short: []const u8,
     /// Multi-paragraph body. May be empty when the short summary
-    /// suffices — codes whose semantics are non-obvious (cross-refs,
+    /// suffices. Codes whose semantics are non-obvious (cross-refs,
     /// exclusive groups, pin protocols) get richer bodies.
     long: []const u8 = "",
 };
 
 /// Look up an entry by name (e.g. `"unresolved_plugin"`). Returns null
-/// when the name is unknown — the CLI uses this for both `sjon explain
+/// when the name is unknown. The CLI uses this for both `sjon explain
 /// foo` typo handling and for the `--list` walker.
 ///
 /// Two steps, and the split is the point: the *name* half is
@@ -35,7 +35,7 @@ pub fn lookup(name: []const u8) ?Entry {
     return byCode(code);
 }
 
-/// The entry for `code`. Total — every variant has one, proven at
+/// The entry for `code`. Total: every variant has one, proven at
 /// compile time by `by_code` below.
 pub fn byCode(code: Ast.Diagnostic.Code) Entry {
     return by_code[@intFromEnum(code)];
@@ -45,7 +45,7 @@ pub fn byCode(code: Ast.Diagnostic.Code) Entry {
 ///
 /// Building it *is* the completeness check, which is the part worth
 /// having: a code with no entry, or two entries for one code, is now a
-/// compile error naming the code, rather than a test failure — and the
+/// compile error naming the code rather than a test failure, and the
 /// audit test below (which predates this) becomes a second opinion
 /// instead of the only one. Adding a `Diagnostic.Code` variant without
 /// its explanation stops the build in the same commit that adds it.
@@ -64,7 +64,7 @@ const by_code = blk: {
     break :blk out;
 };
 
-/// Slice over every entry — used by `sjon explain --list` and the
+/// Slice over every entry, used by `sjon explain --list` and the
 /// audit step.
 pub fn all() []const Entry {
     return &table;
@@ -75,13 +75,13 @@ pub fn all() []const Entry {
 /// set of valid slugs and the set of `Code` variants are the same set
 /// by construction.
 ///
-/// Hardcoding the project's own docs host is deliberate — nothing in
+/// Hardcoding the project's own docs host is deliberate: nothing in
 /// the LSP protocol (or the CLI) lets a consumer learn a documentation
 /// URL from elsewhere, and a configurable base would be a setting with
 /// no second correct value.
 pub const DOCS_BASE = "https://hugodaniel.com/pages/sjon/errors";
 
-/// The documentation URL for `code`. Total — every variant has a page —
+/// The documentation URL for `code`. Total: every variant has a page,
 /// and allocation-free: `inline else` makes `@tagName(c)` comptime, so
 /// each arm returns a string literal built at compile time.
 pub fn codeHref(code: Ast.Diagnostic.Code) []const u8 {
@@ -107,6 +107,15 @@ const table = [_]Entry{
         \\spelling under the loaded vocabulary. If the head exists in a
         \\plugin you forgot to import, the suggestion includes the import
         \\path.
+        \\
+        \\The same code is raised at schema load for a `:lowering :produces`
+        \\entry that names no declared form. A bare entry resolves
+        \\local-first, like a form head at validation: it may name a
+        \\slot-local form reachable through the list (declared inside a
+        \\form the same list resolves) or a global form. A local listed
+        \\without its declaring form is this diagnostic, and the message
+        \\names the form the list is missing; a qualified entry
+        \\(`<plugin>/<form>`) bypasses locals and resolves global-only.
         ,
     },
     .{
@@ -120,30 +129,30 @@ const table = [_]Entry{
         \\local-first: the local forms shadow same-named globals, and a head
         \\that isn't local still falls back to the global catalog (additive).
         \\Only when the head matches *neither* a local form *nor* any global
-        \\form is this emitted — at the slot path: the key path for a keyword
+        \\form is this emitted, at the slot path: the key path for a keyword
         \\slot (e.g. `[canvas shape]`) or the parent form's path for a
         \\positional slot (e.g. `[canvas]`), listing the allowed local heads.
         \\The generic `unknown_form` is suppressed for that node so you get one
         \\precise diagnostic, not two.
         \\
         \\A *qualified* head (`<plugin>/<form>`) bypasses the locals entirely
-        \\and resolves against the global catalog only — so a typo'd
+        \\and resolves against the global catalog only, so a typo'd
         \\qualified head yields `unknown_form`, not this.
         ,
     },
     .{ .code = .unknown_key, .short = "Form does not declare this `:keyword` and is not `:open true`." },
-    .{ .code = .ambiguous_form, .short = "Two plugins declare a form with the same bare head — qualify the spelling." },
-    .{ .code = .ambiguous_expr, .short = "Two plugins declare an expression with the same name — qualify the spelling." },
+    .{ .code = .ambiguous_form, .short = "Two plugins declare a form with the same bare head; qualify the spelling." },
+    .{ .code = .ambiguous_expr, .short = "Two plugins declare an expression with the same name; qualify the spelling." },
     .{ .code = .ambiguous_element_kind, .short = "Element kind reference matches multiple plugin-declared kinds." },
     .{ .code = .unknown_element_kind, .short = "Element kind name resolves to no plugin." },
-    .{ .code = .recursion_depth, .short = "Validator's depth ceiling exceeded — the input is pathologically nested." },
-    .{ .code = .not_cross_ref, .short = "Symbol is not a registered name for the cross-ref's target — no target instance declares (or provides) it." },
+    .{ .code = .recursion_depth, .short = "Validator's depth ceiling exceeded; the input is pathologically nested." },
+    .{ .code = .not_cross_ref, .short = "Symbol is not a registered name for the cross-ref's target: no target instance declares (or provides) it." },
     .{ .code = .duplicate_cross_ref_target, .short = "Two forms share the same `:name` value within one cross-ref's target scope." },
     .{ .code = .unknown_cross_ref_target, .short = "The `:target` declared on a `(cross-ref …)` resolves to no form in the aggregated schema." },
-    .{ .code = .ambiguous_cross_ref_target, .short = "Cross-ref symbol matches multiple targets — typically a name collision under scopes." },
+    .{ .code = .ambiguous_cross_ref_target, .short = "Cross-ref symbol matches multiple targets, typically a name collision under scopes." },
     .{ .code = .cross_ref_name_key_unknown, .short = "The `:name-key` declared on a `(cross-ref …)` is not a key on the target form." },
     .{ .code = .acyclic_without_self_edge, .short = "`(cross-ref … :acyclic true)` declared on a kind that can't form cycles." },
-    .{ .code = .cyclic_cross_ref, .short = "Acyclic cross-ref forms a cycle — at least one edge must be removed." },
+    .{ .code = .cyclic_cross_ref, .short = "Acyclic cross-ref forms a cycle; at least one edge must be removed." },
     .{ .code = .unknown_cross_ref_scope, .short = "Cross-ref `:scope` is not a known form name." },
     .{ .code = .ambiguous_cross_ref_scope, .short = "Cross-ref `:scope` matches multiple form names; qualify the spelling." },
     .{ .code = .cross_ref_outside_scope, .short = "Cross-ref references a target outside the enclosing scope's instance." },
@@ -163,13 +172,13 @@ const table = [_]Entry{
     },
     .{
         .code = .ambiguous_cross_ref_provider,
-        .short = "Bare cross-ref `:provider` name is declared by two or more plugins — qualify the spelling.",
+        .short = "Bare cross-ref `:provider` name is declared by two or more plugins; qualify the spelling.",
         .long =
         \\Two loaded plugins declare a provider with the same bare name,
         \\so `:provider uniforms` cannot pick one. Qualify it with the
         \\owning plugin: `:provider glsl/uniforms`.
         \\
-        \\Same rule the other bare-or-qualified vocabularies follow —
+        \\Same rule the other bare-or-qualified vocabularies follow:
         \\forms, expression functions, and value kinds all resolve bare
         \\names only when exactly one plugin claims them.
         ,
@@ -181,7 +190,7 @@ const table = [_]Entry{
         \\A provider-route cross-ref reads the string under `:source-key`
         \\from each `:target` instance and hands it to the provider. This
         \\fires when the target form declares no such key, or declares it
-        \\with a type that is not string-shaped — either way no instance
+        \\with a type that is not string-shaped. Either way no instance
         \\could ever supply the provider with anything, so the member set
         \\would silently be empty.
         \\
@@ -196,7 +205,7 @@ const table = [_]Entry{
         .long =
         \\The names this cross-ref accepts are extracted from the string
         \\under `:source-key` by the declared provider. The provider ran
-        \\and reported a failure — usually the content itself doesn't
+        \\and reported a failure, usually because the content itself doesn't
         \\parse, and the message carries the provider's own explanation.
         \\
         \\Because no member set could be computed, references into this
@@ -223,13 +232,13 @@ const table = [_]Entry{
     },
     .{
         .code = .cross_ref_target_collapse,
-        .short = "Two value-kinds cross-reference the same form but disagree on how its member set is built — the first one declared wins.",
+        .short = "Two value-kinds cross-reference the same form but disagree on how its member set is built; the first one declared wins.",
         .long =
         \\A target form's member set is collected once, not once per
         \\referring value-kind. When two `(cross-ref …)` declarations name
-        \\the same target and differ — one reads a `:name-key`, the other
+        \\the same target and differ: one reads a `:name-key`, the other
         \\runs a `:provider`; or they name different keys, providers, or
-        \\`:scope` forms — the first in plugin × value-kind order builds
+        \\`:scope` forms, and the first in plugin × value-kind order builds
         \\the set and the second's declaration has no effect. References
         \\through the losing kind are still checked, but against the
         \\winner's names.
@@ -268,7 +277,7 @@ const table = [_]Entry{
         \\three unmet dependencies produces one diagnostic naming three, not
         \\three separate complaints.
         \\
-        \\Two repairs. Supply the keys it names — usually right, since the
+        \\Two repairs. Supply the keys it names, usually right, since the
         \\dependent key is typically meaningless without them (a `:offset`
         \\into no buffer describes nothing). Or drop the dependent key, if it
         \\was written by mistake.
@@ -276,11 +285,11 @@ const table = [_]Entry{
         \\**Which of the three mechanisms is this?** A form has three ways to
         \\relate keys, and picking the wrong one is the common mistake:
         \\
-        \\  * `:requires` — presence implies presence. "If `:offset` is here,
+        \\  * `:requires`: presence implies presence. "If `:offset` is here,
         \\    `:buffer` must be too." One-directional; the reverse is fine.
-        \\  * `(exclusive-group …)` — bounds *how many* of a set may appear.
+        \\  * `(exclusive-group …)`: bounds *how many* of a set may appear.
         \\    "At most one of `:color` / `:gradient`." Symmetric.
-        \\  * `(variant …)` — gates keys on another key's **value**, not its
+        \\  * `(variant …)`: gates keys on another key's **value**, not its
         \\    presence. "`:strip-index-format` applies only when `:topology`
         \\    is `triangle-strip`."
         \\
@@ -299,16 +308,16 @@ const table = [_]Entry{
     .{ .code = .unit_not_allowed, .short = "Number value carries a unit but the kind's `:allowed` list rejects it." },
     .{ .code = .unit_forbidden, .short = "Number value carries a unit but the kind's `:unit (unit-shape :reject true)` demands bare numbers." },
     .{ .code = .not_member, .short = "Closed `(member-set …)` does not include this value." },
-    .{ .code = .deprecated_member, .short = "Member is declared `:deprecated true` — accepted, but the LSP marks it deprecated." },
+    .{ .code = .deprecated_member, .short = "Member is declared `:deprecated true`: accepted, but the LSP marks it deprecated." },
     .{ .code = .not_head_member, .short = "Form's head is not in the kind's `(head-set …)` whitelist." },
     .{
         .code = .positional_too_many,
-        .short = "More positional children carry this head than the `(head-set …)` entry's `:max` allows.",
+        .short = "More positional children than a `(head-set …)` ceiling allows: the head's `:max`, or the set's `:max-children`.",
         .long =
         \\A `(head-set …)` says which heads a positional slot accepts. A
         \\`(head …)` entry inside one can also say **how many**:
         \\
-        \\```
+        \\```sjon
         \\(value-kind :name pipeline-section :underlying form
         \\  :heads (head-set
         \\    (head :name vertex   :min 1 :max 1)
@@ -322,7 +331,7 @@ const table = [_]Entry{
         \\
         \\The diagnostic lands on the child that crosses the ceiling, not
         \\on the parent, so the squiggle is on the line to delete. You get
-        \\one per form regardless of how far over you went — the crossing
+        \\one per form regardless of how far over you went, since the crossing
         \\child names the real count, so the message stays honest without
         \\repeating itself down the rest of the list.
         \\
@@ -339,20 +348,45 @@ const table = [_]Entry{
         \\
         \\Bounds count only at a form's `:positional` slot. The same kind
         \\reused on a `(key …)` slot or as a `vector-shape :element` carries
-        \\them inertly — a keyed slot holds one value, and a vector element
+        \\them inertly: a keyed slot holds one value, and a vector element
         \\is a value rather than a child list.
+        \\
+        \\**The set has a ceiling too.** `:max-children` on the
+        \\`(head-set …)` itself counts children of *any* head in the set:
+        \\
+        \\```sjon
+        \\(value-kind :name bgl-resource :underlying form
+        \\  :heads (head-set :min-children 1 :max-children 1
+        \\    (head :name buffer  :max 1)
+        \\    (head :name sampler :max 1)
+        \\    (head :name texture :max 1)))
+        \\```
+        \\
+        \\"exactly one resource, and not two of the same". The per-head
+        \\`:max 1`s cannot say the first part: one buffer *and* one sampler
+        \\satisfies all three of them. If the message names a bracketed set
+        \\(`at most 1 positional child from [buffer | sampler | texture]`)
+        \\rather than one head, this is the level that fired.
+        \\
+        \\When both levels would fire on one child (a second `(buffer …)`
+        \\under the kind above crosses `buffer`'s ceiling and the set's)
+        \\**only the per-head one is reported**. It names the line to
+        \\delete, and the set's claim follows from it. So a set-level
+        \\message means the children are individually fine and there are
+        \\simply too many of them together, which is a different repair:
+        \\pick one, rather than de-duplicate.
         ,
     },
     .{
         .code = .positional_missing,
-        .short = "Fewer positional children carry this head than the `(head-set …)` entry's `:min` requires.",
+        .short = "Fewer positional children than a `(head-set …)` floor requires: the head's `:min`, or the set's `:min-children`.",
         .long =
         \\The floor half of a `(head …)` count bound. Given
         \\`(head :name vertex :min 1)` on the kind a form's `:positional`
         \\names, a form with no `(vertex …)` child reports here.
         \\
-        \\It is an end-of-children fact — you cannot know a head is absent
-        \\until the children run out — so it lands at the parent form's
+        \\It is an end-of-children fact (you cannot know a head is absent
+        \\until the children run out) so it lands at the parent form's
         \\head with the parent's path, exactly where `missing_required_key`
         \\lands and for the same reason: there is no child to point at. One
         \\diagnostic per unsatisfied head, each naming the head, the floor,
@@ -363,17 +397,62 @@ const table = [_]Entry{
         \\the head is allowed but not required.
         \\
         \\`:open true` does not silence this either, which makes it the one
-        \\end-of-form sweep openness leaves alone. Every other one —
+        \\end-of-form sweep openness leaves alone. Every other one,
         \\required keys, the discriminant gate, exclusive groups, key
-        \\dependencies — is about *keywords*, and that is the surface
+        \\dependencies, is about *keywords*, and that is the surface
         \\`:open` widens. Positional children are a different surface, and
         \\declaring `:positional <bounded-kind>` opts into their count.
+        \\
+        \\**The set has a floor too.** `:min-children` on the
+        \\`(head-set …)` itself requires that many children of *any* head
+        \\in the set: "at least one of these, whichever". No per-head
+        \\`:min` can express it: `(head :name buffer :min 1)` demands a
+        \\*buffer* specifically, which is a stricter and different claim.
+        \\A message naming a bracketed set
+        \\(`at least 1 positional child from [buffer | sampler | texture]`)
+        \\is this level, and the repair is to add any one of them.
+        \\
+        \\When a head's own `:min` is also unmet, only the per-head report
+        \\fires, since it is the more actionable of the two, and the set's floor
+        \\is reported on the next run if it is still short. So a set-level
+        \\message means every head that *had* to appear did, and the slot
+        \\is simply not full enough.
         ,
     },
     .{ .code = .not_flag_member, .short = "Positional keyword flag is not in the form's `:positional (flag-set …)` set." },
     .{ .code = .duplicate_positional_flag, .short = "A declared positional keyword flag is repeated on one form, e.g. `(task :done :done)`." },
-    .{ .code = .union_no_branch_matched, .short = "No alternative in a `(union-shape …)` accepted the value." },
-    .{ .code = .nested_union, .short = "Union alternative resolves to another union — flatten the alternatives." },
+    .{
+        .code = .union_no_branch_matched,
+        .short = "No alternative in a `(union-shape …)` accepted the value.",
+        .long =
+        \\Alternatives are tried in declaration order and the first full
+        \\match wins; this fires when none does.
+        \\
+        \\Which message you get depends on the value's shape. SJON asks
+        \\what the value is (a number, a string, a symbol, a vector, a
+        \\form) and which alternatives a value of that shape could reach
+        \\at all, before any bound, member set, head set or reference
+        \\check runs. When exactly one could, nothing else was meant, so
+        \\the slot reports *that* alternative's own code instead:
+        \\`number_above_max` naming the bound it broke, `not_member`
+        \\listing the members, `not_head_member` listing the heads,
+        \\`not_cross_ref` naming the form the symbol had to be declared
+        \\by.
+        \\
+        \\So this code means one of two things. Either the value's shape
+        \\reaches no alternative at all (a string in a `number | symbol`
+        \\slot), or it reaches two or more, which means those alternatives
+        \\overlap and only declaration order separates them. Blaming one
+        \\would be a guess, so the message names them all. Rewrite the
+        \\value to fit one of the shapes listed.
+        \\
+        \\Reachability stops at the shape and does not look further. Two
+        \\`:underlying form` alternatives with different head sets both
+        \\reach a form, so a form outside both lands here rather than on
+        \\either one.
+        ,
+    },
+    .{ .code = .nested_union, .short = "Union alternative resolves to another union; flatten the alternatives." },
     .{
         .code = .union_ambiguous,
         .short = "A name is registered by two cross-ref alternatives of one union, so declaration order decides which.",
@@ -385,16 +464,16 @@ const table = [_]Entry{
         \\
         \\Given a union of two reference kinds:
         \\
-        \\```
+        \\```sjon
         \\(value-kind :name pipeline-ref :underlying union
         \\  :union (union-shape :alternatives [render-pipeline-ref compute-pipeline-ref]))
         \\```
         \\
         \\a document that names both a `(render-pipeline :name same)` and a
         \\`(compute-pipeline :name same)` makes `(dispatch :pipeline same)`
-        \\resolvable two ways. Neither declaration is a duplicate —
+        \\resolvable two ways. Neither declaration is a duplicate,
         \\duplicate detection is per-target, and these are different targets
-        \\— so nothing else complains.
+        \\so nothing else complains.
         \\
         \\Why that is worth a warning: SJON picks by alternative order, and
         \\a consumer that resolves the same reference through its own table
@@ -410,7 +489,7 @@ const table = [_]Entry{
         \\It stays quiet in the cases where order is the design. A union
         \\like `[byte-count symbol]` overlaps on purpose and names no
         \\entity, so nothing warns. Nor does a union whose winning
-        \\alternative is a plain member set — the slot then denotes a
+        \\alternative is a plain member set, the slot then denotes a
         \\member, not a reference. Only two *references* to differently-named
         \\entities trip it.
         ,
@@ -430,7 +509,7 @@ const table = [_]Entry{
         \\(`sqrt/0`).
         \\
         \\The runtime one fires when the types are fine but an evaluated
-        \\*value* falls outside the function's domain — `(clamp 5 10 0)`
+        \\*value* falls outside the function's domain: `(clamp 5 10 0)`
         \\with lo above hi, `(nth [1 2 3] 9)` past the end,
         \\`(normalize [0 0])` with no direction, `(/ 1 0)`. The validator
         \\cannot reach these: it knows what a slot declares, not what an
@@ -442,7 +521,7 @@ const table = [_]Entry{
     .{ .code = .expr_unknown_label, .short = "Labeled-call kvpair key does not match any declared `:param-names`." },
     .{ .code = .expr_duplicate_label, .short = "Labeled call supplies the same label twice." },
     .{ .code = .expr_missing_label, .short = "Labeled call omits a declared parameter." },
-    .{ .code = .expr_mixed_args, .short = "Call mixes positional and labeled arguments — pick one form." },
+    .{ .code = .expr_mixed_args, .short = "Call mixes positional and labeled arguments; pick one form." },
 
     // --- Manifest load (D0)
     .{ .code = .invalid_manifest, .short = "Manifest source failed to load (read error, malformed shape, etc.)." },
@@ -455,7 +534,7 @@ const table = [_]Entry{
         \\The host walks references in document order. For each, it asks
         \\the resolver to produce manifest bytes. The default
         \\`FilesystemResolver` consults the project file's `:plugins`
-        \\index — if the bare name is missing, this code fires.
+        \\index. If the bare name is missing, this code fires.
         \\
         \\Two ways out: add the manifest to `sjon-project.sjon`'s
         \\`:plugins` (preferred for reusable plugins), or use the
@@ -486,12 +565,12 @@ const table = [_]Entry{
     // --- Plugin runtime (D7)
     .{ .code = .plugin_abi_mismatch, .short = "Plugin wasm reports a `sjon_plugin_abi_version()` the host does not implement." },
     .{ .code = .plugin_export_missing, .short = "Manifest references a `:impl wasm:<name>` export the wasm binary does not define." },
-    .{ .code = .plugin_import_forbidden, .short = "Plugin wasm imports a forbidden host symbol — ABI v2 plugins are pure." },
+    .{ .code = .plugin_import_forbidden, .short = "Plugin wasm imports a forbidden host symbol; ABI v2 plugins are pure." },
     .{ .code = .plugin_wasm_required, .short = "Manifest declares `:impl wasm:…` but the resolver returned no wasm bytes." },
     .{ .code = .plugin_describe_invalid, .short = "`sjon_plugin_describe()` output is malformed or inconsistent with the manifest." },
     .{ .code = .plugin_func_trapped, .short = "Plugin export trapped during invocation (unreachable, OOB memory, etc.)." },
     .{ .code = .plugin_func_result_type, .short = "Plugin export's return value's tag mismatches the manifest's declared `:result`." },
-    .{ .code = .plugin_func_failed, .short = "Plugin export returned an error status — runtime semantic failure." },
+    .{ .code = .plugin_func_failed, .short = "Plugin export returned an error status: a runtime semantic failure." },
     .{ .code = .plugin_func_alloc_failed, .short = "Plugin allocation hook (`sjon_alloc`) returned null." },
 
     // --- Default materialization
@@ -501,11 +580,11 @@ const table = [_]Entry{
     .{ .code = .lowering_hook_missing, .short = "Host has no implementation registered for the `:lowering :hook` named by the manifest." },
     .{ .code = .lowering_hook_failed, .short = "Lowering hook returned an error or invalid output." },
     .{ .code = .lowering_produced_invalid_head, .short = "Lowering output's form head is not in the manifest's `:produces` whitelist." },
-    .{ .code = .lowering_produced_lowerable_head, .short = "Lowering output's form head is itself a surface — lowering must terminate." },
+    .{ .code = .lowering_produced_lowerable_head, .short = "Lowering output's form head is itself a surface; lowering must terminate." },
     .{ .code = .lowering_output_too_large, .short = "Lowering output exceeded one of `MAX_LOWERED_FORMS` / `MAX_LOWERED_DEPTH` / `MAX_LOWERED_BYTES`." },
     .{
         .code = .lowering_cycle,
-        .short = "A `:lowering :produces` graph cycles — following produces-edges leads back to a lowering form.",
+        .short = "A `:lowering :produces` graph cycles: following produces-edges leads back to a lowering form.",
         .long =
         \\Staged lowering follows `:produces` edges: a form's lowering hook
         \\emits forms whose heads are listed in `:produces`, and those forms
@@ -522,7 +601,7 @@ const table = [_]Entry{
     },
     .{
         .code = .lowering_target_plugin_absent,
-        .short = "A `:lowering :produces` head names a plugin that isn't loaded — a dangling cross-plugin edge.",
+        .short = "A `:lowering :produces` head names a plugin that isn't loaded: a dangling cross-plugin edge.",
         .long =
         \\A `:produces` entry spelled `<plugin>/<form>` resolves against the
         \\loaded aggregate. When the named plugin is present but lacks the
@@ -537,24 +616,24 @@ const table = [_]Entry{
     },
     .{
         .code = .lowering_nested_lowerable,
-        .short = "A `:lowering` form is a positional child of another `:lowering` form — container and child can't both lower.",
+        .short = "A `:lowering` form is a positional child of another `:lowering` form; container and child can't both lower.",
         .long =
         \\Container lowering puts `:lowering` on a container and leaves its
         \\children plain data: the one hook invocation consumes every child at
         \\once. If a child *also* declares `:lowering`, both hooks fire in the
-        \\same layer — the container consumes the child while the child lowers
-        \\itself — and their output overlaps or orphans (often surfacing later
+        \\same layer (the container consumes the child while the child lowers
+        \\itself) and their output overlaps or orphans (often surfacing later
         \\as a confusing `duplicate_cross_ref_target`).
         \\
         \\Fix it by declaring `:lowering` on the container OR the child, never
         \\both. In container lowering the children stay data; only the
-        \\container lowers. The check is emit-only, so lowering still runs — the
+        \\container lowers. The check is emit-only, so lowering still runs; the
         \\diagnostic just names the contradiction at the child.
         ,
     },
 
     // --- Numeric / date / time
-    .{ .code = .number_overflow_exact_integer, .short = "Integer literal exceeds u64 — falls back to f64 with precision loss." },
+    .{ .code = .number_overflow_exact_integer, .short = "Integer literal exceeds u64; falls back to f64 with precision loss." },
     .{ .code = .date_invalid_year, .short = "Date year `0000` rejected (ISO 8601 disallows year 0)." },
     .{ .code = .date_invalid_month, .short = "Date month outside `[1, 12]`." },
     .{ .code = .date_invalid_day, .short = "Date day outside the month's valid range." },
@@ -587,8 +666,8 @@ const table = [_]Entry{
         \\Divisibility is decided in exact integer space whenever the value and
         \\the divisor are both whole numbers, so a value above 2^53 answers
         \\correctly rather than being rounded first. A *fractional* divisor
-        \\(`:multiple-of 0.25`) is compared with a small tolerance instead —
-        \\binary floating point has no exact answer there — and the schema
+        \\(`:multiple-of 0.25`) is compared with a small tolerance instead,
+        \\because binary floating point has no exact answer there, and the schema
         \\author is warned about it at the declaration. Alignment rules use
         \\whole divisors, so this caveat rarely applies in practice.
         \\
@@ -619,7 +698,7 @@ const table = [_]Entry{
         .short = "Manifest's `:wasm-file` resolves outside its own directory.",
         .long =
         \\The override is checked lexically against the manifest's
-        \\directory — any `..` segments that walk above the directory
+        \\directory: any `..` segments that walk above the directory
         \\boundary are rejected, as are absolute paths. The check uses
         \\lexical normalization (no realpath) so symlink hops are not
         \\caught; the goal is honest path-traversal blocking, not full
@@ -630,7 +709,26 @@ const table = [_]Entry{
     .{ .code = .plugin_wasm_self_hash_mismatch, .short = "Manifest's `:wasm-sha256` stamp disagrees with the bytes on disk." },
     .{ .code = .license_unrecognized, .short = "Advisory: `:license` is not a canonical SPDX identifier." },
     .{ .code = .too_many_keywords, .short = "Advisory: `:keywords` exceeds the soft cap of 16 entries." },
-    .{ .code = .sjon_format_unsupported, .short = "Manifest declares a `:sjon` version newer than this host implements." },
+    .{
+        .code = .sjon_format_unsupported,
+        .short = "Retired: manifests no longer declare a format version; this code is never emitted.",
+        .long =
+        \\Manifests once carried `(plugin … :sjon "1.x")`, a declared
+        \\format version the host compared against its own ceiling and
+        \\refused when the manifest's was higher. The key never enabled
+        \\anything on the host reading it. Every feature the host had was
+        \\on regardless, so it was removed. SJON has one version, the
+        \\release, and the CHANGELOG says which release a manifest keyword
+        \\arrived in.
+        \\
+        \\A manifest newer than the host reading it still fails loudly:
+        \\every meta-schema form is closed, so an unknown keyword or
+        \\declaration head is `unknown_key` / `unknown_form` at
+        \\meta-validation and the plugin is dropped. A leftover `:sjon`
+        \\key reports the same way. The code stays in the wire-stable enum
+        \\and is asserted silent by a tombstone test.
+        ,
+    },
 
     // --- Project v1.1 (Slice 3)
     .{ .code = .unknown_project_key, .short = "Advisory: project file declared a top-level key the host doesn't recognize." },
@@ -679,12 +777,12 @@ const table = [_]Entry{
         .code = .pattern_value_eval_failed,
         .short = "A `(pure …)` expression leaf failed to evaluate at the cycle-0 dry-run.",
         .long =
-        \\A form in `(pure …)` value position is an expression of time —
-        \\`(pure (* 0.5 (+ 1 (sin (* (tau) cycle)))))` — evaluated per hap
+        \\A form in `(pure …)` value position is an expression of time:
+        \\`(pure (* 0.5 (+ 1 (sin (* (tau) cycle)))))`, evaluated per hap
         \\with `cycle` / `tick` / `seed` bound. At compile time the engine
         \\dry-runs it once at cycle 0 / seed 0; static validity is
         \\seed-independent, so cycle 0 catches the whole document-defect class
-        \\— an unbound name, division by zero, an arity error, a resource
+        \\an unbound name, division by zero, an arity error, a resource
         \\budget. The leaf then degrades to `silence` and this code is
         \\collected. A failure that only appears at a *later* cycle (e.g.
         \\`(/ 1 (- cycle 2))` at cycle 2) is NOT this code: it is a domain
@@ -697,7 +795,7 @@ const table = [_]Entry{
         .short = "A `(pure …)` expression evaluated but produced a value no hap can carry.",
         .long =
         \\The cycle-0 dry-run of a `(pure …)` expression leaf succeeded, but
-        \\its result is a form, a vector, a date, or a time — none of which a
+        \\its result is a form, a vector, a date, or a time, none of which a
         \\hap value can be (a hap carries a symbol / string / keyword /
         \\number / boolean / nil). The most common cause is a misspelled
         \\function name: an unresolved head does not error, it evaluates to a
@@ -715,7 +813,7 @@ const table = [_]Entry{
 const testing = std.testing;
 
 test "Explanations: every Diagnostic.Code variant has an entry" {
-    // Audit step — every code in the wire-stable enum must have an
+    // Audit step: every code in the wire-stable enum must have an
     // entry. Append-only enum means this guard is one-way, but it
     // prevents accidental omissions from sneaking through review.
     inline for (@typeInfo(Ast.Diagnostic.Code).@"enum".fields) |f| {

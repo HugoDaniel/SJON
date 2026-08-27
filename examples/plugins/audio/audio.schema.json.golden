@@ -48,7 +48,7 @@
   "$defs": {
     "form.audio.phrase": {
       "type": "object",
-      "description": "A note sequence — named (a reusable definition) or anonymous (inline).",
+      "description": "A note sequence, either named (a reusable definition) or anonymous (inline).",
       "properties": {
         "$form": {
           "const": "phrase"

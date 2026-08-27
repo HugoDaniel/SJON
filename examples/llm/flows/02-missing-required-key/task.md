@@ -8,5 +8,5 @@ Schema: `(circle :x <number> :y <number> :radius <number>)`, where
 
 `attempt-1.sjon` sets `:x` and `:y` but forgets `:radius`. The
 diagnostic is `code = missing_required_key`, `path = [circle, radius]`.
-The repair is additive — supply the key, don't restructure.
+The repair is additive: supply the key, don't restructure.
 `attempt-2.sjon` adds `:radius 1` and validates clean.

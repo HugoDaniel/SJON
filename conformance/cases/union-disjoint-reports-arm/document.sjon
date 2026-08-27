@@ -1,0 +1,46 @@
+; A hand-written `(union-shape …)` whose alternatives are disjoint by node
+; shape reports the arm, not the collapsed union code.
+;
+; Matching is untouched: alternatives are tried in declaration order and the
+; first to accept wins. What changes is the FAILURE. Count the alternatives
+; the value's node shape can reach; when exactly one can, nothing else could
+; have been meant, so that arm's own diagnostic is the one the author can
+; act on. `union_no_branch_matched` only names the kinds.
+;
+; The shape axis is coarse — number, string, symbol, vector, form — and the
+; rule stops there. It does not look through bounds, member sets, head sets
+; or cross-refs; those are matching. See `union-overlap-keeps-union` for
+; every way the collapse is still the honest answer.
+(plugin :name repro :version "1.0.0"
+  ; --- disjoint by node shape: number | vector ---
+  (value-kind :name f32-number :underlying number
+    :repr (repr-shape :type f32))
+  (value-kind :name f32-vector :underlying vector
+    :vector (vector-shape :element f32-number :min-len 1 :max-len 4))
+  (value-kind :name scalar-or-vector :underlying union
+    :union (union-shape :alternatives [f32-number f32-vector]))
+
+  ; --- disjoint by node shape: symbol | form ---
+  (value-kind :name ease-name :underlying symbol
+    :members (member-set :values [linear smoothstep]))
+  (value-kind :name ease-form :underlying form
+    :heads (head-set :names [spring]))
+  (value-kind :name ease-spec :underlying union
+    :union (union-shape :alternatives [ease-name ease-form]))
+
+  ; --- three arms, one per shape: the rule is N-ary, not two-armed ---
+  (value-kind :name three :underlying union
+    :union (union-shape :alternatives [f32-number ease-name ease-form]))
+
+  (form :name spring (key :name damping :type f32-number :optional true))
+  (form :name bounce :positional any)
+  (form :name k
+    (key :name value :type scalar-or-vector :optional true)
+    (key :name ease  :type ease-spec        :optional true)
+    (key :name three :type three            :optional true)))
+
+(k :value 1e39)          ; number reaches only f32-number: its :repr refuses
+(k :ease smoothstepp)    ; symbol reaches only ease-name: its member set
+(k :ease (bounce))       ; form reaches only ease-form: its head set
+(k :value [1 2 1e39])    ; vector reaches only f32-vector: its element's :repr
+(k :three (bounce))      ; one of three arms takes a form

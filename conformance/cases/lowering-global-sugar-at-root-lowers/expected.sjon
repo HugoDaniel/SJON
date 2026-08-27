@@ -1,0 +1,4 @@
+; The global sugar lowers; the emitted `(entry-normal)` lacks its required
+; `:must`.
+(diagnostics
+  (diagnostic :code missing_required_key :path [entry-normal]))

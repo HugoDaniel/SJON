@@ -1,0 +1,21 @@
+/* Reading measure on the splash home page.
+ *
+ * Starlight's `splash` template widens `--sl-content-width` from the 45rem it
+ * gives a documentation page to 67.5rem, so a hero and a card grid have room
+ * to breathe. That measure is right for cards and wrong for prose: on a 1280px
+ * window it puts roughly 135 characters on a line, which is about twice what
+ * anybody wants to track back from.
+ *
+ * So the text-bearing blocks get the documentation measure back and everything
+ * that actually wants the width (code blocks, card grids, tabs, the pipeline
+ * figure, the lesson outline) keeps it. Left edges stay aligned; only the right
+ * edge of the prose comes in.
+ *
+ * `html[data-has-hero]` is Starlight's own attribute, set by the splash
+ * template when the page declares a `hero`. The home page is the only page
+ * here that does. The playground is `splash` too but heroless, so its editor
+ * shell is untouched, and every documentation page is already at 45rem.
+ */
+html[data-has-hero] .sl-markdown-content > :is(p, ul, ol, blockquote, h2, h3, h4) {
+  max-width: 45rem;
+}

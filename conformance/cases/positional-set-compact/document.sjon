@@ -1,0 +1,37 @@
+; Set bounds on the *compact* `:names [a b c]` spelling. Legal, and
+; deliberately so: the aggregate needs no per-head metadata, and "exactly
+; one of these four" is the common case — forcing it to spell every head
+; as a `(head …)` child would be a tax on the shape the feature is for.
+;
+; It is also what invalidated the old promise that a compact head-set is
+; always unbounded. Nothing here declares a per-head bound, so if the
+; count sweep still keyed on that alone, both forms below would validate
+; clean.
+;
+; `(data …)` is the second WebGPU-adjacent shape the ask filed: at most
+; one generator, none being fine. That is `:max-children 1` with no
+; floor — which the per-head spelling can express only as "at most one
+; cube AND at most one sphere", satisfied by one of each.
+(plugin :name pngine :version "1.0.0"
+  (value-kind :name data-shape-section
+    :description "The one generator a (data …) may carry."
+    :underlying form
+    :heads (head-set :names [cube sphere teapot] :max-children 1))
+
+  (form :name cube
+    (key :name size :type number))
+  (form :name sphere
+    (key :name radius :type number))
+  (form :name teapot)
+
+  (form :name data
+    :positional data-shape-section
+    (key :name name :type symbol)))
+
+; No generator: fine, the set declares no floor.
+(data :name empty)
+; One generator: fine.
+(data :name solid (cube :size 2))
+; Two: over the set's ceiling, though each head is well within its own
+; (absent) bound.
+(data :name both (cube :size 2) (sphere :radius 1))

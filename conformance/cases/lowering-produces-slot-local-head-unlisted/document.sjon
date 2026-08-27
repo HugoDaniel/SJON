@@ -1,0 +1,16 @@
+; S12, the negative: `leaf` is slot-local to `wrap`, but the `:produces` list
+; names only `leaf`. A hook can place a local only under its declaring form,
+; and the all-depths contract would then require `wrap` in the same list — so
+; a list that names `leaf` and not `wrap` cannot be right, and it is still
+; `unknown_form` at schema load. The message names the missing form
+; ("`leaf` is slot-local to `wrap` …"); the corpus compares code and path.
+; The authored `(wrap (leaf))` below shows the local is perfectly writable —
+; the aggregate finding is about what the hook may emit, not what an author
+; may write.
+(plugin :name p :version "1.0.0"
+  (form :name seed :open true
+    :lowering (lowering :hook test/nest-emit-v1 :produces [leaf]))
+  (form :name wrap
+    (form :name leaf)))
+
+(wrap (leaf))

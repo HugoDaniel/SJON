@@ -100,19 +100,37 @@ export type PositionalSpec =
   | { kind: 'flag_set'; flags: readonly FlagDecl[] };
 
 /**
- * One per-discriminant-value extra key set on a discriminated form.
- * Mirrors `Plugin.Variant` in `src/Plugin.zig`: `keys` are allowed (and
- * possibly required) only while the discriminant kvpair's value equals
- * `when`, and must not collide with the form's common keys or with
- * another variant's keys — a collision is `variant_key_collision` from
- * the aggregate pass, not a load-time error.
+ * One extra key set on a discriminated form, selected by the discriminant's
+ * value. Mirrors `Plugin.Variant` in `src/Plugin.zig`: `when` lists the
+ * discriminant values that select the variant — the manifest's `:when a`
+ * and `:when [a b]` both land here as a list, never empty — and `keys` are
+ * allowed (and possibly required) only while the discriminant's value is
+ * one of them (see `variantSelects`). Keys must not collide with the form's
+ * common keys or with another variant's keys — a collision is
+ * `variant_key_collision` from the aggregate pass, not a load-time error —
+ * and a value selects at most one variant (the loader rejects an empty
+ * list, a repeat, and a value two variants both list, `invalid_manifest`).
  */
 export interface Variant {
-  readonly when: string;
+  readonly when: readonly string[];
   readonly keys: readonly KeySpec[];
   /** Variant-scoped exclusive groups; alternatives name `keys`, not the
    * form's common keys. Absent when the variant declared none. */
   readonly exclusiveGroups?: readonly ExclusiveGroup[];
+}
+
+/** True when the discriminant value `value` selects `v` — membership of
+ *  `v.when`. Mirrors `Plugin.Variant.selects`. */
+export function variantSelects(v: Variant, value: string): boolean {
+  return v.when.includes(value);
+}
+
+/** The `:when` as the author would spell it: one symbol bare (`tri-strip`),
+ *  a set bracketed (`[tri-strip line-strip]`). Every message that names a
+ *  variant renders it through here, so a single-value variant reads exactly
+ *  as it did when `:when` took one symbol. Mirrors `Plugin.Variant.whenText`. */
+export function variantWhenText(when: readonly string[]): string {
+  return when.length === 1 ? when[0]! : `[${when.join(' ')}]`;
 }
 
 /** `:cardinality exactly-one | at-most-one`. `at_least_one` is deliberately
@@ -331,10 +349,43 @@ export interface Head {
   readonly description?: string;
 }
 
+/**
+ * A `(head-set …)`: the accepted heads, plus the count over the *whole*
+ * set. Mirrors Zig's `Plugin.ValueKind.HeadSet`.
+ *
+ * The two levels are independent. Per head, `Head.min`/`Head.max` bound
+ * how many children carry *that* head; over the set, `minChildren` /
+ * `maxChildren` bound how many carry *any* head in it. "Exactly one of
+ * buffer / sampler / texture" is the second and cannot be said by the
+ * first — every per-head bound is satisfied both by one of each and by
+ * none at all. Both are enforced only at a form's `:positional` slot.
+ */
+export interface HeadSet {
+  readonly heads: readonly Head[];
+  /** `(head-set :min-children N)`; absent = 0 = no floor. */
+  readonly minChildren?: number;
+  /** `(head-set :max-children N)`; absent = unbounded. */
+  readonly maxChildren?: number;
+}
+
+/**
+ * True when neither level of `hs` carries a count bound, so the
+ * validator's per-form tally can be skipped entirely. Mirrors Zig's
+ * `HeadSet.isUnbounded`.
+ *
+ * The compact `:names [a b c]` spelling does *not* imply this: it cannot
+ * carry a per-head bound, but `:min-children` / `:max-children` sit on
+ * the set and are legal beside it.
+ */
+export function headSetIsUnbounded(hs: HeadSet): boolean {
+  if ((hs.minChildren ?? 0) !== 0 || hs.maxChildren !== undefined) return false;
+  return hs.heads.every((h) => (h.min ?? 0) === 0 && h.max === undefined);
+}
+
 export interface ValueKind {
   readonly name: string;
   readonly underlying: 'number' | 'string' | 'vector' | 'form' | 'symbol' | 'union_of';
-  readonly heads?: readonly Head[];
+  readonly heads?: HeadSet;
   readonly members?: readonly Member[];
   readonly vector?: {
     readonly element: QualifiedRef;
@@ -344,6 +395,10 @@ export interface ValueKind {
     /** Inclusive element-count ceiling (`:max-len`). Mutually exclusive with `len`. */
     readonly maxLen?: number;
   };
+  /** Alternatives are tried in declaration order; the first to accept wins.
+   * A failure reports the alternative the value's node shape could only have
+   * meant, when there is exactly one (`determinedArm`); otherwise the
+   * collapsed `union_no_branch_matched`. */
   readonly unionOf?: { readonly alternatives: readonly QualifiedRef[] };
   readonly unit?: UnitShape;
   readonly numeric?: NumericBounds;
@@ -409,9 +464,6 @@ export interface Plugin {
   /// Free-form keywords for discovery / categorization. Capped at
   /// `MAX_KEYWORDS = 16` with an advisory `too_many_keywords` warning.
   readonly keywords: readonly string[];
-  /// Declared portable-manifest format version (e.g. `"1.0"`, `"1.1"`).
-  /// Empty / absent = treat as `"1.0"`.
-  readonly sjonFormat: string;
   readonly forms: readonly FormSpec[];
   readonly exprFuncs: readonly ExprFunc[];
   readonly valueKinds: readonly ValueKind[];
@@ -421,11 +473,6 @@ export interface Plugin {
 /// Advisory cap on `:keywords` entries. Above this, the loader emits
 /// `too_many_keywords` (warning, not error). Mirrors `Plugin.MAX_KEYWORDS`.
 export const MAX_KEYWORDS = 16;
-
-/// Highest portable-manifest format version this host understands.
-/// Mirrors `Plugin.SUPPORTED_SJON_FORMAT`. Bumped on incompatible spec
-/// changes.
-export const SUPPORTED_SJON_FORMAT = '1.3';
 
 export interface Schema {
   readonly plugins: readonly Plugin[];
@@ -1147,18 +1194,30 @@ export function validateForms(schema: Schema): Diagnostic[] {
 
       const variants = form.variants ?? [];
       for (const v of variants) {
-        if (members.some((m) => m.name === v.when)) continue;
-        out.push({
-          code: 'unknown_discriminant_value',
-          message: `form \`${form.name}\` variant \`:when ${v.when}\` is not a member of discriminant \`:${dkey.name}\``,
-          path: formAggregatePath(plugin.name, form.name, 'variant'),
-          span: ZERO_SPAN,
-          severity: 'err',
-        });
+        // Once per listed value: `[tri-strip nope]` reports `nope` and keeps
+        // `tri-strip`, so a set with one typo names the typo rather than
+        // rejecting the whole declaration.
+        for (const w of v.when) {
+          if (members.some((m) => m.name === w)) continue;
+          const whenText = variantWhenText(v.when);
+          out.push({
+            code: 'unknown_discriminant_value',
+            message:
+              v.when.length === 1
+                ? `form \`${form.name}\` variant \`:when ${whenText}\` is not a member of discriminant \`:${dkey.name}\``
+                : `form \`${form.name}\` variant \`:when ${whenText}\` lists \`${w}\`, which is not a member of discriminant \`:${dkey.name}\``,
+            path: formAggregatePath(plugin.name, form.name, 'variant'),
+            span: ZERO_SPAN,
+            severity: 'err',
+          });
+        }
       }
 
       // Key-name collisions: every variant key must be distinct from every
       // common key, and from every prior variant key. One name = one slot.
+      // A `:when` listing several values does not loosen this — the point of
+      // one declaration reaching several values is that a key still lives in
+      // exactly one variant.
       for (let vi = 0; vi < variants.length; vi++) {
         const v = variants[vi]!;
         for (const vk of v.keys) {
@@ -1166,7 +1225,7 @@ export function validateForms(schema: Schema): Diagnostic[] {
             if (vk.name !== ck.name) continue;
             out.push({
               code: 'variant_key_collision',
-              message: `form \`${form.name}\` variant \`:when ${v.when}\` redeclares key \`:${vk.name}\` (also in common keys)`,
+              message: `form \`${form.name}\` variant \`:when ${variantWhenText(v.when)}\` redeclares key \`:${vk.name}\` (also in common keys)`,
               path: formAggregatePath(plugin.name, form.name, 'variant'),
               span: ZERO_SPAN,
               severity: 'err',
@@ -1178,7 +1237,7 @@ export function validateForms(schema: Schema): Diagnostic[] {
               if (vk.name !== pk.name) continue;
               out.push({
                 code: 'variant_key_collision',
-                message: `form \`${form.name}\` variant \`:when ${v.when}\` redeclares key \`:${vk.name}\` (also in variant \`:when ${prior.when}\`)`,
+                message: `form \`${form.name}\` variant \`:when ${variantWhenText(v.when)}\` redeclares key \`:${vk.name}\` (also in variant \`:when ${variantWhenText(prior.when)}\`)`,
                 path: formAggregatePath(plugin.name, form.name, 'variant'),
                 span: ZERO_SPAN,
                 severity: 'err',

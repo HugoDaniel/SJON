@@ -2,33 +2,58 @@
 
 ## Goal
 
-Use diagnostic codes as a practical repair workflow. Predict the likely
-problem, fix the source shape, then re-check the schema expectation.
+Turn a diagnostic into a repair mechanically: read the code, know which
+layer of the contract it belongs to, and fix that layer rather than
+guessing at the one next to it.
 
-## Mental Model
+## Read the Code, Not the Sentence
 
-Diagnostics are not just error messages. They tell you which layer of
-authoring went wrong:
+Every diagnostic SJON emits carries a **code**, a snake_case identifier
+like `unknown_key` or `vector_too_short`, alongside its prose message, a
+source span, and a semantic path. The code is the part to build a habit
+around, for two reasons. It is wire-stable, so it means the same thing
+in this release and the next one, which the wording of a message does
+not promise. And it names a *layer*, which is what tells you where to
+look.
 
-- Unknown head or key, or a form head outside a slot's local form
-  set: vocabulary mismatch.
-- Duplicate or missing key: form contract mismatch.
-- Wrong underlying kind, or a vector with the wrong number of
-  elements: value shape mismatch.
-- Member, head, unit, bound, or representation error: value kind
-  refinement mismatch.
-- Union of alternatives, no match: the value didn't fit any alternative
-  the plugin declared for this slot.
-- Expression arity, typed-argument, or kvpair error: expression contract
-  mismatch.
-- Positional error: child placement or keyword-pairing mismatch.
-- Cross-reference resolution failure: name not declared, duplicated,
-  cyclic, or outside its lexical scope.
-- Exclusive-group cardinality error: the form declares an
-  exactly-one-of (or at-most-one-of) rule and the source presents
-  too many or too few alternatives.
+That last point is the whole method. Write this against the shapes
+plugin and you get two diagnostics, both of them
+`positional_not_allowed`, both saying that `circle` does not accept
+positional children:
 
-Work from the diagnostic code first, then from the prose message.
+```sjon del={1}
+(circle :center [0 0] :radius 1 :fill :evenodd)
+```
+
+Read that literally and you go looking for a stray child form. There is
+no child form. What happened is the pairing rule from
+[Forms and keyword pairing](05-forms-and-keyword-pairing.md): `:fill`
+could not pair with `:evenodd`, so both became positional flags, and
+`circle` accepts no positionals. The count is the tell, incidentally,
+since two complaints from one mistake means two children appeared where
+you wrote one thing. The diagnostic is telling the truth about the tree,
+and the tree is not what you thought you wrote. Fixing the layer it
+names would mean deleting children that do not exist; fixing the layer
+*underneath* it takes one character:
+
+```sjon ins={1}
+(circle :center [0 0] :radius 1 :fill evenodd)
+```
+
+So the first move on any diagnostic is to place the code in the stack:
+
+```
+vocabulary        unknown head or key, or a head outside a slot's local form set
+form contract     duplicate key, missing key, positional placement
+value shape       wrong underlying kind, wrong vector length
+kind refinement   member, head, unit, bound, or representation error
+union             no alternative accepted the value
+expression        arity, typed argument, or kvpair in a call
+cross-reference   name undeclared, duplicated, cyclic, or out of scope
+exclusive group   too many or too few alternatives present
+```
+
+Then work the code first and the prose second.
 
 Stable codes you are likely to see while authoring:
 
@@ -41,16 +66,16 @@ Stable codes you are likely to see while authoring:
 | `vector_too_short` / `vector_too_long` | Add or drop elements to land in the kind's `:min-len`/`:max-len` window (distinct from a fixed `:len`). |
 | `repr_out_of_range` | Bring the number into the `:repr` type's range, and make it whole for an integer type (`u16`/`u32`/`i32`). |
 | `unit_required` / `unit_not_allowed` | Add an allowed unit suffix. |
-| `unit_forbidden` | Drop the unit suffix - the kind rejects every unit (distinct from a suffix outside an allowed list). |
+| `unit_forbidden` | Drop the unit suffix; the kind rejects every unit, which is distinct from a suffix outside an allowed list. |
 | `not_member` / `not_head_member` | Use one of the plugin's closed-set values or heads. |
-| `unknown_local_form` | Use a head the slot accepts - a local form the message lists, or a known global head. |
-| `union_no_branch_matched` | Read the listed alternatives - the message names every shape the slot accepts - and rewrite the value to fit one of them. |
+| `unknown_local_form` | Use a head the slot accepts: a local form the message lists, or a known global head. |
+| `union_no_branch_matched` | Read the listed alternatives (the message names every shape the slot accepts) and rewrite the value to fit one of them. You see this code when the value's shape reaches none of the alternatives, or two or more; when it reaches exactly one, the slot reports that alternative's own code instead. |
 | `expr_kvpair_not_allowed` / `arity_mismatch` / `expr_type_mismatch` | Rewrite the expression call shape. |
 | `not_cross_ref` | Spell the referenced name correctly, or add the missing declaration. |
 | `duplicate_cross_ref_target` | Rename one of the two declarations or remove the duplicate. |
 | `cyclic_cross_ref` | Break the cycle in the chain (typically a `:parent`-style key). |
 | `cross_ref_outside_scope` | Move the reference inside the enclosing scope form, or declare the name in the right scope. |
-| `cross_ref_extraction_failed` | Fix the source string the diagnostic points at - a provider read it and rejected it, so the names inside are unknown. |
+| `cross_ref_extraction_failed` | Fix the source string the diagnostic points at; a provider read it and rejected it, so the names inside are unknown. |
 | `cross_ref_provider_unavailable` | Nothing in the document to repair: this host cannot run the provider, so those names go unchecked here. |
 | `missing_discriminant_key` | Add the discriminant key (e.g. `:kind`) to the form. |
 | `unknown_key` (with discriminant-first hint) | Reorder so the discriminant key precedes any variant-only key. |
@@ -59,35 +84,17 @@ Stable codes you are likely to see while authoring:
 
 ## Worked Example
 
-Broken:
+The pairing case from the opening is the first half of this drill, so
+here is the second. Broken:
 
-```sjon
-(circle :center [0 0] :radius 1 :fill :evenodd)
-```
-
-Likely symptoms:
-
-- `:fill` does not pair with `:evenodd`.
-- Both become positional flags.
-- `circle` does not accept positional children.
-
-The real mistake is not "fill rule unknown"; it is keyword pairing.
-Repair:
-
-```sjon
-(circle :center [0 0] :radius 1 :fill evenodd)
-```
-
-Broken:
-
-```sjon
+```sjon del={1}
 (badge :label "x" :shape (group :name "oops"))
 ```
 
 Likely diagnostic: `not_head_member`. The `:shape` slot accepts only
 specific form heads. Repair with an allowed form:
 
-```sjon
+```sjon ins={1}
 (badge :label "x" :shape (circle :center [0 0] :radius 1))
 ```
 
@@ -97,86 +104,86 @@ Predict the diagnostic category and repair each example.
 
 Unknown form:
 
-```sjon
+```sjon del={1}
 (circl :center [0 0] :radius 1)
 ```
 
 Repair:
 
-```sjon
+```sjon ins={1}
 (circle :center [0 0] :radius 1)
 ```
 
 Unknown key:
 
-```sjon
+```sjon del={1}
 (canvas :width 320 :height 240)
 ```
 
 Repair:
 
-```sjon
+```sjon ins={1}
 (canvas :w 320 :h 240)
 ```
 
 Duplicate key:
 
-```sjon
+```sjon del={1}
 (scene :title "a" :title "b")
 ```
 
 Repair by choosing one value:
 
-```sjon
+```sjon ins={1}
 (scene :title "b")
 ```
 
 Missing required key. This one is a schema-reading drill: assume the
 plugin docs say `(circle ...)` requires both `:center` and `:radius`.
 
-```sjon
+```sjon del={1}
 (circle :center [0 0])
 ```
 
 Repair:
 
-```sjon
+```sjon ins={1}
 (circle :center [0 0] :radius 1)
 ```
 
 Wrong underlying kind:
 
-```sjon
+```sjon del={1}
 (circle :center "middle" :radius 1)
 ```
 
 Repair:
 
-```sjon
+```sjon ins={1}
 (circle :center [0 0] :radius 1)
 ```
 
 Arity mismatch:
 
-```sjon
+```sjon del={1}
 (shape :sdf :radius (lerp 0 10))
 ```
 
 Repair:
 
-```sjon
+```sjon ins={1}
 (shape :sdf :radius (lerp 0 10 0.5))
 ```
 
 Typed expression mismatch:
 
-```sjon
+```sjon del={1}
 (vec3 1 "two" 3)
 ```
 
 `vec3` takes three numbers:
 
-```sjon
+```sjon ins={1}
 (vec3 1 2 3)
 ```
 
@@ -188,94 +195,94 @@ If you meant a scalar radius, use a scalar expression instead:
 
 Member set mismatch:
 
-```sjon
+```sjon del={1}
 (circle :center [0 0] :radius 1 :fill diagonal)
 ```
 
 Repair:
 
-```sjon
+```sjon ins={1}
 (circle :center [0 0] :radius 1 :fill nonzero)
 ```
 
 Unit mismatch. Assume `duration` allows `s | ms | b`:
 
-```sjon
+```sjon del={1}
 (delay :wait 4px)
 ```
 
 Repair with an allowed suffix:
 
-```sjon
+```sjon ins={1}
 (delay :wait 4b)
 ```
 
 Head set mismatch:
 
-```sjon
+```sjon del={1}
 (badge :label "x" :shape (group :name "oops"))
 ```
 
 Repair:
 
-```sjon
+```sjon ins={1}
 (badge :label "x" :shape (rect :origin [0 0] :size [10 10]))
 ```
 
 Variable-length vector. Assume `:position` is documented as
-`vector, length 2-4` - a range, not a fixed `:len`:
+`vector, length 2-4`, a range rather than a fixed `:len`:
 
-```sjon
+```sjon del={1}
 (vertex :position [0.0])
 ```
 
 Likely diagnostic: `vector_too_short` (the floor is 2; a fixed-length
 kind fires `vector_length_mismatch` instead). Repair into range:
 
-```sjon
+```sjon ins={1}
 (vertex :position [0.0 1.0])
 ```
 
 Representation out of range. Assume `:tint` is documented as
 `number, repr u16`:
 
-```sjon
+```sjon del={1}
 (vertex :tint 70000)
 ```
 
 Likely diagnostic: `repr_out_of_range`. `u16` tops out at `65535`, and
 an integer type also rejects a fractional value. Repair into range:
 
-```sjon
+```sjon ins={1}
 (vertex :tint 65535)
 ```
 
 Unit rejected. Assume `:lod-bias` is documented as
 `number, unit rejected`:
 
-```sjon
+```sjon del={1}
 (draw :lod-bias 0.5f)
 ```
 
 Likely diagnostic: `unit_forbidden`. The slot takes bare numbers; the
 trailing `f` lexes as a unit suffix. Repair by dropping it:
 
-```sjon
+```sjon ins={1}
 (draw :lod-bias 0.5)
 ```
 
 Slot-local form. Assume `canvas`'s `:shape` slot defines local forms
 `circle | rect | group`:
 
-```sjon
+```sjon del={1}
 (canvas :shape (triangle))
 ```
 
 Likely diagnostic: `unknown_local_form`, listing the slot's local
-heads - more specific than a top-level `unknown_form`. Repair with a
+heads, which is more specific than a top-level `unknown_form`. Repair with a
 head the slot accepts:
 
-```sjon
+```sjon ins={1}
 (canvas :shape (circle :r 12))
 ```
 
@@ -283,22 +290,25 @@ Union no-branch matched. Assume `:notes` is documented as
 `vector<note-or-event>` where `note-or-event = note-or-rest | event`
 and `event` is a form with head `n` or `rest`:
 
-```sjon
+```sjon del={1}
 (phrase :notes [E4 42])
 ```
 
 Likely diagnostic: `union_no_branch_matched` listing the alternatives
 (`note-or-rest`, `event`). The number `42` is neither a pitch symbol
-nor an event form. Repair with a value matching either alternative:
+nor an event form, and since no alternative takes numbers there is no
+single one to blame. Write a *symbol* the set does not contain and the
+message changes: only `note-or-rest` takes symbols, so you get its
+`not_member` instead. Repair with a value matching either alternative:
 
-```sjon
+```sjon ins={1}
 (phrase :notes [E4 (n G4 0.5b)])
 ```
 
-Union with `form` alternative - the wildcard pitfall. Assume the
+Union with a `form` alternative, which is the wildcard pitfall. Assume the
 plugin documents `:value` as `number | vec4 | form`:
 
-```sjon
+```sjon del={1}
 (set :value (foo 1 2))
 ```
 
@@ -307,39 +317,39 @@ The `form` alternative still resolves the form's head against the
 schema; "any form" is not the same as "any parens." Repair by using
 a form whose head the schema knows:
 
-```sjon
+```sjon ins={1}
 (set :value (+ 1 2))
 ```
 
 Ambiguous form. Assume two loaded plugins both declare `circle`:
 
-```sjon
+```sjon del={1}
 (circle :center [0 0] :radius 1)
 ```
 
 Repair by qualifying the domain head:
 
-```sjon
+```sjon ins={1}
 (shapes/circle :center [0 0] :radius 1)
 ```
 
 Discriminant absent. Assume `(track ...)` is documented with
 `discriminant: kind` and variants `kick | groove | animation`:
 
-```sjon
+```sjon del={1}
 (track :name k1 :from 0)
 ```
 
 Likely diagnostic: `missing_discriminant_key`. Repair:
 
-```sjon
+```sjon ins={1}
 (track :kind kick :name k1 :step 4 :from 0)
 ```
 
 Discriminant out of order. The variant key `:step` is written before
 `:kind`:
 
-```sjon
+```sjon del={1}
 (track :name k1 :step 4 :kind kick)
 ```
 
@@ -347,36 +357,36 @@ Likely diagnostic: `unknown_key` on `:step` with a hint that the
 discriminant must be set first. Repair by placing `:kind` before any
 variant-only key:
 
-```sjon
+```sjon ins={1}
 (track :kind kick :name k1 :step 4)
 ```
 
 Cross-variant key. `:mesh` is an `animation`-variant key, but
 `:kind = kick`:
 
-```sjon
+```sjon del={1}
 (track :kind kick :name k1 :mesh logo)
 ```
 
-Likely diagnostic: `unknown_key` (no hint - discriminant is set, the
+Likely diagnostic: `unknown_key` (no hint, because the discriminant is set and the
 key just isn't valid under this variant). Repair by changing the
 discriminant or removing the wrong-variant key:
 
-```sjon
+```sjon ins={1}
 (track :kind animation :name k1 :mesh logo)
 ```
 
 Exclusive-group violation. Assume `(phrase ...)` is documented with
 an `exactly-one` group over `:notes | :events`:
 
-```sjon
+```sjon del={1}
 (phrase :name p0 :notes [E4 G4] :events [(n A4 0.5b)])
 ```
 
 Likely diagnostic: `mutually_exclusive_keys_present` listing
 `:notes | :events`. Repair by keeping one alternative:
 
-```sjon
+```sjon ins={1}
 (phrase :name p0 :notes [E4 G4])
 ```
 
@@ -405,14 +415,15 @@ Cross-reference miss. Assume the plugin's `:sequence` slot expects
 Likely diagnostic: `not_cross_ref` at `[track sequence]`. Repair by
 adding the missing phrase or fixing the spelling:
 
-```sjon
+```sjon ins={2}
 (phrase :name p0 :notes [E4 G4 A4 G4])
 (phrase :name p1 :notes [B4 A4 G4 E4])
 
 (track :sequence [p0 p1])
 ```
 
-Chapter 13 covers cross-reference shapes in detail.
+[Cross-references](13-cross-references.md) covers these shapes in
+detail.
 
 ## LSP Quickfixes
 

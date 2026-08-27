@@ -1,9 +1,11 @@
-; A form whose head matches no union alternative is rejected with
-; `union_no_branch_matched`. `other` is a *declared* data form, so it is not
-; an `unknown_form`; it simply satisfies neither the `note-or-rest` symbol
-; alternative nor the `event` head-set (`n` / `rest`). This case pins the
-; union-over-forms funnel that the binary validator used to silently pass
-; (the `!resolvesToUnion` guard in processEvalValidate).
+; A form whose head matches no union alternative is rejected. `other` is a
+; *declared* data form, so it is not an `unknown_form`; it simply satisfies
+; neither the `note-or-rest` symbol alternative nor the `event` head-set
+; (`n` / `rest`). This case pins the union-over-forms funnel that the binary
+; validator used to silently pass (the `!resolvesToUnion` guard in
+; processEvalValidate) — the rejection itself is what it is for, and it now
+; carries the determined arm's `not_head_member` rather than the collapsed
+; union code.
 (plugin :name ev :version "1.0.0"
   (value-kind :name note-or-rest
     :underlying symbol

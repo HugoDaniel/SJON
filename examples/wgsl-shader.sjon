@@ -1,12 +1,12 @@
-; SJON — embedding multi-line WGSL via triple-quoted raw strings.
+; SJON: embedding multi-line WGSL via triple-quoted raw strings.
 ;
 ; Body bytes between `"""…"""` are taken verbatim: no escape processing,
 ; no newline stripping. To keep content clean, place the opening `"""`
 ; on the same line as the first byte of content. Closing on its own line
 ; means the body ends in a literal `\n`, which is harmless for WGSL.
 ;
-; The host is responsible for interpreting the string payload as WGSL —
-; SJON itself stores it as opaque UTF-8 bytes.
+; Interpreting the payload as WGSL is the host's job. SJON stores it as
+; opaque UTF-8 bytes and never looks inside.
 
 (shader-module :name "hello-triangle"
   :source """@vertex

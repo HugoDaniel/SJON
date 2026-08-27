@@ -1,0 +1,9 @@
+; Nothing under the active variant; the slot's `unknown_local_form` for the
+; miss; then `unknown_key` + `unknown_form` for the inactive-variant key
+; and for the key written ahead of the discriminant.
+(diagnostics
+  (diagnostic :code unknown_local_form :path [thing extra])
+  (diagnostic :code unknown_key :path [thing extra])
+  (diagnostic :code unknown_form :path [thing extra loc])
+  (diagnostic :code unknown_key :path [thing extra])
+  (diagnostic :code unknown_form :path [thing extra loc]))

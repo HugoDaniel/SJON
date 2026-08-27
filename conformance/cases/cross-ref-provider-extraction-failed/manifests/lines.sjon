@@ -1,6 +1,6 @@
 ; Same manifest as `cross-ref-provider-resolved`. The refusal below is
 ; the provider's answer to a particular source, not a different schema.
-(plugin :name lines :version "1.0.0" :sjon "1.2"
+(plugin :name lines :version "1.0.0"
   (cross-ref-provider :name lines
     :description "One name per non-empty line."
     :impl "wasm:extract_lines")

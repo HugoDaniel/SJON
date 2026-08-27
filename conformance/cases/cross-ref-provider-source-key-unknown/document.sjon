@@ -10,7 +10,7 @@
 ; A key of the wrong *type* is the same error for the same reason: this
 ; case pins the absent-key half, and `:body` below is present only to
 ; make the near-miss legible.
-(plugin :name probe :version "1.0.0" :sjon "1.2"
+(plugin :name probe :version "1.0.0"
   (cross-ref-provider :name lines
     :description "One name per non-empty line.")
 

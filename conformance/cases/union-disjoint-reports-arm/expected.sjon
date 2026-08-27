@@ -1,0 +1,13 @@
+; Five documents, five arm diagnostics, none of them the union code. Each
+; is exactly what the bare kind would have said in that slot.
+;
+; The vector row is the same rule one level down: the vector is the only
+; alternative a vector can reach, so it is the determined arm and its
+; `element_at` failure is reported at the slot, framed the way a direct
+; vector slot is framed — same span, path and code on both walkers.
+(diagnostics
+  (diagnostic :code repr_out_of_range :path [k value])
+  (diagnostic :code not_member        :path [k ease])
+  (diagnostic :code not_head_member   :path [k ease])
+  (diagnostic :code repr_out_of_range :path [k value])
+  (diagnostic :code not_head_member   :path [k three]))

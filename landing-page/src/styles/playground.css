@@ -1,39 +1,115 @@
-/* Playground page — paper-aesthetic chrome for the embedded CodeMirror editor.
+/* Playground chrome.
  *
- * Consumes the same tokens as the rest of the marketing site (system-tokens.css).
+ * Global on purpose, not scoped to the page component: `schema-tabs.ts`,
+ * `lsp-eval.ts` and `lsp-outline.ts` mint `pg-*` elements at runtime, and
+ * Astro's scoping attribute is applied at build time, so a scoped stylesheet
+ * would miss every one of them.
+ *
+ * Deliberately *unlayered*. All of Starlight's CSS sits in `@layer starlight.*`,
+ * and cascade layers are compared before specificity, so an unlayered rule wins
+ * by construction — including over `reset.css`'s `input, button, select { font:
+ * inherit }`, which is what the button rules below are up against. Wrapping this
+ * file in a layer of its own would hand that fight back to Starlight.
  */
 
-.playground {
-  max-width: var(--landing-width);
-  margin: var(--space-4) auto var(--space-5);
-  padding: 0 var(--landing-inset);
+/* The lede above the editor.
+ *
+ * `/playground` is a `splash` page, which widens `--sl-content-width` to
+ * 67.5rem so the editor frame can use it. The one paragraph of prose above the
+ * frame does not want that measure, so it gets the documentation-page 45rem
+ * back. The frame itself is a `div` and so is untouched by the child selector.
+ */
+.sl-markdown-content > p {
+  max-width: 45rem;
 }
 
-.playground .kicker {
-  font-family: var(--display);
-  font-size: 15px;
-  line-height: 1.25;
-  color: var(--accent);
-  letter-spacing: 0.02em;
-  margin-bottom: var(--space-2);
+/* The one block that knows Starlight exists.
+ *
+ * Everything below names a `--sjon-pg-*` or `--sjon-cm-*` property, so
+ * re-theming the playground means editing this block and nothing else. */
+:root {
+  --sjon-pg-bg: var(--sl-color-bg);
+  --sjon-pg-bg-inset: var(--sl-color-bg-nav);
+  --sjon-pg-text: var(--sl-color-text);
+  /* Inverts with the theme: near-white on dark, near-black on light. */
+  --sjon-pg-text-strong: var(--sl-color-white);
+  --sjon-pg-text-muted: var(--sl-color-gray-3);
+  --sjon-pg-rule: var(--sl-color-hairline-light);
+  --sjon-pg-accent: var(--sl-color-accent);
+  --sjon-pg-text-accent: var(--sl-color-text-accent);
+  --sjon-pg-font-mono: var(--__sl-font-mono);
 }
 
-.playground h1 {
-  font-family: var(--body);
-  font-weight: 600;
-  font-size: var(--step-3);
-  letter-spacing: 0;
-  color: var(--ink);
-  margin-bottom: var(--space-2);
+/* The editor's palette.
+ *
+ * `src/playground/codemirror-setup.ts` names every colour and face through one
+ * of these properties and spells out none of them. CodeMirror's
+ * `EditorView.theme()` emits literal CSS text, so `var()` is resolved by the
+ * browser at paint rather than by CodeMirror at configure-time: the theme
+ * toggle recolours a live editor through this block alone, with no reconfigure,
+ * no observer, and no flash.
+ *
+ * Defined on `:root` because CodeMirror mounts tooltips and completion panels
+ * as siblings of the editor rather than inside it, and custom properties reach
+ * them only by inheritance. */
+:root {
+  --sjon-cm-font-mono: var(--sjon-pg-font-mono);
+  --sjon-cm-font-ui: var(--__sl-font);
+
+  --sjon-cm-fg: var(--sjon-pg-text-strong);
+  --sjon-cm-fg-soft: var(--sjon-pg-text-muted);
+  /* `text-accent` rather than `accent`: it is the readable-on-background
+     variant in both themes, which is what a caret and a link want. */
+  --sjon-cm-accent: var(--sjon-pg-text-accent);
+  --sjon-cm-link: var(--sjon-pg-text-accent);
+  --sjon-cm-caret: var(--sjon-pg-text-accent);
+
+  --sjon-cm-gutter-bg: var(--sjon-pg-bg-inset);
+  --sjon-cm-gutter-fg: var(--sjon-pg-text-muted);
+  --sjon-cm-gutter-border: var(--sjon-pg-rule);
+  --sjon-cm-inset-bg: var(--sjon-pg-bg-inset);
+  --sjon-cm-border-soft: var(--sjon-pg-rule);
+  --sjon-cm-panel-bg: var(--sjon-pg-bg);
+  /* A floating card needs a border you can see against the page it floats
+     over, which a hairline is not. */
+  --sjon-cm-panel-border: var(--sl-color-gray-4);
+
+  /* Tints. Mixed against the accent so they follow it, and in sRGB because
+     mixing with `transparent` in oklch does not do what it reads like. */
+  --sjon-cm-active-line: color-mix(in srgb, var(--sjon-pg-accent) 6%, transparent);
+  --sjon-cm-active-line-gutter: color-mix(in srgb, var(--sjon-pg-accent) 9%, transparent);
+  --sjon-cm-selection: color-mix(in srgb, var(--sjon-pg-accent) 24%, transparent);
+  --sjon-cm-bracket-bg: color-mix(in srgb, var(--sjon-pg-accent) 20%, transparent);
+  --sjon-cm-selected-bg: color-mix(in srgb, var(--sjon-pg-accent) 16%, transparent);
+
+  --sjon-cm-error: var(--sl-color-red);
+  --sjon-cm-warning: var(--sl-color-orange);
+  --sjon-cm-special: var(--sl-color-red-high);
+  --sjon-cm-snippet-field: color-mix(in srgb, var(--sjon-pg-text-strong) 13%, transparent);
+
+  /* Syntax, on the `*-high` family — the variant Starlight tunes to stay
+     readable as text in both themes, as opposed to the `*` variant, which is
+     tuned to work as a fill. */
+  --sjon-cm-keyword: var(--sl-color-purple-high);
+  --sjon-cm-atom: var(--sl-color-blue-high);
+  --sjon-cm-number: var(--sl-color-orange-high);
+  --sjon-cm-string: var(--sl-color-green-high);
+  --sjon-cm-comment: var(--sjon-pg-text-muted);
+  --sjon-cm-meta: var(--sl-color-blue-high);
+  --sjon-cm-punctuation: var(--sjon-pg-text-muted);
+  /* The one bespoke pair. `:keys` are the most common token in a SJON
+     document, Starlight has no teal, and routing them through the accent would
+     flood the editor with it.
+
+     Dark first, light in the override below — the same way round as
+     Starlight's own tokens, because the inline theme script sets `data-theme`
+     at load and a page rendered before it runs (or with scripting off) gets
+     the bare `:root` values. */
+  --sjon-cm-key: #7fd6e0;
 }
 
-.playground .lede {
-  font-family: var(--body);
-  font-size: var(--step-0);
-  color: var(--ink-soft);
-  line-height: var(--leading-body);
-  margin-bottom: var(--space-3);
-  max-width: var(--measure);
+:root[data-theme='light'] {
+  --sjon-cm-key: #2d7d8a;
 }
 
 .editor-frame {
@@ -41,60 +117,62 @@
      itself takes the remainder (`.pg-body`). Big enough for five rows and the
      label, which covers every worked example on the site. */
   --pg-eval-height: 8rem;
-  border: 1px solid var(--ink);
-  border-radius: var(--radius-card);
+  border: 1px solid var(--sjon-pg-rule);
+  border-radius: 0.5rem;
   overflow: hidden;
-  background: var(--surface);
-  box-shadow: 5px 5px 0 var(--shadow);
+  background: var(--sjon-pg-bg);
 }
 
 /* Stale-asset banner — unhidden by boot.ts when the running LSP wasm disagrees
  * with the build-staged sidecar. No `display` rule so the `hidden` attribute
- * governs visibility. */
+ * governs visibility.
+ *
+ * Orange, and the failure banner below is red. They used to differ only in the
+ * opacity of the same coral, which said nothing: this one is advice to a
+ * developer, and that one says half the page is dead. The `*-low` / `*` pairs
+ * are designed to invert, so both stay readable in either theme. */
 .pg-stale {
-  padding: var(--space-2) var(--space-4);
-  border-bottom: 1px solid var(--accent);
-  background: rgba(240, 100, 73, 0.08);
-  color: var(--ink);
-  font-size: 0.85rem;
+  padding: 0.5rem 1.5rem;
+  border-bottom: 1px solid var(--sl-color-orange);
+  background: var(--sl-color-orange-low);
+  color: var(--sjon-pg-text-strong);
+  font-size: var(--sl-text-sm);
   line-height: 1.4;
 }
 
 .pg-stale code {
-  font-family: var(--mono);
+  font-family: var(--sjon-pg-font-mono);
 }
 
 /* Language-server boot failure. Same shape as .pg-stale — it sits in the same
- * slot above the tab bar — with a heavier tint, because .pg-stale is advice to
- * a developer and this one tells a visitor half the page is dead. */
+ * slot above the tab bar. */
 .pg-failed {
-  padding: var(--space-2) var(--space-4);
-  border-bottom: 1px solid var(--accent);
-  background: rgba(240, 100, 73, 0.16);
-  color: var(--ink);
-  font-size: 0.85rem;
+  padding: 0.5rem 1.5rem;
+  border-bottom: 1px solid var(--sl-color-red);
+  background: var(--sl-color-red-low);
+  color: var(--sjon-pg-text-strong);
+  font-size: var(--sl-text-sm);
   line-height: 1.4;
 }
 
 /* Empty until `showLspFailure` fills it in, so it must not reserve space. */
 .pg-failed code {
-  font-family: var(--mono);
+  font-family: var(--sjon-pg-font-mono);
 }
 
 .pg-failed code:empty {
   display: none;
 }
 
-/* Tab bar — document + schema panes, an add button, and copy-link.
- * Tokens mirror the host-language tabs in HostStartTabs.astro. */
+/* Tab bar — document + schema panes, an add button, and copy-link. */
 .pg-tabs {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 10px var(--space-4);
-  background: var(--surface);
-  border-bottom: 1px solid var(--rule-mute);
+  padding: 10px 1rem;
+  background: var(--sjon-pg-bg);
+  border-bottom: 1px solid var(--sjon-pg-rule);
 }
 
 .pg-tablist {
@@ -104,31 +182,36 @@
   gap: 6px;
 }
 
+/* Every control below spells `font-*` out in longhands rather than using the
+ * `font:` shorthand, because the shorthand resets `font-family` too and would
+ * drop the face inherited from Starlight. */
 .pg-tab {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   appearance: none;
-  border: 1px solid var(--rule-mute);
+  border: 1px solid var(--sjon-pg-rule);
   border-radius: 5px;
-  background: var(--surface-mute);
-  color: var(--ink);
+  background: var(--sjon-pg-bg-inset);
+  color: var(--sjon-pg-text);
   cursor: pointer;
-  font: 600 13px/1 var(--body);
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1;
   padding: 7px 10px;
   transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
 }
 
 .pg-tab:hover,
 .pg-tab:focus-visible {
-  border-color: var(--accent);
+  border-color: var(--sjon-pg-accent);
   outline: none;
 }
 
 .pg-tab[aria-selected='true'] {
-  background: var(--ink);
-  border-color: var(--ink);
-  color: var(--surface);
+  background: var(--sjon-pg-text-strong);
+  border-color: var(--sjon-pg-text-strong);
+  color: var(--sjon-pg-bg);
 }
 
 .pg-tab__label {
@@ -141,7 +224,9 @@
   background: transparent;
   color: inherit;
   cursor: pointer;
-  font: 600 15px/1 var(--body);
+  font-weight: 600;
+  font-size: 15px;
+  line-height: 1;
   padding: 0 1px;
   opacity: 0.55;
   border-radius: 3px;
@@ -156,20 +241,22 @@
 
 .pg-tab--add {
   appearance: none;
-  border: 1px dashed var(--rule-mute);
+  border: 1px dashed var(--sjon-pg-rule);
   border-radius: 5px;
   background: transparent;
-  color: var(--ink-soft);
+  color: var(--sjon-pg-text-muted);
   cursor: pointer;
-  font: 600 13px/1 var(--body);
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1;
   padding: 7px 10px;
   transition: border-color 0.12s ease, color 0.12s ease;
 }
 
 .pg-tab--add:hover,
 .pg-tab--add:focus-visible {
-  border-color: var(--accent);
-  color: var(--ink);
+  border-color: var(--sjon-pg-accent);
+  color: var(--sjon-pg-text);
   outline: none;
 }
 
@@ -183,12 +270,14 @@
 
 .pg-examples__select {
   appearance: none;
-  border: 1px solid var(--rule-mute);
+  border: 1px solid var(--sjon-pg-rule);
   border-radius: 5px;
-  background: var(--surface-mute);
-  color: var(--ink-soft);
+  background-color: var(--sjon-pg-bg-inset);
+  color: var(--sjon-pg-text-muted);
   cursor: pointer;
-  font: 600 12.5px/1 var(--body);
+  font-weight: 600;
+  font-size: 12.5px;
+  line-height: 1;
   /* Room on the right for the caret drawn below. */
   padding: 7px 26px 7px 10px;
   transition: border-color 0.12s ease, color 0.12s ease;
@@ -201,28 +290,30 @@
 
 .pg-examples__select:hover,
 .pg-examples__select:focus-visible {
-  border-color: var(--accent);
-  color: var(--ink);
+  border-color: var(--sjon-pg-accent);
+  color: var(--sjon-pg-text);
   outline: none;
 }
 
 .pg-copy-link {
   margin-left: auto;
   appearance: none;
-  border: 1px solid var(--rule-mute);
+  border: 1px solid var(--sjon-pg-rule);
   border-radius: 5px;
-  background: var(--surface-mute);
-  color: var(--ink-soft);
+  background: var(--sjon-pg-bg-inset);
+  color: var(--sjon-pg-text-muted);
   cursor: pointer;
-  font: 600 12.5px/1 var(--body);
+  font-weight: 600;
+  font-size: 12.5px;
+  line-height: 1;
   padding: 7px 10px;
   transition: border-color 0.12s ease, color 0.12s ease;
 }
 
 .pg-copy-link:hover,
 .pg-copy-link:focus-visible {
-  border-color: var(--accent);
-  color: var(--ink);
+  border-color: var(--sjon-pg-accent);
+  color: var(--sjon-pg-text);
   outline: none;
 }
 
@@ -268,8 +359,8 @@
   flex: none;
   height: 100%;
   overflow-y: auto;
-  border-left: 1px solid var(--rule-mute);
-  background: var(--surface-mute);
+  border-left: 1px solid var(--sjon-pg-rule);
+  background: var(--sjon-pg-bg-inset);
   padding: 10px 0;
 }
 
@@ -279,8 +370,10 @@
 
 .pg-outline__title {
   margin: 0 0 6px 10px;
-  color: var(--ink-soft);
-  font: 600 11px/1 var(--body);
+  color: var(--sjon-pg-text-muted);
+  font-weight: 600;
+  font-size: 11px;
+  line-height: 1;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -295,9 +388,12 @@
   border: 0;
   border-radius: 0;
   background: none;
-  color: var(--ink-soft);
+  color: var(--sjon-pg-text-muted);
   cursor: pointer;
-  font: 500 12.5px/1.7 var(--mono, var(--body));
+  font-family: var(--sjon-pg-font-mono);
+  font-weight: 500;
+  font-size: 12.5px;
+  line-height: 1.7;
   padding-block: 1px;
   padding-inline-end: 8px;
   text-align: left;
@@ -308,16 +404,18 @@
 
 .pg-outline__row:hover,
 .pg-outline__row:focus-visible {
-  background: var(--surface);
-  color: var(--ink);
+  background: var(--sjon-pg-bg);
+  color: var(--sjon-pg-text);
   outline: none;
 }
 
 .pg-outline__empty {
   margin: 0;
   padding-inline: 10px;
-  color: var(--ink-soft);
-  font: 400 12px/1.6 var(--body);
+  color: var(--sjon-pg-text-muted);
+  font-weight: 400;
+  font-size: 12px;
+  line-height: 1.6;
   opacity: 0.7;
 }
 
@@ -327,16 +425,18 @@
    around on every keystroke that added an expression. Extra rows scroll. */
 .pg-eval {
   height: var(--pg-eval-height);
-  border-top: 1px solid var(--rule-mute);
-  background: var(--surface-mute);
+  border-top: 1px solid var(--sjon-pg-rule);
+  background: var(--sjon-pg-bg-inset);
   overflow-y: auto;
   padding: 10px 0;
 }
 
 .pg-eval__title {
   margin: 0 0 6px 10px;
-  color: var(--ink-soft);
-  font: 600 11px/1 var(--body);
+  color: var(--sjon-pg-text-muted);
+  font-weight: 600;
+  font-size: 11px;
+  line-height: 1;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -351,11 +451,14 @@
   border: 0;
   border-radius: 0;
   background: none;
-  color: var(--ink);
+  color: var(--sjon-pg-text);
   cursor: pointer;
   display: flex;
   gap: 10px;
-  font: 500 12.5px/1.7 var(--mono, var(--body));
+  font-family: var(--sjon-pg-font-mono);
+  font-weight: 500;
+  font-size: 12.5px;
+  line-height: 1.7;
   padding-block: 1px;
   padding-inline: 10px;
   text-align: left;
@@ -363,7 +466,7 @@
 
 .pg-eval__row:hover,
 .pg-eval__row:focus-visible {
-  background: var(--surface);
+  background: var(--sjon-pg-bg);
   outline: none;
 }
 
@@ -371,7 +474,7 @@
 .pg-eval__line {
   flex: none;
   min-width: 2.5rem;
-  color: var(--ink-soft);
+  color: var(--sjon-pg-text-muted);
   opacity: 0.65;
   text-align: right;
 }
@@ -385,7 +488,7 @@
 }
 
 .pg-eval__row--muted .pg-eval__text {
-  color: var(--ink-soft);
+  color: var(--sjon-pg-text-muted);
   font-style: italic;
   opacity: 0.75;
 }
@@ -393,7 +496,9 @@
 .pg-eval__empty {
   margin: 0;
   padding-inline: 10px;
-  color: var(--ink-soft);
-  font: 400 12px/1.6 var(--body);
+  color: var(--sjon-pg-text-muted);
+  font-weight: 400;
+  font-size: 12px;
+  line-height: 1.6;
   opacity: 0.7;
 }

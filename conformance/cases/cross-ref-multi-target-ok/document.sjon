@@ -11,7 +11,7 @@
 ; `:render` is deliberately here too: it targets `render-pipeline` alone,
 ; so this document also pins that a group member keeps its own, narrower
 ; namespace. `reduce` would NOT be accepted there.
-(plugin :name gpu :version "1.0.0" :sjon "1.3"
+(plugin :name gpu :version "1.0.0"
   (value-kind :name pipeline-ref :underlying symbol
     :description "A render or compute pipeline, in one namespace."
     :cross-ref (cross-ref :target [render-pipeline compute-pipeline]))

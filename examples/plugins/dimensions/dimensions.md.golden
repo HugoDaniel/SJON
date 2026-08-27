@@ -22,6 +22,6 @@ Type: `symbol enum` — one of: `1d`, `2d`, `3d`.
 
 ### view-dimension
 
-GPUTextureViewDimension — digit-leading and ordinary members in one set.
+GPUTextureViewDimension: digit-leading and ordinary members in one set.
 
 Type: `symbol enum` — one of: `1d`, `2d` — 2D, `2d-array`, `cube`, `cube-array`, `3d`.

@@ -1,4 +1,4 @@
-//! Reference plugin: `shapes` — a tiny 2-D drawing vocabulary.
+//! Reference plugin: `shapes`, a tiny 2-D drawing vocabulary.
 //!
 //! This file is meant to be **read alongside `src/Plugin.zig`**: it
 //! exercises every plugin extension point SJON exposes today, and is
@@ -6,14 +6,14 @@
 //!
 //! What it shows:
 //!
-//!   * `forms`        — `(canvas …)`, `(circle …)`, `(rect …)`, `(group …)`,
+//!   * `forms`:         `(canvas …)`, `(circle …)`, `(rect …)`, `(group …)`,
 //!                      `(scene …)`. Mix of `.positional = .any` and
 //!                      `.positional = .none`; `scene` sets `.open = true`
 //!                      to opt out of unknown-key checks.
-//!   * `value_kinds`  — `length` (number) and `point` (vector). Referenced
+//!   * `value_kinds`:   `length` (number) and `point` (vector). Referenced
 //!                      from key `value_type` declarations as
 //!                      `.{ .named = .{ .name = "length" } }`.
-//!   * `expr_funcs`   — `golden` and `deg`. Declared so the validator can
+//!   * `expr_funcs`:    `golden` and `deg`. Declared so the validator can
 //!                      recognise them in expression position; the actual
 //!                      evaluator dispatch for plugin funcs is a v0.3
 //!                      concern (today they return
@@ -29,7 +29,7 @@ const std = @import("std");
 const sjon = @import("sjon");
 const Plugin = sjon.Plugin;
 
-/// The `shapes` plugin descriptor — pass alongside `sjon.plugins.core.plugin`
+/// The `shapes` plugin descriptor. Pass it alongside `sjon.plugins.core.plugin`
 /// to `Schema.init` to compose them into one schema.
 pub const plugin: Plugin.Plugin = .{
     .name = "shapes",
@@ -287,7 +287,7 @@ test "validator: open form (scene) silently accepts unknown keys" {
 }
 
 test "validator: forms compose with core expressions in keyword positions" {
-    // Demonstrates that a key value can itself be a safe expression — the
+    // Demonstrates that a key value can itself be a safe expression: the
     // validator just walks it and checks the head, no special-casing needed.
     const a = testing.allocator;
     const src: [:0]const u8 =

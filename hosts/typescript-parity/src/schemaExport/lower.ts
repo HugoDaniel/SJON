@@ -34,6 +34,7 @@ import type {
   ModelDiscriminator,
   ModelExclusiveGroup,
   ModelForm,
+  ModelFormRef,
   ModelKey,
   ModelMember,
   ModelNumericBound,
@@ -55,6 +56,61 @@ interface LowerCtx {
   warnings: Warning[];
 }
 
+/**
+ * The slot-local form registry in scope for a head-set resolution, in
+ * both source and lowered form (index-parallel — a `local` head embeds
+ * the lowered body, so `lowerForm` lowers its locals before resolving
+ * the positional kind). Mirrors `Context.locals` / `lowered_locals` in
+ * `src/SchemaExport/SchemaExport.zig`.
+ */
+interface SlotLocals {
+  readonly specs: readonly FormSpec[];
+  readonly lowered: readonly ModelForm[];
+}
+
+/**
+ * Where a value-kind is being lowered *from*: the names that scope a
+ * warning, plus the slot.
+ *
+ * An absent `slot` means there is **no slot** — `lowerPlugin`'s
+ * standalone pass over every value-kind, which exists for the Markdown
+ * and IR channels. Absent-versus-empty is load-bearing: "this slot
+ * declares no locals" is a verdict a head-set resolution can act on, and
+ * "there is no slot" is the absence of one. Only the first may call a
+ * head unresolvable.
+ */
+interface LowerScope {
+  readonly pluginName?: string;
+  readonly formName?: string;
+  readonly keyName?: string;
+  readonly kindName?: string;
+  readonly slot?: SlotLocals;
+}
+
+/**
+ * A slot that declares no locals — distinct from no slot at all. Used by
+ * the two sites that are structurally locals-free: a keyed slot (the
+ * loader rejects keyed locals on anything but `:type form`, so a keyed
+ * slot can never carry both a head-set and locals) and a vector element
+ * (a value, not a form child, so no registry ever reaches one).
+ */
+const NO_LOCALS: SlotLocals = { specs: [], lowered: [] };
+
+/** True when a slot is in hand, so the head-set resolution is complete. */
+function scopeJudges(scope: LowerScope): boolean {
+  return scope.slot !== undefined;
+}
+
+/** The lowered body of the slot-local matching `head`, or null. */
+function matchSlotLocal(scope: LowerScope, head: string): ModelForm | null {
+  const slot = scope.slot;
+  if (!slot) return null;
+  for (let i = 0; i < slot.specs.length; i += 1) {
+    if (slot.specs[i]!.name === head) return slot.lowered[i]!;
+  }
+  return null;
+}
+
 /** Entry point — lower a Schema to the IR. */
 export function lowerSchema(schema: Schema): { model: Model; warnings: readonly Warning[] } {
   const ctx: LowerCtx = { schema, warnings: [] };
@@ -70,7 +126,10 @@ function lowerPlugin(ctx: LowerCtx, plugin: Plugin): ModelPlugin {
   const valueKinds: ModelValueKindEntry[] = plugin.valueKinds.map((vk) => ({
     name: vk.name,
     description: '',
-    shape: lowerValueKind(ctx, plugin, vk),
+    // No slot: this pass exists for the value-kind table the Markdown
+    // and IR channels render, and a head-set kind is reusable across
+    // slots with different local registries. An absent `slot` says so.
+    shape: lowerValueKind(ctx, plugin, vk, { pluginName: plugin.name }),
     originPlugin: plugin.name,
   }));
   return {
@@ -84,6 +143,16 @@ function lowerPlugin(ctx: LowerCtx, plugin: Plugin): ModelPlugin {
 
 function lowerForm(ctx: LowerCtx, plugin: Plugin, form: FormSpec): ModelForm {
   const keys: ModelKey[] = form.keys.map((k) => lowerKey(ctx, plugin, form, k));
+
+  // Positional slot-local forms, lowered *before* the positional kind
+  // because a head-set resolution embeds these bodies. Mirrors the Zig
+  // `lowerForm` hook.
+  const localSpecs: readonly FormSpec[] = form.localForms ?? [];
+  const slot: SlotLocals = {
+    specs: localSpecs,
+    lowered: localSpecs.map((lf) => lowerForm(ctx, plugin, lf)),
+  };
+
   let positional: ModelPositional;
   switch (form.positional.kind) {
     case 'none':
@@ -98,6 +167,7 @@ function lowerForm(ctx: LowerCtx, plugin: Plugin, form: FormSpec): ModelForm {
         shape: resolveNamedShape(ctx, plugin, form.positional.name, form.positional.namespace, {
           pluginName: plugin.name,
           formName: form.name,
+          slot,
         }),
       };
       break;
@@ -111,26 +181,43 @@ function lowerForm(ctx: LowerCtx, plugin: Plugin, form: FormSpec): ModelForm {
       assertNever(form.positional);
   }
 
-  // Positional slot-local forms override the positional child shape to the
-  // same inline anonymous union (`form_locals`) `lowerKey` uses for keyed
-  // locals — each local lowered via `lowerForm` (a discriminated local keeps
-  // its if/then). Rides independent of the declared positional variant
-  // (`any` / head-set `kind`); the head-set gate stays SJON-only. Reuses the
-  // `local_forms_emitted_inline` warning (form-scoped, no key). Mirrors the
-  // Zig `lowerForm` hook.
-  if (form.localForms && form.localForms.length > 0) {
-    positional = {
-      kind: 'kind',
-      shape: {
-        kind: 'form_locals',
-        forms: form.localForms.map((lf) => lowerForm(ctx, plugin, lf)),
-      },
-    };
+  if (localSpecs.length > 0) {
+    // A declared head-set closes the slot by head text, and the
+    // resolution above has already embedded each local body into the
+    // matching member — keeping it is what preserves the narrowing, the
+    // `x-sjon-head-set` annotation and the per-head `contains` bounds.
+    // Anything else places no head constraint, so the locals open the
+    // slot additively (inline union + trailing open generic branch).
+    // The loader guarantees only `any` and `kind` reach here with a
+    // non-empty registry. Mirrors the Zig `lowerForm` hook.
+    const headSet =
+      positional.kind === 'kind' && positional.shape.kind === 'form_heads'
+        ? positional.shape.heads
+        : null;
+    if (headSet === null) {
+      positional = { kind: 'kind', shape: { kind: 'form_locals', forms: slot.lowered } };
+    } else {
+      // A local outside the set is dead: narrowing rejects the head
+      // (`not_head_member`) before resolution reaches the registry.
+      for (const lf of localSpecs) {
+        if (headSet.some((ref) => ref.name === lf.name)) continue;
+        ctx.warnings.push(
+          makeWarning(
+            'local_form_outside_head_set',
+            'warn',
+            `positional slot-local form \`${lf.name}\` on \`${form.name}\` is outside the slot's head-set, so no child can ever reach it — add \`${lf.name}\` to the head-set or delete the local`,
+            { pluginName: plugin.name, formName: form.name },
+          ),
+        );
+      }
+    }
     ctx.warnings.push(
       makeWarning(
         'local_forms_emitted_inline',
         'info',
-        `positional slot on form \`${form.name}\` declares ${form.localForms.length} local form(s) — emitted as an inline union plus an open generic branch for the additive global fallback; local-first/global resolution order is SJON-only`,
+        headSet === null
+          ? `positional slot on form \`${form.name}\` declares ${localSpecs.length} local form(s) — emitted as an inline union plus an open generic branch for the additive global fallback; local-first/global resolution order is SJON-only`
+          : `positional slot on form \`${form.name}\` declares ${localSpecs.length} local form(s) behind a ${headSet.length}-head head-set — emitted as a closed inline union with no global fallback branch; a head outside the set is \`not_head_member\``,
         { pluginName: plugin.name, formName: form.name },
       ),
     );
@@ -218,6 +305,7 @@ function lowerKey(ctx: LowerCtx, plugin: Plugin, form: FormSpec, key: KeySpec): 
     pluginName: plugin.name,
     formName: form.name,
     keyName: key.name,
+    slot: NO_LOCALS,
   });
 
   // Slot-local forms live on the key, not the type: a `:type form` slot
@@ -278,11 +366,29 @@ function lowerKeyDefault(d: KeyDefault | null | undefined): ModelDefault | null 
   }
 }
 
-function lowerValueKind(ctx: LowerCtx, plugin: Plugin, vk: ValueKind): ModelValueShape {
+function lowerValueKind(
+  ctx: LowerCtx,
+  plugin: Plugin,
+  vk: ValueKind,
+  /**
+   * The site this kind is being lowered *for*. Callers pass their own
+   * scope rather than one minted here, so a head-set kind reached
+   * through a union alternative still knows which slot it landed in.
+   */
+  outer: LowerScope,
+): ModelValueShape {
   // Refinement axes layered onto the underlying type. Order matters —
   // unit-with-numeric pulls bounds into the unit shape; numeric-only
   // routes through number_bounded; etc.
-  const scope = { pluginName: plugin.name, kindName: vk.name };
+  // Two scopes, deliberately. `scope` is the *warning* scope and is
+  // kind-only, exactly as before slot-aware resolution: widening it would
+  // put the caller's form and key on every warning this function emits,
+  // which un-collapses `dedupeWarnings` for a kind referenced from a slot
+  // *and* from the standalone value-kind pass — one cross-ref would warn
+  // twice. `inner` is the *resolution* scope, and carries the slot on to
+  // anything that recurses.
+  const scope: LowerScope = { pluginName: plugin.name, kindName: vk.name };
+  const inner: LowerScope = { ...scope, ...(outer.slot ? { slot: outer.slot } : {}) };
   // union_of replaces the underlying mapping entirely, so it resolves
   // first — and a union_of kind (today only produced by the scalar-or-ref
   // desugar, `union [<base> symbol]`) never carries the unit/numeric/
@@ -304,7 +410,7 @@ function lowerValueKind(ctx: LowerCtx, plugin: Plugin, vk: ValueKind): ModelValu
     );
     const alternatives: ModelUnionAlternative[] = vk.unionOf.alternatives.map((alt) => ({
       name: alt.name,
-      shape: resolveNamedShape(ctx, plugin, alt.name, alt.namespace, scope),
+      shape: resolveNamedShape(ctx, plugin, alt.name, alt.namespace, inner),
     }));
     return { kind: 'union_of', alternatives };
   }
@@ -424,28 +530,76 @@ function lowerValueKind(ctx: LowerCtx, plugin: Plugin, vk: ValueKind): ModelValu
       },
     };
   }
-  if (vk.heads && vk.heads.length > 0) {
-    const heads = vk.heads.map((entry) => {
-      const hit = lookupForm(ctx.schema, entry.name, null);
-      const owner =
-        hit.kind === 'found' ? (findOwningPlugin(ctx.schema, hit.value) ?? plugin.name) : '';
-      const ref: { plugin: string; name: string; min?: number; max?: number } = {
-        plugin: owner,
+  if (vk.heads && vk.heads.heads.length > 0) {
+    // Head-set resolution, the way `Validator.validateFormHead` step 0
+    // resolves the child that will carry the head: slot-local first,
+    // global catalog second. `scope.slot` is what makes that possible and
+    // what decides whether a miss is reported at all — a slot judges, the
+    // standalone value-kind pass stays quiet (see `LowerScope`).
+    let localCount = 0;
+    const heads = vk.heads.heads.map((entry) => {
+      const ref: ModelFormRef = {
+        plugin: '',
         name: entry.name,
+        ...(entry.min !== undefined ? { min: entry.min } : {}),
+        ...(entry.max !== undefined ? { max: entry.max } : {}),
       };
-      if (entry.min !== undefined) ref.min = entry.min;
-      if (entry.max !== undefined) ref.max = entry.max;
-      return ref;
+      const local = matchSlotLocal(outer, entry.name);
+      if (local) {
+        localCount += 1;
+        // A slot-local belongs to the plugin whose form declares it,
+        // which is the plugin being lowered — locals never cross a
+        // plugin boundary.
+        return { ...ref, plugin: plugin.name, body: { kind: 'local', form: local } as const };
+      }
+      const hit = lookupForm(ctx.schema, entry.name, null);
+      if (hit.kind === 'found') {
+        return { ...ref, plugin: findOwningPlugin(ctx.schema, hit.value) ?? plugin.name };
+      }
+      if (scopeJudges(outer)) {
+        ctx.warnings.push(
+          makeWarning(
+            'head_set_member_unresolved',
+            'err',
+            hit.kind === 'ambiguous'
+              ? `head-set member \`${entry.name}\` on value-kind \`${vk.name}\` is declared by more than one plugin; qualify it or rename one`
+              : `head-set member \`${entry.name}\` on value-kind \`${vk.name}\` resolves to no form in scope at this slot — no slot-local \`(form :name ${entry.name} …)\` and no global one`,
+            // The err names the slot, which the kind-scoped message it
+            // replaced could not. Mirrors the Zig warning's fields.
+            {
+              ...scope,
+              ...(outer.formName ? { formName: outer.formName } : {}),
+              ...(outer.keyName ? { keyName: outer.keyName } : {}),
+            },
+          ),
+        );
+      }
+      return { ...ref, body: { kind: 'unresolved' } as const };
     });
+    // Scoped to slots for the same reason the miss above is: the note
+    // describes how a *slot's* `$children` was emitted, and the standalone
+    // value-kind pass emits no `$children` anywhere. Left unscoped it fired
+    // twice per locals-backed head-set. Mirrors the Zig guard.
+    // The set's own count travels with the members, since it belongs to
+    // the set rather than to any of them. Mirrors `Model.HeadSetShape`.
+    const shape: ModelValueShape = {
+      kind: 'form_heads',
+      heads,
+      ...(vk.heads.minChildren !== undefined ? { minChildren: vk.heads.minChildren } : {}),
+      ...(vk.heads.maxChildren !== undefined ? { maxChildren: vk.heads.maxChildren } : {}),
+    };
+    if (!scopeJudges(outer)) return shape;
     ctx.warnings.push(
       makeWarning(
         'head_set_emitted_via_oneof_refs',
         'info',
-        `value-kind \`${vk.name}\` — head-set emitted as \`oneOf\` of \`$ref\`s into \`#/$defs/form.<plugin>.<head>\``,
-        scope,
+        localCount === 0
+          ? `value-kind \`${vk.name}\` — head-set emitted as \`oneOf\` of \`$ref\`s into \`#/$defs/form.<plugin>.<head>\``
+          : `value-kind \`${vk.name}\` head-set emitted as a closed \`oneOf\` — ${localCount} of ${vk.heads.heads.length} head(s) resolve to slot-local forms and are emitted inline, the rest as \`$ref\`s into \`#/$defs/form.<plugin>.<head>\``,
+        localCount === 0 || !outer.formName ? scope : { ...scope, formName: outer.formName },
       ),
     );
-    return { kind: 'form_heads', heads };
+    return shape;
   }
   if (vk.members && vk.members.length > 0) {
     const isAnnotated = vk.members.some(
@@ -501,7 +655,10 @@ function lowerValueKind(ctx: LowerCtx, plugin: Plugin, vk: ValueKind): ModelValu
           ctx,
           plugin,
           { kind: 'named', name: vk.vector.element.name, namespace: vk.vector.element.namespace },
-          scope,
+          // An element is a value, not a form child, so the enclosing
+          // slot's registry does not reach it — matching the validator,
+          // which attaches one only to a direct `.form` child.
+          { ...inner, slot: NO_LOCALS },
         ),
       },
     };
@@ -542,7 +699,7 @@ function lowerValueType(
   ctx: LowerCtx,
   plugin: Plugin,
   vt: ValueType,
-  scope: { pluginName?: string; formName?: string; keyName?: string; kindName?: string },
+  scope: LowerScope,
 ): ModelValueShape {
   switch (vt.kind) {
     case 'any':
@@ -586,7 +743,7 @@ function resolveNamedShape(
   plugin: Plugin,
   name: string,
   namespace: string | null,
-  scope: { pluginName?: string; formName?: string; keyName?: string; kindName?: string },
+  scope: LowerScope,
 ): ModelValueShape {
   // Primitive-name shortcut — the TS plugin model lets keys reference
   // `number` / `string` / etc. via `{kind: 'named', name: 'number'}`.
@@ -595,7 +752,7 @@ function resolveNamedShape(
 
   const hit = lookupValueKind(ctx.schema, name, namespace);
   if (hit.kind === 'found') {
-    return lowerValueKind(ctx, plugin, hit.value);
+    return lowerValueKind(ctx, plugin, hit.value, scope);
   }
   // Could also be a form name (form-as-slot shape).
   const formHit = lookupForm(ctx.schema, name, namespace);
@@ -642,7 +799,7 @@ function primitiveShortcut(name: string): ModelValueShape | null {
 function lowerNumericBounds(
   ctx: LowerCtx,
   src: NumericBounds,
-  scope: { pluginName?: string; formName?: string; kindName?: string; keyName?: string },
+  scope: LowerScope,
 ): ModelNumericBounds {
   const min = src.min ? lowerBound(ctx, src.min, scope) : null;
   const max = src.max ? lowerBound(ctx, src.max, scope) : null;
@@ -673,11 +830,7 @@ function emptyNumericBounds(): ModelNumericBounds {
   };
 }
 
-function lowerBound(
-  ctx: LowerCtx,
-  src: NumericBound,
-  scope: { pluginName?: string; formName?: string; kindName?: string; keyName?: string },
-): ModelNumericBound {
+function lowerBound(ctx: LowerCtx, src: NumericBound, scope: LowerScope): ModelNumericBound {
   let exactIntDigits: string | null = null;
   if (src.exactInt && Math.abs(src.value) > F64_PRECISE_INT_CEILING) {
     exactIntDigits = src.integerBits != null ? src.integerBits.toString() : String(src.value);

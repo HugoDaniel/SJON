@@ -2719,12 +2719,16 @@ test "required key: diagnostic on form preceded by a comment uses head bytes" {
 // Parity contract: for any source `s` and schema `S`,
 //   validate(parse(s), S).diagnostics.len == validateBinary(toBinary(parse(s)), S).diagnostics.len
 //
-// Nested typed-`.vector` failures now converge fully: both walkers emit the
-// same message, span, and path, framed against the outer slot with an
-// `element [N]: …` wrap (B.9; pinned by "message parity: nested typed-vector
-// element"). The remaining documented divergence is a `.union_of` slot that
-// accepts a vector alternative — tree emits one `union_no_branch_matched` at
-// the slot, binary emits per bad element (union-div #2).
+// Nested typed-`.vector` failures converge on code, span and path: both
+// walkers frame against the outer slot with an `element [N]: …` wrap (B.9;
+// pinned by "message parity: nested typed-vector element"), and so does a
+// `.union_of` slot whose determined arm is a vector. What does not converge
+// is the COUNT when more than one element fails — the tree breaks at the
+// first, the binary emits one per element — and that is true of a direct
+// vector slot too, so the parity contract above holds only for a single
+// failing element. A union that determines no arm keeps the older, wider
+// divergence: tree collapses to `union_no_branch_matched` at the slot,
+// binary emits per bad element at an index-extended path (union-div #2).
 // ---------------------------------------------------------------------------
 
 const Binary = @import("Binary.zig");
@@ -3586,10 +3590,13 @@ const event_union_plugin: Plugin.Plugin = .{
     },
 };
 
-test "validate [union-over-forms 1]: rejectable form in a union slot -> union_no_branch_matched on both paths" {
-    // PRIMARY red: today the binary path emits nothing here.
+test "validate [union-over-forms 1]: rejectable form in a union slot -> the form arm's not_head_member on both paths" {
+    // PRIMARY red: the binary path used to emit nothing here. A form
+    // reaches only the `event` alternative, so that is the determined arm
+    // and its own failure is what the slot reports (15).
     const schema = Schema.Schema.init(&.{event_union_plugin});
-    try expectPathOnBoth("(track :ev (other 1))", schema, .union_no_branch_matched, &.{ "track", "ev" });
+    try expectPathOnBoth("(track :ev (other 1))", schema, .not_head_member, &.{ "track", "ev" });
+    try expectNoCodeOnBoth("(track :ev (other 1))", schema, .union_no_branch_matched);
 }
 
 test "validate [union-over-forms 2]: form matching the event HeadSet alternative accepts on both paths" {
@@ -3598,12 +3605,12 @@ test "validate [union-over-forms 2]: form matching the event HeadSet alternative
     try expectNoCodeOnBoth("(track :ev (rest))", schema, .union_no_branch_matched);
 }
 
-test "validate [union-over-forms 3]: rejectable form as a union'd vector element -> union_no_branch_matched (code parity; path exempt)" {
+test "validate [union-over-forms 3]: rejectable form as a union'd vector element -> the form arm's not_head_member (code parity; path exempt)" {
     // Vector-element funnel. Path parity is exempt — the tree wraps one
     // diagnostic at the slot path, the binary emits per element at an
     // index-extended path — so assert code parity only.
     const schema = Schema.Schema.init(&.{event_union_plugin});
-    try expectCodeOnBoth("(line :notes [(other 1)])", schema, .union_no_branch_matched);
+    try expectCodeOnBoth("(line :notes [(other 1)])", schema, .not_head_member);
 }
 
 test "validate [union-over-forms 4]: forms matching alternatives as vector elements accept on both paths" {
@@ -3613,39 +3620,106 @@ test "validate [union-over-forms 4]: forms matching alternatives as vector eleme
 
 test "validate [union-over-forms 5]: walk-opaque union slot rejects a bad form once, identically on both paths" {
     // The slot type-check runs before the opaque descent-drain, so a
-    // rejectable form still trips exactly one union_no_branch_matched and
-    // the value's body is not walked. Full (count, code, path) parity.
+    // rejectable form still trips exactly one diagnostic and the value's
+    // body is not walked. Full (count, code, path) parity.
     const schema = Schema.Schema.init(&.{event_union_plugin});
     try parityCheckPaths("(opaque-track :ev (other 1))", schema);
-    try expectPathOnBoth("(opaque-track :ev (other 1))", schema, .union_no_branch_matched, &.{ "opaque-track", "ev" });
+    try expectPathOnBoth("(opaque-track :ev (other 1))", schema, .not_head_member, &.{ "opaque-track", "ev" });
 }
 
 // ----- Group U-div: residual tree/binary union divergences -----------------
 //
-// Two known divergences the union-over-forms fix above does NOT close. They
-// are pinned here as single-path characterization tests (deliberately NOT
-// expectCodeOnBoth — the paths genuinely disagree) so that a change closing
-// either has a red to flip into a parity assertion. Both are deliberate,
-// known residuals.
+// The divergences the union-over-forms fix above does NOT close, pinned as
+// characterization tests (deliberately NOT expectCodeOnBoth — the paths
+// genuinely disagree) so that a change closing one has a red to flip into a
+// parity assertion. #2 has since had exactly that happen to its determined
+// -arm leg (2a); what is left of it is below. All are deliberate residuals.
 
-// Divergence #2: a union with a VECTOR alternative whose elements fail. The
-// tree tries the vector alternative, recurses its elements, and — the
-// elements failing — rejects the alternative, so the whole union fails with
-// one `union_no_branch_matched` at the slot. The binary path's union
-// alternative selection is length-only (`matchKindBinary`'s `.vector` arm
-// defers per-element checks via `element_type`), so it ACCEPTS the vector
-// alternative on length and then emits a per-element `wrong_underlying` for
-// each bad element at an index-extended path. Different code, count, and
-// path. Closing it needs eager per-element validation during binary union
-// alternative selection.
-test "validate [union-div 2]: union-over-vector w/ failing elements diverges (tree slot vs binary per-element)" {
+// Divergence #2: a union with a VECTOR alternative whose elements fail.
+//
+// The vector is the *determined* arm (15) — nothing else in the union takes
+// a vector — so the tree reports that arm's `element_at` at the slot, and
+// the binary keeps `wrap_element_failures` and reframes to the same slot
+// (B.9). Code and path converge; what is left is the COUNT, and it is not
+// this union's: the tree `break`s at the first failing element while the
+// binary emits one per element, which is already true of a *direct* vector
+// slot. The two characterizations below pin both halves of that, with the
+// direct-slot twin beside the union so the residual is visible where it
+// actually lives. The third case — two vector alternatives, so no arm is
+// determined — is the union residual proper: there the tree still collapses
+// and the binary still emits per element at index-extended paths.
+//
+// Closing the count needs the tree walker to continue past the first failing
+// element; closing the third needs eager per-element validation during
+// binary union alternative selection.
+
+/// The union-div #2 gate: one vector alternative (so it is determined for a
+/// vector) beside a scalar one, plus the same vector kind as a direct slot.
+const d2_plugin: Plugin.Plugin = .{
+    .name = "d2",
+    .forms = &.{
+        .{ .name = "pick", .keys = &.{.{ .name = "v", .value_type = .{ .named = .{ .name = "vec2sym-or-num" } } }} },
+        .{ .name = "direct", .keys = &.{.{ .name = "v", .value_type = .{ .named = .{ .name = "vec2sym" } } }} },
+    },
+    .value_kinds = &.{
+        .{ .name = "vec2sym", .underlying = .vector, .vector = .{ .len = 2, .element = .{ .name = "symbol" } } },
+        .{ .name = "vec2sym-or-num", .underlying = .union_of, .union_of = .{ .alternatives = &.{ .{ .name = "vec2sym" }, .{ .name = "number" } } } },
+    },
+};
+
+test "validate [union-div 2a]: one failing element of a determined vector arm is full parity" {
+    // The flipped red: this used to diverge on code (tree
+    // `union_no_branch_matched` at the slot, binary `wrong_underlying` at
+    // `[pick v 1]`). With the arm determined and the wrap restored it is
+    // (count, code, path) parity, and corpus-pinnable.
+    const schema = Schema.Schema.init(&.{d2_plugin});
+    try parityCheckPaths("(pick :v [a 2])", schema);
+    try expectPathOnBoth("(pick :v [a 2])", schema, .wrong_underlying, &.{ "pick", "v" });
+    try expectNoCodeOnBoth("(pick :v [a 2])", schema, .union_no_branch_matched);
+}
+
+test "validate [union-div 2b]: more than one failing element diverges on count — inherited from a direct vector slot" {
+    // Both halves of the same residual: the tree breaks at the first failing
+    // element, the binary emits one per element. Code and path agree; only
+    // the count does not, and it does not for the direct slot either.
+    const a = testing.allocator;
+    const schema = Schema.Schema.init(&.{d2_plugin});
+
+    for ([_][:0]const u8{ "(pick :v [1 2])", "(direct :v [1 2])" }, [_][]const u8{ "pick", "direct" }) |src, form| {
+        var tree = try Parser.parse(a, src);
+        defer tree.deinit();
+        var tr = try validate(a, tree, schema);
+        defer tr.deinit();
+        try testing.expectEqual(@as(usize, 1), tr.diagnostics.len);
+        try testing.expect(anyCodeAtPath(tr.diagnostics, .wrong_underlying, &.{ form, "v" }));
+
+        const bin = try Binary.toBinary(a, tree, .{});
+        defer bin.deinit();
+        var br = try validateBinary(a, bin.data, schema);
+        defer br.deinit();
+        try testing.expectEqual(@as(usize, 2), br.diagnostics.len);
+        for (br.diagnostics) |d| {
+            try testing.expectEqual(Diagnostic.Code.wrong_underlying, d.code);
+            try testing.expectEqual(@as(usize, 2), d.path.len);
+            try testing.expectEqualStrings(form, d.path[0]);
+            try testing.expectEqualStrings("v", d.path[1]);
+        }
+    }
+}
+
+test "validate [union-div 2c]: two vector alternatives determine no arm — tree collapses, binary stays per-element" {
+    // The union residual proper. Both alternatives reach a vector, so there
+    // is no arm to blame: the tree emits one `union_no_branch_matched` at the
+    // slot and the binary accepts the first on length alone and reports per
+    // element at an index-extended path.
     const a = testing.allocator;
     const p: Plugin.Plugin = .{
-        .name = "d2",
-        .forms = &.{.{ .name = "pick", .keys = &.{.{ .name = "v", .value_type = .{ .named = .{ .name = "vec2sym-or-num" } } }} }},
+        .name = "d2c",
+        .forms = &.{.{ .name = "pick", .keys = &.{.{ .name = "v", .value_type = .{ .named = .{ .name = "either" } } }} }},
         .value_kinds = &.{
             .{ .name = "vec2sym", .underlying = .vector, .vector = .{ .len = 2, .element = .{ .name = "symbol" } } },
-            .{ .name = "vec2sym-or-num", .underlying = .union_of, .union_of = .{ .alternatives = &.{ .{ .name = "vec2sym" }, .{ .name = "number" } } } },
+            .{ .name = "vec2str", .underlying = .vector, .vector = .{ .len = 2, .element = .{ .name = "string" } } },
+            .{ .name = "either", .underlying = .union_of, .union_of = .{ .alternatives = &.{ .{ .name = "vec2sym" }, .{ .name = "vec2str" } } } },
         },
     };
     const schema = Schema.Schema.init(&.{p});
@@ -3654,7 +3728,6 @@ test "validate [union-div 2]: union-over-vector w/ failing elements diverges (tr
     defer tree.deinit();
     var tr = try validate(a, tree, schema);
     defer tr.deinit();
-    // Tree: one union rejection at the slot.
     try testing.expectEqual(@as(usize, 1), tr.diagnostics.len);
     try testing.expect(anyCodeAtPath(tr.diagnostics, .union_no_branch_matched, &.{ "pick", "v" }));
 
@@ -3662,11 +3735,9 @@ test "validate [union-div 2]: union-over-vector w/ failing elements diverges (tr
     defer bin.deinit();
     var br = try validateBinary(a, bin.data, schema);
     defer br.deinit();
-    // Binary: length-only alternative accept, then per-element wrong_underlying.
     try testing.expectEqual(@as(usize, 2), br.diagnostics.len);
     try testing.expect(anyCodeAtPath(br.diagnostics, .wrong_underlying, &.{ "pick", "v", "0" }));
     try testing.expect(anyCodeAtPath(br.diagnostics, .wrong_underlying, &.{ "pick", "v", "1" }));
-    // The divergence itself: neither path emits the other's code.
     try testing.expect(!anyCode(br.diagnostics, .union_no_branch_matched));
 }
 
@@ -3835,7 +3906,7 @@ const piece_track_plugin: Plugin.Plugin = .{
             .discriminant_idx = 1,
             .variants = &.{
                 .{
-                    .when = "kick",
+                    .when = &.{"kick"},
                     .keys = &.{
                         .{ .name = "step", .value_type = .number, .optional = false },
                         .{ .name = "volume", .value_type = .number, .optional = true },
@@ -3843,14 +3914,14 @@ const piece_track_plugin: Plugin.Plugin = .{
                     },
                 },
                 .{
-                    .when = "groove",
+                    .when = &.{"groove"},
                     .keys = &.{
                         .{ .name = "pattern", .value_type = .symbol, .optional = false },
                         .{ .name = "velocity", .value_type = .number, .optional = true },
                     },
                 },
                 .{
-                    .when = "animation",
+                    .when = &.{"animation"},
                     .keys = &.{
                         .{ .name = "mesh", .value_type = .symbol, .optional = true },
                         .{ .name = "parent", .value_type = .symbol, .optional = true },
@@ -6952,6 +7023,79 @@ test "local_forms (dual): a qualified head bypasses locals (global-only)" {
 }
 
 // ---------------------------------------------------------------------------
+// Slot-locals and `walk_opaque` on a VARIANT key — DUAL path. A key declared
+// on a `(variant …)` is accepted only while that variant is active, and only
+// after the discriminant (the position rule); its slot-level opt-ins —
+// `KeySpec.local_forms`, `KeySpec.walk_opaque` — are in scope exactly then.
+// Outside the active variant the key is `unknown_key` and puts nothing in
+// scope: the value form resolves globally, and an opaque slot is walked.
+// The tree walker used to attach *any* variant's key opt-ins regardless of
+// the active variant (its kvpair handler re-matched keys on its own); the
+// binary walker never did. Both now read the key the key-typing pass
+// accepted, so every case runs through both (`expect*OnBoth`).
+// ---------------------------------------------------------------------------
+
+/// A discriminated `thing` (`:kind` ∈ {a, b}) whose variant `a` declares two
+/// slots with opt-ins: `:extra` (form-typed, local `loc`) and `:blob`
+/// (`walk_opaque`). Variant `b` declares nothing. `loc` is local-only, so an
+/// unresolved `(loc)` is `unknown_form`.
+fn variantKeyLocalsPlugin() Plugin.Plugin {
+    return .{
+        .name = "demo",
+        .forms = &.{.{
+            .name = "thing",
+            .keys = &.{.{ .name = "kind", .value_type = .{ .named = .{ .name = "k" } }, .optional = false }},
+            .discriminant_name = "kind",
+            .discriminant_idx = 0,
+            .variants = &.{
+                .{ .when = &.{"a"}, .keys = &.{
+                    .{ .name = "extra", .value_type = .form, .optional = true, .local_forms = &.{.{ .name = "loc" }} },
+                    .{ .name = "blob", .value_type = .any, .optional = true, .walk_opaque = true },
+                } },
+                .{ .when = &.{"b"}, .keys = &.{} },
+            },
+        }},
+        .value_kinds = &.{
+            .{ .name = "k", .underlying = .symbol, .members = .{ .members = &.{ .{ .name = "a" }, .{ .name = "b" } } } },
+        },
+    };
+}
+
+test "variant-key locals (dual): the active variant's key puts its locals in scope" {
+    const schema = Schema.Schema.init(&.{variantKeyLocalsPlugin()});
+    try expectNoCodeOnBoth("(thing :kind a :extra (loc))", schema, .unknown_key);
+    try expectNoCodeOnBoth("(thing :kind a :extra (loc))", schema, .unknown_form);
+    try expectNoCodeOnBoth("(thing :kind a :extra (loc))", schema, .unknown_local_form);
+    // …and a miss against them is the slot's `unknown_local_form`.
+    try expectPathOnBoth("(thing :kind a :extra (nope))", schema, .unknown_local_form, &.{ "thing", "extra" });
+}
+
+test "variant-key locals (dual): a key of an inactive variant puts nothing in scope" {
+    const schema = Schema.Schema.init(&.{variantKeyLocalsPlugin()});
+    // `:extra` belongs to variant `a`; with `b` active it is unknown, and
+    // `(loc)` resolves globally — to nothing.
+    try expectCodeOnBoth("(thing :kind b :extra (loc))", schema, .unknown_key);
+    try expectCodeOnBoth("(thing :kind b :extra (loc))", schema, .unknown_form);
+    try expectNoCodeOnBoth("(thing :kind b :extra (loc))", schema, .unknown_local_form);
+}
+
+test "variant-key locals (dual): a variant key ahead of the discriminant puts nothing in scope" {
+    const schema = Schema.Schema.init(&.{variantKeyLocalsPlugin()});
+    // The position rule: the discriminant precedes variant-only keys, so
+    // `:extra` here is unknown even though `a` is selected later.
+    try expectCodeOnBoth("(thing :extra (loc) :kind a)", schema, .unknown_key);
+    try expectCodeOnBoth("(thing :extra (loc) :kind a)", schema, .unknown_form);
+}
+
+test "variant-key walk_opaque (dual): honoured on the active variant, not outside it" {
+    const schema = Schema.Schema.init(&.{variantKeyLocalsPlugin()});
+    try expectNoCodeOnBoth("(thing :kind a :blob (mystery))", schema, .unknown_form);
+    // Inactive: the slot is unknown and its value is walked like any other.
+    try expectCodeOnBoth("(thing :kind b :blob (mystery))", schema, .unknown_key);
+    try expectCodeOnBoth("(thing :kind b :blob (mystery))", schema, .unknown_form);
+}
+
+// ---------------------------------------------------------------------------
 // Positional slot-local forms (FormSpec.local_forms) — DUAL path. The
 // positional mirror of the keyed block above: a form-shaped POSITIONAL child
 // of a form that declares `FormSpec.local_forms` resolves local-first (local
@@ -9256,13 +9400,13 @@ const Validator_test_track: Plugin.Plugin = .{
             .discriminant_name = "kind",
             .variants = &.{
                 .{
-                    .when = "audio",
+                    .when = &.{"audio"},
                     .keys = &.{
                         .{ .name = "channels", .value_type = .number, .optional = true },
                     },
                 },
                 .{
-                    .when = "midi",
+                    .when = &.{"midi"},
                     .keys = &.{
                         .{ .name = "instrument", .value_type = .symbol, .optional = true },
                     },
@@ -10937,7 +11081,7 @@ const primitive_requires_plugin: Plugin.Plugin = .{
             },
             .variants = &.{
                 .{
-                    .when = "triangle-strip",
+                    .when = &.{"triangle-strip"},
                     .keys = &.{
                         .{ .name = "strip-index-format", .value_type = .symbol, .optional = true, .requires = &.{"cull"} },
                     },
@@ -11323,6 +11467,315 @@ test "loaded-manifest: scalar-or-ref accepts a number and a symbol, rejects a st
     try expectNoCodeOnBoth("(use :n 42)", schema, .union_no_branch_matched);
     try expectNoCodeOnBoth("(use :n MY_DEFINE)", schema, .union_no_branch_matched);
     try expectCodeOnBoth("(use :n \"hi\")", schema, .union_no_branch_matched);
+}
+
+// ---------------------------------------------------------------------------
+// S13/15 — a union slot reports the arm the node's shape selected, when
+// exactly one alternative could take that shape. *Matching* is unchanged —
+// declaration order, first accept wins; only the failure report differs.
+// `determinedArm` is one function asked by both walkers and the binary form
+// funnel, so every pin below is dual-path.
+// ---------------------------------------------------------------------------
+
+/// The S13 gate manifest: a bounded base, a checked ref, and the
+/// scalar-or-ref that pairs them.
+const s13_manifest =
+    \\(plugin :name p :version "1.0.0"
+    \\  (value-kind :name qty-value :underlying number
+    \\    :numeric (numeric-bounds :min 0 :max 16 :integer true))
+    \\  (value-kind :name thing-ref :underlying symbol
+    \\    :cross-ref (cross-ref :target thing))
+    \\  (value-kind :name qty
+    \\    :underlying scalar-or-ref
+    \\    :scalar-or-ref (scalar-or-ref-shape :base qty-value :ref thing-ref))
+    \\  (form :name thing
+    \\    (key :name name :type symbol :optional false))
+    \\  (form :name use
+    \\    (key :name q :type qty :optional false)))
+;
+
+test "scalar-or-ref: a number reports the base arm's bound, not the union code (both paths)" {
+    var r = try loadManifest(s13_manifest);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const schema = Schema.Schema.init(&.{r.plugin});
+
+    // The bound that refused is named — and the union code is not emitted.
+    try expectCodeOnBoth("(use :q 32)", schema, .number_above_max);
+    try expectNoCodeOnBoth("(use :q 32)", schema, .union_no_branch_matched);
+    try expectCodeOnBoth("(use :q -1)", schema, .number_below_min);
+    try expectNoCodeOnBoth("(use :q -1)", schema, .union_no_branch_matched);
+    try expectCodeOnBoth("(use :q 1.5)", schema, .number_not_integer);
+    // Matching is untouched: in-range literals and resolved refs are clean.
+    try expectNoCodeOnBoth("(use :q 8)", schema, .number_above_max);
+    try expectNoCodeOnBoth("(thing :name TILE) (use :q TILE)", schema, .not_cross_ref);
+}
+
+test "scalar-or-ref: a symbol reports the ref arm's not_cross_ref (both paths)" {
+    var r = try loadManifest(s13_manifest);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const schema = Schema.Schema.init(&.{r.plugin});
+
+    try expectCodeOnBoth("(thing :name TILE) (use :q TIL)", schema, .not_cross_ref);
+    try expectNoCodeOnBoth("(thing :name TILE) (use :q TIL)", schema, .union_no_branch_matched);
+}
+
+test "scalar-or-ref: the ref arm's own message survives the arm report" {
+    // The point of reporting the arm: the message names the target form
+    // and the key its names are drawn from — what the author has to go and
+    // declare — where the union message named two kinds.
+    var r = try loadManifest(s13_manifest);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const schema = Schema.Schema.init(&.{r.plugin});
+    const b = try validateSrc("(thing :name TILE) (use :q TIL)", schema);
+    defer deinitBundle(b);
+    const d = diagForCode(b.result.diagnostics, .not_cross_ref) orelse return error.DiagnosticMissing;
+    try testing.expect(std.mem.indexOf(u8, d.message, "got `TIL` (no `(p/thing :name …)` form declares this name)") != null);
+    try testing.expect(std.mem.indexOf(u8, d.message, "no alternative matched") == null);
+}
+
+test "scalar-or-ref: a shape neither arm reaches keeps union_no_branch_matched (both paths)" {
+    var r = try loadManifest(s13_manifest);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const schema = Schema.Schema.init(&.{r.plugin});
+
+    // A vector in a `number | symbol` slot selects no arm; the union code
+    // is then the honest answer, and no arm's private code is invented.
+    try expectCodeOnBoth("(use :q [1 2])", schema, .union_no_branch_matched);
+    try expectNoCodeOnBoth("(use :q [1 2])", schema, .number_above_max);
+    try expectNoCodeOnBoth("(use :q [1 2])", schema, .not_cross_ref);
+    try expectCodeOnBoth("(use :q \"8\")", schema, .union_no_branch_matched);
+}
+
+test "scalar-or-ref: a symbol both arms reach keeps union_no_branch_matched (both paths)" {
+    // A base that is itself a symbol kind (a member set) makes a symbol
+    // reachable by both arms — no determined arm, so the union code stays
+    // rather than blaming the reference half for a misspelled member.
+    var r = try loadManifest(
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name mode :underlying symbol
+        \\    :members (member-set :values [normal multiply]))
+        \\  (value-kind :name thing-ref :underlying symbol
+        \\    :cross-ref (cross-ref :target thing))
+        \\  (value-kind :name mode-or-ref
+        \\    :underlying scalar-or-ref
+        \\    :scalar-or-ref (scalar-or-ref-shape :base mode :ref thing-ref))
+        \\  (form :name thing
+        \\    (key :name name :type symbol :optional false))
+        \\  (form :name use
+        \\    (key :name m :type mode-or-ref :optional false)))
+    );
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const schema = Schema.Schema.init(&.{r.plugin});
+
+    try expectCodeOnBoth("(use :m nrmal)", schema, .union_no_branch_matched);
+    try expectNoCodeOnBoth("(use :m nrmal)", schema, .not_cross_ref);
+    try expectNoCodeOnBoth("(use :m nrmal)", schema, .not_member);
+    try expectNoCodeOnBoth("(use :m multiply)", schema, .union_no_branch_matched);
+    try expectNoCodeOnBoth("(thing :name X) (use :m X)", schema, .union_no_branch_matched);
+}
+
+test "15: a hand-written union with shape-disjoint arms reports the arm" {
+    // The rule is the shape, not the spelling: `union [qty-value thing-ref]`
+    // spelled by hand is disjoint by node shape exactly as the shorthand
+    // is, so a number reports the base arm's bound and a symbol the ref
+    // arm's reference failure. Same two kinds, same two documents, same
+    // two diagnostics as the shorthand pins above.
+    var r = try loadManifest(
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name qty-value :underlying number
+        \\    :numeric (numeric-bounds :min 0 :max 16 :integer true))
+        \\  (value-kind :name thing-ref :underlying symbol
+        \\    :cross-ref (cross-ref :target thing))
+        \\  (value-kind :name qty :underlying union
+        \\    :union (union-shape :alternatives [qty-value thing-ref]))
+        \\  (form :name thing
+        \\    (key :name name :type symbol :optional false))
+        \\  (form :name use
+        \\    (key :name q :type qty :optional false)))
+    );
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const schema = Schema.Schema.init(&.{r.plugin});
+
+    try expectCodeOnBoth("(use :q 32)", schema, .number_above_max);
+    try expectNoCodeOnBoth("(use :q 32)", schema, .union_no_branch_matched);
+    try expectCodeOnBoth("(use :q NOPE)", schema, .not_cross_ref);
+    try expectNoCodeOnBoth("(use :q NOPE)", schema, .union_no_branch_matched);
+    // A string reaches neither arm: the collapse is still the honest answer.
+    try expectCodeOnBoth("(use :q \"hi\")", schema, .union_no_branch_matched);
+}
+
+test "15: the arm is counted per value — one union, disjoint for one shape and overlapping for another" {
+    // `[small big thing-ref]`: a symbol reaches only the cross-ref arm, so
+    // it is determined; a number reaches two number arms, so it is not.
+    var r = try loadManifest(
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name small :underlying number
+        \\    :numeric (numeric-bounds :min 0 :max 8))
+        \\  (value-kind :name big :underlying number
+        \\    :numeric (numeric-bounds :min 100 :max 200))
+        \\  (value-kind :name thing-ref :underlying symbol
+        \\    :cross-ref (cross-ref :target thing))
+        \\  (value-kind :name sized :underlying union
+        \\    :union (union-shape :alternatives [small big thing-ref]))
+        \\  (form :name thing
+        \\    (key :name name :type symbol :optional false))
+        \\  (form :name use
+        \\    (key :name q :type sized :optional false)))
+    );
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const schema = Schema.Schema.init(&.{r.plugin});
+
+    // Symbol: one reachable arm out of three -> its own failure.
+    try expectCodeOnBoth("(use :q NOPE)", schema, .not_cross_ref);
+    try expectNoCodeOnBoth("(use :q NOPE)", schema, .union_no_branch_matched);
+    // Number: two reachable arms -> the collapse, and neither arm's bound.
+    try expectCodeOnBoth("(use :q 50)", schema, .union_no_branch_matched);
+    try expectNoCodeOnBoth("(use :q 50)", schema, .number_above_max);
+    try expectNoCodeOnBoth("(use :q 50)", schema, .number_below_min);
+}
+
+test "15: reachability stops at the node shape — two form arms keep the collapse" {
+    // `[spring-form bounce-form]` are disjoint by *head*, not by shape.
+    // Deciding between them would mean running the refinement, which is
+    // matching, so the union code stays.
+    var r = try loadManifest(
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name spring-form :underlying form
+        \\    :heads (head-set :names [spring]))
+        \\  (value-kind :name bounce-form :underlying form
+        \\    :heads (head-set :names [bounce]))
+        \\  (value-kind :name ease :underlying union
+        \\    :union (union-shape :alternatives [spring-form bounce-form]))
+        \\  (form :name spring :positional any)
+        \\  (form :name bounce :positional any)
+        \\  (form :name other  :positional any)
+        \\  (form :name use
+        \\    (key :name e :type ease :optional false)))
+    );
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const schema = Schema.Schema.init(&.{r.plugin});
+
+    try expectCodeOnBoth("(use :e (other 1))", schema, .union_no_branch_matched);
+    try expectNoCodeOnBoth("(use :e (other 1))", schema, .not_head_member);
+    try expectNoCodeOnBoth("(use :e (spring))", schema, .union_no_branch_matched);
+    try expectNoCodeOnBoth("(use :e (bounce))", schema, .union_no_branch_matched);
+}
+
+test "scalar-or-ref: the arm report captures no second reference site" {
+    // The failing ref arm is captured once (the existing typo'd-reference
+    // re-run) — reporting its failure must not add a phantom site, or
+    // find-refs and rename gain a duplicate.
+    var r = try loadManifest(s13_manifest);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const schema = Schema.Schema.init(&.{r.plugin});
+    const a = testing.allocator;
+    var tree = try Parser.parse(a, "(thing :name TILE) (use :q TIL)");
+    defer tree.deinit();
+    const trees = [_]Ast.Tree{tree};
+    var fr = try Validator.validateForest(a, &trees, schema);
+    defer fr.deinit(a);
+    try testing.expect(anyCode(fr.results[0].diagnostics, .not_cross_ref));
+    const sites = fr.cross_ref_index.lookupReferences(.tree(0), "p/thing", "TIL");
+    try testing.expectEqual(@as(usize, 1), sites.len);
+}
+
+// ---------------------------------------------------------------------------
+// S14 — `(variant :when [a b])`: one key set for several discriminant values.
+// Selection is membership (`Plugin.Variant.selects`), asked by both walkers.
+// ---------------------------------------------------------------------------
+
+/// The S14 gate manifest: the WebGPU `strip-index-format` shape, read for
+/// both strip topologies and for neither list.
+const s14_manifest =
+    \\(plugin :name p :version "1.0.0"
+    \\  (value-kind :name topo :underlying symbol
+    \\    :members (member-set :values [tri-list tri-strip line-list line-strip]))
+    \\  (form :name prim :discriminant topo-key
+    \\    (key :name topo-key :type topo :optional false)
+    \\    (variant :when [tri-strip line-strip]
+    \\      (key :name strip-format :type symbol :optional true))
+    \\    (variant :when line-list
+    \\      (key :name line-width :type number :optional false))))
+;
+
+test "variant :when list: every listed value selects the variant (both paths)" {
+    var r = try loadManifest(s14_manifest);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const schema = Schema.Schema.init(&.{r.plugin});
+
+    try expectNoCodeOnBoth("(prim :topo-key tri-strip :strip-format uint16)", schema, .unknown_key);
+    try expectNoCodeOnBoth("(prim :topo-key line-strip :strip-format uint16)", schema, .unknown_key);
+    // A value outside the list does not — the key is unknown under it.
+    try expectCodeOnBoth("(prim :topo-key tri-list :strip-format uint16)", schema, .unknown_key);
+    // The single-value variant beside it is unchanged, sweeps included.
+    try expectCodeOnBoth("(prim :topo-key line-list)", schema, .missing_required_key);
+    try expectNoCodeOnBoth("(prim :topo-key line-list :line-width 2)", schema, .missing_required_key);
+}
+
+test "variant :when list: messages name the variant as the author spelled it (both paths)" {
+    var r = try loadManifest(s14_manifest);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const schema = Schema.Schema.init(&.{r.plugin});
+    // A multi-value variant renders bracketed; a single-value one bare — so
+    // every message that named a variant before reads exactly as it did.
+    try expectMessageOnBoth(
+        "(prim :topo-key tri-strip :nope 1)",
+        schema,
+        .unknown_key,
+        "unknown keyword `:nope` in form `prim` (variant `:when [tri-strip line-strip]`)",
+    );
+    try expectMessageOnBoth(
+        "(prim :topo-key line-list)",
+        schema,
+        .missing_required_key,
+        "form `prim` (variant `:when line-list`) is missing required keyword `:line-width`",
+    );
+}
+
+test "variant :when list: a Zig-built variant selects by membership too (both paths)" {
+    // The manifest path normalises `:when a` to a one-element list; a host
+    // building `Plugin.Variant` directly writes the list itself.
+    const p: Plugin.Plugin = .{
+        .name = "gfx",
+        .forms = &.{.{
+            .name = "prim",
+            .discriminant_idx = 0,
+            .discriminant_name = "topology",
+            .keys = &.{
+                .{ .name = "topology", .value_type = .{ .named = .{ .name = "topo" } }, .optional = false },
+            },
+            .variants = &.{.{
+                .when = &.{ "triangle-strip", "line-strip" },
+                .keys = &.{.{ .name = "strip-index-format", .value_type = .symbol, .optional = false }},
+            }},
+        }},
+        .value_kinds = &.{.{
+            .name = "topo",
+            .underlying = .symbol,
+            .members = .{ .members = &.{
+                .{ .name = "triangle-list" },
+                .{ .name = "triangle-strip" },
+                .{ .name = "line-list" },
+                .{ .name = "line-strip" },
+            } },
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    try expectCodeOnBoth("(prim :topology line-strip)", schema, .missing_required_key);
+    try expectCodeOnBoth("(prim :topology triangle-strip)", schema, .missing_required_key);
+    try expectNoCodeOnBoth("(prim :topology line-list)", schema, .missing_required_key);
+    try expectNoCodeOnBoth("(prim :topology triangle-strip :strip-index-format uint16)", schema, .missing_required_key);
 }
 
 test "loaded-manifest: unit-bearing bound + matching value passes; wrong unit fails" {
@@ -13120,6 +13573,29 @@ test "positional cardinality: an exact count reports on both sides of it" {
     try expectCodeOnBoth("(biped (leg) (leg) (leg))", schema, .positional_too_many);
 }
 
+test "positional cardinality: a :max at the u16 ceiling is tallied, not overflowed" {
+    // `:max 65535` is the largest bound the loader accepts, and the
+    // ceiling test used to be spelled `counts[i] == max + 1` in u16 —
+    // which overflows on the *first* matching child, before any document
+    // could get near the bound. So the panic was reachable from a valid
+    // manifest and one child, not from 65536 of them. The comparison is
+    // widened; the arithmetic is the assertion.
+    const p: Plugin.Plugin = .{
+        .name = "gfx",
+        .value_kinds = &.{.{
+            .name = "many",
+            .underlying = .form,
+            .heads = .{ .heads = &.{.{ .name = "leg", .max = std.math.maxInt(u16) }} },
+        }},
+        .forms = &.{
+            .{ .name = "leg" },
+            .{ .name = "pile", .positional = .{ .kind = .{ .name = "many" } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    try expectNoCodeOnBoth("(pile (leg) (leg) (leg))", schema, .positional_too_many);
+}
+
 test "positional cardinality: both messages name form, head, bound, and count" {
     // The four facts a repair needs. Asserted on the tree path only —
     // prose is not a cross-host contract, the codes and paths above are.
@@ -13741,4 +14217,508 @@ test "cross-ref group: two kinds listing the same group share one bucket" {
         try testing.expect(std.mem.indexOf(u8, d.message, "the target group") != null);
     }
     try testing.expect(found);
+}
+
+// ---------------------------------------------------------------------------
+// S10 — the count over the *whole* head-set. `:min-children` /
+// `:max-children` tally every positional child whose head is in the set,
+// which is the claim per-head bounds structurally cannot make: "exactly
+// one of buffer / sampler / texture" is satisfied by one of each and by
+// none at all under any per-head spelling.
+//
+// The two levels overlap by construction, so every case below also pins
+// the **suppression rule**: the set yields to the head. A child that
+// already reported for its own head does not report again for the set,
+// and a head whose `:min` went unmet suppresses the set's floor report.
+// ---------------------------------------------------------------------------
+
+/// `entry` is the `GPUBindGroupLayoutEntry` shape the ask filed: exactly
+/// one resource, and not two of the same. `pair` is the shape neither
+/// level can express alone — one of each, up to two. `spare` reuses the
+/// same bounded kind on a keyed slot, where both levels must be inert,
+/// and `open-entry` is `:open true`.
+fn buildResourceSetPlugin() Plugin.Plugin {
+    return .{
+        .name = "gpu",
+        .value_kinds = &.{
+            .{
+                .name = "bgl-resource",
+                .underlying = .form,
+                .heads = .{
+                    .heads = &.{
+                        .{ .name = "buffer", .max = 1 },
+                        .{ .name = "sampler", .max = 1 },
+                        .{ .name = "texture", .max = 1 },
+                    },
+                    .min_children = 1,
+                    .max_children = 1,
+                },
+            },
+            .{
+                .name = "pair-resource",
+                .underlying = .form,
+                .heads = .{
+                    .heads = &.{ .{ .name = "buffer", .max = 1 }, .{ .name = "sampler", .max = 1 } },
+                    .max_children = 2,
+                },
+            },
+            .{
+                // Set bounds on the compact spelling — no per-head bound
+                // anywhere, so only the set can report.
+                .name = "set-only",
+                .underlying = .form,
+                .heads = .{
+                    .heads = &.{ .{ .name = "buffer" }, .{ .name = "sampler" } },
+                    .min_children = 1,
+                    .max_children = 1,
+                },
+            },
+        },
+        .forms = &.{
+            .{ .name = "buffer" },
+            .{ .name = "sampler" },
+            .{ .name = "texture" },
+            .{ .name = "ghost" },
+            .{ .name = "entry", .positional = .{ .kind = .{ .name = "bgl-resource" } } },
+            .{ .name = "open-entry", .open = true, .positional = .{ .kind = .{ .name = "bgl-resource" } } },
+            .{ .name = "pair", .positional = .{ .kind = .{ .name = "pair-resource" } } },
+            .{ .name = "loose-entry", .positional = .{ .kind = .{ .name = "set-only" } } },
+            .{ .name = "spare", .keys = &.{.{ .name = "res", .value_type = .{ .named = .{ .name = "bgl-resource" } }, .optional = true }} },
+        },
+    };
+}
+
+test "aggregate head-set: exactly one resource is clean" {
+    const schema = Schema.Schema.init(&.{buildResourceSetPlugin()});
+    try expectNoCodeOnBoth("(entry (buffer))", schema, .positional_too_many);
+    try expectNoCodeOnBoth("(entry (buffer))", schema, .positional_missing);
+    try expectNoCodeOnBoth("(entry (sampler))", schema, .positional_too_many);
+    try expectNoCodeOnBoth("(entry (sampler))", schema, .positional_missing);
+}
+
+test "aggregate head-set: the ask's two probes, which every per-head bound accepts" {
+    // Filed verbatim: an `(entry …)` with two *different* resources, and
+    // one with none. Both satisfy every per-head `:max 1` / absent `:min`,
+    // and neither is a bind-group-layout entry.
+    const schema = Schema.Schema.init(&.{buildResourceSetPlugin()});
+    try expectCodeCountOnBoth("(entry (buffer) (sampler))", schema, .positional_too_many, 1);
+    try expectCodeCountOnBoth("(entry)", schema, .positional_missing, 1);
+}
+
+test "aggregate head-set: the ceiling fires once, on the child that crosses it" {
+    const schema = Schema.Schema.init(&.{buildResourceSetPlugin()});
+    // Three distinct heads, ceiling 1: one diagnostic, not two.
+    try expectCodeCountOnBoth("(entry (buffer) (sampler) (texture))", schema, .positional_too_many, 1);
+    // The path is the crossing child's own positional step, as the
+    // per-head code's is — the line to delete.
+    try expectPathOnBoth(
+        "(entry (buffer) (sampler))",
+        schema,
+        .positional_too_many,
+        &.{ "entry", "sampler" },
+    );
+}
+
+test "aggregate head-set: the set yields to the head on a redundant ceiling" {
+    // The shape the suppression rule exists for: set `:min-children 1
+    // :max-children 1` over heads each `:max 1`. A second `(buffer …)`
+    // crosses the head's ceiling *and* the set's on the same child, at
+    // the same span, with the same path and the same code. Exactly one
+    // diagnostic — the per-head one, which names the line to delete.
+    const schema = Schema.Schema.init(&.{buildResourceSetPlugin()});
+    try expectCodeCountOnBoth("(entry (buffer) (buffer))", schema, .positional_too_many, 1);
+    var bundle = try validateSrc("(entry (buffer) (buffer))", schema);
+    defer bundle.tree.deinit();
+    defer {
+        var r = bundle.result;
+        r.deinit();
+    }
+    for (bundle.result.diagnostics) |d| {
+        if (d.code != .positional_too_many) continue;
+        // The per-head message names the head; the set's names the set.
+        try testing.expect(std.mem.indexOf(u8, d.message, "`buffer` positional") != null);
+    }
+}
+
+test "aggregate head-set: the set yields to the head on a floor too" {
+    // `:min-children 1` and no head floor, so nothing to yield to: the
+    // set reports. Then the mirror — a head floor unmet suppresses it.
+    const p: Plugin.Plugin = .{
+        .name = "gpu",
+        .value_kinds = &.{.{
+            .name = "needs-two",
+            .underlying = .form,
+            .heads = .{
+                .heads = &.{ .{ .name = "buffer", .min = 1 }, .{ .name = "sampler" } },
+                .min_children = 2,
+            },
+        }},
+        .forms = &.{
+            .{ .name = "buffer" },
+            .{ .name = "sampler" },
+            .{ .name = "entry", .positional = .{ .kind = .{ .name = "needs-two" } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    // Empty: the head's `:min 1` is unmet, so the set's `:min-children 2`
+    // stays quiet. One diagnostic, the more actionable of the two.
+    try expectCodeCountOnBoth("(entry)", schema, .positional_missing, 1);
+    // Head floor satisfied, set floor not: now the set speaks, and it is
+    // the only thing that can.
+    try expectCodeCountOnBoth("(entry (buffer))", schema, .positional_missing, 1);
+    try expectNoCodeOnBoth("(entry (buffer) (sampler))", schema, .positional_missing);
+}
+
+test "aggregate head-set: both levels report when they cross on different children" {
+    // Set `:max-children 2` over heads each `:max 1` — "one of each, up
+    // to two", the shape neither level can express alone. `(buffer)
+    // (buffer) (buffer)`: the second crosses the head's ceiling, the
+    // third crosses the set's. Two diagnostics, and suppression must not
+    // swallow the second — it is a different child and a different claim.
+    const schema = Schema.Schema.init(&.{buildResourceSetPlugin()});
+    try expectCodeCountOnBoth("(pair (buffer) (buffer) (buffer))", schema, .positional_too_many, 2);
+    // Inside both: one of each.
+    try expectNoCodeOnBoth("(pair (buffer) (sampler))", schema, .positional_too_many);
+}
+
+test "aggregate head-set: set bounds ride the compact :names spelling" {
+    // No `(head …)` child anywhere, so the whole feature is the set's two
+    // numbers — and `isUnbounded` has to read them or nothing is tallied.
+    const schema = Schema.Schema.init(&.{buildResourceSetPlugin()});
+    try expectNoCodeOnBoth("(loose-entry (buffer))", schema, .positional_too_many);
+    try expectCodeCountOnBoth("(loose-entry (buffer) (sampler))", schema, .positional_too_many, 1);
+    try expectCodeCountOnBoth("(loose-entry)", schema, .positional_missing, 1);
+    try expectCodeCountOnBoth("(loose-entry (buffer) (buffer))", schema, .positional_too_many, 1);
+}
+
+test "aggregate head-set: a head outside the set counts towards neither level" {
+    // `(ghost …)` fails the narrowing (`not_head_member`) and must not
+    // consume the set's single slot — the same narrowing S1 pinned per
+    // head, now pinned over the set. Without it, `(entry (ghost))` would
+    // read as a satisfied floor.
+    const schema = Schema.Schema.init(&.{buildResourceSetPlugin()});
+    try expectCodeOnBoth("(entry (ghost))", schema, .not_head_member);
+    try expectCodeCountOnBoth("(entry (ghost))", schema, .positional_missing, 1);
+    try expectNoCodeOnBoth("(entry (buffer) (ghost))", schema, .positional_too_many);
+}
+
+test "aggregate head-set: a non-form positional counts towards neither level" {
+    const schema = Schema.Schema.init(&.{buildResourceSetPlugin()});
+    try expectCodeCountOnBoth("(entry 42)", schema, .positional_missing, 1);
+}
+
+test "aggregate head-set: :open true suppresses neither level" {
+    // Same rule S1 pinned: `:open` widens the *keyword* surface, and a
+    // form declaring `:positional <bounded-kind>` opted into the counts.
+    const schema = Schema.Schema.init(&.{buildResourceSetPlugin()});
+    try expectCodeOnBoth("(open-entry :whatever 1)", schema, .positional_missing);
+    try expectCodeOnBoth("(open-entry :whatever 1 (buffer) (sampler))", schema, .positional_too_many);
+    try expectNoCodeOnBoth("(open-entry :whatever 1 (buffer))", schema, .unknown_key);
+}
+
+test "aggregate head-set: set bounds are inert away from a :positional slot" {
+    // The scope rule, over the set. A keyed slot holds one value:
+    // `:max-children 1` is trivially satisfied and `:min-children 1` has
+    // no population to be missing from.
+    const schema = Schema.Schema.init(&.{buildResourceSetPlugin()});
+    try expectNoCodeOnBoth("(spare :res (buffer))", schema, .positional_too_many);
+    try expectNoCodeOnBoth("(spare :res (buffer))", schema, .positional_missing);
+    // The narrowing still applies — inert bounds, live set.
+    try expectCodeOnBoth("(spare :res (ghost))", schema, .not_head_member);
+}
+
+test "aggregate head-set: bounds count per form instance, not per document" {
+    const schema = Schema.Schema.init(&.{buildResourceSetPlugin()});
+    const src =
+        \\(entry (buffer))
+        \\(entry (sampler))
+    ;
+    try expectNoCodeOnBoth(src, schema, .positional_too_many);
+    try expectNoCodeOnBoth(src, schema, .positional_missing);
+}
+
+test "aggregate head-set: both set messages name the set, the bound, and the count" {
+    // The set's prose must be distinguishable from the head's by a reader
+    // — that is the whole justification for reusing the two codes rather
+    // than appending two more. Tree path only; prose is not a cross-host
+    // contract.
+    const schema = Schema.Schema.init(&.{buildResourceSetPlugin()});
+    {
+        var bundle = try validateSrc("(entry (buffer) (sampler))", schema);
+        defer bundle.tree.deinit();
+        defer {
+            var r = bundle.result;
+            r.deinit();
+        }
+        var found = false;
+        for (bundle.result.diagnostics) |d| {
+            if (d.code != .positional_too_many) continue;
+            found = true;
+            try testing.expect(std.mem.indexOf(u8, d.message, "entry") != null);
+            try testing.expect(std.mem.indexOf(u8, d.message, "at most 1") != null);
+            try testing.expect(std.mem.indexOf(u8, d.message, "found 2") != null);
+            // The set, rendered in `not_head_member`'s vocabulary.
+            try testing.expect(std.mem.indexOf(u8, d.message, "[buffer | sampler | texture]") != null);
+        }
+        try testing.expect(found);
+    }
+    {
+        var bundle = try validateSrc("(entry)", schema);
+        defer bundle.tree.deinit();
+        defer {
+            var r = bundle.result;
+            r.deinit();
+        }
+        var found = false;
+        for (bundle.result.diagnostics) |d| {
+            if (d.code != .positional_missing) continue;
+            found = true;
+            try testing.expect(std.mem.indexOf(u8, d.message, "at least 1") != null);
+            try testing.expect(std.mem.indexOf(u8, d.message, "found 0") != null);
+            try testing.expect(std.mem.indexOf(u8, d.message, "[buffer | sampler | texture]") != null);
+        }
+        try testing.expect(found);
+    }
+}
+
+test "head-set: an empty set is no narrowing, matching member-set" {
+    // `HeadSet` and `MemberSet` carry the same promise — an empty list is
+    // "no narrowing", same as the field being null — and only one of them
+    // kept it. `matchScalar` guards `m.members.len == 0`; the four
+    // head-set narrowing sites did not, so an empty head-set rejected
+    // *every* head with a `not_head_member` whose allowed list was empty
+    // and therefore rendered as nothing at all ("got form head `arm`").
+    //
+    // Unreachable from a manifest — both `(head-set)` and `(member-set)`
+    // are `invalid_manifest` and the plugin is dropped — so this is a
+    // consistency fix, not a behaviour change any document can see. It is
+    // worth having because the next reader of either comment should be
+    // able to trust it.
+    const p: Plugin.Plugin = .{
+        .name = "gfx",
+        .value_kinds = &.{.{ .name = "nothing", .underlying = .form, .heads = .{ .heads = &.{} } }},
+        .forms = &.{
+            .{ .name = "arm" },
+            .{ .name = "torso", .positional = .{ .kind = .{ .name = "nothing" } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    try expectNoCodeOnBoth("(torso (arm))", schema, .not_head_member);
+    // And a set that narrows nothing counts nothing: a `:min-children`
+    // floor over an empty set would otherwise demand a child from a set
+    // naming none, on a slot that now accepts every head.
+    const p2: Plugin.Plugin = .{
+        .name = "gfx",
+        .value_kinds = &.{.{
+            .name = "nothing",
+            .underlying = .form,
+            .heads = .{ .heads = &.{}, .min_children = 1 },
+        }},
+        .forms = &.{
+            .{ .name = "arm" },
+            .{ .name = "torso", .positional = .{ .kind = .{ .name = "nothing" } } },
+        },
+    };
+    const schema2 = Schema.Schema.init(&.{p2});
+    try expectNoCodeOnBoth("(torso (arm))", schema2, .positional_missing);
+    try expectNoCodeOnBoth("(torso)", schema2, .positional_missing);
+}
+
+test "aggregate head-set: :max-children 0 declares a set and forbids all of it" {
+    // The degenerate set ceiling, the mirror of `:max 0` per head. It
+    // says "these heads belong to the set — a typo is still
+    // `not_head_member` — but this slot takes none of them". The
+    // alternative, declaring no head-set at all, would make every child
+    // read as an unknown head rather than a forbidden one.
+    const p: Plugin.Plugin = .{
+        .name = "gpu",
+        .value_kinds = &.{.{
+            .name = "no-resources",
+            .underlying = .form,
+            .heads = .{ .heads = &.{ .{ .name = "buffer" }, .{ .name = "sampler" } }, .max_children = 0 },
+        }},
+        .forms = &.{
+            .{ .name = "buffer" },
+            .{ .name = "sampler" },
+            .{ .name = "ghost" },
+            .{ .name = "entry", .positional = .{ .kind = .{ .name = "no-resources" } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    try expectNoCodeOnBoth("(entry)", schema, .positional_too_many);
+    try expectCodeCountOnBoth("(entry (buffer))", schema, .positional_too_many, 1);
+    // Still one report, not one per child, at a ceiling of zero.
+    try expectCodeCountOnBoth("(entry (buffer) (sampler))", schema, .positional_too_many, 1);
+    // The narrowing is live: an out-of-set head reports as such.
+    try expectCodeOnBoth("(entry (ghost))", schema, .not_head_member);
+}
+
+test "aggregate head-set: set bounds survive a slot that declares locals" {
+    // S7b's interaction, one level up. A head-set slot that also declares
+    // inline `(form …)` children keeps its narrowing *and* its counts —
+    // that override is precisely what dropped the per-head bounds before
+    // S7b, and the set's would have gone the same way.
+    const p: Plugin.Plugin = .{
+        .name = "gpu",
+        .value_kinds = &.{.{
+            .name = "bgl-resource",
+            .underlying = .form,
+            .heads = .{
+                .heads = &.{ .{ .name = "buffer" }, .{ .name = "sampler" } },
+                .min_children = 1,
+                .max_children = 1,
+            },
+        }},
+        .forms = &.{
+            .{
+                .name = "entry",
+                .positional = .{ .kind = .{ .name = "bgl-resource" } },
+                .local_forms = &.{
+                    .{ .name = "buffer", .keys = &.{.{ .name = "slot", .value_type = .number, .optional = false }} },
+                    .{ .name = "sampler" },
+                },
+            },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    try expectNoCodeOnBoth("(entry (buffer :slot 0))", schema, .positional_too_many);
+    try expectNoCodeOnBoth("(entry (buffer :slot 0))", schema, .positional_missing);
+    try expectCodeCountOnBoth("(entry (buffer :slot 0) (sampler))", schema, .positional_too_many, 1);
+    try expectCodeCountOnBoth("(entry)", schema, .positional_missing, 1);
+    // The local body is still what a child is checked against — the
+    // counts do not displace the resolution, they ride beside it.
+    try expectCodeOnBoth("(entry (buffer))", schema, .missing_required_key);
+}
+
+test "aggregate head-set: set bounds are inert on a vector element" {
+    // The third reuse site named by the scope rule. A `vector-shape
+    // :element` is a value, not a child list, so neither level counts —
+    // and the narrowing still applies, which is what makes reuse inert
+    // rather than an error.
+    const p: Plugin.Plugin = .{
+        .name = "gpu",
+        .value_kinds = &.{
+            .{
+                .name = "bgl-resource",
+                .underlying = .form,
+                .heads = .{
+                    .heads = &.{ .{ .name = "buffer" }, .{ .name = "sampler" } },
+                    .min_children = 1,
+                    .max_children = 1,
+                },
+            },
+            .{
+                .name = "resource-list",
+                .underlying = .vector,
+                .vector = .{ .element = .{ .name = "bgl-resource" } },
+            },
+        },
+        .forms = &.{
+            .{ .name = "buffer" },
+            .{ .name = "sampler" },
+            .{ .name = "ghost" },
+            .{ .name = "layout", .keys = &.{.{ .name = "res", .value_type = .{ .named = .{ .name = "resource-list" } }, .optional = true }} },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    // Three elements, a set ceiling of one: inert.
+    const src = "(layout :res [(buffer) (sampler) (buffer)])";
+    try expectNoCodeOnBoth(src, schema, .positional_too_many);
+    try expectNoCodeOnBoth(src, schema, .positional_missing);
+    // An empty vector under a set floor of one: also inert.
+    try expectNoCodeOnBoth("(layout :res [])", schema, .positional_missing);
+    // Live set, inert counts.
+    try expectCodeOnBoth("(layout :res [(ghost)])", schema, .not_head_member);
+}
+
+test "member-set: an empty set is no narrowing — the contract head-set now matches" {
+    // The sibling this rule was taken from. `matchScalar`'s
+    // `m.members.len == 0` guard has always been here; pinned now so the
+    // two constructs cannot drift apart again in the other direction.
+    const p: Plugin.Plugin = .{
+        .name = "gfx",
+        .value_kinds = &.{.{ .name = "nothing", .underlying = .symbol, .members = .{ .members = &.{} } }},
+        .forms = &.{.{ .name = "box", .keys = &.{.{ .name = "mode", .value_type = .{ .named = .{ .name = "nothing" } }, .optional = true }} }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    try expectNoCodeOnBoth("(box :mode anything)", schema, .not_member);
+}
+
+test "aggregate head-set: a nested instance gets its own counters" {
+    // S1 pinned "per form instance" on *siblings*. Nesting is the shape
+    // that could actually share state: the tree walker allocates a
+    // `FormState` per form and the binary walker pushes a `FormWalk`
+    // frame, so an inner `(entry …)` inside an outer one is the case
+    // where a hoisted array or a reused frame would let the child's
+    // children spill into the parent's tally — and the set's tally is
+    // `Σ counts`, which reads the whole array.
+    const p: Plugin.Plugin = .{
+        .name = "gpu",
+        .value_kinds = &.{.{
+            .name = "res",
+            .underlying = .form,
+            .heads = .{
+                .heads = &.{ .{ .name = "buffer" }, .{ .name = "entry" } },
+                .min_children = 1,
+                .max_children = 1,
+            },
+        }},
+        .forms = &.{
+            .{ .name = "buffer" },
+            .{ .name = "entry", .positional = .{ .kind = .{ .name = "res" } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    // Outer holds one child (the inner entry); inner holds one (a
+    // buffer). Both are exactly at the set's bound, so a shared tally
+    // would read two and report.
+    try expectNoCodeOnBoth("(entry (entry (buffer)))", schema, .positional_too_many);
+    try expectNoCodeOnBoth("(entry (entry (buffer)))", schema, .positional_missing);
+    // Three levels, same reasoning.
+    try expectNoCodeOnBoth("(entry (entry (entry (buffer))))", schema, .positional_too_many);
+    // And the inner one really is judged: an empty inner breaches its own
+    // floor while the outer is satisfied by it.
+    try expectCodeCountOnBoth("(entry (entry))", schema, .positional_missing, 1);
+    // Two children on the inner, one on the outer: exactly one report,
+    // from the inner.
+    try expectCodeCountOnBoth("(entry (entry (buffer) (buffer)))", schema, .positional_too_many, 1);
+}
+
+test "aggregate head-set: a union-typed positional slot carries no counts" {
+    // `boundedPositionalHeads` resolves through `resolveFormHeadKind`,
+    // which returns a kind only when its underlying is `.form`. A union
+    // whose alternatives include a bounded head-set kind therefore counts
+    // nothing — which is right (a union slot dispatches per value and has
+    // no single head-set to tally against) and worth pinning, since the
+    // alternative would be a silent half-enforcement that depends on
+    // which alternative matched.
+    const p: Plugin.Plugin = .{
+        .name = "gpu",
+        .value_kinds = &.{
+            .{
+                .name = "res",
+                .underlying = .form,
+                .heads = .{
+                    .heads = &.{.{ .name = "buffer", .max = 1 }},
+                    .min_children = 1,
+                    .max_children = 1,
+                },
+            },
+            .{
+                .name = "res-or-num",
+                .underlying = .union_of,
+                .union_of = .{ .alternatives = &.{ .{ .name = "res" }, .{ .name = "number" } } },
+            },
+        },
+        .forms = &.{
+            .{ .name = "buffer" },
+            .{ .name = "entry", .positional = .{ .kind = .{ .name = "res-or-num" } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    try expectNoCodeOnBoth("(entry (buffer) (buffer))", schema, .positional_too_many);
+    try expectNoCodeOnBoth("(entry)", schema, .positional_missing);
+    // The union's own dispatch is untouched: a form outside the branch's
+    // head-set and not a number still fails.
+    try expectNoCodeOnBoth("(entry 42)", schema, .union_no_branch_matched);
 }

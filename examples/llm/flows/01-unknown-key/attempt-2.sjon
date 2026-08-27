@@ -1,4 +1,4 @@
-; Schema mirrored from examples/unknown-key-typo.sjon — keep the two in sync.
+; Schema mirrored from examples/unknown-key-typo.sjon. Keep the two in sync.
 (plugin :name demo :version "1.0.0"
   (form :name camera
     (key :name mode :type symbol :optional true)

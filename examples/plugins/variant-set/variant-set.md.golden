@@ -1,0 +1,32 @@
+# variant-set v1.0.0
+
+## Forms
+
+### `(primitive …)`
+
+Primitive assembly state. `:topology` selects the variant; the strip-index-format key exists only under a strip.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:topology` | `symbol enum` | no | `triangle-list` | one of: `point-list`, `line-list`, `line-strip`, `triangle-list`, `triangle-strip`<br>Defaults to triangle-list, as GPUPrimitiveState does. |
+| `:cull` | `symbol` | no | — | none / front / back. |
+
+#### Variant `:topology [triangle-strip line-strip]`
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:strip-index-format` | `symbol enum` | no | — | one of: `uint16`, `uint32`<br>The primitive-restart index format; only meaningful when the topology is a strip. |
+
+## Value kinds
+
+### topology
+
+How vertices assemble into primitives: the five WebGPU topologies.
+
+Type: `symbol enum` — one of: `point-list`, `line-list`, `line-strip`, `triangle-list`, `triangle-strip`.
+
+### index-format
+
+The index buffer element type.
+
+Type: `symbol enum` — one of: `uint16`, `uint32`.

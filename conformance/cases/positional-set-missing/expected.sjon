@@ -1,0 +1,6 @@
+; At the parent form's head, with the parent's path — there is no child
+; to point at, which is `missing_required_key`'s placement for
+; `missing_required_key`'s reason, and where the per-head floor lands
+; too.
+(diagnostics
+  (diagnostic :code positional_missing :severity err :path [entry]))

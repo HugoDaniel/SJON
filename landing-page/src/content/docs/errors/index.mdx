@@ -1,0 +1,28 @@
+---
+title: Diagnostic codes
+description: Every diagnostic code SJON can report, with a one-line summary and a page explaining what to do about it.
+---
+
+import ErrorList from '../../../components/ErrorList.astro';
+// Counted rather than transcribed: `zig build audit-docs` reconciles the
+// numbers in README/DESIGN/LANGUAGE/CLAUDE and never looks at this page, so a
+// literal would go stale the next time a code is appended.
+import { ERRORS } from '../../../lib/errors.ts';
+
+Every diagnostic SJON reports carries a code, and every one of the
+{ERRORS.length} codes has a page here. The codes are wire-stable: they are
+appended, never renamed and never reordered, so a code you match on today keeps
+meaning the same thing in the next release. That is what makes matching on one
+in your own tooling a reasonable thing to do.
+
+You will meet these three ways round. Your editor's language server attaches
+one to a squiggle, with a `codeDescription.href` pointing at the page below.
+The command line prints one as a `help:` link under the caret. And
+`sjon explain <code>` prints the same text in your terminal, without a browser.
+
+The list is in catalogue order, which is the declaration order of the
+wire-stable enum. That is not alphabetical on purpose: codes were appended in
+related batches, so the neighbours of the one you came here for are usually the
+ones you are about to hit next.
+
+<ErrorList />

@@ -15,7 +15,7 @@
 ;                  target form, so a group would make one form owe
 ;                  extractions to several buckets at once. Declare one
 ;                  cross-ref per target instead — the message says so.
-(plugin :name gpu :version "1.0.0" :sjon "1.3"
+(plugin :name gpu :version "1.0.0"
   (cross-ref-provider :name uniforms)
 
   (value-kind :name empty-ref :underlying symbol

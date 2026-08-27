@@ -38,7 +38,7 @@ export interface Xkey_Route {
 }
 
 /**
- * A tag decoration. Use `(prefix + suffix)` to flank, or `literal` alone — but never both.
+ * A tag decoration. Use `(prefix + suffix)` to flank, or `literal` alone, but never both.
  *
  * @sjon-exclusive-group at-most-one [prefix + suffix, literal]
  */

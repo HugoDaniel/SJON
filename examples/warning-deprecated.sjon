@@ -1,6 +1,6 @@
 ; Inline-manifest fixture producing a WARNING-severity diagnostic
-; (`deprecated_member`) — used by the CLI tests for `--format=github`
-; annotation mapping (`::warning`) and any other warning-channel cases.
+; (`deprecated_member`). The CLI tests use it for `--format=github`
+; annotation mapping (`::warning`) and other warning-channel cases.
 (plugin :name probe :version "1.0.0"
   (value-kind :name status
     :underlying symbol

@@ -1,0 +1,10 @@
+; Exactly two, not four. Counts rather than messages, so a host that
+; reported both levels fails as a count mismatch rather than quietly
+; matching on the first of a pair.
+;
+; The precedent for the rule is `:requires`' self-reference carve-out in
+; the cycle walk: a self-loop is a cycle, and the more specific
+; diagnostic wins rather than both being reported in different words.
+(diagnostics
+  (diagnostic :code positional_too_many :severity err :path [entry buffer])
+  (diagnostic :code positional_missing  :severity err :path [pair]))

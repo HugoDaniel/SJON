@@ -1,0 +1,41 @@
+; A count over the *whole* head-set: `:min-children` / `:max-children`
+; tally every positional child whose head is in the set, which per-head
+; `:min` / `:max` structurally cannot do.
+;
+; `GPUBindGroupLayoutEntry` is the shape: an entry carries exactly one of
+; `buffer` / `sampler` / `texture`, and an entry with none is invalid.
+; Every per-head spelling of that is satisfied both by an entry with one
+; of each and by an entry with none — the two probes the sibling cases
+; `positional-set-too-many` and `positional-set-missing` carry.
+;
+; Both levels are declared here, and they are independent claims:
+;
+;   per head   `:max 1`                     not two of the same
+;   over set   `:min-children 1 :max-children 1`   exactly one, any head
+(plugin :name gpu :version "1.0.0"
+  (value-kind :name bgl-resource
+    :description "The one resource a bind-group-layout entry binds."
+    :underlying form
+    :heads (head-set :min-children 1 :max-children 1
+      (head :name buffer  :max 1 :description "A buffer binding.")
+      (head :name sampler :max 1 :description "A sampler binding.")
+      (head :name texture :max 1 :description "A texture binding.")))
+
+  (form :name buffer
+    (key :name type :type symbol))
+  (form :name sampler
+    (key :name type :type symbol))
+  (form :name texture
+    (key :name sample-type :type symbol))
+
+  (form :name entry
+    :positional bgl-resource
+    (key :name binding :type number))
+
+  (form :name bind-group-layout
+    (key :name name :type symbol)))
+
+(bind-group-layout :name bgl0)
+(entry :binding 0 (buffer  :type uniform))
+(entry :binding 1 (sampler :type filtering))
+(entry :binding 2 (texture :sample-type float))

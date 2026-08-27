@@ -1,0 +1,16 @@
+; S12: a `:lowering :produces` head may name a slot-local form. The
+; `test/nest-emit-v1` hook lowers `(seed)` into `(wrap (leaf))`, and `leaf`
+; is declared *inside* `wrap` — a positional slot-local, the S7 shape whose
+; whole point is that no global `leaf` exists. The contract walk checks every
+; emitted head at every depth, so `leaf` must be in `:produces`; and it now
+; resolves there: a bare head resolves local-first, to a slot-local form
+; reachable through a form the same list resolves (`wrap`). Before, this
+; manifest was stuck between `lowering_produced_invalid_head` (`leaf`
+; absent from the list) and `unknown_form` at schema load (`leaf` present).
+(plugin :name p :version "1.0.0"
+  (form :name seed :open true
+    :lowering (lowering :hook test/nest-emit-v1 :produces [wrap leaf]))
+  (form :name wrap
+    (form :name leaf)))
+
+(seed)

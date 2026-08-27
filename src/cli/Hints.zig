@@ -1,7 +1,7 @@
 //! Hint registry keyed by `Ast.Diagnostic.Code`.
 //!
 //! Hints are short, actionable footers attached to a diagnostic in the
-//! rich format — "did you mean X?", "the manifest's :version is here",
+//! rich format: "did you mean X?", "the manifest's :version is here",
 //! "run `sjon project lock` to update." Each hint has a `kind` tag
 //! (`note` / `hint` / `help`) selecting its color and severity in the
 //! renderer.
@@ -32,9 +32,9 @@ pub const Hint = struct {
     kind: HintKind,
     /// The hint body. Arena-owned (the caller's arena).
     body: []const u8,
-    /// When the suggestion is a machine-applicable string — the
+    /// When the suggestion is a machine-applicable string (the
     /// DidYouMean candidate exactly as it would be typed at the
-    /// diagnostic's span — it rides separately from the prose so JSON
+    /// diagnostic's span) it rides separately from the prose so JSON
     /// consumers apply it without parsing the sentence. Null for
     /// prose-only hints.
     replacement: ?[]const u8 = null,
@@ -42,12 +42,12 @@ pub const Hint = struct {
 
 /// Context passed to hint builders. The schema is non-null when
 /// the diagnostic comes from a phase where the aggregate plugin
-/// vocabulary is known — manifest-phase failures may see `null`.
+/// vocabulary is known; manifest-phase failures may see `null`.
 pub const Context = struct {
     arena: Allocator,
     diagnostic: *const Ast.Diagnostic,
     schema: ?*const Schema.Schema = null,
-    /// Plugin name lists for `unresolved_plugin` — populated by the
+    /// Plugin name lists for `unresolved_plugin`, populated by the
     /// CLI from the resolver's project index. Null when the diagnostic
     /// was emitted outside a project context.
     known_plugin_names: ?[]const []const u8 = null,
@@ -57,7 +57,7 @@ pub const Context = struct {
     actual_hash: ?[]const u8 = null,
 };
 
-/// The code-specific registered hints alone — may be empty; the
+/// The code-specific registered hints alone. May be empty; the
 /// registry doesn't require coverage of every code. JSON output uses
 /// this directly (it emits the docs URL as its own structured field).
 pub fn registered(ctx: Context) Allocator.Error![]const Hint {
@@ -72,8 +72,8 @@ pub fn registered(ctx: Context) Allocator.Error![]const Hint {
 }
 
 /// Build the hints for a diagnostic: `registered`, closed by a `help:`
-/// footer linking the code's documentation page. The footer is total —
-/// `Explanations.codeHref` has a page for every variant — so the
+/// footer linking the code's documentation page. The footer is total,
+/// since `Explanations.codeHref` has a page for every variant, so the
 /// returned slice is never empty.
 pub fn forDiagnostic(ctx: Context) Allocator.Error![]const Hint {
     const specific = try registered(ctx);
@@ -143,7 +143,7 @@ fn hintsForUnknownForm(ctx: Context) Allocator.Error![]const Hint {
     const schema = ctx.schema orelse return &.{};
     const needle = extractQuotedName(ctx.diagnostic.message) orelse return &.{};
     // Collect form heads from the aggregate schema. `Schema.plugins`
-    // is the public field — no iterator wrapper exists yet.
+    // is the public field; no iterator wrapper exists yet.
     var heads: std.ArrayList([]const u8) = .empty;
     for (schema.plugins) |plugin| {
         for (plugin.forms) |form| {
@@ -177,7 +177,7 @@ fn hintsForUnknownKey(ctx: Context) Allocator.Error![]const Hint {
 /// Nearest-key lookup behind `unknown_key`'s hint. The validator's
 /// message carries the offending key (first backticked token,
 /// `:`-prefixed) and the enclosing form head (second token); the
-/// form's declared keys — common and variant alike — are the
+/// form's declared keys (common and variant alike) are the
 /// candidate set. Null when the schema is absent, the form can't be
 /// resolved, or no candidate is within `DidYouMean.MAX_DISTANCE`.
 fn suggestNearestKey(ctx: Context) Allocator.Error!?Hint {
@@ -210,7 +210,7 @@ fn suggestNearestKey(ctx: Context) Allocator.Error!?Hint {
 }
 
 /// Resolve a bare form head against the aggregate schema. First match
-/// wins — `unknown_key` is only emitted against a form that already
+/// wins, since `unknown_key` is only emitted against a form that already
 /// resolved, so the head is unambiguous by the time this runs.
 fn findForm(schema: *const Schema.Schema, name: []const u8) ?*const Plugin.FormSpec {
     for (schema.plugins) |plugin| {
@@ -225,7 +225,7 @@ fn hintsForArityMismatch(ctx: Context) Allocator.Error![]const Hint {
     const hints = try ctx.arena.alloc(Hint, 1);
     hints[0] = .{
         .kind = .help,
-        .body = "Function arity declarations come in three shapes — `(fixed N)`, `(at-least N)`, and `(range :min M :max N)`. See `sjon explain arity_mismatch`.",
+        .body = "Function arity declarations come in three shapes: `(fixed N)`, `(at-least N)`, and `(range :min M :max N)`. See `sjon explain arity_mismatch`.",
     };
     return hints;
 }
@@ -320,7 +320,7 @@ test "Hints.forDiagnostic: unknown_key suggestion covers variant keys" {
     defer arena.deinit();
     const common = [_]Plugin.KeySpec{.{ .name = "kind" }};
     const bass_keys = [_]Plugin.KeySpec{.{ .name = "sequence" }};
-    const variants = [_]Plugin.Variant{.{ .when = "bass", .keys = &bass_keys }};
+    const variants = [_]Plugin.Variant{.{ .when = &.{"bass"}, .keys = &bass_keys }};
     const forms = [_]Plugin.FormSpec{.{
         .name = "track",
         .keys = &common,

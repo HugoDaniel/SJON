@@ -385,14 +385,14 @@ function loadResolvedManifest(
   // declared `:version`. Exact-string match — no semver ranges in v1.
   // Mirrors `src/Host.zig` `loadResolvedManifest`.
   if (reference.version !== null && loaded.plugin.version !== reference.version) {
-    diagnostics.push(
-      manifestErr(
-        'plugin_version_mismatch',
-        `(use-plugin "${reference.name}" :version "${reference.version}") pin differs from manifest :version \`${loaded.plugin.version}\``,
-        reference.span,
-        refHeadSpan,
-      ),
-    );
+    // `:version` is optional on the manifest; a pin against an unversioned
+    // plugin is a mismatch too, and the message says which of the two it
+    // is (mirrors `Host.zig`).
+    const message =
+      loaded.plugin.version === ''
+        ? `(use-plugin "${reference.name}" :version "${reference.version}") pin, but the manifest declares no :version`
+        : `(use-plugin "${reference.name}" :version "${reference.version}") pin differs from manifest :version \`${loaded.plugin.version}\``;
+    diagnostics.push(manifestErr('plugin_version_mismatch', message, reference.span, refHeadSpan));
     return;
   }
 

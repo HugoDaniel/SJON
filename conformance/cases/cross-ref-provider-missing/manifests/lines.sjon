@@ -1,7 +1,7 @@
 ; Byte-identical to `cross-ref-provider-resolved`'s manifest — the two
 ; cases differ only in the document, which is the point: the same schema
 ; accepts one reference and rejects the other.
-(plugin :name lines :version "1.0.0" :sjon "1.2"
+(plugin :name lines :version "1.0.0"
   (cross-ref-provider :name lines
     :description "One name per non-empty line."
     :impl "wasm:extract_lines")

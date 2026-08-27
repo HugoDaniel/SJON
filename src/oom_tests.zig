@@ -1233,6 +1233,63 @@ test "OOM: SchemaExport.exportSchema converges over a small schema" {
 }
 
 // ---------------------------------------------------------------------------
+// 27b. SchemaExport.exportSchema over the closed-positional-set recipe — a
+//      head-set gating a slot whose locals supply the bodies. The plugin
+//      above allocates nothing the lowering pass finds interesting; this one
+//      drives the three allocations slot-aware head-set resolution added
+//      (the lowered-locals array, the per-head `FormRef` array, and the
+//      embedded local bodies) plus the branch that emits a local body inline
+//      inside another form's `$children`, which is the deepest nesting the
+//      backends reach. `dead` is out of the head-set on purpose: its
+//      `local_form_outside_head_set` warning is one more allocation on a
+//      path a clean manifest never takes.
+// ---------------------------------------------------------------------------
+
+const export_oom_headset_locals = sjon.Plugin.Plugin{
+    .name = "hl",
+    .version = "1.0.0",
+    .forms = &.{
+        .{
+            .name = "layout",
+            .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = false }},
+            .positional = .{ .kind = .{ .name = "entry-item" } },
+            .local_forms = &.{
+                .{
+                    .name = "entry",
+                    .keys = &.{.{ .name = "binding", .value_type = .number, .optional = false }},
+                },
+                .{ .name = "dead", .keys = &.{.{ .name = "z", .value_type = .number }} },
+            },
+        },
+    },
+    .value_kinds = &.{.{
+        .name = "entry-item",
+        .underlying = .form,
+        .heads = .{ .heads = &.{ .{ .name = "entry", .min = 1 }, .{ .name = "ghost" } } },
+    }},
+};
+
+test "OOM: SchemaExport.exportSchema converges over a head-set with slot-local bodies" {
+    const schema = Schema.Schema.init(&.{export_oom_headset_locals});
+
+    var fail_index: usize = 0;
+    while (fail_index < MAX_FAIL_INDEX) : (fail_index += 1) {
+        var failing = makeFailing(fail_index);
+        const a = failing.allocator();
+
+        const result = sjon.SchemaExport.exportSchema(a, schema, .{});
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var r = try result;
+            r.deinit();
+            return;
+        }
+    }
+    return error.OomLoopDidNotConverge;
+}
+
+// ---------------------------------------------------------------------------
 // 28. applyEditToTree — the tree-consuming edit sibling of `applyEdit`
 //     (test 13). The source tree and the action JSON are pre-built with the
 //     normal allocator, so the failing allocator drives only the functional
@@ -1657,9 +1714,10 @@ test "OOM: EffectiveDocument.render converges splicing defaults into source" {
 /// members, and S4b's target group. One manifest, so one convergence loop
 /// covers all six load paths.
 const asks_manifest_source: [:0]const u8 =
-    \\(plugin :name gpu :version "1.0.0" :sjon "1.3"
+    \\(plugin :name gpu :version "1.0.0"
     \\  (value-kind :name stage :underlying form
-    \\    :heads (head-set (head :name vertex :min 1 :max 1) (head :name constant :max 4)))
+    \\    :heads (head-set :min-children 1 :max-children 4
+    \\      (head :name vertex :min 1 :max 1) (head :name constant :max 4)))
     \\  (value-kind :name dim :underlying symbol
     \\    :members (member-set :values [1d 2d 2d-array]))
     \\  (value-kind :name aligned :underlying number
@@ -1725,9 +1783,11 @@ test "OOM: ManifestLoader.load converges over every asks-series grammar addition
 /// allocation pair per diagnostic — the shape where a partial failure
 /// leaks the first half.
 const asks_invalid_manifest_source: [:0]const u8 =
-    \\(plugin :name bad :version "1.0.0" :sjon "1.3"
+    \\(plugin :name bad :version "1.0.0"
     \\  (value-kind :name empty-heads :underlying form
     \\    :heads (head-set (head :name a :min 3 :max 1)))
+    \\  (value-kind :name unsatisfiable-set :underlying form
+    \\    :heads (head-set :max-children 1 (head :name a :min 1) (head :name b :min 1)))
     \\  (value-kind :name dup-members :underlying symbol
     \\    :members (member-set :values [2d 2.0d]))
     \\  (value-kind :name bad-divisor :underlying number
@@ -1762,7 +1822,7 @@ test "OOM: ManifestLoader.load converges over the asks series' refusals" {
             // Non-vacuous the other way: seven refusals, so seven
             // message+path allocation pairs were driven to completion.
             try testing.expect(r.hasErrors());
-            try testing.expect(r.diagnostics.len >= 7);
+            try testing.expect(r.diagnostics.len >= 8);
             return;
         }
     }
@@ -1854,7 +1914,7 @@ test "OOM: validateBinary converges over the asks series' validate paths" {
 /// de-duplicate it, join it, and then `describe` both specs for the
 /// collapse message.
 const asks_collapse_manifest_source: [:0]const u8 =
-    \\(plugin :name gl :version "1.0.0" :sjon "1.3"
+    \\(plugin :name gl :version "1.0.0"
     \\  (value-kind :name by-name :underlying symbol
     \\    :cross-ref (cross-ref :target [shader kernel]))
     \\  (value-kind :name by-alias :underlying symbol
@@ -1895,6 +1955,99 @@ test "OOM: validateCrossRefs converges building and reporting a group bucket" {
             // and both spec descriptions.
             try testing.expectEqual(@as(usize, 1), diags.len);
             try testing.expectEqual(Ast.Diagnostic.Code.cross_ref_target_collapse, diags[0].code);
+            return;
+        }
+    }
+    return error.OomLoopDidNotConverge;
+}
+
+/// S10's set-level messages are the two allocation paths the clean loops
+/// above cannot reach: `positionalSetTooManyMsg` and
+/// `positionalSetMissingMsg` both build an `ArrayList` incrementally —
+/// prose, then the bracketed head list, then the count — where the
+/// per-head pair are a single `allocPrint`. A partial failure part-way
+/// through that list is a leak nothing else drives.
+const set_bounds_manifest_source: [:0]const u8 =
+    \\(plugin :name gpu :version "1.0.0"
+    \\  (value-kind :name bgl-resource :underlying form
+    \\    :heads (head-set :min-children 1 :max-children 1
+    \\      (head :name buffer :max 1) (head :name sampler :max 1)))
+    \\  (form :name buffer (key :name type :type symbol))
+    \\  (form :name sampler (key :name type :type symbol))
+    \\  (form :name entry :positional bgl-resource (key :name binding :type number)))
+;
+
+/// One form over the set's ceiling and one under its floor, so both
+/// message builders run in one walk. Deliberately two *different* heads
+/// on the first: the same head twice would report per-head and suppress
+/// the set, leaving the ceiling builder unreached.
+const set_bounds_document_source: [:0]const u8 =
+    \\(entry :binding 0 (buffer :type uniform) (sampler :type filtering))
+    \\(entry :binding 1)
+;
+
+test "OOM: both walkers converge building the set-level count messages" {
+    const a0 = testing.allocator;
+    var manifest_tree = try Parser.parse(a0, set_bounds_manifest_source);
+    defer manifest_tree.deinit();
+    var loaded = try sjon.ManifestLoader.load(a0, manifest_tree);
+    defer loaded.deinit();
+    try testing.expect(!loaded.hasErrors());
+    const schema = Schema.Schema.init(&.{loaded.plugin});
+
+    var doc = try Parser.parse(a0, set_bounds_document_source);
+    defer doc.deinit();
+    const trees = [_]Ast.Tree{doc};
+    const bin = try Binary.toBinary(a0, doc, .{});
+    defer bin.deinit();
+
+    var fail_index: usize = 0;
+    while (fail_index < MAX_FAIL_INDEX) : (fail_index += 1) {
+        var failing = makeFailing(fail_index);
+        const a = failing.allocator();
+
+        const result = Validator.validateForest(a, &trees, schema);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var r = try result;
+            defer r.deinit(a);
+            // Non-vacuous: both builders ran, so both allocation chains
+            // were driven to completion rather than short-circuiting.
+            var too_many: usize = 0;
+            var missing: usize = 0;
+            for (r.results) |per_tree| {
+                for (per_tree.diagnostics) |d| switch (d.code) {
+                    .positional_too_many => too_many += 1,
+                    .positional_missing => missing += 1,
+                    else => {},
+                };
+            }
+            try testing.expectEqual(@as(usize, 1), too_many);
+            try testing.expectEqual(@as(usize, 1), missing);
+            break;
+        }
+    } else return error.OomLoopDidNotConverge;
+
+    // The binary walker builds the same two messages from its own frame
+    // state — `CLAUDE.md`'s dual-path rule applies to the allocation
+    // shape as much as to the verdict.
+    fail_index = 0;
+    while (fail_index < MAX_FAIL_INDEX) : (fail_index += 1) {
+        var failing = makeFailing(fail_index);
+        const a = failing.allocator();
+
+        const result = Validator.validateBinary(a, bin.data, schema);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var r = try result;
+            defer r.deinit();
+            var n: usize = 0;
+            for (r.diagnostics) |d| {
+                if (d.code == .positional_too_many or d.code == .positional_missing) n += 1;
+            }
+            try testing.expectEqual(@as(usize, 2), n);
             return;
         }
     }

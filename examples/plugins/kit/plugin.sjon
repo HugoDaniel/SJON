@@ -1,9 +1,9 @@
 ; Drum-kit plugin with a discriminated `(track …)` form. The
 ; `:kind` symbol selects between three per-row overlays:
 ;
-;   * kick — `:step` (required), `:volume`, `:downbeat-volume`
-;   * bass — `:sequence` (required), `:gain`
-;   * hat  — `:pattern` (required), `:swing`
+;   * kick:  `:step` (required), `:volume`, `:downbeat-volume`
+;   * bass:  `:sequence` (required), `:gain`
+;   * hat:   `:pattern` (required), `:swing`
 ;
 ; `:name` and `:kind` are common to every variant. Modelled on
 ; `piece_track_plugin` (src/Validator_tests.zig:3321-3366); the M2

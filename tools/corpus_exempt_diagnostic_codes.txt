@@ -54,7 +54,7 @@ plugin_wasm_resolved_outside_package
 # grow a filesystem-shaped concept it does not have.
 #
 # Both codes fall out of that one resolver: `unknown_project_key` from
-# its nine-key walk, `pin_disagreement` from its cross-check of project
+# its eight-key walk, `pin_disagreement` from its cross-check of project
 # pins against the document's `(use-plugin …)` pins. They sit in the
 # wire-stable enum, which is what makes them LOOK like a cross-host
 # obligation to this audit — they are not one.
@@ -94,3 +94,14 @@ lowering_output_too_large
 # Removed from this list by: nothing. Retiring the variant itself would
 # be the wire-breaking change the append-only enum exists to avoid.
 lowering_produced_lowerable_head
+
+# Manifests once declared a format version (`(plugin … :sjon "1.x")`) and
+# a host refused a declaration above its own ceiling with this code. The
+# key enabled nothing on the host reading it, so the version — key,
+# ceiling and check — was retired (2026-08-18); a manifest newer than its
+# host fails meta-validation with `unknown_key` / `unknown_form` instead,
+# and a leftover `:sjon` reports the same way. `ManifestLoader_tests.zig`
+# carries the TOMBSTONE test that asserts it is never emitted, which is
+# the test reference that keeps it out of `reserved_diagnostic_codes.txt`.
+# Removed from this list by: nothing, for the same reason as above.
+sjon_format_unsupported

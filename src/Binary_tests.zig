@@ -731,7 +731,7 @@ test "regression: examples/basic.sjon binary size pins" {
     const lossless = try toBinary(a, tree, ToBinaryOptions.forMode(.full));
     defer lossless.deinit();
 
-    // Pinned sizes (text=590 bytes; binary measured 2026-04-29):
+    // Pinned sizes (text=589 bytes; binary measured 2026-04-29):
     //   stripped = 412 (0.70× text)   default = 900 (1.5× text)
     //   lossless = 1300 (2.2× text)
     // Lossless re-baselined 1293 → 1300 for wire v5: each of basic.sjon's 7

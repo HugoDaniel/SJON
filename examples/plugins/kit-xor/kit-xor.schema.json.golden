@@ -20,7 +20,7 @@
   "$defs": {
     "form.kit-xor.phrase": {
       "type": "object",
-      "description": "A single phrase rendered either as notes or as events — never both, never neither.",
+      "description": "A single phrase rendered either as notes or as events, never both and never neither.",
       "properties": {
         "$form": {
           "const": "phrase"

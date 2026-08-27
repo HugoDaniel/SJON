@@ -689,11 +689,15 @@ const Frame = struct {
     /// kvpair key / decimal index string).
     path: []const []const u8,
     scope_chain: []const ScopeFrame = &.{},
-    /// Spec of the form this frame's node lives inside (the immediate
-    /// parent form when this frame is a kvpair / form / vector / atom
-    /// child of a form). Null at roots and inside vector elements.
-    /// Used by the kvpair handler to honour `KeySpec.walk_opaque`.
-    parent_form_spec: ?*const Plugin.FormSpec = null,
+    /// The `KeySpec` the parent form's key-typing pass accepted this
+    /// kvpair child under (`validateFormKeys` records one per child), or
+    /// null: not a kvpair child, the parent form resolved to no spec, or
+    /// the key was not accepted — unknown, or a variant key outside the
+    /// active variant / ahead of the discriminant. The kvpair handler
+    /// reads `walk_opaque` and `local_forms` off it, so a slot's opt-ins
+    /// apply exactly when the slot itself is accepted — the rule the
+    /// binary walker applies inline in `processFormWalkValidate`.
+    matched_key: ?*const Plugin.KeySpec = null,
     /// Slot-local form registry in scope for this frame. Set on a form
     /// value frame by the kvpair handler when the matching `KeySpec` has
     /// `local_forms`: the form's head then resolves local-first against
@@ -3345,13 +3349,18 @@ fn validateOneTree(
                 // that declares local forms, its head resolves local-first
                 // (bare heads only — a qualified `ns/foo` bypasses locals).
                 // Computed once and reused for both head validation and the
-                // children's `parent_form_spec`.
+                // positional children's registry (`child_spec` below).
                 const local_hit: ?*const Plugin.FormSpec = blk: {
                     const reg = frame.local_form_registry orelse break :blk null;
                     if (hdr.namespace != null) break :blk null;
                     break :blk matchLocalForm(reg, hdr.head);
                 };
-                try validateFormHead(a, diags, schema, cross_index, tree_scope, frame.scope_chain, tree, frame.idx, frame.path, options, frame.local_form_registry, frame.local_form_slot_path, local_hit);
+                // One slot per child: the key-typing pass fills in the
+                // `KeySpec` it accepted each kvpair child under, and the
+                // push loop below hands each child its own slot.
+                const matched_keys = try a.alloc(?*const Plugin.KeySpec, hdr.children.len);
+                @memset(matched_keys, null);
+                try validateFormHead(a, diags, schema, cross_index, tree_scope, frame.scope_chain, tree, frame.idx, frame.path, options, frame.local_form_registry, frame.local_form_slot_path, local_hit, matched_keys);
                 // If this form is a scope-opener, build an extended chain
                 // for its descendants. Non-openers reuse the parent's chain.
                 var child_chain = frame.scope_chain;
@@ -3369,10 +3378,11 @@ fn validateOneTree(
                         }
                     }
                 }
-                // Resolve the form's own spec so kvpair children can consult
-                // `walk_opaque` / `local_forms` on their matching KeySpec. A
-                // slot-local hit shadows the global catalog (additive
-                // layering); otherwise fall back to the global lookup.
+                // Resolve the form's own spec so a form-shaped positional
+                // child can take `FormSpec.local_forms`. A slot-local hit
+                // shadows the global catalog (additive layering); otherwise
+                // fall back to the global lookup — the same order
+                // `validateFormHead` typed the keys under.
                 const child_spec: ?*const Plugin.FormSpec = if (local_hit) |lf|
                     lf
                 else switch (schema.lookupForm(hdr.head, hdr.namespace)) {
@@ -3406,7 +3416,7 @@ fn validateOneTree(
                         .idx = ch,
                         .path = child_path,
                         .scope_chain = child_chain,
-                        .parent_form_spec = child_spec,
+                        .matched_key = matched_keys[j - 1],
                         .local_form_registry = pos_local,
                         .local_form_slot_path = if (pos_local != null) frame.path else &.{},
                     });
@@ -3431,8 +3441,8 @@ fn validateOneTree(
                 // `[canvas, shape, triangle]` rather than `[canvas, shape]`
                 // for a triangle nested under :shape).
                 const kvh = tree.kvpairHeader(frame.idx);
-                // Resolve the parent form's matching KeySpec (common keys
-                // first, then any variant's keys) to honour two slot-level
+                // The KeySpec the parent's key-typing pass accepted this
+                // kvpair under (`Frame.matched_key`) carries two slot-level
                 // opt-ins:
                 //   * `walk_opaque` — skip descent entirely. The slot-level
                 //     type-check via `matchValueAgainstType` still runs
@@ -3444,26 +3454,15 @@ fn validateOneTree(
                 //     local-first. The registry + slot path ride onto the
                 //     pushed value frame (see `validateFormHead`). Mutually
                 //     exclusive with `walk_opaque` (opaque = not descended).
+                // Both apply only to an *accepted* key: a variant key outside
+                // the active variant (or ahead of the discriminant) is
+                // `unknown_key`, and an unknown key puts nothing in scope —
+                // the binary walker's rule, and this pass's own.
                 var local_registry: ?[]const Plugin.FormSpec = null;
-                if (frame.parent_form_spec) |spec| {
-                    const matched: ?Plugin.KeySpec = blk: {
-                        for (spec.keys) |k| {
-                            if (std.mem.eql(u8, k.name, kvh.key)) break :blk k;
-                        }
-                        if (spec.variants) |variants| {
-                            for (variants) |v| {
-                                for (v.keys) |k| {
-                                    if (std.mem.eql(u8, k.name, kvh.key)) break :blk k;
-                                }
-                            }
-                        }
-                        break :blk null;
-                    };
-                    if (matched) |k| {
-                        if (k.walk_opaque) continue :outer;
-                        if (k.local_forms.len > 0 and tree.tagOf(kvh.value) == .form) {
-                            local_registry = k.local_forms;
-                        }
+                if (frame.matched_key) |k| {
+                    if (k.walk_opaque) continue :outer;
+                    if (k.local_forms.len > 0 and tree.tagOf(kvh.value) == .form) {
+                        local_registry = k.local_forms;
                     }
                 }
                 var child_path = frame.path;
@@ -3625,8 +3624,10 @@ fn computeBinaryPathPair(
 /// `namespace == null` and a non-null registry before calling — a qualified
 /// head bypasses locals. Shared verbatim by the tree (`validateOneTree`) and
 /// binary (`scheduleFormWalkValidate`) head-resolution steps so the two can't
-/// drift on how a local head is matched.
-fn matchLocalForm(reg: []const Plugin.FormSpec, head: []const u8) ?*const Plugin.FormSpec {
+/// drift on how a local head is matched — and `pub` for the lowering
+/// worklist (`Lowering.runLoweringPassBudgeted`), which resolves the same
+/// heads local-first so it never fires a global's hook on a local.
+pub fn matchLocalForm(reg: []const Plugin.FormSpec, head: []const u8) ?*const Plugin.FormSpec {
     for (reg) |*lf| {
         if (std.mem.eql(u8, lf.name, head)) return lf;
     }
@@ -3654,8 +3655,16 @@ fn validateFormHead(
     /// The matched local form (computed by the caller), or null when no
     /// local form's bare name matched this head.
     local_hit: ?*const Plugin.FormSpec,
+    /// Out: one slot per `hdr.children` entry, pre-filled null. When the
+    /// head resolves to a data form, `validateFormKeys` records the
+    /// `KeySpec` it accepted each kvpair child under; the caller hands
+    /// each child frame its slot (`Frame.matched_key`). Left null
+    /// throughout on every other path (synthetic head, unknown,
+    /// ambiguous, expression function).
+    matched_keys: []?*const Plugin.KeySpec,
 ) Allocator.Error!void {
     const hdr = tree.formHeader(idx);
+    std.debug.assert(matched_keys.len == hdr.children.len);
     // Empty head signals a parser-recovery synthetic form — skip.
     if (hdr.head.len == 0) return;
 
@@ -3670,12 +3679,12 @@ fn validateFormHead(
     if (hdr.namespace == null) {
         if (local_registry) |reg| {
             if (local_hit) |lf| {
-                try validateFormKeys(a, diags, schema, cross_index, tree_scope, scope_chain, lf.*, tree, idx, hdr, path, options);
+                try validateFormKeys(a, diags, schema, cross_index, tree_scope, scope_chain, lf.*, tree, idx, hdr, path, options, matched_keys);
                 return;
             }
             switch (schema.lookupForm(hdr.head, null)) {
                 .found => |hit| {
-                    try validateFormKeys(a, diags, schema, cross_index, tree_scope, scope_chain, hit.form.*, tree, idx, hdr, path, options);
+                    try validateFormKeys(a, diags, schema, cross_index, tree_scope, scope_chain, hit.form.*, tree, idx, hdr, path, options, matched_keys);
                     return;
                 },
                 .ambiguous => |amb| {
@@ -3694,7 +3703,7 @@ fn validateFormHead(
     const form_hit = schema.lookupForm(hdr.head, hdr.namespace);
     switch (form_hit) {
         .found => |hit| {
-            try validateFormKeys(a, diags, schema, cross_index, tree_scope, scope_chain, hit.form.*, tree, idx, hdr, path, options);
+            try validateFormKeys(a, diags, schema, cross_index, tree_scope, scope_chain, hit.form.*, tree, idx, hdr, path, options, matched_keys);
             return;
         },
         .ambiguous => |amb| {
@@ -3869,12 +3878,18 @@ const FormKeysState = struct {
     /// Variant-only declared keys the author wrote (by index into the
     /// resolved variant's `keys`). Empty until the discriminant resolves.
     seen_variant: std.bit_set.IntegerBitSet(Plugin.MAX_FORM_KEYS),
-    /// `:when …` value of the resolved variant, or null when the
-    /// discriminant kvpair is absent and no overlay default applies.
-    resolved_when: ?[]const u8 = null,
-    /// Index into `spec.variants` of the resolved variant; mirrors
-    /// `resolved_when` (both set together).
+    /// Index into `spec.variants` of the resolved variant, or null when
+    /// the discriminant kvpair is absent and no overlay default applies.
+    /// The variant's `:when` text is rendered from it only where a
+    /// message needs it (`Variant.whenText`), never on the clean path.
     resolved_variant_idx: ?usize = null,
+    /// Out: one slot per `hdr.children` entry (caller-allocated, null on
+    /// entry). `matchAndTypecheckDeclaredKey` / `matchAndTypecheckVariantKey`
+    /// record the `KeySpec` they accepted a kvpair child under; positional
+    /// children and unaccepted keys stay null. The tree walker hands each
+    /// child frame its slot, so `walk_opaque` / `local_forms` apply exactly
+    /// where this pass accepted the key.
+    matched_keys: []?*const Plugin.KeySpec,
     /// True when axis D pre-resolved the discriminant from an overlay
     /// default. Suppresses the `missing_discriminant_key` emit while
     /// leaving `seen` untouched for the discriminant slot.
@@ -3918,6 +3933,10 @@ fn boundedPositionalHeads(
     };
     const kind = resolveFormHeadKind(schema, .{ .named = kind_ref }) orelse return null;
     const hs = kind.heads orelse return null;
+    // An empty set narrows nothing, so it counts nothing either — else a
+    // `:min-children` floor would demand a child from a set that names
+    // none, on a slot now accepting every head.
+    if (hs.heads.len == 0) return null;
     if (hs.isUnbounded()) return null;
     return hs;
 }
@@ -3929,6 +3948,16 @@ fn boundedPositionalHeads(
 /// the emit fires exactly once — on the transition from `max` to
 /// `max + 1` — so a form five children over its ceiling still gets one
 /// diagnostic.
+///
+/// The transition is computed in `u32`, not in the counters' `u16`: a
+/// head may legally declare `:max 65535` (the loader's own ceiling), and
+/// `max + 1` in `u16` overflows on the *first* matching child — a panic
+/// reachable from a valid manifest and a one-child document, not from
+/// 65536 of them. Widening also makes the one genuine saturation
+/// boundary explicit: `counts[i]` saturates at 65535, so a `:max 65535`
+/// head is never reported however many children carry it. That needs
+/// 65536 positional children under one form, and it is the same
+/// fail-open the counters have always had.
 fn tallyPositionalHead(
     a: Allocator,
     diags: *std.ArrayList(Diagnostic),
@@ -3944,18 +3973,70 @@ fn tallyPositionalHead(
     for (bounds.heads, 0..) |h, i| {
         if (!std.mem.eql(u8, h.name, head)) continue;
         counts[i] +|= 1;
-        const max = h.max orelse return;
-        if (counts[i] == max + 1) {
-            try emit(a, diags, span, pos_path, .err, .positional_too_many, try positionalTooManyMsg(a, form_name, h.name, max, counts[i]));
+        // Per-head first, and its verdict decides whether the set speaks:
+        // the two levels overlap by construction (`:min-children 1
+        // :max-children 1` over heads each `:max 1` is "exactly one, and
+        // not two of the same"), and a second `(buffer …)` under that
+        // crosses both ceilings on the same child — same span, same path,
+        // same code, separable only by prose. **The set yields to the
+        // head.** The per-head diagnostic names the line to delete and the
+        // set's claim is implied by it; the reverse is not true.
+        //
+        // Precedent: the `:requires` self-reference carve-out in the cycle
+        // walk, where a self-loop is a cycle and the more specific
+        // diagnostic wins.
+        if (h.max) |max| {
+            if (@as(u32, counts[i]) == @as(u32, max) + 1) {
+                try emit(a, diags, span, pos_path, .err, .positional_too_many, try positionalTooManyMsg(a, form_name, h.name, max, counts[i]));
+                return;
+            }
         }
+        try tallyPositionalSet(a, diags, bounds, counts, form_name, span, pos_path);
         return;
     }
 }
 
-/// Report every head whose `:min` the finished child list did not reach.
+/// The set half of `tallyPositionalHead`, reached only for a child that
+/// matched a head and did *not* report for it. Fires on the same
+/// transition rule — `max_children` to `max_children + 1` — so a form
+/// five children over the set's ceiling still gets one diagnostic.
+///
+/// The running total is `Σ counts` rather than a counter of its own. It
+/// cannot differ: a child counts towards the set exactly when it counts
+/// towards a head (both are "head matches byte-for-byte"), so a second
+/// counter would be a second thing for the two walkers to disagree about
+/// for no gain. It inherits the counters' saturation, which is the
+/// per-head fail-open at 65536 children under one form.
+fn tallyPositionalSet(
+    a: Allocator,
+    diags: *std.ArrayList(Diagnostic),
+    bounds: Plugin.ValueKind.HeadSet,
+    counts: []const u16,
+    form_name: []const u8,
+    span: Ast.Span,
+    pos_path: []const []const u8,
+) Allocator.Error!void {
+    const max = bounds.max_children orelse return;
+    var total: u32 = 0;
+    for (counts) |n| total += n;
+    if (total != @as(u32, max) + 1) return;
+    try emit(a, diags, span, pos_path, .err, .positional_too_many, try positionalSetTooManyMsg(a, form_name, bounds, max, total));
+}
+
+/// Report every head whose `:min` the finished child list did not reach,
+/// then the set's own `:min-children` if no head spoke.
+///
 /// Shared end-of-form sweep: one diagnostic per unsatisfied head, at the
 /// parent's head span with the parent's path — `missing_required_key`'s
 /// placement, for `missing_required_key`'s reason.
+///
+/// The set yields here too, and for the same reason it yields on the
+/// ceiling: under `:min-children 2` with a head `:min 1`, an empty form
+/// breaches both, and "add a `buffer`" is the more actionable of the two.
+/// The cost is a two-round repair when the set's floor is the higher of
+/// the pair — fix the head, re-run, meet the set — which is the ordinary
+/// shape of validator feedback and cheaper than a pile of overlapping
+/// reports on one span.
 fn emitPositionalMissing(
     a: Allocator,
     diags: *std.ArrayList(Diagnostic),
@@ -3966,11 +4047,66 @@ fn emitPositionalMissing(
     path: []const []const u8,
 ) Allocator.Error!void {
     std.debug.assert(counts.len == bounds.heads.len);
+    var any_head_reported = false;
+    var total: u32 = 0;
     for (bounds.heads, counts) |h, n| {
+        total += n;
         if (h.min == 0) continue;
         if (n >= h.min) continue;
+        any_head_reported = true;
         try emit(a, diags, head_span, path, .err, .positional_missing, try positionalMissingMsg(a, form_name, h.name, h.min, n));
     }
+    if (any_head_reported) return;
+    if (bounds.min_children == 0) return;
+    if (total >= bounds.min_children) return;
+    try emit(a, diags, head_span, path, .err, .positional_missing, try positionalSetMissingMsg(a, form_name, bounds, bounds.min_children, total));
+}
+
+/// Render the set's accepted heads as `[a | b | c]` — `not_head_member`'s
+/// vocabulary, so a reader who has seen one recognises the other. This is
+/// what separates a set-level message from a per-head one, and therefore
+/// what makes reusing the two codes rather than appending two more the
+/// right call: the code says what kind of breach it is, the prose says
+/// which level declared it.
+fn writeHeadSetList(a: Allocator, buf: *std.ArrayList(u8), heads: []const Plugin.ValueKind.HeadSet.Head) Allocator.Error!void {
+    try buf.appendSlice(a, "[");
+    for (heads, 0..) |h, i| {
+        if (i > 0) try buf.appendSlice(a, " | ");
+        try buf.appendSlice(a, h.name);
+    }
+    try buf.appendSlice(a, "]");
+}
+
+/// Prose for the set's `positional_too_many`, in `positionalTooManyMsg`'s
+/// shape with the set standing where the head does.
+fn positionalSetTooManyMsg(
+    a: Allocator,
+    form_name: []const u8,
+    bounds: Plugin.ValueKind.HeadSet,
+    max: u16,
+    got: u32,
+) Allocator.Error![]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.print(a, "form `{s}` accepts at most {d} positional child{s} from ", .{ form_name, max, if (max == 1) "" else "ren" });
+    try writeHeadSetList(a, &buf, bounds.heads);
+    try buf.print(a, ", found {d}", .{got});
+    return try buf.toOwnedSlice(a);
+}
+
+/// Prose for the set's `positional_missing`, mirroring the ceiling above
+/// exactly as the per-head pair mirror each other.
+fn positionalSetMissingMsg(
+    a: Allocator,
+    form_name: []const u8,
+    bounds: Plugin.ValueKind.HeadSet,
+    min: u16,
+    got: u32,
+) Allocator.Error![]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.print(a, "form `{s}` requires at least {d} positional child{s} from ", .{ form_name, min, if (min == 1) "" else "ren" });
+    try writeHeadSetList(a, &buf, bounds.heads);
+    try buf.print(a, ", found {d}", .{got});
+    return try buf.toOwnedSlice(a);
 }
 
 /// Prose for `positional_too_many`: the form, the head, the ceiling, and
@@ -4044,8 +4180,11 @@ fn validateFormKeys(
     hdr: Ast.FormHeader,
     path: []const []const u8,
     options: Options,
+    /// Out: see `FormKeysState.matched_keys`. `len == hdr.children.len`.
+    matched_keys: []?*const Plugin.KeySpec,
 ) Allocator.Error!void {
     std.debug.assert(spec.keys.len <= Plugin.MAX_FORM_KEYS);
+    std.debug.assert(matched_keys.len == hdr.children.len);
 
     var any_required = false;
     for (spec.keys) |k| {
@@ -4073,6 +4212,7 @@ fn validateFormKeys(
         .any_required = any_required,
         .seen = .initEmpty(),
         .seen_variant = .initEmpty(),
+        .matched_keys = matched_keys,
         .pos_bounds = pos_bounds,
         .pos_head_counts = if (pos_bounds) |hs| try a.alloc(u16, hs.heads.len) else &.{},
     };
@@ -4141,13 +4281,19 @@ fn emitDuplicateKvpairKeys(st: *FormKeysState) Allocator.Error!void {
 }
 
 /// Phase 2 — axis D. When the author omitted the discriminant
-/// kvpair and the overlay carries a symbol/keyword default that
-/// resolves to a known variant, pre-set `resolved_when`/
-/// `resolved_variant_idx` so the children loop accepts variant-only
-/// keys without the "discriminant must come first" complaint and
-/// the `missing_discriminant_key` emit below suppresses. The
-/// `seen` bit for the discriminant slot stays clear — this is
-/// overlay-derived, not author-written.
+/// kvpair and the overlay carries a symbol/keyword default, the
+/// discriminant is satisfied — mark `discriminant_via_overlay` so
+/// the `missing_discriminant_key` emit below suppresses — and when
+/// that default resolves to a known variant, pre-set
+/// `resolved_variant_idx` so the children loop
+/// accepts variant-only keys without the "discriminant must come
+/// first" complaint. A default that selects no variant (a
+/// `tri-list` beside strip-only variants) still satisfies the
+/// discriminant: the form has a value, it just gains no keys, and a
+/// variant-only key under it is `unknown_key` exactly as it would be
+/// had the author written that value. The `seen` bit for the
+/// discriminant slot stays clear — this is overlay-derived, not
+/// author-written.
 fn preresolveDiscriminantViaOverlay(st: *FormKeysState) Allocator.Error!void {
     if (!st.options.axes.variant) return;
     const overlay = st.options.overlay orelse return;
@@ -4163,12 +4309,11 @@ fn preresolveDiscriminantViaOverlay(st: *FormKeysState) Allocator.Error!void {
         .string => |s| s,
         else => return,
     };
+    st.discriminant_via_overlay = true;
     const vs = st.spec.variants orelse &.{};
     for (vs, 0..) |v, vi| {
-        if (std.mem.eql(u8, v.when, stext)) {
-            st.resolved_when = v.when;
+        if (v.selects(stext)) {
             st.resolved_variant_idx = vi;
-            st.discriminant_via_overlay = true;
             return;
         }
     }
@@ -4182,12 +4327,12 @@ fn preresolveDiscriminantViaOverlay(st: *FormKeysState) Allocator.Error!void {
 /// `resolved_*` if the discriminant kvpair appears in-line.
 fn validateChildKvpairsAndPositionals(st: *FormKeysState) Allocator.Error!void {
     var positional_n: usize = 0;
-    for (st.hdr.children) |ch| {
+    for (st.hdr.children, 0..) |ch, ci| {
         if (st.tree.tagOf(ch) == .kvpair) {
             const kvh = st.tree.kvpairHeader(ch);
-            const found_declared = try matchAndTypecheckDeclaredKey(st, kvh);
+            const found_declared = try matchAndTypecheckDeclaredKey(st, kvh, ci);
             const found_variant = if (!found_declared)
-                try matchAndTypecheckVariantKey(st, kvh)
+                try matchAndTypecheckVariantKey(st, kvh, ci)
             else
                 false;
             if (!found_declared and !found_variant and !st.spec.open) {
@@ -4200,16 +4345,21 @@ fn validateChildKvpairsAndPositionals(st: *FormKeysState) Allocator.Error!void {
     }
 }
 
-/// Attempt to match `kvh` against a declared top-level key in
-/// `spec.keys`. On hit: set the `seen` bit, type-check the value,
-/// and (if the matched key is the discriminant slot and the value
-/// is a symbol) resolve the variant for downstream lookups.
+/// Attempt to match `kvh` (child `child_i` of the form) against a
+/// declared top-level key in `spec.keys`. On hit: record the key in
+/// `matched_keys`, set the `seen` bit, type-check the value, and (if the
+/// matched key is the discriminant slot and the value is a symbol)
+/// resolve the variant for downstream lookups.
 fn matchAndTypecheckDeclaredKey(
     st: *FormKeysState,
     kvh: Ast.KvPairHeader,
+    child_i: usize,
 ) Allocator.Error!bool {
     for (st.spec.keys, 0..) |k, ki| {
         if (!std.mem.eql(u8, k.name, kvh.key)) continue;
+        // `spec` is a by-value copy, `keys` a borrowed slice into the
+        // plugin's storage — the pointer outlives this state.
+        st.matched_keys[child_i] = &st.spec.keys[ki];
         if (ki < Plugin.MAX_FORM_KEYS) st.seen.set(ki);
         if (try matchValueAgainstType(st.a, st.schema, st.cross_index, st.tree_scope, st.scope_chain, st.tree, kvh.value, k.value_type, 0)) |fail| {
             const value_path = try appendStep(st.a, st.path, kvh.key);
@@ -4237,8 +4387,7 @@ fn matchAndTypecheckDeclaredKey(
                 const sym = st.tree.symbolText(kvh.value);
                 const vs = st.spec.variants orelse &.{};
                 for (vs, 0..) |v, vi| {
-                    if (std.mem.eql(u8, v.when, sym)) {
-                        st.resolved_when = v.when;
+                    if (v.selects(sym)) {
                         st.resolved_variant_idx = vi;
                         break;
                     }
@@ -4259,12 +4408,14 @@ fn matchAndTypecheckDeclaredKey(
 fn matchAndTypecheckVariantKey(
     st: *FormKeysState,
     kvh: Ast.KvPairHeader,
+    child_i: usize,
 ) Allocator.Error!bool {
     const vi = st.resolved_variant_idx orelse return false;
     const vs = st.spec.variants.?;
     const v = vs[vi];
     for (v.keys, 0..) |vk, vki| {
         if (!std.mem.eql(u8, vk.name, kvh.key)) continue;
+        st.matched_keys[child_i] = &v.keys[vki];
         if (vki < Plugin.MAX_FORM_KEYS) st.seen_variant.set(vki);
         if (try matchValueAgainstType(st.a, st.schema, st.cross_index, st.tree_scope, st.scope_chain, st.tree, kvh.value, vk.value_type, 0)) |fail| {
             const value_path = try appendStep(st.a, st.path, kvh.key);
@@ -4301,10 +4452,10 @@ fn emitUnknownKeywordKvpair(
     kvh: Ast.KvPairHeader,
 ) Allocator.Error!void {
     const unk_path = try appendStep(st.a, st.path, kvh.key);
-    const ctx: UnknownKeyContext = if (st.spec.discriminant_idx != null and st.resolved_when == null)
+    const ctx: UnknownKeyContext = if (st.spec.discriminant_idx != null and st.resolved_variant_idx == null)
         .{ .needs_discriminant = st.spec.discriminant_name orelse "kind" }
     else
-        .{ .resolved = st.resolved_when };
+        .{ .resolved = if (st.resolved_variant_idx) |vi| &st.spec.variants.?[vi] else null };
     try emit(st.a, st.diags, kvh.key_span, unk_path, .err, .unknown_key, try unknownKeywordMsg(st.a, st.spec.name, kvh.key, ctx));
 }
 
@@ -4460,11 +4611,12 @@ fn duplicateKeyMsg(a: Allocator, form_name: []const u8, key: []const u8) Allocat
 /// Discriminant context for an `unknown_key` message. `.needs_discriminant`
 /// carries the discriminant name for the "must be set before variant-only
 /// keys" hint (a form with a discriminant that has not resolved yet);
-/// `.resolved` carries the active variant's `:when` value — or null when no
-/// variant is in play — for the optional parenthetical annotation.
+/// `.resolved` carries the active variant — or null when no variant is in
+/// play — for the optional parenthetical annotation; its `:when` is
+/// rendered here, on the error path, not by the walker.
 const UnknownKeyContext = union(enum) {
     needs_discriminant: []const u8,
-    resolved: ?[]const u8,
+    resolved: ?*const Plugin.Variant,
 };
 
 /// Prose for `unknown_key`, both shapes (pre-discriminant hint vs. plain,
@@ -4481,16 +4633,16 @@ fn unknownKeywordMsg(
             "unknown keyword `:{s}` in form `{s}` — `:{s}` must be set before variant-only keys",
             .{ key, form_name, dname },
         ),
-        .resolved => |maybe_when| {
+        .resolved => |maybe_variant| {
             var buf: std.ArrayList(u8) = .empty;
             try buf.appendSlice(a, "unknown keyword `:");
             try buf.appendSlice(a, key);
             try buf.appendSlice(a, "` in form `");
             try buf.appendSlice(a, form_name);
             try buf.appendSlice(a, "`");
-            if (maybe_when) |w| {
+            if (maybe_variant) |v| {
                 try buf.appendSlice(a, " (variant `:when ");
-                try buf.appendSlice(a, w);
+                try buf.appendSlice(a, try v.whenText(a));
                 try buf.appendSlice(a, "`)");
             }
             return try buf.toOwnedSlice(a);
@@ -4593,7 +4745,10 @@ fn emitMissingRequiredTopLevel(st: *FormKeysState) Allocator.Error!void {
 /// (the user wrote them, just in the wrong order).
 fn emitVariantSweeps(st: *FormKeysState) Allocator.Error!void {
     const vi = st.resolved_variant_idx orelse return;
-    const v = st.spec.variants.?[vi];
+    // A pointer, not a copy: `spec.variants` is a borrowed slice into the
+    // plugin's storage, and the message helpers render the `:when` from
+    // it only when they emit.
+    const v: *const Plugin.Variant = &st.spec.variants.?[vi];
     for (v.keys, 0..) |vk, vki| {
         if (vk.effectiveOptional()) continue;
         if (vki < Plugin.MAX_FORM_KEYS and st.seen_variant.isSet(vki)) continue;
@@ -4607,7 +4762,7 @@ fn emitVariantSweeps(st: *FormKeysState) Allocator.Error!void {
         }
         if (present) continue;
         if (keyInExclusiveGroup(v.exclusive_groups, vk.name)) continue;
-        try emit(st.a, st.diags, st.hdr.head_span, st.path, .err, .missing_required_key, try missingRequiredVariantKeyMsg(st.a, st.spec.name, v.when, vk.name));
+        try emit(st.a, st.diags, st.hdr.head_span, st.path, .err, .missing_required_key, try missingRequiredVariantKeyMsg(st.a, st.spec.name, try v.whenText(st.a), vk.name));
     }
     try emitExclusiveGroupDiagnostics(
         st.a,
@@ -4617,7 +4772,7 @@ fn emitVariantSweeps(st: *FormKeysState) Allocator.Error!void {
         st.seen_variant,
         st.overlay_present_variant,
         st.spec.name,
-        v.when,
+        v,
         st.hdr.head_span,
         st.path,
     );
@@ -4634,7 +4789,7 @@ fn emitVariantSweeps(st: *FormKeysState) Allocator.Error!void {
         st.seen,
         st.overlay_present,
         st.spec.name,
-        v.when,
+        v,
         st.hdr.head_span,
         st.path,
     );
@@ -4672,8 +4827,9 @@ fn runEffectiveRefLookups(st: *FormKeysState) Allocator.Error!void {
 /// for `key_name` in author input? Sibling to `MaterializedDefaults
 /// .authorValueOnForm` but answers "kvpair exists?" rather than "what's
 /// the value?", because the axis-D pre-resolution code only needs the
-/// presence bit.
-fn authorWroteKvpair(tree: *const Ast.Tree, hdr: Ast.FormHeader, key_name: []const u8) bool {
+/// presence bit. `pub` for the lowering worklist (`Lowering.matchKvpairKeys`),
+/// which mirrors that pre-resolution when it decides a variant key's locals.
+pub fn authorWroteKvpair(tree: *const Ast.Tree, hdr: Ast.FormHeader, key_name: []const u8) bool {
     for (hdr.children) |ch| {
         if (tree.tagOf(ch) != .kvpair) continue;
         if (std.mem.eql(u8, tree.kvpairHeader(ch).key, key_name)) return true;
@@ -4922,7 +5078,9 @@ fn emitDependentKeyDiagnostics(
     base_seen: ?std.bit_set.IntegerBitSet(Plugin.MAX_FORM_KEYS),
     base_overlay_present: ?std.bit_set.IntegerBitSet(Plugin.MAX_FORM_KEYS),
     form_name: []const u8,
-    variant_when: ?[]const u8,
+    /// The active variant when sweeping a variant's keys, null for the
+    /// form's common keys. Rendered only into a message.
+    variant: ?*const Plugin.Variant,
     span: Ast.Span,
     path: []const []const u8,
 ) Allocator.Error!void {
@@ -4945,7 +5103,7 @@ fn emitDependentKeyDiagnostics(
         try emit(a, diags, span, path, .err, .dependent_key_missing, try dependentKeyMissingMsg(
             a,
             form_name,
-            variant_when,
+            variant,
             k.name,
             missing.items,
         ));
@@ -4986,7 +5144,7 @@ fn requirementPresent(
 fn dependentKeyMissingMsg(
     a: Allocator,
     form_name: []const u8,
-    variant_when: ?[]const u8,
+    variant: ?*const Plugin.Variant,
     key_name: []const u8,
     missing: []const []const u8,
 ) Allocator.Error![]const u8 {
@@ -4995,9 +5153,9 @@ fn dependentKeyMissingMsg(
     try buf.appendSlice(a, "form `");
     try buf.appendSlice(a, form_name);
     try buf.appendSlice(a, "` ");
-    if (variant_when) |w| {
+    if (variant) |v| {
         try buf.appendSlice(a, "variant `");
-        try buf.appendSlice(a, w);
+        try buf.appendSlice(a, try v.whenText(a));
         try buf.appendSlice(a, "` ");
     }
     try buf.appendSlice(a, "keyword `:");
@@ -5021,7 +5179,9 @@ fn emitExclusiveGroupDiagnostics(
     seen: std.bit_set.IntegerBitSet(Plugin.MAX_FORM_KEYS),
     overlay_present: ?std.bit_set.IntegerBitSet(Plugin.MAX_FORM_KEYS),
     form_name: []const u8,
-    variant_when: ?[]const u8,
+    /// The active variant when sweeping a variant's groups, null for the
+    /// form's common groups. Rendered only into a message.
+    variant: ?*const Plugin.Variant,
     span: Ast.Span,
     path: []const []const u8,
 ) Allocator.Error!void {
@@ -5045,7 +5205,7 @@ fn emitExclusiveGroupDiagnostics(
             try emit(a, diags, span, path, .err, .mutually_exclusive_keys_present, try formatExclusiveMessage(
                 a,
                 form_name,
-                variant_when,
+                variant,
                 group,
                 .mutually_exclusive_keys_present,
             ));
@@ -5063,7 +5223,7 @@ fn emitExclusiveGroupDiagnostics(
                     try emit(a, diags, span, path, .err, .exclusive_bundle_partial, try formatExclusiveBundleMessage(
                         a,
                         form_name,
-                        variant_when,
+                        variant,
                         alt,
                         keys,
                         seen,
@@ -5080,7 +5240,7 @@ fn emitExclusiveGroupDiagnostics(
             try emit(a, diags, span, path, .err, .multiple_defaulted_alternatives_in_group, try formatExclusiveMessage(
                 a,
                 form_name,
-                variant_when,
+                variant,
                 group,
                 .multiple_defaulted_alternatives_in_group,
             ));
@@ -5104,7 +5264,7 @@ fn emitExclusiveGroupDiagnostics(
                 try emit(a, diags, span, path, .err, .required_one_of_missing, try formatExclusiveMessage(
                     a,
                     form_name,
-                    variant_when,
+                    variant,
                     group,
                     .required_one_of_missing,
                 ));
@@ -5120,7 +5280,7 @@ fn emitExclusiveGroupDiagnostics(
 fn formatExclusiveMessage(
     a: Allocator,
     form_name: []const u8,
-    variant_when: ?[]const u8,
+    variant: ?*const Plugin.Variant,
     group: Plugin.ExclusiveGroup,
     code: Diagnostic.Code,
 ) Allocator.Error![]u8 {
@@ -5129,9 +5289,9 @@ fn formatExclusiveMessage(
     try buf.appendSlice(a, "form `");
     try buf.appendSlice(a, form_name);
     try buf.appendSlice(a, "`");
-    if (variant_when) |w| {
+    if (variant) |v| {
         try buf.appendSlice(a, " (variant `:when ");
-        try buf.appendSlice(a, w);
+        try buf.appendSlice(a, try v.whenText(a));
         try buf.appendSlice(a, "`)");
     }
     switch (code) {
@@ -5163,7 +5323,7 @@ fn formatExclusiveMessage(
 fn formatExclusiveBundleMessage(
     a: Allocator,
     form_name: []const u8,
-    variant_when: ?[]const u8,
+    variant: ?*const Plugin.Variant,
     alt: Plugin.Alternative,
     keys: []const Plugin.KeySpec,
     seen: std.bit_set.IntegerBitSet(Plugin.MAX_FORM_KEYS),
@@ -5173,9 +5333,9 @@ fn formatExclusiveBundleMessage(
     try buf.appendSlice(a, "form `");
     try buf.appendSlice(a, form_name);
     try buf.appendSlice(a, "`");
-    if (variant_when) |w| {
+    if (variant) |v| {
         try buf.appendSlice(a, " (variant `:when ");
-        try buf.appendSlice(a, w);
+        try buf.appendSlice(a, try v.whenText(a));
         try buf.appendSlice(a, "`)");
     }
     try buf.appendSlice(a, ": exclusive-group alt `");
@@ -5924,6 +6084,13 @@ fn matchValueAgainstType(
     if (tag == .form) {
         if (resolveFormHeadKind(schema, expected)) |kind| {
             if (kind.heads) |hs| {
+                // An empty closed set is "no narrowing", not "reject
+                // everything" — the contract `MemberSet` states and
+                // `matchScalar` honours (`m.members.len == 0`). Both
+                // spellings are `invalid_manifest` at load, so this only
+                // governs a Zig-constructed schema; what matters is that
+                // the two sibling constructs answer it the same way.
+                if (hs.heads.len == 0) return null;
                 const head = tree.formHeader(idx).head;
                 for (hs.heads) |h| if (std.mem.eql(u8, h.name, head)) return null;
                 return MatchFail{ .not_head_member = .{ .got = head, .allowed = hs.heads } };
@@ -6353,6 +6520,7 @@ fn matchValueAgainstKind(
             std.debug.assert(kind.members == null);
             if (tag != .form) break :blk MatchFail{ .wrong_underlying = "form" };
             if (kind.heads) |hs| {
+                if (hs.heads.len == 0) break :blk null; // empty set = no narrowing
                 const head = tree.formHeader(idx).head;
                 for (hs.heads) |h| if (std.mem.eql(u8, h.name, head)) break :blk null;
                 break :blk MatchFail{ .not_head_member = .{ .got = head, .allowed = hs.heads } };
@@ -6414,13 +6582,21 @@ fn matchValueAgainstKind(
             // and every lookup still read the real maps.
             var probe = cross_index.*;
             probe.arena = null;
-            for (us.alternatives) |alt_name| {
+            // A union whose alternatives are disjoint by node shape has a
+            // determined arm even when nothing matches (see
+            // `determinedArm`); its failure is kept from the
+            // capture-suppressed probe so reporting it costs no extra run
+            // and leaves no extra reference site behind.
+            const arm = determinedArm(schema, kind, shapeOfTag(tag));
+            var arm_fail: ?MatchFail = null;
+            for (us.alternatives, 0..) |alt_name, ai| {
                 const alt_type: Plugin.ValueType = .{ .named = alt_name };
                 const inner = try matchValueAgainstType(a, schema, &probe, tree_scope, scope_chain, tree, idx, alt_type, depth);
                 if (inner == null) {
                     _ = try matchValueAgainstType(a, schema, cross_index, tree_scope, scope_chain, tree, idx, alt_type, depth);
                     break :blk null;
                 }
+                if (arm == ai) arm_fail = inner;
             }
             // Nothing accepted: there is no winner to pollute, and the
             // symbol really might be a typo'd reference — which find-refs
@@ -6429,6 +6605,7 @@ fn matchValueAgainstKind(
             for (us.alternatives) |alt_name| {
                 _ = try matchValueAgainstType(a, schema, cross_index, tree_scope, scope_chain, tree, idx, .{ .named = alt_name }, depth);
             }
+            if (arm_fail) |f| break :blk f;
             break :blk MatchFail{ .union_no_branch_matched = .{
                 .got_label = nodeTagLabel(tag),
                 .alternatives = us.alternatives,
@@ -6456,6 +6633,104 @@ fn nodeTagLabel(tag: Ast.Tag) []const u8 {
         .form => "form",
         .kvpair => "keyword pair",
     };
+}
+
+/// The shape axis a union arm is selected on. Coarser than `Ast.Tag` and
+/// `Ast.ValueKind` on purpose: it is the projection both walkers agree on,
+/// so `determinedArm` answers the same for a tree node and for the binary
+/// view of the same value.
+pub const NodeShape = enum { number, string, symbol, vector, form, other };
+
+/// `pub` so the LSP's quick-fixes reach a union arm by the validator's own
+/// rule rather than a second copy of it (`determinedArm`).
+pub fn shapeOfTag(tag: Ast.Tag) NodeShape {
+    return switch (tag) {
+        .number, .number_with_unit, .number_i64, .number_u64 => .number,
+        .string => .string,
+        .symbol => .symbol,
+        .vector => .vector,
+        .form => .form,
+        .keyword, .boolean_true, .boolean_false, .nil, .date, .time, .kvpair => .other,
+    };
+}
+
+fn shapeOfBinaryKind(kind: Ast.ValueKind) NodeShape {
+    return switch (kind) {
+        .number, .number_with_unit => .number,
+        .string => .string,
+        .symbol => .symbol,
+        .vector => .vector,
+        .form => .form,
+        .keyword, .boolean, .nil, .date, .time => .other,
+    };
+}
+
+/// True when a value of `shape` can reach `alt` at all — when `alt`
+/// resolves to an underlying whose slot admits that shape *before* any
+/// refinement (bounds, members, cross-ref, head-set) is asked. `any`
+/// reaches everything; a nested union (rejected at aggregate time anyway)
+/// and an unresolvable name reach nothing.
+fn alternativeReaches(schema: Schema.Schema, alt: Plugin.QualifiedRef, shape: NodeShape) bool {
+    if (resolvePrimitiveShortcut(alt.name)) |vt| {
+        return switch (vt) {
+            .any => true,
+            .number => shape == .number,
+            .string => shape == .string,
+            .symbol => shape == .symbol,
+            .vector => shape == .vector,
+            .form, .expr => shape == .form,
+            .boolean, .nil => false,
+            .named => unreachable, // the shortcut table holds primitives only
+        };
+    }
+    return switch (schema.lookupValueKind(alt.name, alt.namespace)) {
+        .found => |k| switch (k.underlying) {
+            .number => shape == .number,
+            .string => shape == .string,
+            .symbol => shape == .symbol,
+            .vector => shape == .vector,
+            .form => shape == .form,
+            .union_of => false,
+        },
+        .not_found, .ambiguous => false,
+    };
+}
+
+/// The one alternative a node of `shape` could have meant, as an index
+/// into `kind.union_of.alternatives` — or null when the shape reaches no
+/// alternative, or more than one.
+///
+/// Matching is unchanged by this: alternatives are tried in declaration
+/// order and the first to accept wins (manifest spec §4.9). This decides
+/// only what a *failure* says. Count the alternatives the value's shape
+/// reaches; when exactly one does, nothing else could have been meant, so
+/// that arm's own `MatchFail` (the bound that refused, the reference that
+/// names nothing, the head outside the set) is what the author can act on.
+/// `union_no_branch_matched` only names the kinds.
+///
+/// Zero reachable (a string against `number | symbol`) or two (a symbol
+/// against `member-set | cross-ref`) leaves no arm to blame, and the union
+/// code stays the honest answer. That is the overlap §4.9 is about, and it
+/// is decided per *value*: `[small big def-ref]` determines `def-ref` for a
+/// symbol and collapses for a number.
+///
+/// The rule stops at the node shape and does not look through refinements
+/// — two form kinds with disjoint head-sets both *reach* a form, so
+/// `[spring-form bounce-form]` keeps the collapse. Deciding that would
+/// mean running the refinement, which is matching.
+///
+/// Both walkers, and the binary form funnel, ask this one function so they
+/// cannot drift, and so does the LSP: a quick-fix reads the `cross_ref` /
+/// `members` of the arm the validator blamed, not of a re-derived guess.
+pub fn determinedArm(schema: Schema.Schema, kind: *const Plugin.ValueKind, shape: NodeShape) ?usize {
+    const us = kind.union_of orelse return null;
+    var only: ?usize = null;
+    for (us.alternatives, 0..) |alt, i| {
+        if (!alternativeReaches(schema, alt, shape)) continue;
+        if (only != null) return null; // two reach: overlap, no arm to blame
+        only = i;
+    }
+    return only;
 }
 
 // ---------------------------------------------------------------------------
@@ -7320,10 +7595,11 @@ fn writeAmbiguousElementKind(
 // `vector_walk` frames as an `OuterVecCtx`; when an element fails, the emit
 // reconstructs the tree walker's "form X expects mat4, element [3]: got
 // vector of length 3" at the outer slot's span — same message, span, path,
-// and code on both walkers (see B.9). The one intentional exception is a
-// `.union_of` slot that accepts a vector alternative: there the tree arm
-// collapses to `union_no_branch_matched` at the slot and the binary path
-// keeps its per-element divergence (union-div #2 in the tests).
+// and code on both walkers (see B.9). A `.union_of` slot that accepts a
+// vector alternative is framed the same way when that alternative is the
+// *determined* arm; when it is not, the tree arm collapses to
+// `union_no_branch_matched` at the slot and the binary path keeps its
+// per-element divergence (union-div #2 in the tests).
 // ---------------------------------------------------------------------------
 
 const MAX_VALIDATE_FRAMES: u32 = 1024;
@@ -7363,11 +7639,12 @@ const SlotCtx = struct {
 /// depth reports against that slot — same span, path, expected-type label,
 /// and diagnostic code the Tree walker produces via its `element_at` wrap.
 ///
-/// Set only when the outer slot's `expected` resolves to a direct `.vector`
-/// kind (the case the Tree arm wraps). A `.union_of` slot that happens to
-/// accept a vector alternative deliberately leaves this null — the Tree arm
-/// collapses union failures to `union_no_branch_matched` at the slot, and
-/// the binary path keeps its documented per-element divergence there.
+/// Set when the outer slot's `expected` resolves to a direct `.vector` kind,
+/// or to a union whose *determined* arm is one — both cases the Tree arm
+/// wraps. A union that accepts a vector alternative which is not the
+/// determined arm deliberately leaves this null: the Tree arm collapses
+/// those failures to `union_no_branch_matched` at the slot, and the binary
+/// path keeps its documented per-element divergence there.
 const OuterVecCtx = struct {
     /// The outermost slot's declared type (e.g. `mat4`), so the message
     /// names the container, not the element kind.
@@ -7421,12 +7698,13 @@ const MatchResult = struct {
     element_type: Plugin.ValueType = .any,
     /// Kind-resolution depth to propagate into element evaluation.
     element_depth: u8 = 0,
-    /// True when `element_type` came from a direct `.vector` kind, meaning
-    /// the Tree arm would wrap an element failure in `element_at` and report
-    /// it against this slot. Cleared when the type resolved via a union
-    /// alternative — there the Tree arm emits `union_no_branch_matched` at
-    /// the slot instead, so the binary path stays per-element (a separate,
-    /// documented divergence). Drives whether a `vector_walk` establishes an
+    /// True when `element_type` came from a `.vector` kind the Tree arm
+    /// would wrap in `element_at` and report against this slot: a direct
+    /// vector slot, or a union whose determined arm is one. Cleared when the
+    /// type resolved via a union alternative that is *not* the determined arm
+    /// — there the Tree arm emits `union_no_branch_matched` at the slot
+    /// instead, so the binary path stays per-element (a separate, documented
+    /// divergence). Drives whether a `vector_walk` establishes an
     /// `OuterVecCtx`.
     wrap_element_failures: bool = false,
 };
@@ -7562,7 +7840,9 @@ const FrameValidate = union(enum) {
         /// keys; the form-end sweep uses these to emit variant required-
         /// key diagnostics.
         seen_variant_keys: std.bit_set.IntegerBitSet(Plugin.MAX_FORM_KEYS) = .initEmpty(),
-        discriminant_resolved_when: ?[]const u8 = null,
+        /// Index into `spec.variants` of the variant the discriminant
+        /// selected, carried across iterations of the same form; the
+        /// `:when` text is rendered from it only into a message.
         discriminant_variant_idx: ?u8 = null,
         /// Labeled-call tracking for `spec_state == .expr_func`. The tree
         /// walker resolves a labeled call in one shot against
@@ -7873,7 +8153,8 @@ fn processEvalValidate(
             // Form value in a form-pinned slot: the only structural
             // check applied to forms is the HeadSet narrowing — every
             // other form-typed slot defers to runtime (§7.4).
-            if (kind.heads) |hs| {
+            if (kind.heads) |hs| blk: {
+                if (hs.heads.len == 0) break :blk; // empty set = no narrowing
                 const head = maybe_form.?.head;
                 var matched = false;
                 for (hs.heads) |h| if (std.mem.eql(u8, h.name, head)) {
@@ -8130,7 +8411,6 @@ fn processFormWalkValidate(
     var expr_labels = fw.expr_labels;
     var expr_saw_positional = fw.expr_saw_positional;
     // Discriminant tracking carried across iterations of the same form.
-    var discriminant_resolved_when = fw.discriminant_resolved_when;
     var discriminant_variant_idx = fw.discriminant_variant_idx;
     // Default-carry: keeps the overload candidate mask unchanged unless
     // an overloaded expr-func arg narrows it (see .expr_func branch).
@@ -8212,8 +8492,7 @@ fn processFormWalkValidate(
                                 if (BinaryCursor.peekSymbol(iter.cursor, entry.value)) |sym| {
                                     const vs = spec.variants orelse &.{};
                                     for (vs, 0..) |v, vi| {
-                                        if (std.mem.eql(u8, v.when, sym)) {
-                                            discriminant_resolved_when = v.when;
+                                        if (v.selects(sym)) {
                                             discriminant_variant_idx = @intCast(vi);
                                             break;
                                         }
@@ -8247,10 +8526,10 @@ fn processFormWalkValidate(
                     }
                 }
                 if (!found and !spec.open) {
-                    const ctx: UnknownKeyContext = if (spec.discriminant_idx != null and discriminant_resolved_when == null)
+                    const ctx: UnknownKeyContext = if (spec.discriminant_idx != null and discriminant_variant_idx == null)
                         .{ .needs_discriminant = spec.discriminant_name orelse "kind" }
                     else
-                        .{ .resolved = discriminant_resolved_when };
+                        .{ .resolved = if (discriminant_variant_idx) |vi| &spec.variants.?[vi] else null };
                     try emit(a, diags, entry.key_span orelse ZERO_SPAN, child_base, .err, .unknown_key, try unknownKeywordMsg(a, spec.name, key, ctx));
                 }
             },
@@ -8464,7 +8743,6 @@ fn processFormWalkValidate(
             // Carry the scope-opener flag so the eventual exhausted-frame
             // pop knows to drop the matching scope_stack entry.
             .opened_scope = fw.opened_scope,
-            .discriminant_resolved_when = discriminant_resolved_when,
             .discriminant_variant_idx = discriminant_variant_idx,
             .expr_labels = expr_labels,
             .expr_saw_positional = expr_saw_positional,
@@ -8548,7 +8826,7 @@ fn emitEndOfFormBinary(
                 fw.path,
             );
             if (fw.discriminant_variant_idx) |vi| {
-                const v = spec.variants.?[vi];
+                const v: *const Plugin.Variant = &spec.variants.?[vi];
                 for (v.keys, 0..) |vk, vki| {
                     if (vk.effectiveOptional()) continue;
                     if (vki < Plugin.MAX_FORM_KEYS and fw.seen_variant_keys.isSet(vki)) continue;
@@ -8566,7 +8844,7 @@ fn emitEndOfFormBinary(
                     }
                     if (present) continue;
                     if (keyInExclusiveGroup(v.exclusive_groups, vk.name)) continue;
-                    try emit(a, diags, head_span, fw.path, .err, .missing_required_key, try missingRequiredVariantKeyMsg(a, spec.name, v.when, vk.name));
+                    try emit(a, diags, head_span, fw.path, .err, .missing_required_key, try missingRequiredVariantKeyMsg(a, spec.name, try v.whenText(a), vk.name));
                 }
                 try emitExclusiveGroupDiagnostics(
                     a,
@@ -8576,7 +8854,7 @@ fn emitEndOfFormBinary(
                     fw.seen_variant_keys,
                     null,
                     spec.name,
-                    v.when,
+                    v,
                     head_span,
                     fw.path,
                 );
@@ -8590,7 +8868,7 @@ fn emitEndOfFormBinary(
                     fw.seen_keys,
                     null,
                     spec.name,
-                    v.when,
+                    v,
                     head_span,
                     fw.path,
                 );
@@ -8847,7 +9125,11 @@ fn matchKindBinary(
             // here because cross-ref capture is shared by both walkers.
             var probe = cross_index.*;
             probe.arena = null;
-            for (us.alternatives) |alt_name| {
+            // The determined arm's failure, kept from the probe — the tree
+            // arm's rule, asked of the same function (`determinedArm`).
+            const arm = determinedArm(schema, kind, shapeOfBinaryKind(tag));
+            var arm_fail: ?MatchFail = null;
+            for (us.alternatives, 0..) |alt_name, ai| {
                 const result = try matchAgainstExpected(
                     a,
                     schema,
@@ -8859,6 +9141,7 @@ fn matchKindBinary(
                     depth,
                     extras,
                 );
+                if (arm == ai) arm_fail = result.fail;
                 if (result.fail == null) {
                     _ = try matchAgainstExpected(
                         a,
@@ -8872,13 +9155,15 @@ fn matchKindBinary(
                         extras,
                     );
                     // The alternative may be a `.vector` (its match set
-                    // `wrap_element_failures`), but a failing element of a
-                    // union-accepted vector is NOT wrapped by the Tree arm —
-                    // it collapses the whole union to `union_no_branch_matched`
-                    // at the slot. Clear the flag so the binary path keeps its
-                    // documented per-element divergence here (union-div #2).
+                    // `wrap_element_failures`). Keep the flag only when this
+                    // is the *determined* arm: there the Tree arm reports the
+                    // arm's own `element_at` at the slot, framed like a direct
+                    // vector slot (B.9), so the binary must frame it the same.
+                    // An undetermined arm still collapses on the Tree side, so
+                    // clear it and keep the documented per-element divergence
+                    // (union-div #2).
                     var r = result;
-                    r.wrap_element_failures = false;
+                    r.wrap_element_failures = r.wrap_element_failures and (arm == ai);
                     break :blk r;
                 }
             }
@@ -8887,6 +9172,7 @@ fn matchKindBinary(
             for (us.alternatives) |alt_name| {
                 _ = try matchAgainstExpected(a, schema, cross_index, tree_scope, scope_chain, view, .{ .named = alt_name }, depth, extras);
             }
+            if (arm_fail) |f| break :blk .{ .fail = f };
             break :blk .{ .fail = .{ .union_no_branch_matched = .{
                 .got_label = nodeKindLabelBinary(tag),
                 .alternatives = us.alternatives,
@@ -8925,6 +9211,7 @@ fn matchFormAgainstTypeBinary(
     //    `matchValueAgainstType` 4342-4349 + `matchValueAgainstKind` `.form`).
     if (resolveFormHeadKind(schema, expected)) |kind| {
         if (kind.heads) |hs| {
+            if (hs.heads.len == 0) return null; // empty set = no narrowing
             for (hs.heads) |h| if (std.mem.eql(u8, h.name, head)) return null;
             return MatchFail{ .not_head_member = .{ .got = head, .allowed = hs.heads } };
         }
@@ -8954,10 +9241,16 @@ fn matchFormAgainstTypeBinary(
             else => return null, // unreachable given resolvesToUnion; defer
         };
         const us = k.union_of orelse return null;
-        for (us.alternatives) |alt_name| {
-            if (matchFormAgainstTypeBinary(schema, head, namespace, argc, .{ .named = alt_name }, next_d) == null)
-                return null;
+        // A union with exactly one form-reaching alternative has a
+        // determined arm for a form node, same rule as the value arms.
+        const arm = determinedArm(schema, k, .form);
+        var arm_fail: ?MatchFail = null;
+        for (us.alternatives, 0..) |alt_name, ai| {
+            const inner = matchFormAgainstTypeBinary(schema, head, namespace, argc, .{ .named = alt_name }, next_d);
+            if (inner == null) return null;
+            if (arm == ai) arm_fail = inner;
         }
+        if (arm_fail) |f| return f;
         return MatchFail{ .union_no_branch_matched = .{
             .got_label = "form",
             .alternatives = us.alternatives,

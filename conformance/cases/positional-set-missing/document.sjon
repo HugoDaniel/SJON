@@ -1,0 +1,29 @@
+; The second probe: an `(entry …)` with *no* resource. Every per-head
+; bound is a ceiling, so all are satisfied by an empty child list, and no
+; per-head floor could be written that does not also demand that
+; particular head. The set's `:min-children 1` is the only spelling of
+; "at least one of these".
+;
+; This is the case the ask reported PNGine's emitter fabricating a
+; `"buffer":{}` for — an invented binding out of a document that
+; validated clean.
+(plugin :name gpu :version "1.0.0"
+  (value-kind :name bgl-resource
+    :underlying form
+    :heads (head-set :min-children 1 :max-children 1
+      (head :name buffer  :max 1)
+      (head :name sampler :max 1)
+      (head :name texture :max 1)))
+
+  (form :name buffer
+    (key :name type :type symbol))
+  (form :name sampler
+    (key :name type :type symbol))
+  (form :name texture
+    (key :name sample-type :type symbol))
+
+  (form :name entry
+    :positional bgl-resource
+    (key :name binding :type number)))
+
+(entry :binding 0)

@@ -2,55 +2,71 @@
 
 ## Goal
 
-Read and write symbols that refer to named forms elsewhere in the
-document. Understand the two authoring roles, declaration and reference,
-and repair the common cross-reference diagnostics.
+Write symbols that refer to named forms elsewhere in the document, tell
+the declaration side from the reference side, and repair the
+cross-reference diagnostics without guessing.
 
-## Mental Model
+## A Member Set the Document Writes
 
-A cross-reference is a symbol whose allowed values are discovered from
-the document being validated.
+[Member sets](12-value-kinds-refinements.md#member-sets) are closed
+lists chosen by the plugin: `fill-rule` is `evenodd | nonzero` and will
+be for as long as the plugin lives. That works for vocabularies the
+plugin knows in advance, and it is useless for the ones it cannot.
 
-Compare it with chapter 12:
+A track that plays phrases has to name the phrases, and the plugin
+cannot know their names, because you are about to invent them. So the
+legal values have to be discovered from the document being validated,
+and that is what a **cross-reference** is: a symbol whose member set is
+built by reading your own file.
 
-- A **member set** like `fill-rule` gets its legal values from the
-  plugin: `evenodd | nonzero`.
-- A **cross-reference** like `phrase-name` gets its legal values from
-  the document: every `(phrase :name ...)` form currently in scope.
+```
+member set        legal values come from the PLUGIN
+                    fill-rule -> evenodd | nonzero
 
-So a cross-reference has two sides:
+cross-reference   legal values come from the DOCUMENT
+                    phrase-name -> every (phrase :name …) in scope
+```
+
+Which means a cross-reference always has two sides, and you write both:
 
 ```sjon
 (phrase :name p0)       ; declaration: introduces the name p0
 (track :sequence [p0])  ; reference: uses the name p0
 ```
 
-The validator does two passes conceptually:
+## Two Passes, So Order Does Not Matter
 
-1. **Build a registry.** Walk the document and collect every target
-   form's name.
-2. **Check references.** Every symbol in a cross-reference slot must be
-   present in that registry.
+Think of the validator as doing two passes:
 
-Order in the file does not matter. A reference may appear before the
-form it names, because the registry is built before references are
-checked:
+```
+pass 1   walk the document, collect every target form's name
+           registry: { p0, p1 }
+
+pass 2   check every symbol in a cross-reference slot against it
+           (track :sequence [p0 p1])   both present -> clean
+```
+
+Because the registry is complete before any reference is checked, a
+reference may name a form that appears later in the file:
 
 ```sjon
 (track :sequence [p0])
 (phrase :name p0)
 ```
 
-The surface value is still just a symbol. You do not write `$p0`,
-`ref(p0)`, `"p0"`, or `:p0` unless the plugin's docs explicitly say a
-different value kind is expected.
+That validates. Forward references are not a special feature that had
+to be added; they fall out of building the registry first.
+
+The surface value is still a plain symbol. You do not write `$p0`,
+`ref(p0)`, `"p0"`, or `:p0`, unless a plugin's docs explicitly say some
+other value kind is expected.
 
 ## Worked Example
 
 You will not see the plugin DSL while authoring. You will see an
 author-facing summary like this:
 
-```text
+```text title="plugin summary"
 (phrase ...)
   :name   symbol required       ; declares a phrase name
   :notes  vector optional
@@ -89,7 +105,7 @@ Both references resolve.
 
 This source does not validate:
 
-```sjon
+```sjon del={3}
 (phrase :name p0 :notes [E4 G4 A4 G4])
 
 (track :sequence [p0 p99])
@@ -105,7 +121,7 @@ track references:      p0, p99
 `p99` is missing, so the likely diagnostic is `not_cross_ref`. Repair
 by making the reference match a declaration:
 
-```sjon
+```sjon ins={3}
 (phrase :name p0 :notes [E4 G4 A4 G4])
 
 (track :sequence [p0])
@@ -137,7 +153,9 @@ These are different values:
 
 If the plugin says `:name symbol`, write a bare symbol. A quoted string
 does not declare the same name. A keyword does not become a normal value
-after `:name`; chapter 5's pairing rule still applies.
+after `:name`; the pairing rule from
+[Forms and keyword pairing](05-forms-and-keyword-pairing.md) still
+applies.
 
 The same rule applies at the reference site:
 
@@ -151,22 +169,23 @@ The same rule applies at the reference site:
 
 This is how most authors first meet a cross-reference in practice. A
 slot that takes "a number, or a constant naming one" is the
-`scalar-or-ref` shorthand from chapter 12, and its reference half can be
-a cross-reference kind:
+[`scalar-or-ref` shorthand](12-value-kinds-refinements.md#the-scalar-or-ref-shorthand),
+and its reference half can be a cross-reference kind:
 
 ```sjon
 (define :name MAX_BONES :value 128)
 
 (mesh :bones 128)         ; the literal half
-(mesh :bones MAX_BONES)   ; the reference half — a cross-reference
+(mesh :bones MAX_BONES)   ; the reference half, a cross-reference
 ```
 
 The value of doing it this way is what happens on a typo. Left as the
 default, the reference half is a plain `symbol` and `MAX_BONE`
 validates clean, naming nothing. Backed by a cross-reference kind, it
-fails — reported as `union_no_branch_matched`, since the shorthand is a
-union and the union names its alternatives rather than forwarding
-`not_cross_ref` from one branch.
+fails, reported as `not_cross_ref`, naming the form the symbol had to
+be declared by. The shorthand is a union underneath, but a symbol can
+only have meant its reference half, so the diagnostic is that half's
+own rather than the union's list of alternatives.
 
 ## Duplicate Declarations
 
@@ -176,7 +195,7 @@ means.
 
 Broken:
 
-```sjon
+```sjon del={2}
 (phrase :name p0 :notes [E4 G4 A4 G4])
 (phrase :name p0 :notes [B4 A4 G4 E4])
 
@@ -193,7 +212,7 @@ p0 -> second phrase  ; duplicate
 Likely diagnostic: `duplicate_cross_ref_target`. Repair by renaming one
 declaration:
 
-```sjon
+```sjon ins={2}
 (phrase :name p0 :notes [E4 G4 A4 G4])
 (phrase :name p1 :notes [B4 A4 G4 E4])
 
@@ -206,8 +225,8 @@ Then choose which one the track should reference:
 (track :sequence [p0 p1])
 ```
 
-Duplicate checking happens inside the active scope. The next section
-explains what "scope" means for references.
+Duplicate checking happens inside the active scope. [Scope](#scope),
+further down, explains what that means for references.
 
 ## Two Targets, One Name
 
@@ -219,9 +238,9 @@ namespace, so a `(render-pipeline :name same)` and a
 `(compute-pipeline :name same)` are each alone in theirs. Neither is a
 duplicate. Both are fine.
 
-Now suppose a slot accepts either one — a union of two reference kinds:
+Now suppose a slot accepts either one, as a union of two reference kinds:
 
-```text
+```text title="plugin summary"
 render-pipeline-ref:  symbol, cross-ref to render-pipeline
 compute-pipeline-ref: symbol, cross-ref to compute-pipeline
 pipeline-ref:         union render-pipeline-ref | compute-pipeline-ref
@@ -242,11 +261,12 @@ Before reading on, predict what happens here:
 Ask yourself two questions. Does it validate? And which pipeline is
 `same`?
 
-The answers are "yes" and "the render one" — but only because
-`render-pipeline-ref` is listed first. That is lesson 12's rule doing
-real work: alternatives are tried in declaration order, the first that
-accepts wins, and here *both* accept. Reorder the plugin's alternatives
-and the same document means something different.
+The answers are "yes" and "the render one", but only because
+`render-pipeline-ref` is listed first. That is
+[Order Is Part of the Contract](12-value-kinds-refinements.md#order-is-part-of-the-contract)
+doing real work: alternatives are tried in declaration order, the first
+that accepts wins, and here *both* accept. Reorder the plugin's
+alternatives and the same document means something different.
 
 So it validates, with a warning:
 
@@ -257,14 +277,14 @@ union_ambiguous (warning)
 Read it as: *this reference has two readings, and nothing but
 declaration order is choosing between them.* Your document is not
 broken. What is fragile is that a tool resolving `same` through its own
-lookup — an emitter, a code generator, an editor — may pick the compute
+lookup (an emitter, a code generator, an editor) may pick the compute
 pipeline, and neither it nor the validator would ever notice they
 disagreed.
 
 Two repairs, and the right one depends on what you meant:
 
 ```sjon
-; Repair A - the collision was an accident. Rename one.
+; Repair A: the collision was an accident. Rename one.
 (render-pipeline  :name blit)
 (compute-pipeline :name reduce)
 
@@ -272,18 +292,18 @@ Two repairs, and the right one depends on what you meant:
 ```
 
 ```sjon
-; Repair B - both names are deliberate; the SLOT was overloaded.
+; Repair B: both names are deliberate; the SLOT was overloaded.
 ; Ask the plugin author for two keys, one reference kind each.
 (dispatch :render-pipeline same)
 ```
 
 ```sjon
-; Repair C - the names were never meant to coexist. Ask the plugin author
+; Repair C: the names were never meant to coexist. Ask the plugin author
 ; for ONE reference kind over BOTH forms:
 ;
 ;   pipeline-ref: symbol, cross-ref to [render-pipeline compute-pipeline]
 ;
-; Then this document does not warn — it fails, at the declarations:
+; Then this document does not warn. It fails, at the declarations:
 
 (render-pipeline  :name same)
 (compute-pipeline :name same)   ; duplicate_cross_ref_target
@@ -292,7 +312,7 @@ Two repairs, and the right one depends on what you meant:
 Repair A is right most of the time. Reach for B when the two names are
 genuinely the same concept in two pipelines and renaming would be a lie.
 Repair C is the one to ask for when they are *never* meant to be the same
-name — see below.
+name, which the next heading unpicks.
 
 ### One Namespace Or Two
 
@@ -303,7 +323,7 @@ A **union of two reference kinds** is two namespaces. `same` in each is
 two different names that happen to be spelled alike, so declaring both is
 fine and every *reference* is the ambiguous thing.
 
-A **target group** — one cross-reference over a list of forms — is one
+A **target group**, meaning one cross-reference over a list of forms, is one
 namespace. `same` declared twice is one name declared twice, so the
 *declaration* is the wrong thing and no reference is ever ambiguous.
 
@@ -313,7 +333,7 @@ a name? If yes, the union is right and `union_ambiguous` is a fair warning
 about a genuinely overloaded slot. If no, the group is right and you want
 to hear about the collision once, where you made it.
 
-You cannot pick between them as a document author — `:target` is the
+You cannot pick between them as a document author, because `:target` is the
 plugin's to write. What you can do is read the diagnostic and know which
 one you are inside: a warning on a reference means two namespaces, an
 error on a declaration means one.
@@ -328,7 +348,7 @@ union overlaps:
   two entities, so nothing warns.
 - **A member set that wins first.** If the alternative that accepts is
   an enum rather than a reference, the slot denotes a member, not an
-  entity — there is no "which one" to answer.
+  entity, so there is no "which one" to answer.
 - **Two alternatives onto the same target.** Both readings pick out the
   same declaration, so order decides nothing.
 - **A target group.** One namespace has nothing to be ambiguous between;
@@ -375,7 +395,7 @@ split-file authoring, check the host's plugin docs.
 A plugin can make a cross-reference local to the nearest enclosing form.
 The docs might say:
 
-```text
+```text title="plugin summary"
 phrase-name: cross-reference to (phrase :name ...), scope piece
 ```
 
@@ -439,7 +459,7 @@ those cases, the plugin may say the reference must be acyclic.
 
 Example contract:
 
-```text
+```text title="plugin summary"
 (phrase ...)
   :name   symbol required
   :parent phrase-name optional
@@ -467,7 +487,7 @@ There is no loop.
 
 This chain is not fine:
 
-```sjon
+```sjon del={2}
 (phrase :name p0 :parent p1)
 (phrase :name p1 :parent p0)
 ```
@@ -482,7 +502,7 @@ p1 -> p0
 The names form a cycle, so the likely diagnostic is
 `cyclic_cross_ref`. Repair by breaking the loop:
 
-```sjon
+```sjon ins={2}
 (phrase :name p0 :parent p1)
 (phrase :name p1)
 ```
@@ -503,7 +523,7 @@ A plugin can still make those names referenceable, by declaring a
 **provider**: a named extractor that reads one string and reports the
 names in it. The author-facing summary says so:
 
-```text
+```text title="plugin summary"
 (shader ...)
   :name symbol required
   :code string required     ; the provider reads this
@@ -535,7 +555,7 @@ uniform vec2 u_resolution;
 Registry:
 
 ```text
-shader names:    (unused - this route ignores :name)
+shader names:    (unused; this route ignores :name)
 extracted names: u_time, u_resolution
 bind references: u_time, u_resolution
 ```
@@ -554,7 +574,7 @@ uniform float u_time;
 (bind :uniform u_tim)
 ```
 
-Likely diagnostic: `not_cross_ref` - the same code as any other missed
+Likely diagnostic: `not_cross_ref`, the same code as any other missed
 reference, because from the reference side nothing has changed. Repair
 the same way, by matching a name that exists:
 
@@ -600,7 +620,7 @@ fixing the source string the provider could not read.
 Notice where the diagnostic did *not* appear. `(bind :uniform u_time)`
 is silent, on purpose. Reporting `not_cross_ref` there would mean
 claiming `u_time` is absent from a member set that was never computed.
-On this route the references go unchecked when the extraction fails -
+On this route the references go unchecked when the extraction fails,
 neither accepted nor rejected.
 
 The other one is not about your document at all:
@@ -609,7 +629,7 @@ The other one is not about your document at all:
 cross_ref_provider_unavailable
 ```
 
-It means the host you are running could not execute the provider - the
+It means the host you are running could not execute the provider: the
 browser playground, for instance, cannot run plugin code at all. Same
 place (the source string), same silence at the references, but the
 repair is on the host side, not in your file. In an editor it usually
@@ -635,7 +655,7 @@ it. That is a limit of the route, not a bug in the editor.
 | `cyclic_cross_ref` | An acyclic reference chain loops back on itself. | Remove or change one edge in the cycle. |
 | `wrong_underlying` | The declaration or reference is not the expected value shape, often string vs symbol. | Match the plugin's declared type. |
 | `cross_ref_extraction_failed` | A provider ran over a source string and rejected it, so that source contributed no names. | Fix the string the diagnostic points at; the references into it stay unchecked until it parses. |
-| `cross_ref_provider_unavailable` | The host could not run the provider at all. | Nothing in the document is wrong - check the host, or accept that these names go unchecked here. |
+| `cross_ref_provider_unavailable` | The host could not run the provider at all. | Nothing in the document is wrong. Check the host, or accept that these names go unchecked here. |
 
 You may also see schema setup diagnostics such as
 `unknown_cross_ref_target`, `ambiguous_cross_ref_target`,
@@ -654,7 +674,7 @@ When a cross-reference fails, do this mechanically:
 5. Check exact symbol spelling and case.
 6. If the name exists twice, rename one declaration.
 7. If the slot is a union of reference kinds, check every target for the
-   name - not just the one you had in mind.
+   name, not just the one you had in mind.
 8. If the kind is acyclic, draw the arrows and remove the loop.
 9. If the kind names a provider, the list in step 4 is what the
    provider extracted from the source string, so read the source
@@ -668,7 +688,7 @@ Predict the diagnostic, then repair.
 
 Assume only `p0` and `p1` are declared:
 
-```sjon
+```sjon del={4}
 (phrase :name p0 :notes [E4 G4 A4 G4])
 (phrase :name p1 :notes [B4 A4 G4 E4])
 
@@ -678,7 +698,7 @@ Assume only `p0` and `p1` are declared:
 Likely diagnostic: `not_cross_ref`. Repair by spelling the reference
 correctly:
 
-```sjon
+```sjon ins={4}
 (phrase :name p0 :notes [E4 G4 A4 G4])
 (phrase :name p1 :notes [B4 A4 G4 E4])
 
@@ -725,7 +745,7 @@ Repair the declaration:
 
 ### Duplicate Target
 
-```sjon
+```sjon del={2}
 (phrase :name p0 :notes [E4 G4 A4 G4])
 (phrase :name p0 :notes [B4 A4 G4 E4])
 
@@ -735,7 +755,7 @@ Repair the declaration:
 Likely diagnostic: `duplicate_cross_ref_target`. Repair by renaming one
 declaration:
 
-```sjon
+```sjon ins={2}
 (phrase :name p0 :notes [E4 G4 A4 G4])
 (phrase :name p1 :notes [B4 A4 G4 E4])
 
@@ -758,7 +778,7 @@ Two questions before you answer: does this validate, and which pipeline
 does `same` mean?
 
 It validates. `same` is the *render* pipeline, because that alternative
-is listed first. Neither declaration is a duplicate - duplicate checking
+is listed first. Neither declaration is a duplicate, because duplicate checking
 is per target, and these are two targets. Likely diagnostic:
 `union_ambiguous`, at `warning` severity. Repair by renaming so the two
 targets do not collide:
@@ -782,7 +802,7 @@ Slot `:size` is typed `byte-count | symbol`.
 Both lines match a union whose alternatives overlap on shape, so is this
 the ambiguity case?
 
-No - clean, no diagnostic. `1024` matches `byte-count` and
+No: clean, no diagnostic. `1024` matches `byte-count` and
 `default-size` matches the `symbol` half, and neither value names two
 different entities. `union_ambiguous` is about two *references* to two
 different things colliding on one name, not about a union having
@@ -832,14 +852,14 @@ piece:
 
 Assume the plugin opts the `:parent` key into acyclic detection:
 
-```sjon
+```sjon del={2}
 (phrase :name p0 :parent p1)
 (phrase :name p1 :parent p0)
 ```
 
 Likely diagnostic: `cyclic_cross_ref`. Repair by breaking the loop:
 
-```sjon
+```sjon ins={2}
 (phrase :name p0 :parent p1)
 (phrase :name p1)
 ```
@@ -885,7 +905,7 @@ uniform vec2 u_resolution;
 ```
 
 Likely diagnostic: `cross_ref_extraction_failed`, on the `:code` string.
-Predict the second diagnostic too - there isn't one. `(bind :uniform
+Predict the second diagnostic too. There isn't one: `(bind :uniform
 u_time)` is not reported, because the member set was never computed.
 Repair the source, and the reference becomes checkable again.
 

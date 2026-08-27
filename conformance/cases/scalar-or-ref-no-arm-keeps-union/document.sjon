@@ -1,0 +1,39 @@
+; The arm report is by NODE SHAPE, and it fires only when exactly one arm
+; can reach the node. Two shapes keep the union's `union_no_branch_matched`,
+; and both are the honest answer:
+;
+;   * a shape neither arm reaches — a vector in a `number | symbol` slot.
+;     Selecting an arm would invent a private code for a value that was
+;     never a candidate for either.
+;   * a shape BOTH arms reach — a symbol against `member-set | cross-ref`,
+;     a scalar-or-ref whose base is itself a symbol kind. Blaming the
+;     reference half for what is probably a misspelled member would send
+;     the author to declare a constant they never meant to reference.
+;
+; See `scalar-or-ref-reports-base-arm` and `scalar-or-ref-checked-ref` for
+; the shapes that DO select an arm.
+(plugin :name p :version "1.0.0"
+  (value-kind :name qty-value :underlying number
+    :numeric (numeric-bounds :min 0 :max 16 :integer true))
+  (value-kind :name mode :underlying symbol
+    :members (member-set :values [normal multiply]))
+  (value-kind :name thing-ref :underlying symbol
+    :cross-ref (cross-ref :target thing))
+  (value-kind :name qty
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base qty-value :ref thing-ref))
+  (value-kind :name mode-or-ref
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base mode :ref thing-ref))
+  (form :name thing
+    (key :name name :type symbol :optional false))
+  (form :name use
+    (key :name q :type qty :optional true)
+    (key :name m :type mode-or-ref :optional true)))
+
+(thing :name TILE)
+
+(use :q [1 2])       ; neither arm reaches a vector
+(use :m nrmal)       ; both arms reach a symbol — no determined arm
+(use :m multiply)    ; the base arm, a member — clean
+(use :m TILE)        ; the ref arm, resolved — clean

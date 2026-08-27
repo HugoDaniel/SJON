@@ -1107,7 +1107,7 @@ test "ManifestLoader: the compact :values list is scanned for duplicates too" {
     // members.
     const a = testing.allocator;
     var tree = try parseSource(a,
-        \\(plugin :name p :version "1.0.0" :sjon "1.3"
+        \\(plugin :name p :version "1.0.0"
         \\  (value-kind :name plain :underlying symbol
         \\    :members (member-set :values [a b a]))
         \\  (value-kind :name dim :underlying symbol
@@ -1126,7 +1126,7 @@ test "ManifestLoader: a distinct compact :values list is clean" {
     // each shape, stay three members.
     const a = testing.allocator;
     var tree = try parseSource(a,
-        \\(plugin :name p :version "1.0.0" :sjon "1.3"
+        \\(plugin :name p :version "1.0.0"
         \\  (value-kind :name dim :underlying symbol
         \\    :members (member-set :values [1d 2d cube])))
     );
@@ -1390,6 +1390,219 @@ test "ManifestLoader: negative and fractional head counts report wrong_underlyin
         if (d.code != .wrong_underlying) continue;
         if (std.mem.indexOf(u8, d.message, "`:min` requires a non-negative integer") != null) min_reported = true;
         if (std.mem.indexOf(u8, d.message, "`:max` requires a non-negative integer") != null) max_reported = true;
+    }
+    try testing.expect(min_reported);
+    try testing.expect(max_reported);
+}
+
+// ---------------------------------------------------------------------------
+// head-set aggregate counts — `:min-children` / `:max-children`, the bound
+// on the *set* rather than on any one head. Two spellings carry them (the
+// aggregate needs no per-head metadata, so the compact `:names` shape is
+// legal here where it can carry no `(head …)` bound), and three refusals
+// fall out: the set's own empty range, and the two cross-level sums.
+// ---------------------------------------------------------------------------
+
+test "ManifestLoader: head-set :min-children / :max-children on the compact spelling" {
+    // The common case — "exactly one of these four" needs no per-head
+    // metadata at all, so it must not force the rich spelling. This is
+    // also what invalidated `isUnbounded`'s old promise that the compact
+    // shape is always unbounded.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name buffer)
+        \\  (form :name sampler)
+        \\  (value-kind :name resource :underlying form
+        \\    :heads (head-set :names [buffer sampler] :min-children 1 :max-children 1)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const hs = r.plugin.value_kinds[0].heads orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), hs.heads.len);
+    try testing.expectEqual(@as(u16, 1), hs.min_children);
+    try testing.expectEqual(@as(?u16, 1), hs.max_children);
+    // Every *head* is still unbounded, and the set is not: `isUnbounded`
+    // now has to read both levels or the count sweep never runs.
+    for (hs.heads) |h| {
+        try testing.expectEqual(@as(u16, 0), h.min);
+        try testing.expectEqual(@as(?u16, null), h.max);
+    }
+    try testing.expect(!hs.isUnbounded());
+}
+
+test "ManifestLoader: set bounds ride alongside per-head bounds" {
+    // Both levels at once — "one of each, up to two" is the shape neither
+    // level can express alone.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name buffer)
+        \\  (form :name sampler)
+        \\  (value-kind :name resource :underlying form
+        \\    :heads (head-set :max-children 2
+        \\      (head :name buffer  :max 1)
+        \\      (head :name sampler :max 1))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const hs = r.plugin.value_kinds[0].heads orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u16, 0), hs.min_children);
+    try testing.expectEqual(@as(?u16, 2), hs.max_children);
+    try testing.expectEqual(@as(?u16, 1), hs.heads[0].max);
+}
+
+test "ManifestLoader: a head-set with no set bounds leaves the pair at its default" {
+    // The drift gate for every head-set written before S10: absent keys
+    // must lower to `0` / `null`, which is what keeps an all-unbounded
+    // compact set on the `isUnbounded` fast path.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name buffer)
+        \\  (value-kind :name resource :underlying form
+        \\    :heads (head-set :names [buffer])))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const hs = r.plugin.value_kinds[0].heads orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u16, 0), hs.min_children);
+    try testing.expectEqual(@as(?u16, null), hs.max_children);
+    try testing.expect(hs.isUnbounded());
+}
+
+test "ManifestLoader: :min-children > :max-children emits invalid_manifest" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name buffer)
+        \\  (value-kind :name resource :underlying form
+        \\    :heads (head-set :names [buffer] :min-children 3 :max-children 1)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiagWithCode(r.diagnostics, .invalid_manifest, "empty child range"));
+}
+
+test "ManifestLoader: :min-children = :max-children is exactly-N, not an empty range" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name buffer)
+        \\  (value-kind :name resource :underlying form
+        \\    :heads (head-set :names [buffer] :min-children 2 :max-children 2)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+}
+
+test "ManifestLoader: Σ head.min above :max-children emits invalid_manifest" {
+    // The check the *weaker* per-head spelling would have let through:
+    // neither head's `:min 1` exceeds `:max-children 1`, yet satisfying
+    // both needs two children and the set allows one. Only the sum sees
+    // it, which is why the cross-check is a sum and not a comparison.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name buffer)
+        \\  (form :name sampler)
+        \\  (value-kind :name resource :underlying form
+        \\    :heads (head-set :max-children 1
+        \\      (head :name buffer  :min 1)
+        \\      (head :name sampler :min 1))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiagWithCode(r.diagnostics, .invalid_manifest, "require at least 2 child(ren) together"));
+}
+
+test "ManifestLoader: Σ head.min equal to :max-children is satisfiable" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name buffer)
+        \\  (form :name sampler)
+        \\  (value-kind :name resource :underlying form
+        \\    :heads (head-set :max-children 2
+        \\      (head :name buffer  :min 1)
+        \\      (head :name sampler :min 1))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+}
+
+test "ManifestLoader: :min-children above Σ head.max emits invalid_manifest" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name buffer)
+        \\  (form :name sampler)
+        \\  (value-kind :name resource :underlying form
+        \\    :heads (head-set :min-children 3
+        \\      (head :name buffer  :max 1)
+        \\      (head :name sampler :max 1))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiagWithCode(r.diagnostics, .invalid_manifest, "2 child(ren) its heads allow together"));
+}
+
+test "ManifestLoader: one unbounded head makes the Σ head.max check vacuous" {
+    // The ceiling sum is only finite when *every* head is bounded. One
+    // unbounded head means the set can always be filled, so the check must
+    // not fire — otherwise a perfectly satisfiable schema is refused.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name buffer)
+        \\  (form :name sampler)
+        \\  (value-kind :name resource :underlying form
+        \\    :heads (head-set :min-children 9
+        \\      (head :name buffer  :max 1)
+        \\      (head :name sampler))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+}
+
+test "ManifestLoader: negative and fractional set counts report wrong_underlying" {
+    // Same reuse of `emitNumericOutOfRange` the per-head pair gets, for
+    // the same reason: the condition is identical.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name buffer)
+        \\  (value-kind :name resource :underlying form
+        \\    :heads (head-set :names [buffer] :min-children -1 :max-children 1.5)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    var min_reported = false;
+    var max_reported = false;
+    for (r.diagnostics) |d| {
+        if (d.code != .wrong_underlying) continue;
+        if (std.mem.indexOf(u8, d.message, "`:min-children` requires a non-negative integer") != null) min_reported = true;
+        if (std.mem.indexOf(u8, d.message, "`:max-children` requires a non-negative integer") != null) max_reported = true;
     }
     try testing.expect(min_reported);
     try testing.expect(max_reported);
@@ -2729,6 +2942,132 @@ test "ManifestLoader: :scalar-or-ref on non-scalar-or-ref underlying emits inval
     try testing.expect(found);
 }
 
+// ---------------------------------------------------------------------------
+// S14 — `(variant :when [a b])`. The loader normalises both spellings to
+// `Plugin.Variant.when` (a list) and decides everything a list can carry
+// that a symbol cannot: empty, a repeat, a value two variants both list.
+// ---------------------------------------------------------------------------
+
+test "ManifestLoader: variant :when accepts a symbol or a vector, both normalised to a list" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name topo :underlying symbol
+        \\    :members (member-set :values [tri-list tri-strip line-list line-strip]))
+        \\  (form :name prim :discriminant topo-key
+        \\    (key :name topo-key :type topo :optional false)
+        \\    (variant :when [tri-strip line-strip]
+        \\      (key :name strip-format :type symbol :optional true))
+        \\    (variant :when line-list
+        \\      (key :name line-width :type number :optional true))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    const variants = r.plugin.forms[0].variants orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), variants.len);
+    try testing.expectEqual(@as(usize, 2), variants[0].when.len);
+    try testing.expectEqualStrings("tri-strip", variants[0].when[0]);
+    try testing.expectEqualStrings("line-strip", variants[0].when[1]);
+    try testing.expectEqual(@as(usize, 1), variants[1].when.len);
+    try testing.expectEqualStrings("line-list", variants[1].when[0]);
+}
+
+test "ManifestLoader: variant :when [] is invalid_manifest" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name topo :underlying symbol
+        \\    :members (member-set :values [a b]))
+        \\  (form :name f :discriminant k
+        \\    (key :name k :type topo :optional false)
+        \\    (variant :when []
+        \\      (key :name x :type number :optional true))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiag(r, .invalid_manifest, "`:when []`") != null);
+    // Total: the variant still lands, selected by nothing.
+    const variants = r.plugin.forms[0].variants orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), variants[0].when.len);
+    try testing.expect(!variants[0].selects("a"));
+}
+
+test "ManifestLoader: variant :when listing one value twice is invalid_manifest" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name topo :underlying symbol
+        \\    :members (member-set :values [a b]))
+        \\  (form :name f :discriminant k
+        \\    (key :name k :type topo :optional false)
+        \\    (variant :when [a b a]
+        \\      (key :name x :type number :optional true))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    try testing.expect(findDiag(r, .invalid_manifest, "lists `a` twice") != null);
+}
+
+test "ManifestLoader: a value listed by two variants is invalid_manifest, once per value" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name topo :underlying symbol
+        \\    :members (member-set :values [a b c d]))
+        \\  (form :name f :discriminant k
+        \\    (key :name k :type topo :optional false)
+        \\    (variant :when [a b]
+        \\      (key :name x :type number :optional true))
+        \\    (variant :when [b c]
+        \\      (key :name y :type number :optional true))
+        \\    (variant :when b
+        \\      (key :name z :type number :optional true))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    // `[b c]` repeats `b` from `[a b]`; the scalar `b` repeats it again.
+    // Each later listing reports once, naming the earlier variant.
+    try testing.expect(findDiag(r, .invalid_manifest, "variant `:when [b c]` lists `b`, already selected by variant `:when [a b]`") != null);
+    try testing.expect(findDiag(r, .invalid_manifest, "variant `:when b` lists `b`, already selected by variant `:when [a b]`") != null);
+    var count: usize = 0;
+    for (r.diagnostics) |d| {
+        if (d.code == .invalid_manifest and std.mem.indexOf(u8, d.message, "already selected") != null) count += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), count);
+    // The key-collision check is untouched: three distinct keys, no
+    // `variant_key_collision`, and the manifest is otherwise whole.
+    for (r.diagnostics) |d| try testing.expect(d.code != .variant_key_collision);
+}
+
+test "ManifestLoader: two variants with the same single :when is invalid_manifest" {
+    // The pre-list gap: `:when a` twice used to load clean, with the second
+    // variant dead (first match won). The disjointness rule catches it now.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (value-kind :name topo :underlying symbol
+        \\    :members (member-set :values [a b]))
+        \\  (form :name f :discriminant k
+        \\    (key :name k :type topo :optional false)
+        \\    (variant :when a
+        \\      (key :name x :type number :optional true))
+        \\    (variant :when a
+        \\      (key :name y :type number :optional true))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(findDiag(r, .invalid_manifest, "variant `:when a` lists `a`, already selected by variant `:when a`") != null);
+}
+
 test "ManifestLoader: integer + exclusive-min round-trip" {
     const a = testing.allocator;
     var tree = try parseSource(a,
@@ -3659,23 +3998,42 @@ test "ManifestLoader: accepts :authors as vector of strings" {
     try testing.expectEqual(@as(usize, 2), r.plugin.authors.len);
 }
 
-test "ManifestLoader: accepts :license, :homepage, :repository, :keywords, :sjon" {
+test "ManifestLoader: accepts :license, :homepage, :repository, :keywords" {
     const a = testing.allocator;
     var tree = try parseSource(a,
         \\(plugin :name x :version "1.0.0"
         \\  :license "CC0-1.0"
         \\  :homepage "https://example.com"
         \\  :repository "https://github.com/x/y"
-        \\  :keywords [graphics two-d shapes]
-        \\  :sjon "1.0")
+        \\  :keywords [graphics two-d shapes])
     );
     defer tree.deinit();
     var r = try load(a, tree);
     defer r.deinit();
     try testing.expect(!r.hasErrors());
     try testing.expectEqualStrings("CC0-1.0", r.plugin.license);
-    try testing.expectEqualStrings("1.0", r.plugin.sjon_format);
     try testing.expectEqual(@as(usize, 3), r.plugin.keywords.len);
+}
+
+test "ManifestLoader: :version is optional — a manifest without one loads, unversioned" {
+    // The key used to be required, which gave every scratch manifest a
+    // fake "1.0.0". It is the pin target and the lockfile row, nothing
+    // else, so a manifest that has no version to declare declares none:
+    // `plugin.version` is empty and every consumer treats that as
+    // unversioned (the CLI prints `?`, a `(use-plugin … :version …)` pin
+    // against it is `plugin_version_mismatch` — see Host_tests).
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name x
+        \\  (form :name f (key :name n :type number)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    try testing.expectEqualStrings("x", r.plugin.name);
+    try testing.expectEqualStrings("", r.plugin.version);
+    try testing.expectEqual(@as(usize, 1), r.plugin.forms.len);
 }
 
 test "ManifestLoader: plugin_wasm_self_hash_malformed on bad :wasm-sha256" {
@@ -3728,7 +4086,17 @@ test "ManifestLoader: too_many_keywords advisory above MAX_KEYWORDS" {
     try testing.expect(saw);
 }
 
-test "ManifestLoader: sjon_format_unsupported when declared version > supported" {
+test "ManifestLoader: a manifest has no format version of its own (sjon_format_unsupported retired)" {
+    // TOMBSTONE for `sjon_format_unsupported`. Manifests once declared
+    // `:sjon "<major>.<minor>"` and a host refused any declaration above
+    // its `SUPPORTED_SJON_FORMAT`. The key never enabled anything on the
+    // host reading it — every feature was on regardless — so it was
+    // retired: the vocabulary has one version, the SJON release. A manifest
+    // newer than its host still fails loudly, through the meta-schema
+    // (`(plugin …)` is `:open false`): the retired key is now just an
+    // unknown key. The wire-stable code variant is kept (never renumbered)
+    // but no longer emitted; this test references it so `audit-diagnostics`
+    // stays green and documents the retirement.
     const a = testing.allocator;
     var tree = try parseSource(a,
         \\(plugin :name x :version "1.0.0" :sjon "99.0")
@@ -3737,11 +4105,12 @@ test "ManifestLoader: sjon_format_unsupported when declared version > supported"
     var r = try load(a, tree);
     defer r.deinit();
     try testing.expect(r.hasErrors());
-    var saw = false;
+    var saw_unknown_key = false;
     for (r.diagnostics) |d| {
-        if (d.code == .sjon_format_unsupported) saw = true;
+        try testing.expect(d.code != .sjon_format_unsupported);
+        if (d.code == .unknown_key) saw_unknown_key = true;
     }
-    try testing.expect(saw);
+    try testing.expect(saw_unknown_key);
 }
 
 // ---------------------------------------------------------------------------
@@ -3803,7 +4172,8 @@ test "ManifestLoader: discriminated slot-local form resolves its discriminant + 
     try testing.expectEqual(@as(?u8, 0), poly.discriminant_idx);
     const variants = poly.variants orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(usize, 1), variants.len);
-    try testing.expectEqualStrings("tri", variants[0].when);
+    try testing.expectEqual(@as(usize, 1), variants[0].when.len);
+    try testing.expectEqualStrings("tri", variants[0].when[0]);
 }
 
 test "ManifestLoader: slot-local forms on a non-form slot emits invalid_manifest" {
@@ -4010,6 +4380,69 @@ test "ManifestLoader: positional-local forms alongside a (flag-set …) emit inv
             std.mem.indexOf(u8, d.message, "positional-local") != null) found = true;
     }
     try testing.expect(found);
+}
+
+test "ManifestLoader: :lowering on a positional slot-local form emits invalid_manifest and stays null" {
+    // A slot-local form cannot lower — nothing downstream would honour it
+    // (`Schema.validateLowering` and the graph walk top-level forms; the
+    // worklist resolves a local head to its local body). Rejected at load,
+    // and the local's spec keeps `lowering == null` so the invariant holds
+    // even in the partial result. The top-level sugar beside it loads.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name bind-group
+        \\    (form :name entry
+        \\      :lowering (lowering :hook p/entry-v1 :produces [entry-normal])))
+        \\  (form :name entry-normal :open true)
+        \\  (form :name init
+        \\    :lowering (lowering :hook p/init-v1 :produces [bind-group entry])))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    var found: bool = false;
+    for (r.diagnostics) |d| {
+        if (d.code == .invalid_manifest and
+            std.mem.indexOf(u8, d.message, "slot-local form `entry` declares `:lowering`") != null)
+        {
+            found = true;
+            try testing.expectEqual(@as(usize, 2), d.path.len);
+            try testing.expectEqualStrings("entry", d.path[0]);
+            try testing.expectEqualStrings("lowering", d.path[1]);
+        }
+    }
+    try testing.expect(found);
+    // Partial load: the local carries no lowering; the top-level sugar does.
+    const bg = r.plugin.forms[0];
+    try testing.expectEqualStrings("bind-group", bg.name);
+    try testing.expect(bg.local_forms[0].lowering == null);
+    try testing.expect(r.plugin.forms[2].lowering != null);
+}
+
+test "ManifestLoader: :lowering on a keyed slot-local form emits invalid_manifest" {
+    // The keyed carrier (`KeySpec.local_forms`) takes the same rejection —
+    // the depth the guard keys on is form nesting, whichever carrier nests.
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name pipeline
+        \\    (key :name layout :type form
+        \\      (form :name layout
+        \\        :lowering (lowering :hook p/layout-v1 :produces [pipeline])))))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    var found: bool = false;
+    for (r.diagnostics) |d| {
+        if (d.code == .invalid_manifest and
+            std.mem.indexOf(u8, d.message, "slot-local form `layout` declares `:lowering`") != null) found = true;
+    }
+    try testing.expect(found);
+    try testing.expect(r.plugin.forms[0].keys[0].local_forms[0].lowering == null);
 }
 
 /// Generate a manifest whose deepest POSITIONAL slot-local form sits at

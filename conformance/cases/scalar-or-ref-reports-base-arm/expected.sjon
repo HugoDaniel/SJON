@@ -1,0 +1,7 @@
+; Three diagnostics, one per rejected literal, each the base arm's own code.
+; A host that reported `union_no_branch_matched` here has kept the collapsed
+; union report and lost the bound.
+(diagnostics
+  (diagnostic :code number_above_max :path [use q])
+  (diagnostic :code number_below_min :path [use q])
+  (diagnostic :code number_not_integer :path [use q]))

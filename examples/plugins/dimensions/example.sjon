@@ -1,7 +1,7 @@
 ; Example usage of the `dimensions` plugin. Every value here validates.
 ;
 ; `:dimension` and `:view` both hold digit-leading spellings, written
-; exactly as the WebGPU spec writes them — no lookup table, no quoting.
+; exactly as the WebGPU spec writes them: no lookup table, no quoting.
 ;
 ;   * `2d` is the member `2d`.
 ;   * `2.0d` and `02d` are the *same* member: matching is on the parsed
@@ -10,9 +10,9 @@
 ;   * `2d-array` is one token: inside a unit, a `-` joins two letter runs
 ;     when the next byte is a letter. `1em-2` is still `1em` then `-2`.
 ;
-; What would not validate: `4d` (not declared — `not_member`, naming the
+; What would not validate: `4d` (not declared, so `not_member`, naming the
 ; set), `2.5d` (fractional magnitudes match nothing), and a bare `2` (no
-; unit, so not a spelling at all — `wrong_underlying`).
+; unit, so not a spelling at all, so `wrong_underlying`).
 
 (texture :name albedo    :dimension 2d   :view 2d)
 (texture :name lightmap  :dimension 2.0d :view cube)

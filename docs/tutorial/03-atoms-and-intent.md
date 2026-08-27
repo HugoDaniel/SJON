@@ -2,37 +2,24 @@
 
 ## Goal
 
-Choose the right atomic value kind for the job: keyword, symbol, string,
-boolean, number, or nil.
+Pick the right atomic value kind for a slot every time: keyword, symbol,
+string, boolean, number, or nil.
 
-## Mental Model
+## Why Six Kinds and Not One
 
-SJON keeps value kinds distinct. A value does not forget whether you
-wrote it as a string, symbol, keyword, number, boolean, or nil.
+JSON gives you one way to write a word: put quotes around it. That means
+`"ortho"`, `"intro.sjon"`, and `"zoom"` all arrive at your program
+looking identical, and the program has to remember from context that the
+first is one of a fixed set of projections, the second is a filename,
+and the third is the name of a field. All the author's intent is thrown
+away at the quote marks and reconstructed later by hand.
 
-Use this authoring rule:
+SJON keeps the distinction the author wrote. A value never forgets
+whether it was spelled as a string, a symbol, a keyword, a number, a
+boolean, or nil, which means the schema can hold you to it and the
+diagnostic can be specific about it.
 
-- **Keyword** - names a slot or acts as a flag: `:name`, `:ortho`.
-- **Symbol** - names something the schema resolves: `ortho`, `mask`,
-  `parent.transform`, `C#4`, `+`.
-- **String** - carries opaque text: `"intro"`, `"black"`,
-  `"hello.wgsl"`.
-- **Boolean** - carries truth: `true`, `false`.
-- **Nil** - carries explicit absence: `nil`.
-- **Number** - carries numeric magnitude, optionally with a unit suffix.
-
-Identifiers are case-sensitive. `circle`, `Circle`, and `CIRCLE` are
-different heads or symbols.
-
-Identifiers can include letters, digits after the first character,
-operator characters, `_`, `-`, `.`, `/`, and a few other punctuation
-characters. `#` is allowed **inside** an identifier, but not as the
-first character. That makes natural sharp spellings such as `C#4` and
-`F#m` valid symbols for plugins that model musical note names. A token
-starting with `#` is reserved for block comments, so `#note` is not a
-symbol.
-
-## Worked Example
+Here is our camera saying six different things in six different ways:
 
 ```sjon
 (camera
@@ -44,28 +31,76 @@ symbol.
   :debug nil)
 ```
 
-Read the intent:
+Read the intent off the spelling alone:
 
-- `:ortho` is a positional flag.
-- `:projection ortho` uses a symbol value. A schema can constrain it to
-  a member set such as `ortho | perspective`.
-- `:zoom 2` uses a number.
-- `:label "main camera"` uses a string because this is free text.
-- `:enabled true` uses a boolean.
-- `:debug nil` explicitly says the slot has no value.
+```
+:ortho              keyword, standing alone   -> a flag. Present or absent.
+:projection ortho   keyword + symbol          -> a named choice from a closed set.
+:zoom 2             keyword + number          -> a magnitude.
+:label "main camera"  keyword + string        -> opaque text. Nobody validates it.
+:enabled true       keyword + boolean         -> truth.
+:debug nil          keyword + nil             -> explicitly, deliberately absent.
+```
 
-Do not write this when the slot expects a symbol:
+The authoring rule in one line each:
+
+- **Keyword** names a slot or acts as a flag: `:zoom`, `:ortho`.
+- **Symbol** names something the schema resolves: `ortho`, `mask`,
+  `parent.transform`, `C#4`, `+`.
+- **String** carries opaque text: `"intro"`, `"black"`, `"hello.wgsl"`.
+- **Boolean** carries truth: `true`, `false`.
+- **Nil** carries explicit absence: `nil`.
+- **Number** carries magnitude, optionally with a unit suffix.
+
+The distinction that earns its keep is symbol versus string. A symbol
+says "this is a name from a vocabulary, go and check it", so a schema
+can pin `:projection` to the member set `ortho | perspective` and tell
+the author when they write `orhto`. A string says "this is text, leave
+it alone", so nobody checks `"main camera"` and nobody should. Choosing
+between them is choosing whether you want to be told when you are wrong.
+
+## What Counts as an Identifier
+
+Identifiers are case-sensitive. `circle`, `Circle`, and `CIRCLE` are
+three different heads, and `:bpm` and `:BPM` are two different keywords.
+There is no folding anywhere.
+
+An identifier may contain letters, digits after the first character,
+operator characters, `_`, `-`, `.`, `/`, and a handful of other
+punctuation. `#` is allowed **inside** an identifier but never as the
+first character, which is a deliberate concession to music: `C#4` and
+`F#m` are perfectly good symbols, so a plugin that models note names
+doesn't have to make its authors write `"C#4"` in quotes.
+
+The reason for the restriction on the first character is that `#` there
+already means something. `#|` opens a block comment, which
+[Comments and strings](06-comments-and-strings.md) covers, so a token starting with
+`#` can never be a symbol. `#note` is not a name; it is the start of
+something the lexer reads differently.
+
+## Worked Example
+
+Look again at the camera above, and then at the version that goes wrong:
 
 ```sjon
 (camera :projection :ortho)
 ```
 
-That does not create `projection = :ortho`. The keyword pairing rule
-will treat both keywords as flags. Section 5 covers this in detail.
+This does **not** mean `projection = :ortho`. The parser sees two
+keywords in a row and produces two positional flags, `:projection` and
+`:ortho`, neither of which is a kvpair, and the form now has no
+projection set at all.
+
+I keep flagging this and keep not explaining it, and
+[Forms and keyword pairing](05-forms-and-keyword-pairing.md) is where that debt gets
+paid in full. For now, treat it as a hard authoring rule: **a keyword is
+never the value of a kvpair.** When a slot wants a named choice, the
+value goes in as a symbol.
 
 ## Exercises
 
-Choose the intended value kind for each slot:
+Choose the value kind for each slot, and say what the choice tells a
+future reader:
 
 1. A user-visible title: `"intro"` or `intro`?
 2. A closed projection mode: `"ortho"`, `ortho`, or `:ortho`?
@@ -73,35 +108,40 @@ Choose the intended value kind for each slot:
 4. An absent optional value: `"nil"` or `nil`?
 5. A form flag with no payload: `:ortho` or `ortho`?
 
-Repair each broken example:
+Repair each of these. The fix is always "write the kind the slot
+means", so the work is in deciding what it means:
 
-```sjon
+```sjon del={1}
 (scene :name intro)
 ```
 
-If `:name` is free-form text, repair with a string:
+If `:name` is free text, a symbol is a promise the schema can't keep.
+Use a string:
 
-```sjon
+```sjon ins={1}
 (scene :name "intro")
 ```
 
-```sjon
+```sjon del={1}
 (camera :projection "ortho")
 ```
 
-If `:projection` is a symbol member set, repair with a symbol:
+If `:projection` is a member set, a string opts out of the check you
+wanted. Use a symbol:
 
-```sjon
+```sjon ins={1}
 (camera :projection ortho)
 ```
 
-```sjon
+```sjon del={1}
 (placeholder :enabled "false" :data "nil")
 ```
 
-If the slots expect a boolean and nil, repair the atoms:
+`"false"` is a five-character string, and it is truthy. `"nil"` is a
+three-character string, and it is present. Both slots wanted the
+literal:
 
-```sjon
+```sjon ins={1}
 (placeholder :enabled false :data nil)
 ```
 

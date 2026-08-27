@@ -1,5 +1,5 @@
-//! The wasm root of the `uniforms` cross-ref provider. The scanner —
-//! and the story of what this example is for — lives in
+//! The wasm root of the `uniforms` cross-ref provider. The scanner,
+//! and the story of what this example is for, live in
 //! `uniforms_extract.zig`; this file frames its answer for the
 //! executable-plugin ABI, the same split (and the same codec) as the
 //! corpus fixture pair `lines_extract.zig` / `lines_provider.zig`.
@@ -12,7 +12,7 @@
 //! The value codec is hand-rolled to that slice so the plugin has no
 //! host-side SDK dependency; the byte layout is pinned cross-host by
 //! `src/PluginValueCodec.zig`'s tests. Imports MUST be empty per spec
-//! §7.1 — `std.heap.wasm_allocator` only reaches the `@wasmMemoryGrow` /
+//! §7.1: `std.heap.wasm_allocator` only reaches the `@wasmMemoryGrow` /
 //! `@wasmMemorySize` intrinsics, never an `env.*` import.
 
 const std = @import("std");

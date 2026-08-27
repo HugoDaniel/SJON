@@ -40,6 +40,7 @@
       ".gitnexus/**",
       "**/*.wasm",
       "**/*.astro",
+      "**/*.mdx",
       "**/*.css",
       "pnpm-lock.yaml",
       "package-lock.json",

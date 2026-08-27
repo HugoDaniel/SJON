@@ -12,7 +12,6 @@ import {
   MAX_KEYWORDS,
   MAX_LOCAL_FORM_DEPTH,
   MAX_SPELLING_VALUE,
-  SUPPORTED_SJON_FORMAT,
   canonicalSpelling,
   effectiveOptional,
   spellingKeyOf,
@@ -25,6 +24,7 @@ import {
   type FlagDecl,
   type FormSpec,
   type Head,
+  type HeadSet,
   type KeyDefault,
   type KeySpec,
   type Member,
@@ -41,6 +41,8 @@ import {
   type ValueKind,
   type ValueType,
   type Variant,
+  variantSelects,
+  variantWhenText,
 } from './plugin.ts';
 import * as StringFormats from './stringFormats.ts';
 
@@ -67,7 +69,6 @@ export function loadManifest(roots: readonly Node[]): LoadResult {
     homepage: '',
     repository: '',
     keywords: [],
-    sjonFormat: '',
     forms: [],
     exprFuncs: [],
     valueKinds: [],
@@ -93,7 +94,6 @@ export function loadManifest(roots: readonly Node[]): LoadResult {
   let homepage = '';
   let repository = '';
   let keywords: string[] = [];
-  let sjonFormat = '';
   const forms: FormSpec[] = [];
   const valueKinds: ValueKind[] = [];
   const exprFuncs: ExprFunc[] = [];
@@ -166,22 +166,11 @@ export function loadManifest(roots: readonly Node[]): LoadResult {
             }
           }
           break;
-        case 'sjon':
-          if (child.value.tag === 'string') {
-            sjonFormat = child.value.value;
-            if (compareSjonFormat(sjonFormat, SUPPORTED_SJON_FORMAT) > 0) {
-              diagnostics.push({
-                code: 'sjon_format_unsupported',
-                message: `manifest declares \`:sjon ${sjonFormat}\` but host implements ${SUPPORTED_SJON_FORMAT}`,
-                path: ['plugin'],
-                span: child.value.span,
-                severity: 'err',
-              });
-            }
-          }
-          break;
-        // description / other unknown top-level keys: silently ignored,
-        // matching the Zig loader (no `unknown_key` on `(plugin …)`).
+        // description / other unknown top-level keys: silently ignored.
+        // (The Zig reference reports an unknown `(plugin …)` key as
+        // `unknown_key` at meta-validation; this port's meta-validation is
+        // minimal by design — see `loadManifest`'s note below. `:sjon`, the
+        // retired manifest format version, lands here too.)
       }
     } else if (child.tag === 'form') {
       switch (child.head) {
@@ -227,7 +216,6 @@ export function loadManifest(roots: readonly Node[]): LoadResult {
     homepage,
     repository,
     keywords,
-    sjonFormat,
     forms,
     exprFuncs,
     valueKinds,
@@ -296,25 +284,6 @@ const CANONICAL_SPDX: readonly string[] = [
 ];
 function isRecognizedSpdx(lic: string): boolean {
   return CANONICAL_SPDX.includes(lic);
-}
-
-/// Compare two `<major>.<minor>` version strings. Returns >0 / 0 / <0.
-/// Malformed input compares equal (mirrors Zig `compareSjonFormat`).
-function compareSjonFormat(declared: string, supported: string): number {
-  const d = parseSimpleVersion(declared);
-  const s = parseSimpleVersion(supported);
-  if (!d || !s) return 0;
-  if (d.major !== s.major) return d.major - s.major;
-  return d.minor - s.minor;
-}
-
-function parseSimpleVersion(s: string): { major: number; minor: number } | null {
-  const dot = s.indexOf('.');
-  if (dot < 0) return null;
-  const major = Number.parseInt(s.slice(0, dot), 10);
-  const minor = Number.parseInt(s.slice(dot + 1), 10);
-  if (!Number.isFinite(major) || !Number.isFinite(minor)) return null;
-  return { major, minor };
 }
 
 function buildFormSpec(form: FormNode, diagnostics: Diagnostic[], depth = 1): FormSpec {
@@ -387,7 +356,7 @@ function buildFormSpec(form: FormNode, diagnostics: Diagnostic[], depth = 1): Fo
       // `keys.length <= MAX_FORM_KEYS`) stays sound.
       if (keyCount <= MAX_FORM_KEYS) keys.push(buildKeySpec(child, diagnostics, depth));
     } else if (child.tag === 'form' && child.head === 'variant') {
-      builtVariants.push(buildVariant(child, diagnostics, depth));
+      builtVariants.push(buildVariant(child, name, diagnostics, depth));
     } else if (child.tag === 'form' && child.head === 'exclusive-group') {
       builtGroups.push(buildExclusiveGroup(child));
     }
@@ -463,11 +432,19 @@ function buildFormSpec(form: FormNode, diagnostics: Diagnostic[], depth = 1): Fo
   const variants: Variant[] = builtVariants.map((bv) => {
     // A variant's groups name the variant's own keys, and a variant has no
     // discriminant of its own — hence the `null` third argument.
-    const groups = resolveExclusiveGroups(bv.groups, bv.keys, null, name, bv.when, diagnostics);
+    const groups = resolveExclusiveGroups(
+      bv.groups,
+      bv.keys,
+      null,
+      name,
+      variantWhenText(bv.when),
+      diagnostics,
+    );
     return groups.length > 0
       ? { when: bv.when, keys: bv.keys, exclusiveGroups: groups }
       : { when: bv.when, keys: bv.keys };
   });
+  if (variants.length > 0) checkVariantWhenDisjoint(name, variants, form.headSpan, diagnostics);
 
   // Deferred here, not done in `buildKeySpec`: a key may require one
   // declared after it, and a variant key may require a base key, so
@@ -624,20 +601,56 @@ function checkRequiresCycles(
  *  against its own `keys`. Mirrors the split the Zig loader makes between
  *  `buildVariant` and `resolveExclusiveGroups`. */
 interface BuiltVariant {
-  readonly when: string;
+  readonly when: readonly string[];
   readonly keys: readonly KeySpec[];
   readonly groups: readonly BuiltGroup[];
 }
 
-function buildVariant(form: FormNode, diagnostics: Diagnostic[], depth: number): BuiltVariant {
-  let when = '';
+function buildVariant(
+  form: FormNode,
+  formName: string,
+  diagnostics: Diagnostic[],
+  depth: number,
+): BuiltVariant {
+  let when: string[] = [];
   const keys: KeySpec[] = [];
   let keyCount = 0;
   const groups: BuiltGroup[] = [];
 
   for (const child of form.children) {
     if (child.tag === 'kvpair') {
-      if (child.key === 'when' && child.value.tag === 'symbol') when = child.value.text;
+      if (child.key !== 'when') continue;
+      // `:when` is a symbol or a vector of symbols; both normalise to a
+      // list (`Variant.when`), so nothing downstream knows which the author
+      // wrote. The two rejections a list can earn — empty, a repeat — are
+      // decided here, where the spelling is still visible. Mirrors
+      // `ManifestLoader.buildVariant`.
+      if (child.value.tag === 'symbol') {
+        when = [child.value.text];
+      } else if (child.value.tag === 'vector') {
+        when = child.value.elements.filter((e) => e.tag === 'symbol').map((e) => e.text);
+        const path = [formName, 'variant', 'when'];
+        if (when.length === 0) {
+          diagnostics.push({
+            code: 'invalid_manifest',
+            message: `form \`${formName}\` variant \`:when []\` lists no discriminant value — a variant nothing selects can never apply`,
+            path,
+            span: child.value.span,
+            severity: 'err',
+          });
+        }
+        for (let i = 0; i < when.length; i++) {
+          const w = when[i]!;
+          if (when.indexOf(w, i + 1) < 0) continue;
+          diagnostics.push({
+            code: 'invalid_manifest',
+            message: `form \`${formName}\` variant \`:when\` lists \`${w}\` twice; a value selects the variant once, so the repeat adds nothing and hides a likely typo`,
+            path,
+            span: child.value.span,
+            severity: 'err',
+          });
+        }
+      }
     } else if (child.tag === 'form' && child.head === 'key') {
       keyCount++;
       if (keyCount <= MAX_FORM_KEYS) keys.push(buildKeySpec(child, diagnostics, depth));
@@ -646,7 +659,42 @@ function buildVariant(form: FormNode, diagnostics: Diagnostic[], depth: number):
     }
   }
 
+  // Total: a `:when`-less variant (already `missing_required_key` from the
+  // Zig meta-validator; this port's meta-validation is minimal) keeps the
+  // `.length >= 1` invariant with one unnameable value, selected by nothing.
+  if (when.length === 0) when = [''];
   return { when, keys, groups };
+}
+
+/** A discriminant value selects at most one variant. Two variants that both
+ *  list a value — `:when a` twice, or `:when [a b]` beside `:when [b c]` —
+ *  leave "which one applies" to declaration order, the question the
+ *  key-collision check exists to keep a schema from asking; the second
+ *  listing is `invalid_manifest`, once per repeated value. Mirrors
+ *  `ManifestLoader.checkVariantWhenDisjoint`. */
+function checkVariantWhenDisjoint(
+  formName: string,
+  variants: readonly Variant[],
+  span: Span,
+  diagnostics: Diagnostic[],
+): void {
+  for (let vi = 0; vi < variants.length; vi++) {
+    const v = variants[vi]!;
+    for (const w of v.when) {
+      // The unnameable placeholder a `:when`-less variant carries selects
+      // nothing; two of them are not a value listed twice. Mirrors Zig.
+      if (w.length === 0) continue;
+      const prior = variants.slice(0, vi).find((p) => variantSelects(p, w));
+      if (!prior) continue;
+      diagnostics.push({
+        code: 'invalid_manifest',
+        message: `form \`${formName}\` variant \`:when ${variantWhenText(v.when)}\` lists \`${w}\`, already selected by variant \`:when ${variantWhenText(prior.when)}\` — a discriminant value selects at most one variant`,
+        path: [formName, 'variant', 'when'],
+        span,
+        severity: 'err',
+      });
+    }
+  }
 }
 
 /** Intermediate shape captured during the structural walk of
@@ -981,7 +1029,7 @@ function splitNamespace(text: string): { name: string; namespace: string | null 
 function buildValueKind(form: FormNode, diagnostics: Diagnostic[]): ValueKind {
   let name = '';
   let underlying: ValueKind['underlying'] = 'symbol';
-  let heads: Head[] | undefined;
+  let heads: HeadSet | undefined;
   let members: Member[] | undefined;
   let membersSpan: Span | undefined;
   let vector: ValueKind['vector'];
@@ -1096,7 +1144,7 @@ function buildValueKind(form: FormNode, diagnostics: Diagnostic[]): ValueKind {
     }
   }
   const kind: ValueKind = { name, underlying };
-  if (heads) (kind as { heads?: readonly Head[] }).heads = heads;
+  if (heads) (kind as { heads?: HeadSet }).heads = heads;
   if (members) (kind as { members?: readonly Member[] }).members = members;
   if (vector) (kind as { vector?: ValueKind['vector'] }).vector = vector;
   if (unit) (kind as { unit?: UnitShape }).unit = unit;
@@ -1940,19 +1988,42 @@ function readMemberSet(form: FormNode, kindName: string, diagnostics: Diagnostic
  * Both wire spellings of `:heads`, mirroring `readMemberSet` — same
  * shapes, same message vocabulary, and the same four `invalid_manifest`
  * rejections (mix, empty, duplicate `:name`, `:min > :max`). The rich
- * `(head …)` spelling is the only one that can carry a count.
+ * `(head …)` spelling is the only one that can carry a *per-head* count.
+ *
+ * `:min-children` / `:max-children` bound the whole set and are legal
+ * beside either spelling, plus three refusals of their own: the set's own
+ * empty range, and the two cross-level sums in `checkAggregateBounds`.
  *
  * A count that is negative, fractional, or over `u16` reports
  * `wrong_underlying` instead, matching the reference loader's reuse of
  * its own out-of-range check for `(fixed N)` and `(range :min …)`.
  */
-function readHeadSet(form: FormNode, kindName: string, diagnostics: Diagnostic[]): Head[] {
+function readHeadSet(form: FormNode, kindName: string, diagnostics: Diagnostic[]): HeadSet {
   let compactNames: string[] | undefined;
   const richForms: FormNode[] = [];
+  let minChildren: number | undefined;
+  let maxChildren: number | undefined;
   for (const child of form.children) {
     if (child.tag === 'kvpair' && child.key === 'names') {
       if (child.value.tag === 'vector') {
         compactNames = child.value.elements.map((e) => (e.tag === 'symbol' ? e.text : ''));
+      }
+    } else if (
+      child.tag === 'kvpair' &&
+      (child.key === 'min-children' || child.key === 'max-children')
+    ) {
+      const n = child.value.tag === 'number' ? child.value.value : undefined;
+      if (n !== undefined && Number.isInteger(n) && n >= 0 && n <= 0xffff) {
+        if (child.key === 'min-children') minChildren = n;
+        else maxChildren = n;
+      } else {
+        diagnostics.push({
+          code: 'wrong_underlying',
+          message: `\`:${child.key}\` requires a non-negative integer ≤ 65535, got ${n ?? 0}`,
+          path: [kindName, 'heads', child.key],
+          span: child.value.span,
+          severity: 'err',
+        });
       }
     } else if (child.tag === 'form' && child.head === 'head') {
       richForms.push(child);
@@ -1970,8 +2041,27 @@ function readHeadSet(form: FormNode, kindName: string, diagnostics: Diagnostic[]
     });
   }
 
+  if (maxChildren !== undefined && (minChildren ?? 0) > maxChildren) {
+    diagnostics.push({
+      code: 'invalid_manifest',
+      message: `value-kind \`${kindName}\` \`:heads\` declares an empty child range (\`:min-children ${minChildren ?? 0}\` > \`:max-children ${maxChildren}\`)`,
+      path,
+      span: form.headSpan,
+      severity: 'err',
+    });
+  }
+
+  const withBounds = (heads: readonly Head[]): HeadSet => {
+    const hs: { heads: readonly Head[]; minChildren?: number; maxChildren?: number } = { heads };
+    if (minChildren !== undefined) hs.minChildren = minChildren;
+    if (maxChildren !== undefined) hs.maxChildren = maxChildren;
+    return hs;
+  };
+
   if (compactNames !== undefined) {
-    return compactNames.map((n) => ({ name: n }));
+    // No per-head bound can exist on this spelling, so both cross-level
+    // sums are vacuous — skipped rather than computed to nothing.
+    return withBounds(compactNames.map((n) => ({ name: n })));
   }
 
   if (richForms.length > 0) {
@@ -1998,7 +2088,9 @@ function readHeadSet(form: FormNode, kindName: string, diagnostics: Diagnostic[]
       }
       out.push(h);
     }
-    return out;
+    const hs = withBounds(out);
+    checkAggregateBounds(hs, kindName, form.headSpan, diagnostics);
+    return hs;
   }
 
   diagnostics.push({
@@ -2008,7 +2100,54 @@ function readHeadSet(form: FormNode, kindName: string, diagnostics: Diagnostic[]
     span: form.headSpan,
     severity: 'err',
   });
-  return [];
+  return withBounds([]);
+}
+
+/**
+ * The two cross-level checks, and the only place this loader compares a
+ * per-head bound against the set's. Both are **sums**:
+ *
+ *   * `Σ head.min > set.max` — heads `a :min 1` and `b :min 1` under a set
+ *     `:max-children 1` is unsatisfiable, yet neither head's `:min` is
+ *     above the set's `:max`. The weaker per-head spelling misses it.
+ *   * `set.min > Σ head.max` — the mirror, and only meaningful when every
+ *     head is bounded: one unbounded head makes the set always fillable,
+ *     so the check is vacuous and must not fire.
+ *
+ * Mirrors Zig's `checkAggregateBounds`.
+ */
+function checkAggregateBounds(
+  hs: HeadSet,
+  kindName: string,
+  headSpan: Span,
+  diagnostics: Diagnostic[],
+): void {
+  const path = [kindName, 'heads'];
+  if (hs.maxChildren !== undefined) {
+    const floorSum = hs.heads.reduce((acc, h) => acc + (h.min ?? 0), 0);
+    if (floorSum > hs.maxChildren) {
+      diagnostics.push({
+        code: 'invalid_manifest',
+        message: `value-kind \`${kindName}\` \`:heads\` is unsatisfiable: its heads require at least ${floorSum} child(ren) together, above \`:max-children ${hs.maxChildren}\``,
+        path,
+        span: headSpan,
+        severity: 'err',
+      });
+    }
+  }
+  const min = hs.minChildren ?? 0;
+  if (min === 0) return;
+  if (hs.heads.some((h) => h.max === undefined)) return; // vacuous
+  const ceilSum = hs.heads.reduce((acc, h) => acc + (h.max ?? 0), 0);
+  if (min > ceilSum) {
+    diagnostics.push({
+      code: 'invalid_manifest',
+      message: `value-kind \`${kindName}\` \`:heads\` is unsatisfiable: \`:min-children ${min}\` is above the ${ceilSum} child(ren) its heads allow together`,
+      path,
+      span: headSpan,
+      severity: 'err',
+    });
+  }
 }
 
 function readHeadDecl(form: FormNode, kindName: string, diagnostics: Diagnostic[]): Head {

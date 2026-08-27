@@ -1,0 +1,13 @@
+; A `:when` list is checked against the discriminant's member set ONCE PER
+; VALUE, at schema-aggregate time — the same `unknown_discriminant_value`
+; a single symbol earns, and the same place (the discriminant kind may
+; live in another plugin, so the loader cannot decide it). `[tri-strip
+; nope]` reports `nope` and keeps `tri-strip`: a set with one typo names
+; the typo rather than rejecting the whole declaration.
+(plugin :name gfx :version "1.0.0"
+  (value-kind :name topo :underlying symbol
+    :members (member-set :values [tri-list tri-strip line-list line-strip]))
+  (form :name prim :discriminant topology
+    (key :name topology :type topo :optional false)
+    (variant :when [tri-strip nope]
+      (key :name strip-format :type symbol :optional true))))

@@ -1,0 +1,71 @@
+# headset-locals v1.0.0
+
+## Forms
+
+### `(head …)`
+
+A global form, reachable from the resource slot by the additive fallback.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:text` | `string` | yes | — | — |
+
+### `(bind-group-layout …)`
+
+A layout whose entries are slot-local, behind a closed head-set.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:name` | `symbol` | yes | — | — |
+
+Positional children: `form: (entry …, local)`.
+
+| Head | Count |
+| --- | --- |
+| `entry` | at least 1 |
+
+#### `(entry …)`
+
+One binding. Its own positional slot is closed the same way.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:binding` | `number` | yes | — | — |
+
+Positional children: `form: (buffer …, local) | (storage-texture …, local) | (head …)`.
+
+| Head | Count |
+| --- | --- |
+| `buffer` | at most 1 |
+| `storage-texture` | any |
+| `head` | any |
+
+#### `(buffer …)`
+
+Slot-local buffer resource; no global `buffer` exists.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:kind` | `symbol` | yes | — | — |
+
+#### `(storage-texture …)`
+
+Slot-local storage texture; no global one exists either.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:format` | `symbol` | yes | — | — |
+
+## Value kinds
+
+### bgl-resource
+
+What one binding may hold. Local bodies, one global, and counts.
+
+Type: `form: (buffer …) | (storage-texture …) | (head …)`.
+
+### bgl-entry-item
+
+One entry of a layout. Exactly one `entry` is required.
+
+Type: `form: (entry …)`.

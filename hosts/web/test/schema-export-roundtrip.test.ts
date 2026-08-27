@@ -302,6 +302,21 @@ test('schema-export round-trip: ajv enforces per-head positional counts', async 
   );
   // `:min 1` on vertex — none at all must be rejected.
   assert.equal(validate(pipeline([fragment])), false, 'under :min: expected reject');
+  // …including when there are no children whatsoever. The JSON bridge
+  // OMITS `$children` for a childless form (`Json.zig`'s
+  // `if (children.items.len > 0)`), so a floor that lives only inside the
+  // `$children` subschema is unreachable for the very document that
+  // breaches it hardest. `required: ["$children"]` is what closes it.
+  assert.equal(validate(pipeline([])), false, 'empty $children: expected reject');
+  assert.equal(
+    validate({
+      $form: 'render-pipeline',
+      $ns: 'head-counts',
+      name: { $sym: 'main' },
+    }),
+    false,
+    'absent $children under a floor: expected reject',
+  );
   // The unbounded head really is unbounded: four constants are fine, which
   // is what `minItems`/`maxItems` would have wrongly rejected.
   assert.equal(
@@ -309,6 +324,175 @@ test('schema-export round-trip: ajv enforces per-head positional counts', async 
     true,
     `unbounded head should stay unbounded: ${JSON.stringify(validate.errors)}`,
   );
+});
+
+test('schema-export round-trip: ajv enforces the count over a whole head-set', async () => {
+  // The claim the exporter cannot make about itself, one level up from
+  // the per-head test above: that `contains: {anyOf: […]}` + `minContains`
+  // / `maxContains` actually *bites* in a real 2020-12 validator.
+  //
+  // Four documents, and the middle two are the ask's own probes — an
+  // entry with two different resources and an entry with none. Both
+  // satisfy every per-head bound, so the per-head `contains` entries in
+  // the same `allOf` accept them; only the set's entry can refuse.
+  const manifestPath = path.join(examplesDir, 'head-counts/plugin.sjon');
+  if (!existsSync(manifestPath)) return; // fixture removed; nothing to test
+  const manifestSrc = readFileSync(manifestPath, 'utf8');
+  const host = await SjonHost.load(wasmPath);
+  const result = host.exportSchema(manifestSrc, {
+    projectRoot: null,
+    projectFile: null,
+    target: 'json-schema',
+  });
+  assert.ok(result.aggregated?.jsonSchema, 'missing jsonSchema bytes');
+  const schema = JSON.parse(result.aggregated.jsonSchema);
+  const ajv = new Ajv2020({ strict: false, allErrors: true });
+  addFormats(ajv);
+  const validate = ajv.compile({
+    $schema: schema.$schema,
+    $defs: schema.$defs,
+    $ref: '#/$defs/form.head-counts.bgl-entry',
+  });
+
+  const buffer = { $form: 'buffer', $ns: 'head-counts', type: { $sym: 'uniform' } };
+  const sampler = { $form: 'sampler', $ns: 'head-counts', type: { $sym: 'filtering' } };
+  const entry = (children: unknown[]) => {
+    const out: Record<string, unknown> = {
+      $form: 'bgl-entry',
+      $ns: 'head-counts',
+      binding: 0,
+    };
+    // Mirror the JSON bridge: a childless form carries no `$children` key
+    // at all, which is exactly the case `required` has to cover.
+    if (children.length > 0) out['$children'] = children;
+    return out;
+  };
+
+  assert.equal(
+    validate(entry([buffer])),
+    true,
+    `exactly one resource should be accepted: ${JSON.stringify(validate.errors)}`,
+  );
+  // Two DIFFERENT resources: `buffer: 0..1` and `sampler: 0..1` are both
+  // satisfied. Only `:max-children 1` refuses, so this assertion fails if
+  // the set's `allOf` entry is dropped or its `anyOf` is wrong.
+  assert.equal(validate(entry([buffer, sampler])), false, 'two resources: expected reject');
+  // None at all, and with no `$children` key — the shape the emitter was
+  // fabricating a `"buffer":{}` for.
+  assert.equal(validate(entry([])), false, 'no resource: expected reject');
+  // Two of the SAME: the per-head ceiling refuses it too, which is the
+  // redundancy the validator's suppression rule exists for. The export
+  // has no suppression to do — both entries simply fail.
+  assert.equal(validate(entry([buffer, buffer])), false, 'two buffers: expected reject');
+});
+
+test('schema-export round-trip: ajv closes a head-set slot that declares locals', async () => {
+  // The sibling the head-counts test above could not be: that manifest
+  // uses globals only, which is exactly why it never caught S7b. Here the
+  // head-set members resolve to *slot-local* forms with no global
+  // declaration anywhere, and two claims need a real validator to check
+  // rather than a reading of the exporter.
+  //
+  //   1. The slot is CLOSED. Before, a locals slot exported `anyOf` with a
+  //      trailing `{type: object, required: [$form]}` branch, which
+  //      accepts every form there is — so `(ghost …)` passed a schema the
+  //      SJON validator rejects with `not_head_member`. An open branch is
+  //      invisible to any test that only feeds it valid documents.
+  //   2. The per-head `contains` bounds BITE on a locals slot. They were
+  //      absent entirely, and an absent `allOf` is indistinguishable from
+  //      a satisfied one unless you drive a document past the bound.
+  const manifestPath = path.join(examplesDir, 'headset-locals/plugin.sjon');
+  if (!existsSync(manifestPath)) return; // fixture removed; nothing to test
+  const manifestSrc = readFileSync(manifestPath, 'utf8');
+  const host = await SjonHost.load(wasmPath);
+  const result = host.exportSchema(manifestSrc, {
+    projectRoot: null,
+    projectFile: null,
+    target: 'json-schema',
+  });
+  assert.ok(result.aggregated?.jsonSchema, 'missing jsonSchema bytes');
+  const schema = JSON.parse(result.aggregated.jsonSchema);
+  const ajv = new Ajv2020({ strict: false, allErrors: true });
+  addFormats(ajv);
+  // Compiling at all is a claim: an unresolved head used to render
+  // `{"$ref": "#/$defs/form..<head>"}`, and ajv refuses to compile a
+  // schema with an unresolvable `$ref` — one typo'd head would take the
+  // whole document down, not the one slot that earned it.
+  const validate = ajv.compile({
+    $schema: schema.$schema,
+    $defs: schema.$defs,
+    $ref: '#/$defs/form.headset-locals.bind-group-layout',
+  });
+
+  const ns = 'headset-locals';
+  const buffer = { $form: 'buffer', $ns: ns, kind: { $sym: 'uniform' } };
+  const storage = { $form: 'storage-texture', $ns: ns, format: { $sym: 'rgba8unorm' } };
+  const head = { $form: 'head', $ns: ns, text: 'the camera UBO' };
+  const entry = (children: unknown[]) => ({
+    $form: 'entry',
+    $ns: ns,
+    binding: 0,
+    $children: children,
+  });
+  const layout = (children: unknown[]) => ({
+    $form: 'bind-group-layout',
+    $ns: ns,
+    name: { $sym: 'bgl0' },
+    $children: children,
+  });
+
+  // The happy path: a local body, a *global* body resolved by `$ref`, and
+  // an unbounded local repeated — all in one slot.
+  assert.equal(
+    validate(layout([entry([buffer, head]), entry([storage, storage])])),
+    true,
+    `in-set children should be accepted: ${JSON.stringify(validate.errors)}`,
+  );
+
+  // (1) Closed. `ghost` is in no head-set, so the slot must reject it.
+  assert.equal(
+    validate(layout([{ $form: 'ghost', $ns: ns }])),
+    false,
+    'an out-of-set head must be rejected — the open branch used to accept every form',
+  );
+
+  // A local that omits its required key is rejected too, which the open
+  // branch also used to wave through (SCHEMA_EXPORT.md's one-way caveat
+  // holds for an *open* locals slot; a closed one enforces).
+  assert.equal(
+    validate(layout([entry([{ $form: 'buffer', $ns: ns }])])),
+    false,
+    'a local missing its required key must be rejected',
+  );
+
+  // The one thing closing the slot does NOT tighten, pinned so it cannot
+  // change silently. A *qualified* head bypasses the locals and resolves
+  // global-only, so `(headset-locals/buffer …)` is `unknown_form` to the
+  // validator — but `$ns` is const-pinned and deliberately not required
+  // (a bare invocation round-trips without it), so the local's branch
+  // accepts it. The looser direction the one-way assertion permits; see
+  // SCHEMA_EXPORT.md's caveat table.
+  assert.equal(
+    validate(layout([entry([{ ...buffer, $ns: ns }])])),
+    true,
+    'a self-qualified local head is accepted by the schema, per the documented caveat',
+  );
+  // A qualifier naming a *different* plugin is still rejected, which is
+  // what makes the `$ns` const carry any weight at all.
+  assert.equal(
+    validate(layout([entry([{ ...buffer, $ns: 'somewhere-else' }])])),
+    false,
+    'a foreign qualifier must still be rejected',
+  );
+
+  // (2) The bounds bite. `buffer` is `:max 1` on a locals slot …
+  assert.equal(
+    validate(layout([entry([buffer, buffer])])),
+    false,
+    'over :max on a local head: expected reject',
+  );
+  // … and `entry` is `:min 1` on the outer one.
+  assert.equal(validate(layout([])), false, 'under :min on a local head: expected reject');
 });
 
 test('schema-export round-trip: ajv accepts a digit-leading member as $num, not $sym', async () => {

@@ -149,7 +149,20 @@ fn writeForm(w: *Writer, f: *const Model.Form, heading: []const u8) Writer.Error
 
     if (f.discriminator) |disc| {
         for (disc.variants) |v| {
-            try w.print("\n{s}# Variant `:{s} {s}`\n", .{ heading, disc.key_name, v.when });
+            // The manifest's own spelling of the gate — one value bare, a
+            // set bracketed — so a single-value heading is unchanged.
+            try w.print("\n{s}# Variant `:{s} ", .{ heading, disc.key_name });
+            if (v.when.len == 1) {
+                try w.writeAll(v.when[0]);
+            } else {
+                try w.writeByte('[');
+                for (v.when, 0..) |x, i| {
+                    if (i > 0) try w.writeByte(' ');
+                    try w.writeAll(x);
+                }
+                try w.writeByte(']');
+            }
+            try w.writeAll("`\n");
             if (v.keys.len > 0) {
                 try w.writeAll("\n| Key | Type | Required | Default | Constraints |\n| --- | --- | --- | --- | --- |\n");
                 for (v.keys) |k| try writeKeyRow(w, k);
@@ -180,15 +193,28 @@ fn writeForm(w: *Writer, f: *const Model.Form, heading: []const u8) Writer.Error
 
     // Slot-local forms render in place, one heading level down, so the
     // page shows the closed local vocabulary next to the slot's form.
-    for (f.keys) |k| {
-        switch (k.value) {
-            .form_locals => |locals| {
-                for (locals) |lf| {
-                    try writeForm(w, &lf, "####");
-                }
-            },
-            else => {},
-        }
+    // Every carrier, not just the keyed one: a *positional* locals slot
+    // named its locals in the type sentence and then never showed them,
+    // which is the one surface a reader of the closed-positional-set
+    // recipe (`docs/portable-manifest-v1.md` §5.2) most needs.
+    for (f.keys) |k| try writeLocalBodies(w, k.value);
+    switch (f.positional) {
+        .kind => |shape| try writeLocalBodies(w, shape),
+        .none, .any => {},
+    }
+}
+
+/// Render the inline bodies a shape carries, whichever shape carries
+/// them — the open `form_locals` union, or the `.local` members of a
+/// closed head-set.
+fn writeLocalBodies(w: *Writer, shape: Model.ValueShape) Writer.Error!void {
+    switch (shape) {
+        .form_locals => |locals| for (locals) |lf| try writeForm(w, &lf, "####"),
+        .form_heads => |hs| for (hs.refs) |ref| switch (ref.body) {
+            .local => |lf| try writeForm(w, lf, "####"),
+            .global, .unresolved => {},
+        },
+        else => {},
     }
 }
 
@@ -261,11 +287,26 @@ fn writeTypeText(w: *Writer, shape: Model.ValueShape, pipes: PipeStyle) Writer.E
             try w.writeAll(">");
         },
         .form_any => try w.writeAll("form"),
-        .form_heads => |heads| {
+        .form_heads => |hs| {
             try w.writeAll("form: ");
-            for (heads, 0..) |h, i| {
+            for (hs.refs, 0..) |h, i| {
                 if (i > 0) try pipe(w, pipes);
-                try w.print("({s} …)", .{h.name});
+                // A local head is marked, because "which body does this
+                // name mean" is the one thing a reader of a head-set
+                // recipe cannot work out from the head alone — the local
+                // shadows any same-named global.
+                //
+                // `.unresolved` deliberately renders plain. In a slot it
+                // is already an `.err` with a precise message, so the
+                // marker would only repeat it; and in the value-kind
+                // table — which has no slot, so every local-only head
+                // arrives unresolved — "undeclared" would be false. The
+                // marker answers "which body", and only `.local` changes
+                // that answer.
+                switch (h.body) {
+                    .global, .unresolved => try w.print("({s} …)", .{h.name}),
+                    .local => try w.print("({s} …, local)", .{h.name}),
+                }
             }
         },
         .form_locals => |locals| {
@@ -466,36 +507,47 @@ fn writeDefaultText(w: *Writer, d: Model.Default) Writer.Error!void {
 /// one export target read by a human at a terminal — "exactly 1" and "at
 /// most 1" are the same facts a `1..1` / `0..1` reader has to translate.
 fn writeChildCounts(w: *Writer, shape: Model.ValueShape) Writer.Error!void {
-    const refs = switch (shape) {
-        .form_heads => |r| r,
+    const hs = switch (shape) {
+        .form_heads => |h| h,
         else => return,
     };
-    var any = false;
-    for (refs) |ref| {
-        if (ref.isBounded()) {
-            any = true;
-            break;
-        }
-    }
-    if (!any) return;
+    if (!hs.anyBounded()) return;
 
     try w.writeAll("\n| Head | Count |\n| --- | --- |\n");
-    for (refs) |ref| {
+    for (hs.refs) |ref| {
         try w.print("| `{s}` | ", .{ref.name});
-        if (ref.max) |mx| {
-            if (ref.min == mx) {
-                try w.print("exactly {d}", .{mx});
-            } else if (ref.min == 0) {
-                try w.print("at most {d}", .{mx});
-            } else {
-                try w.print("{d} to {d}", .{ ref.min, mx });
-            }
-        } else if (ref.min != 0) {
-            try w.print("at least {d}", .{ref.min});
-        } else {
-            try w.writeAll("any");
-        }
+        try writeCountProse(w, ref.min, ref.max);
         try w.writeAll(" |\n");
+    }
+    // The set's own count gets a row of its own, named for what it counts
+    // rather than for a head — "any of these" is the whole claim, and a
+    // reader scanning the Head column has to be able to see that this row
+    // is not one more head. It comes last because it is the sum of the
+    // rows above it.
+    if (hs.isBounded()) {
+        try w.writeAll("| *any of these* | ");
+        try writeCountProse(w, hs.min_children, hs.max_children);
+        try w.writeAll(" |\n");
+    }
+}
+
+/// "exactly 1" / "at most 1" / "1 to 3" / "at least 2" / "any". Prose
+/// rather than `min..max` notation because this is the one export target
+/// read by a human at a terminal. Shared by the per-head rows and the
+/// set's so the column reads uniformly.
+fn writeCountProse(w: *Writer, min: u16, max: ?u16) Writer.Error!void {
+    if (max) |mx| {
+        if (min == mx) {
+            try w.print("exactly {d}", .{mx});
+        } else if (min == 0) {
+            try w.print("at most {d}", .{mx});
+        } else {
+            try w.print("{d} to {d}", .{ min, mx });
+        }
+    } else if (min != 0) {
+        try w.print("at least {d}", .{min});
+    } else {
+        try w.writeAll("any");
     }
 }
 
@@ -568,6 +620,34 @@ test "markdown export renders a form's keys with type, default, constraints" {
     try testing.expect(std.mem.indexOf(u8, page, "| `:label` | `string` | yes | — | — |") != null);
 }
 
+test "a variant heading spells its :when as the manifest did — one bare, several bracketed" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const keys = [_]Model.Key{
+        .{ .name = "topology", .optional = false, .value = .symbol },
+    };
+    const strip_keys = [_]Model.Key{
+        .{ .name = "strip-index-format", .optional = true, .value = .symbol },
+    };
+    const variants = [_]Model.Variant{
+        .{ .when = &.{ "tri-strip", "line-strip" }, .keys = &strip_keys },
+        .{ .when = &.{"line-list"}, .keys = &.{} },
+    };
+    const forms = [_]Model.Form{.{
+        .name = "prim",
+        .keys = &keys,
+        .positional = .none,
+        .discriminator = .{ .key_name = "topology", .variants = &variants },
+    }};
+    const page = try emitOne(arena.allocator(), .{
+        .name = "gfx",
+        .forms = &forms,
+        .value_kinds = &.{},
+    });
+    try testing.expect(std.mem.indexOf(u8, page, "# Variant `:topology [tri-strip line-strip]`") != null);
+    try testing.expect(std.mem.indexOf(u8, page, "# Variant `:topology line-list`") != null);
+}
+
 test "bounded positional heads render as a count table" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -581,7 +661,7 @@ test "bounded positional heads render as a count table" {
     const forms = [_]Model.Form{.{
         .name = "render-pipeline",
         .keys = &.{},
-        .positional = .{ .kind = .{ .form_heads = &heads } },
+        .positional = .{ .kind = .{ .form_heads = .{ .refs = &heads } } },
     }};
     const page = try emitOne(arena.allocator(), .{
         .name = "gfx",
@@ -599,6 +679,41 @@ test "bounded positional heads render as a count table" {
     try testing.expect(std.mem.indexOf(u8, page, "| `constant` | any |") != null);
 }
 
+test "a positional locals slot renders its local bodies, head-set or not" {
+    // The keyed carrier always rendered its locals in place; the
+    // positional one named them in the type sentence and then never
+    // showed them, so the closed-positional-set recipe's whole vocabulary
+    // was invisible on the page a human reads.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const local: Model.Form = .{
+        .name = "entry",
+        .keys = &.{.{ .name = "binding", .value = .number, .optional = false }},
+        .positional = .none,
+    };
+    const heads = [_]Model.FormRef{
+        .{ .plugin = "p", .name = "entry", .body = .{ .local = &local } },
+        .{ .plugin = "p", .name = "buffer" },
+    };
+    const forms = [_]Model.Form{.{
+        .name = "bind-group",
+        .keys = &.{},
+        .positional = .{ .kind = .{ .form_heads = .{ .refs = &heads } } },
+    }};
+    const page = try emitOne(arena.allocator(), .{
+        .name = "p",
+        .forms = &forms,
+        .value_kinds = &.{},
+    });
+    // The body, one heading level down, exactly as a keyed local renders.
+    try testing.expect(std.mem.indexOf(u8, page, "#### `(entry …)`") != null);
+    try testing.expect(std.mem.indexOf(u8, page, "| `:binding` |") != null);
+    // And the type sentence marks which head means a local body, since a
+    // local shadows any same-named global.
+    try testing.expect(std.mem.indexOf(u8, page, "(entry …, local)") != null);
+    try testing.expect(std.mem.indexOf(u8, page, "(buffer …)") != null);
+}
+
 test "an all-unbounded positional head-set emits no count table" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -609,7 +724,7 @@ test "an all-unbounded positional head-set emits no count table" {
     const forms = [_]Model.Form{.{
         .name = "loose",
         .keys = &.{},
-        .positional = .{ .kind = .{ .form_heads = &heads } },
+        .positional = .{ .kind = .{ .form_heads = .{ .refs = &heads } } },
     }};
     const page = try emitOne(arena.allocator(), .{
         .name = "gfx",
@@ -665,7 +780,7 @@ test "table cells escape pipes and newlines so GFM rows survive" {
         .{ .plugin = "demo", .name = "rect" },
     };
     const keys = [_]Model.Key{
-        .{ .name = "child", .optional = false, .value = .{ .form_heads = &heads } },
+        .{ .name = "child", .optional = false, .value = .{ .form_heads = .{ .refs = &heads } } },
         .{ .name = "note", .optional = true, .value = .string, .description = "a|b\nc" },
     };
     const forms = [_]Model.Form{.{ .name = "canvas", .keys = &keys, .positional = .none }};

@@ -1,0 +1,197 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "headset-locals",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "head",
+          "description": "A global form, reachable from the resource slot by the additive fallback.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "text",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "string"
+              }
+            }
+          ]
+        },
+        {
+          "name": "bind-group-layout",
+          "description": "A layout whose entries are slot-local, behind a closed head-set.",
+          "open": false,
+          "positional": {
+            "kind": {
+              "kind": "form_heads",
+              "refs": [
+                {
+                  "plugin": "headset-locals",
+                  "name": "entry",
+                  "min": 1,
+                  "resolved": "local",
+                  "local": {
+                    "name": "entry",
+                    "description": "One binding. Its own positional slot is closed the same way.",
+                    "open": false,
+                    "positional": {
+                      "kind": {
+                        "kind": "form_heads",
+                        "refs": [
+                          {
+                            "plugin": "headset-locals",
+                            "name": "buffer",
+                            "max": 1,
+                            "resolved": "local",
+                            "local": {
+                              "name": "buffer",
+                              "description": "Slot-local buffer resource; no global `buffer` exists.",
+                              "open": false,
+                              "positional": "none",
+                              "keys": [
+                                {
+                                  "name": "kind",
+                                  "optional": false,
+                                  "description": "",
+                                  "value": {
+                                    "kind": "symbol"
+                                  }
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "plugin": "headset-locals",
+                            "name": "storage-texture",
+                            "resolved": "local",
+                            "local": {
+                              "name": "storage-texture",
+                              "description": "Slot-local storage texture; no global one exists either.",
+                              "open": false,
+                              "positional": "none",
+                              "keys": [
+                                {
+                                  "name": "format",
+                                  "optional": false,
+                                  "description": "",
+                                  "value": {
+                                    "kind": "symbol"
+                                  }
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "plugin": "headset-locals",
+                            "name": "head"
+                          }
+                        ]
+                      }
+                    },
+                    "keys": [
+                      {
+                        "name": "binding",
+                        "optional": false,
+                        "description": "",
+                        "value": {
+                          "kind": "number"
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          "keys": [
+            {
+              "name": "name",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": [
+        {
+          "name": "bgl-resource",
+          "description": "What one binding may hold. Local bodies, one global, and counts.",
+          "shape": {
+            "kind": "form_heads",
+            "refs": [
+              {
+                "plugin": "",
+                "name": "buffer",
+                "max": 1,
+                "resolved": "unresolved"
+              },
+              {
+                "plugin": "",
+                "name": "storage-texture",
+                "resolved": "unresolved"
+              },
+              {
+                "plugin": "headset-locals",
+                "name": "head"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bgl-entry-item",
+          "description": "One entry of a layout. Exactly one `entry` is required.",
+          "shape": {
+            "kind": "form_heads",
+            "refs": [
+              {
+                "plugin": "",
+                "name": "entry",
+                "min": 1,
+                "resolved": "unresolved"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `bgl-resource` head-set emitted as a closed `oneOf` — 2 of 3 head(s) resolve to slot-local forms and are emitted inline, the rest as `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin_name": "headset-locals",
+      "form_name": "entry",
+      "kind_name": "bgl-resource"
+    },
+    {
+      "code": "local_forms_emitted_inline",
+      "severity": "info",
+      "message": "positional slot on form `entry` declares 2 local form(s) behind a 3-head head-set — emitted as a closed inline union with no global fallback branch; a head outside the set is `not_head_member`",
+      "plugin_name": "headset-locals",
+      "form_name": "entry"
+    },
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `bgl-entry-item` head-set emitted as a closed `oneOf` — 1 of 1 head(s) resolve to slot-local forms and are emitted inline, the rest as `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin_name": "headset-locals",
+      "form_name": "bind-group-layout",
+      "kind_name": "bgl-entry-item"
+    },
+    {
+      "code": "local_forms_emitted_inline",
+      "severity": "info",
+      "message": "positional slot on form `bind-group-layout` declares 1 local form(s) behind a 1-head head-set — emitted as a closed inline union with no global fallback branch; a head outside the set is `not_head_member`",
+      "plugin_name": "headset-locals",
+      "form_name": "bind-group-layout"
+    }
+  ]
+}

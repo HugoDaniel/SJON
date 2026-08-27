@@ -1,8 +1,8 @@
-; Per-head positional counts — the `(head :name … :min … :max …)` spelling
+; Per-head positional counts: the `(head :name … :min … :max …)` spelling
 ; of `:heads`.
 ;
 ; A head-set says *which* heads a slot accepts. On a form's `:positional`
-; slot — the one place a head has a repeated population — it can also say
+; slot (the one place a head has a repeated population) it can also say
 ; *how many*. The compact `:names [a b c]` spelling cannot: the two
 ; spellings are mutually exclusive, so declaring one bound means writing
 ; every head as a `(head …)` child.
@@ -11,13 +11,26 @@
 ; read carefully:
 ;
 ;   :min 1 :max 1   exactly one
-;   :max 1          at most one — none is fine
+;   :max 1          at most one, none is fine
 ;   (no bound)      any number, including none
+;
+; A SECOND level of count sits on the set itself: `:min-children` /
+; `:max-children`, how many children of *any* head in the set the slot
+; holds. `(bgl-entry …)` below is the shape that needs it: a
+; `GPUBindGroupLayoutEntry` binds exactly one resource, and no per-head
+; spelling can say so. "at most one buffer AND at most one sampler" is
+; satisfied by one of each, and by none at all.
+;
+; The two levels are independent claims and both are declared there:
+; `:max 1` per head ("not two of the same") and `:min-children 1
+; :max-children 1` over the set ("exactly one, whichever"). When they
+; overlap, the validator suppresses the set's report in favour of the
+; head's, because the per-head diagnostic names the line to delete.
 ;
 ; Two shapes here exist to pin what the counts *don't* do:
 ;
 ;   * `(section-holder :section …)` reuses `pipeline-section` on a KEYED
-;     slot, where the bounds are inert — a keyed slot holds one value, so
+;     slot, where the bounds are inert: a keyed slot holds one value, so
 ;     `:max 1` is trivially satisfied and `:min 1` has no set to be
 ;     missing from. Inert rather than rejected, so a bounded kind stays
 ;     shareable between a slot with a population and one without.
@@ -28,19 +41,23 @@
 ; Export side: JSON Schema renders the counts as one `contains` +
 ; `minContains` / `maxContains` per bounded head, in the `$children`
 ; array's `allOf` beside the whole-set `items` union. Not
-; `minItems`/`maxItems` — those bound the array's total length, which says
-; nothing about how many children carry any one head. TypeScript cannot
-; express a per-member array count at all, so the `.d.ts` carries the
-; bounds as a doc comment and nothing more.
+; `minItems`/`maxItems`; those bound the array's total length, which says
+; nothing about how many children carry any one head. The set's bound is
+; one more entry in the same `allOf`, whose `contains` is the `anyOf` of
+; the members'. A floor at either level also puts `$children` in
+; `required`, because the JSON bridge omits the key entirely for a
+; childless form and `minContains` would have nothing to judge.
+; TypeScript cannot express a per-member array count at all, so the
+; `.d.ts` carries the bounds as a doc comment and nothing more.
 (plugin :name head-counts :version "1.0.0"
-  :description "Reference plugin for per-head positional counts on a head-set."
+  :description "Reference plugin for positional counts on a head-set, per head and over the whole set."
 
   (form :name vertex
     :description "The vertex stage of a pipeline."
     (key :name entry :type symbol :optional false))
 
   (form :name fragment
-    :description "The fragment stage. Optional — a depth-only pass has none."
+    :description "The fragment stage. Optional, because a depth-only pass has none."
     (key :name entry :type symbol :optional false))
 
   (form :name constant
@@ -62,10 +79,57 @@
     (key :name name :type symbol :optional false))
 
   (form :name section-holder
-    :description "Same kind, keyed slot — the counts ride along inertly here."
+    :description "Same kind, keyed slot: the counts ride along inertly here."
     (key :name section :type pipeline-section :optional true))
 
   (form :name scratch-pipeline
     :description "Open form, same bounded slot: `:open true` does not silence the counts."
     :open true
-    :positional pipeline-section))
+    :positional pipeline-section)
+
+  ; ---- the count over the whole set --------------------------------------
+
+  (form :name buffer
+    :description "A buffer binding."
+    (key :name type :type symbol :optional false))
+
+  (form :name sampler
+    :description "A sampler binding."
+    (key :name type :type symbol :optional false))
+
+  (form :name texture
+    :description "A texture binding."
+    (key :name sample-type :type symbol :optional false))
+
+  (value-kind :name bgl-resource
+    :description "The one resource a bind-group-layout entry binds."
+    :underlying form
+    :heads (head-set :min-children 1 :max-children 1
+      (head :name buffer  :max 1 :description "A buffer binding.")
+      (head :name sampler :max 1 :description "A sampler binding.")
+      (head :name texture :max 1 :description "A texture binding.")))
+
+  (form :name bgl-entry
+    :description "Exactly one resource: the claim per-head bounds cannot make."
+    :positional bgl-resource
+    (key :name binding :type number :optional false))
+
+  ; The compact `:names` spelling carrying a set bound, which is legal on
+  ; purpose: the aggregate needs no per-head metadata. A ceiling with no
+  ; floor, so a `(data …)` with no generator is fine: the direction a
+  ; `contains` without an explicit `minContains: 0` would get wrong.
+  (value-kind :name data-shape-section
+    :description "The one generator a (data …) may carry, if any."
+    :underlying form
+    :heads (head-set :names [cube sphere] :max-children 1))
+
+  (form :name cube
+    (key :name size :type number :optional false))
+
+  (form :name sphere
+    (key :name radius :type number :optional false))
+
+  (form :name data
+    :description "At most one generator: a ceiling-only set bound."
+    :positional data-shape-section
+    (key :name name :type symbol :optional false)))

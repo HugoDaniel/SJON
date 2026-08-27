@@ -1,0 +1,30 @@
+; `(variant :when [a b] …)` — one key set for several discriminant values.
+;
+; `:when` takes one symbol or a vector of symbols; selection is
+; MEMBERSHIP, so every listed value activates the variant's keys and any
+; other value does not. This is WebGPU's own rule for `stripIndexFormat`,
+; read for `triangle-strip` AND `line-strip` and for neither list — the
+; shape that could not be declared before: two identical single-value
+; variants collide on the key (`variant_key_collision`, and rightly so —
+; two declarations of one slot can drift), and one variant could name
+; only one value.
+;
+; The key-collision check is exactly as strict as before; what changed is
+; that one declaration reaches several values, so the question it guards
+; against never arises. (The defaulted-discriminant reading of the same
+; schema is `effective-axis-d-default-selects-no-variant`.)
+(plugin :name gfx :version "1.0.0"
+  (value-kind :name topo :underlying symbol
+    :members (member-set :values [tri-list tri-strip line-list line-strip]))
+  (form :name prim :discriminant topology
+    (key :name topology :type topo :optional false)
+    (variant :when [tri-strip line-strip]
+      (key :name strip-format :type symbol :optional true))
+    (variant :when line-list
+      (key :name line-width :type number :optional false))))
+
+(prim :topology tri-strip :strip-format uint16)    ; listed — clean
+(prim :topology line-strip :strip-format uint16)   ; listed — clean
+(prim :topology tri-list :strip-format uint16)     ; not listed — the key is unknown
+(prim :topology line-list :line-width 2)           ; the single-value sibling, unchanged
+(prim :topology line-list)                         ; …sweeps included

@@ -3,7 +3,7 @@
 //! The repo's top-level `build.zig` already wires a `plugin-fixtures` step
 //! that builds and stages `plugin.wasm` next to this file. This script
 //! mirrors that build so the provider example can also be built in isolation
-//! (`zig build --build-file examples/plugins/uniforms/build.zig`) — useful as
+//! (`zig build --build-file examples/plugins/uniforms/build.zig`), useful as
 //! a copy-and-paste seed for downstream provider authors who don't want to
 //! reach into the SJON tree.
 

@@ -38,47 +38,59 @@ pub const Schema = struct {
         return self;
     }
 
-    /// Panic if any form exceeds `Plugin.MAX_FORM_KEYS`. The required-key
-    /// bitset in the validator is u64-backed; over-cap forms would silently
-    /// drop tracking past index 63. Recurses through variant key sets and both
-    /// slot-local form carriers (`KeySpec.local_forms` and
-    /// `FormSpec.local_forms`) so an over-cap nested form trips here at
-    /// `Schema.init` rather than corrupting required-key tracking at validate
-    /// time. Recursion is bounded by
-    /// `Plugin.MAX_LOCAL_FORM_DEPTH` (loader-enforced for manifests) and by
-    /// the finite, developer-authored shape of static plugin literals — this
-    /// runs at schema construction, not on the user-input walk path.
+    /// Panic if any form exceeds `Plugin.MAX_FORM_KEYS`, or if any
+    /// slot-local form declares `:lowering`. The required-key bitset in the
+    /// validator is u64-backed; over-cap forms would silently drop tracking
+    /// past index 63. A local's `:lowering` would be silently dead:
+    /// `validateLowering` and the produces graph walk top-level forms only,
+    /// and the lowering worklist resolves a local head to its local body,
+    /// never to a hook (`ManifestLoader` rejects it as `invalid_manifest`;
+    /// this is the mirror for static plugin literals). Recurses through
+    /// variant key sets and both slot-local form carriers
+    /// (`KeySpec.local_forms` and `FormSpec.local_forms`) so an over-cap or
+    /// lowerable nested form trips here at `Schema.init` rather than
+    /// corrupting required-key tracking — or lying about lowering — at
+    /// validate time. Recursion is bounded by `Plugin.MAX_LOCAL_FORM_DEPTH`
+    /// (loader-enforced for manifests) and by the finite, developer-authored
+    /// shape of static plugin literals — this runs at schema construction,
+    /// not on the user-input walk path.
     pub fn assertFormKeyCaps(self: Schema) void {
         for (self.plugins) |*p| {
             for (p.forms) |*f| {
-                assertOneFormKeyCaps(p.name, f);
+                assertOneFormKeyCaps(p.name, f, false);
             }
         }
     }
 
-    fn assertOneFormKeyCaps(plugin_name: []const u8, f: *const Plugin.FormSpec) void {
+    fn assertOneFormKeyCaps(plugin_name: []const u8, f: *const Plugin.FormSpec, is_local: bool) void {
         if (f.keys.len > Plugin.MAX_FORM_KEYS) {
             std.debug.panic(
                 "plugin '{s}' form '{s}' has {d} keys; Plugin.MAX_FORM_KEYS is {d}",
                 .{ plugin_name, f.name, f.keys.len, Plugin.MAX_FORM_KEYS },
             );
         }
+        if (is_local and f.lowering != null) {
+            std.debug.panic(
+                "plugin '{s}' slot-local form '{s}' declares lowering; a slot-local form cannot lower",
+                .{ plugin_name, f.name },
+            );
+        }
         for (f.keys) |*k| {
-            for (k.local_forms) |*lf| assertOneFormKeyCaps(plugin_name, lf);
+            for (k.local_forms) |*lf| assertOneFormKeyCaps(plugin_name, lf, true);
         }
         // Positional slot-local forms (FormSpec.local_forms) — the positional
         // carrier, recursed the same as the keyed one above.
-        for (f.local_forms) |*lf| assertOneFormKeyCaps(plugin_name, lf);
+        for (f.local_forms) |*lf| assertOneFormKeyCaps(plugin_name, lf, true);
         if (f.variants) |variants| {
             for (variants) |*v| {
                 if (v.keys.len > Plugin.MAX_FORM_KEYS) {
                     std.debug.panic(
                         "plugin '{s}' form '{s}' variant '{s}' has {d} keys; Plugin.MAX_FORM_KEYS is {d}",
-                        .{ plugin_name, f.name, v.when, v.keys.len, Plugin.MAX_FORM_KEYS },
+                        .{ plugin_name, f.name, v.when[0], v.keys.len, Plugin.MAX_FORM_KEYS },
                     );
                 }
                 for (v.keys) |*k| {
-                    for (k.local_forms) |*lf| assertOneFormKeyCaps(plugin_name, lf);
+                    for (k.local_forms) |*lf| assertOneFormKeyCaps(plugin_name, lf, true);
                 }
             }
         }
@@ -813,6 +825,19 @@ fn ambiguityMessage(
     return buf.toOwnedSlice(a);
 }
 
+/// Render `names` as "`a`, `b`, `c`" — each backticked, comma-joined. Owned
+/// by `a`; the fragments are borrowed.
+fn backtickList(a: Allocator, names: []const []const u8) Allocator.Error![]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    for (names, 0..) |n, i| {
+        if (i > 0) try buf.appendSlice(a, ", ");
+        try buf.append(a, '`');
+        try buf.appendSlice(a, n);
+        try buf.append(a, '`');
+    }
+    return buf.toOwnedSlice(a);
+}
+
 /// Deep-copy aggregate diagnostics built in a validator's scratch arena into
 /// caller-owned `a` allocations — the ownership `runAggregateValidators` /
 /// `freeDiagnostics` expect (`message` + each path segment + the path slice +
@@ -1357,20 +1382,29 @@ fn checkForm(
 
     const variants = form.variants orelse &.{};
     for (variants) |v| {
-        var found = false;
-        for (ms) |m| {
-            if (std.mem.eql(u8, v.when, m.name)) {
-                found = true;
-                break;
+        // Once per listed value: `:when [tri-strip nope]` reports `nope`
+        // and keeps `tri-strip`, so a set with one typo names the typo
+        // rather than rejecting the whole declaration.
+        for (v.when) |w| {
+            var found = false;
+            for (ms) |m| {
+                if (std.mem.eql(u8, w, m.name)) {
+                    found = true;
+                    break;
+                }
             }
-        }
-        if (!found) {
+            if (found) continue;
+            const when_text = try v.whenText(a);
             try diags.append(a, .{
                 .span = .{ .start = 0, .end = 0 },
-                .message = try std.fmt.allocPrint(
+                .message = if (v.when.len == 1) try std.fmt.allocPrint(
                     a,
                     "form `{s}` variant `:when {s}` is not a member of discriminant `:{s}`",
-                    .{ form.name, v.when, dkey.name },
+                    .{ form.name, when_text, dkey.name },
+                ) else try std.fmt.allocPrint(
+                    a,
+                    "form `{s}` variant `:when {s}` lists `{s}`, which is not a member of discriminant `:{s}`",
+                    .{ form.name, when_text, w, dkey.name },
                 ),
                 .severity = .err,
                 .code = .unknown_discriminant_value,
@@ -1381,6 +1415,9 @@ fn checkForm(
 
     // Key-name collisions: every variant key must be distinct from every
     // common key, and from every prior variant key. One name = one slot.
+    // A `:when` listing several values does not loosen this — the point of
+    // one declaration reaching several values is that a key still lives in
+    // exactly one variant.
     for (variants, 0..) |v, vi| {
         for (v.keys) |vk| {
             for (form.keys) |ck| {
@@ -1390,7 +1427,7 @@ fn checkForm(
                         .message = try std.fmt.allocPrint(
                             a,
                             "form `{s}` variant `:when {s}` redeclares key `:{s}` (also in common keys)",
-                            .{ form.name, v.when, vk.name },
+                            .{ form.name, try v.whenText(a), vk.name },
                         ),
                         .severity = .err,
                         .code = .variant_key_collision,
@@ -1406,7 +1443,7 @@ fn checkForm(
                             .message = try std.fmt.allocPrint(
                                 a,
                                 "form `{s}` variant `:when {s}` redeclares key `:{s}` (also in variant `:when {s}`)",
-                                .{ form.name, v.when, vk.name, prior.when },
+                                .{ form.name, try v.whenText(a), vk.name, try prior.whenText(a) },
                             ),
                             .severity = .err,
                             .code = .variant_key_collision,
@@ -1492,11 +1529,122 @@ fn keyAggregatePath(
     return out;
 }
 
-/// Resolve every `:produces` entry on a form's `lowering` declaration
-/// against the aggregated form catalog. Bare entries (`shader`) lookup
-/// across all plugins — ambiguity = collision; qualified entries
-/// (`pngine/shader`) target one plugin. The hook id itself is opaque
-/// to the substrate (no resolution), so this only checks `:produces`.
+/// Push every slot-local form declared *directly* on `f` — both carriers:
+/// `KeySpec.local_forms` on the base keys and on every variant's keys, and
+/// the positional `FormSpec.local_forms`. One level only; callers loop, so
+/// nested locals are reached without host-stack recursion. Shared by the
+/// `:produces` reachability closure and the declaring-form hint so the two
+/// cannot disagree on what "declared inside" means.
+fn pushDirectLocalForms(
+    a: Allocator,
+    stack: *std.ArrayList(*const Plugin.FormSpec),
+    f: *const Plugin.FormSpec,
+) Allocator.Error!void {
+    for (f.keys) |*k| {
+        for (k.local_forms) |*lf| try stack.append(a, lf);
+    }
+    if (f.variants) |variants| {
+        for (variants) |*v| {
+            for (v.keys) |*k| {
+                for (k.local_forms) |*lf| try stack.append(a, lf);
+            }
+        }
+    }
+    for (f.local_forms) |*lf| try stack.append(a, lf);
+}
+
+/// The slot-local heads a `:produces` list can reach: every local form
+/// declared — at any depth, through either carrier — inside a form the same
+/// list resolves globally (bare or qualified). Names only; a body is chosen
+/// at the site, local-first (`Validator.matchLocalForm`), and this decides
+/// nothing but "declared, and reachable from here".
+///
+/// Why *reachable from the list* rather than "any local anywhere": an
+/// emitted form is either a root of a lowered layer or nested inside another
+/// emitted form, so an emitted local can only ever sit under its declaring
+/// form — and the all-depths contract (`Lowering.validateEmittedForm`) puts
+/// that declaring form in this very list. The reachable set is therefore
+/// exactly the set of local heads a hook can legally place; a local listed
+/// without its declaring form is a manifest that cannot be right, and the
+/// caller says which form is missing. Entries the catalog cannot resolve
+/// (unknown, ambiguous, absent plugin) contribute nothing — they are reported
+/// on their own by `checkLowering`, and a local under an ambiguous root
+/// resolves once its root does.
+///
+/// Locals never carry `:lowering` (loader-rejected, `Schema.init`-asserted),
+/// so a head resolved here adds no edge to `buildLoweringGraph` — the graph
+/// keeps resolving globally, and only a global lowerable form is an edge.
+fn collectReachableLocalHeads(
+    schema: Schema,
+    a: Allocator,
+    produces: []const []const u8,
+) Allocator.Error!std.StringHashMapUnmanaged(void) {
+    var reachable: std.StringHashMapUnmanaged(void) = .empty;
+    errdefer reachable.deinit(a);
+    var stack: std.ArrayList(*const Plugin.FormSpec) = .empty;
+    defer stack.deinit(a);
+    for (produces) |head| {
+        const q = Plugin.splitQualified(head);
+        switch (schema.lookupForm(q.name, q.namespace)) {
+            .found => |hit| try stack.append(a, hit.form),
+            else => {},
+        }
+    }
+    // Locals are owned slices in a finite spec tree (loader-bounded by
+    // `Plugin.MAX_LOCAL_FORM_DEPTH`), so the worklist terminates without a
+    // visited set; a name reached twice is a no-op `put`.
+    while (stack.pop()) |f| {
+        const mark = stack.items.len;
+        try pushDirectLocalForms(a, &stack, f);
+        for (stack.items[mark..]) |lf| try reachable.put(a, lf.name, {});
+    }
+    return reachable;
+}
+
+/// Top-level forms (bare names, catalog order) that declare a slot-local
+/// form named `head` somewhere in their local tree — the forms a `:produces`
+/// list would have to name for `head` to resolve. Error-path only; feeds the
+/// `unknown_form` hint. Empty when `head` is nobody's local.
+fn localHeadDeclaringForms(
+    schema: Schema,
+    a: Allocator,
+    head: []const u8,
+) Allocator.Error![]const []const u8 {
+    var owners: std.ArrayList([]const u8) = .empty;
+    errdefer owners.deinit(a);
+    var stack: std.ArrayList(*const Plugin.FormSpec) = .empty;
+    defer stack.deinit(a);
+    for (schema.plugins) |*p| {
+        for (p.forms) |*f| {
+            stack.clearRetainingCapacity();
+            try stack.append(a, f);
+            const owns = blk: while (stack.pop()) |cur| {
+                const mark = stack.items.len;
+                try pushDirectLocalForms(a, &stack, cur);
+                for (stack.items[mark..]) |lf| {
+                    if (std.mem.eql(u8, lf.name, head)) break :blk true;
+                }
+            } else false;
+            if (!owns) continue;
+            // Two plugins declaring the same-named owner (an ambiguous root)
+            // would name it twice; the ambiguity is reported on its own.
+            for (owners.items) |seen| {
+                if (std.mem.eql(u8, seen, f.name)) break;
+            } else try owners.append(a, f.name);
+        }
+    }
+    return owners.toOwnedSlice(a);
+}
+
+/// Resolve every `:produces` entry on a form's `lowering` declaration.
+/// A bare entry (`shader`) resolves **local-first**, mirroring the site
+/// (`Validator.validateFormHead` step 0): if it names a slot-local form
+/// reachable from this list (`collectReachableLocalHeads`) it resolves,
+/// whatever the global catalog says; otherwise it looks up across all
+/// plugins — ambiguity = collision. A qualified entry (`pngine/shader`)
+/// targets one plugin and bypasses locals, exactly as a qualified head does
+/// at the site. The hook id itself is opaque to the substrate (no
+/// resolution), so this only checks `:produces`.
 fn checkLowering(
     schema: Schema,
     a: Allocator,
@@ -1505,24 +1653,40 @@ fn checkLowering(
     form: *const Plugin.FormSpec,
     low: Plugin.LoweringSpec,
 ) Allocator.Error!void {
+    var reachable_locals = try collectReachableLocalHeads(schema, a, low.produces);
+    defer reachable_locals.deinit(a);
     for (low.produces) |head| {
         const head_split = Plugin.splitQualified(head);
         const head_ns = head_split.namespace;
         const head_name = head_split.name;
+        // Slot-local, reachable through a form this list names: resolved.
+        // Local-first — a same-named global (found or ambiguous) is shadowed
+        // at the site, so it is shadowed here too.
+        if (head_ns == null and reachable_locals.contains(head_name)) continue;
         switch (schema.lookupForm(head_name, head_ns)) {
             .not_found => {
                 // A *qualified* head whose plugin is absent dangles on load
                 // order, not on a typo — call that out with a distinct code
                 // (collection over abort: the edge is reported, never fatal).
                 // Bare heads and qualified heads into a present-but-formless
-                // plugin keep the generic `unknown_form`.
+                // plugin keep the generic `unknown_form`; a bare head that is
+                // somebody's slot-local names the declaring form(s) the list
+                // would have to carry for it to resolve.
                 const absent_plugin = head_ns != null and !schema.hasPlugin(head_ns.?);
+                const declaring: []const []const u8 = if (head_ns == null)
+                    try localHeadDeclaringForms(schema, a, head_name)
+                else
+                    &.{};
                 try diags.append(a, .{
                     .span = .{ .start = 0, .end = 0 },
                     .message = if (absent_plugin) try std.fmt.allocPrint(
                         a,
                         "form `{s}` `:lowering` produces head `{s}` whose plugin `{s}` is not loaded",
                         .{ form.name, head, head_ns.? },
+                    ) else if (declaring.len > 0) try std.fmt.allocPrint(
+                        a,
+                        "form `{s}` `:lowering` produces head `{s}` does not resolve to any declared form; `{s}` is slot-local to {s} and resolves only through a `:produces` entry naming that form",
+                        .{ form.name, head, head, try backtickList(a, declaring) },
                     ) else try std.fmt.allocPrint(
                         a,
                         "form `{s}` `:lowering` produces head `{s}` does not resolve to any declared form",
@@ -3655,7 +3819,7 @@ test "validateForms: discriminant resolving to closed MemberSet → clean" {
                 .discriminant_name = "kind",
                 .discriminant_idx = 0,
                 .variants = &.{
-                    .{ .when = "x", .keys = &.{} },
+                    .{ .when = &.{"x"}, .keys = &.{} },
                 },
             },
         },
@@ -3685,7 +3849,7 @@ test "validateForms: discriminant on bare .symbol emits discriminant_not_closed_
                 .discriminant_name = "kind",
                 .discriminant_idx = 0,
                 .variants = &.{
-                    .{ .when = "x", .keys = &.{} },
+                    .{ .when = &.{"x"}, .keys = &.{} },
                 },
             },
         },
@@ -3709,7 +3873,7 @@ test "validateForms: variant :when not in member-set emits unknown_discriminant_
                 .discriminant_name = "kind",
                 .discriminant_idx = 0,
                 .variants = &.{
-                    .{ .when = "bogus", .keys = &.{} },
+                    .{ .when = &.{"bogus"}, .keys = &.{} },
                 },
             },
         },
@@ -3729,6 +3893,82 @@ test "validateForms: variant :when not in member-set emits unknown_discriminant_
     try testing.expect(std.mem.indexOf(u8, diags[0].message, "bogus") != null);
 }
 
+test "validateForms: a multi-value :when is checked once per value, naming the value" {
+    // `[x nope]` reports `nope` and keeps `x`; a set with one typo names
+    // the typo rather than rejecting the whole declaration.
+    const p: Plugin.Plugin = .{
+        .name = "demo",
+        .forms = &.{
+            .{
+                .name = "thing",
+                .keys = &.{
+                    .{ .name = "kind", .value_type = .{ .named = .{ .name = "thing-kind" } }, .optional = false },
+                },
+                .discriminant_name = "kind",
+                .discriminant_idx = 0,
+                .variants = &.{
+                    .{ .when = &.{ "x", "nope", "y" }, .keys = &.{} },
+                },
+            },
+        },
+        .value_kinds = &.{
+            .{
+                .name = "thing-kind",
+                .underlying = .symbol,
+                .members = .{ .members = &.{ .{ .name = "x" }, .{ .name = "y" } } },
+            },
+        },
+    };
+    const schema = Schema.init(&.{p});
+    const diags = try schema.validateForms(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 1), diags.len);
+    try testing.expectEqual(Ast.Diagnostic.Code.unknown_discriminant_value, diags[0].code);
+    try testing.expectEqualStrings(
+        "form `thing` variant `:when [x nope y]` lists `nope`, which is not a member of discriminant `:kind`",
+        diags[0].message,
+    );
+}
+
+test "validateForms: a multi-value :when keeps the key-collision check as strict" {
+    // One declaration reaching several values is what makes the collision
+    // question never arise — but the check itself is unchanged, and the
+    // message spells the offending variant as the author did.
+    const p: Plugin.Plugin = .{
+        .name = "demo",
+        .forms = &.{
+            .{
+                .name = "thing",
+                .keys = &.{
+                    .{ .name = "kind", .value_type = .{ .named = .{ .name = "thing-kind" } }, .optional = false },
+                },
+                .discriminant_name = "kind",
+                .discriminant_idx = 0,
+                .variants = &.{
+                    .{ .when = &.{ "x", "y" }, .keys = &.{.{ .name = "dup", .value_type = .number, .optional = true }} },
+                    .{ .when = &.{"z"}, .keys = &.{.{ .name = "dup", .value_type = .string, .optional = true }} },
+                },
+            },
+        },
+        .value_kinds = &.{
+            .{
+                .name = "thing-kind",
+                .underlying = .symbol,
+                .members = .{ .members = &.{ .{ .name = "x" }, .{ .name = "y" }, .{ .name = "z" } } },
+            },
+        },
+    };
+    const schema = Schema.init(&.{p});
+    const diags = try schema.validateForms(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 1), diags.len);
+    try testing.expectEqual(Ast.Diagnostic.Code.variant_key_collision, diags[0].code);
+    try testing.expectEqualStrings(
+        "form `thing` variant `:when z` redeclares key `:dup` (also in variant `:when [x y]`)",
+        diags[0].message,
+    );
+}
+
 test "validateForms: variant key collides with common key emits variant_key_collision" {
     const p: Plugin.Plugin = .{
         .name = "demo",
@@ -3743,7 +3983,7 @@ test "validateForms: variant key collides with common key emits variant_key_coll
                 .discriminant_idx = 0,
                 .variants = &.{
                     .{
-                        .when = "x",
+                        .when = &.{"x"},
                         .keys = &.{
                             .{ .name = "shared", .value_type = .string, .optional = true },
                         },
@@ -3779,8 +4019,8 @@ test "validateForms: same key in two variants emits variant_key_collision" {
                 .discriminant_name = "kind",
                 .discriminant_idx = 0,
                 .variants = &.{
-                    .{ .when = "x", .keys = &.{.{ .name = "dup", .value_type = .number, .optional = true }} },
-                    .{ .when = "y", .keys = &.{.{ .name = "dup", .value_type = .string, .optional = true }} },
+                    .{ .when = &.{"x"}, .keys = &.{.{ .name = "dup", .value_type = .number, .optional = true }} },
+                    .{ .when = &.{"y"}, .keys = &.{.{ .name = "dup", .value_type = .string, .optional = true }} },
                 },
             },
         },
@@ -4199,6 +4439,294 @@ test "validateLowering: qualified head into a present plugin missing the form st
     defer freeDiagnostics(testing.allocator, diags);
     try testing.expectEqual(@as(usize, 1), diags.len);
     try testing.expectEqual(Ast.Diagnostic.Code.unknown_form, diags[0].code);
+}
+
+// --- `:produces` naming a slot-local head (S12) ------------------------------
+//
+// A hook that emits `(bind-group (entry …))`, where `entry` is slot-local to
+// `bind-group`, must list `entry` (the contract checks every depth) and the
+// list must resolve. A bare `:produces` head therefore resolves local-first:
+// it names a slot-local form reachable through a form the same list resolves,
+// or a global form as before. Qualified heads bypass locals, as at the site.
+
+test "validateLowering: produces head resolves to a positional slot-local of a listed form" {
+    const p: Plugin.Plugin = .{
+        .name = "pngine",
+        .forms = &.{
+            .{
+                .name = "init",
+                .lowering = .{ .hook = "pngine/init-v1", .produces = &.{ "bind-group", "entry" } },
+            },
+            .{
+                .name = "bind-group",
+                .local_forms = &.{.{ .name = "entry", .keys = &.{.{ .name = "binding", .value_type = .number }} }},
+            },
+        },
+    };
+    const schema = Schema.init(&.{p});
+    const diags = try schema.validateLowering(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 0), diags.len);
+}
+
+test "validateLowering: produces head resolves to a keyed slot-local (KeySpec.local_forms) of a listed form" {
+    const p: Plugin.Plugin = .{
+        .name = "pngine",
+        .forms = &.{
+            .{
+                .name = "init",
+                .lowering = .{ .hook = "pngine/init-v1", .produces = &.{ "pipeline", "layout" } },
+            },
+            .{
+                .name = "pipeline",
+                .keys = &.{.{ .name = "layout", .value_type = .form, .local_forms = &.{.{ .name = "layout" }} }},
+            },
+        },
+    };
+    const schema = Schema.init(&.{p});
+    const diags = try schema.validateLowering(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 0), diags.len);
+}
+
+test "validateLowering: produces head resolves to a slot-local of a variant key of a listed form" {
+    const p: Plugin.Plugin = .{
+        .name = "pngine",
+        .forms = &.{
+            .{
+                .name = "init",
+                .lowering = .{ .hook = "pngine/init-v1", .produces = &.{ "target", "view" } },
+            },
+            .{
+                .name = "target",
+                .keys = &.{.{ .name = "kind", .value_type = .symbol }},
+                .discriminant_name = "kind",
+                .discriminant_idx = 0,
+                .variants = &.{.{
+                    .when = &.{"texture"},
+                    .keys = &.{.{ .name = "view", .value_type = .form, .local_forms = &.{.{ .name = "view" }} }},
+                }},
+            },
+        },
+    };
+    const schema = Schema.init(&.{p});
+    const diags = try schema.validateLowering(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 0), diags.len);
+}
+
+test "validateLowering: produces head resolves to a local of a local (two deep) of a listed form" {
+    // `bind-group` → local `entry` → local `range`: only the root is global,
+    // and the list names all three. Reachability is transitive through both
+    // carriers, so `range` resolves through `entry` through `bind-group`.
+    const p: Plugin.Plugin = .{
+        .name = "pngine",
+        .forms = &.{
+            .{
+                .name = "init",
+                .lowering = .{ .hook = "pngine/init-v1", .produces = &.{ "bind-group", "entry", "range" } },
+            },
+            .{
+                .name = "bind-group",
+                .local_forms = &.{.{
+                    .name = "entry",
+                    .keys = &.{.{ .name = "span", .value_type = .form, .local_forms = &.{.{ .name = "range" }} }},
+                }},
+            },
+        },
+    };
+    const schema = Schema.init(&.{p});
+    const diags = try schema.validateLowering(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 0), diags.len);
+}
+
+test "validateLowering: slot-local produces head reaches through a qualified root" {
+    // The root is listed qualified (`gpu/bind-group`); its local `entry` is
+    // listed bare, the only spelling an emitted local can have.
+    const gpu: Plugin.Plugin = .{
+        .name = "gpu",
+        .forms = &.{.{ .name = "bind-group", .local_forms = &.{.{ .name = "entry" }} }},
+    };
+    const pngine: Plugin.Plugin = .{
+        .name = "pngine",
+        .forms = &.{
+            .{
+                .name = "init",
+                .lowering = .{ .hook = "pngine/init-v1", .produces = &.{ "gpu/bind-group", "entry" } },
+            },
+        },
+    };
+    const schema = Schema.init(&.{ gpu, pngine });
+    const diags = try schema.validateLowering(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 0), diags.len);
+}
+
+test "validateLowering: slot-local produces head whose declaring form is unlisted is unknown_form naming that form" {
+    // `entry` is declared inside `bind-group`, but the list names only
+    // `entry`. A hook can place a local only under its declaring form, and
+    // the all-depths contract would then require `bind-group` in the list —
+    // so this manifest cannot be right, and the message says what is missing.
+    const p: Plugin.Plugin = .{
+        .name = "pngine",
+        .forms = &.{
+            .{
+                .name = "init",
+                .lowering = .{ .hook = "pngine/init-v1", .produces = &.{"entry"} },
+            },
+            .{ .name = "bind-group", .local_forms = &.{.{ .name = "entry" }} },
+        },
+    };
+    const schema = Schema.init(&.{p});
+    const diags = try schema.validateLowering(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 1), diags.len);
+    try testing.expectEqual(Ast.Diagnostic.Code.unknown_form, diags[0].code);
+    try testing.expectEqualStrings(
+        "form `init` `:lowering` produces head `entry` does not resolve to any declared form; `entry` is slot-local to `bind-group` and resolves only through a `:produces` entry naming that form",
+        diags[0].message,
+    );
+    try testing.expectEqualStrings("lowering", diags[0].path[2]);
+}
+
+test "validateLowering: the unlisted-declaring-form hint lists every declaring form, catalog order" {
+    const p: Plugin.Plugin = .{
+        .name = "pngine",
+        .forms = &.{
+            .{
+                .name = "init",
+                .lowering = .{ .hook = "pngine/init-v1", .produces = &.{"entry"} },
+            },
+            .{ .name = "bind-group", .local_forms = &.{.{ .name = "entry" }} },
+            .{ .name = "layout", .keys = &.{.{ .name = "slot", .value_type = .form, .local_forms = &.{.{ .name = "entry" }} }} },
+        },
+    };
+    const schema = Schema.init(&.{p});
+    const diags = try schema.validateLowering(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 1), diags.len);
+    try testing.expect(std.mem.indexOf(u8, diags[0].message, "slot-local to `bind-group`, `layout`") != null);
+}
+
+test "validateLowering: a head that is nobody's local keeps the plain unknown_form message" {
+    const p: Plugin.Plugin = .{
+        .name = "pngine",
+        .forms = &.{
+            .{
+                .name = "init",
+                .lowering = .{ .hook = "pngine/init-v1", .produces = &.{ "bind-group", "ghost" } },
+            },
+            .{ .name = "bind-group", .local_forms = &.{.{ .name = "entry" }} },
+        },
+    };
+    const schema = Schema.init(&.{p});
+    const diags = try schema.validateLowering(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 1), diags.len);
+    try testing.expectEqualStrings(
+        "form `init` `:lowering` produces head `ghost` does not resolve to any declared form",
+        diags[0].message,
+    );
+}
+
+test "validateLowering: a qualified produces head never resolves through locals" {
+    // `pngine/entry` targets plugin `pngine`'s global catalog only — the
+    // same bypass a qualified head takes at the site. The local `entry`
+    // under the listed `bind-group` does not rescue it; and because the
+    // spelling is qualified, no declaring-form hint is offered either.
+    const p: Plugin.Plugin = .{
+        .name = "pngine",
+        .forms = &.{
+            .{
+                .name = "init",
+                .lowering = .{ .hook = "pngine/init-v1", .produces = &.{ "bind-group", "pngine/entry" } },
+            },
+            .{ .name = "bind-group", .local_forms = &.{.{ .name = "entry" }} },
+        },
+    };
+    const schema = Schema.init(&.{p});
+    const diags = try schema.validateLowering(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 1), diags.len);
+    try testing.expectEqual(Ast.Diagnostic.Code.unknown_form, diags[0].code);
+    try testing.expectEqualStrings(
+        "form `init` `:lowering` produces head `pngine/entry` does not resolve to any declared form",
+        diags[0].message,
+    );
+}
+
+test "validateLowering: a reachable slot-local shadows an ambiguous global of the same name" {
+    // Local-first, as at the site: `entry` is a global in two plugins
+    // (ambiguous bare) AND a local of the listed `bind-group`. The hook's
+    // emitted `entry` sits under `bind-group` and resolves to the local, so
+    // the list resolves clean — the "qualify with `<ns>/entry`" hint the
+    // ambiguity would offer is unfollowable here (an emitted bare `entry`
+    // never equals a listed `a/entry`).
+    const a_plug: Plugin.Plugin = .{ .name = "a", .forms = &.{.{ .name = "entry" }} };
+    const b_plug: Plugin.Plugin = .{ .name = "b", .forms = &.{.{ .name = "entry" }} };
+    const pngine: Plugin.Plugin = .{
+        .name = "pngine",
+        .forms = &.{
+            .{
+                .name = "init",
+                .lowering = .{ .hook = "pngine/init-v1", .produces = &.{ "bind-group", "entry" } },
+            },
+            .{ .name = "bind-group", .local_forms = &.{.{ .name = "entry" }} },
+        },
+    };
+    const schema = Schema.init(&.{ a_plug, b_plug, pngine });
+    const diags = try schema.validateLowering(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 0), diags.len);
+}
+
+test "validateLowering: a local under an ambiguous root is not reachable until the root resolves" {
+    // `bind-group` is a global in two plugins; both carry a local `entry`.
+    // The ambiguous root contributes no locals, so the list reports the
+    // ambiguity (as before) AND `entry` as unresolved — with the hint naming
+    // `bind-group`, which the author fixes by qualifying the root.
+    const a_plug: Plugin.Plugin = .{ .name = "a", .forms = &.{.{ .name = "bind-group", .local_forms = &.{.{ .name = "entry" }} }} };
+    const b_plug: Plugin.Plugin = .{ .name = "b", .forms = &.{.{ .name = "bind-group", .local_forms = &.{.{ .name = "entry" }} }} };
+    const pngine: Plugin.Plugin = .{
+        .name = "pngine",
+        .forms = &.{
+            .{
+                .name = "init",
+                .lowering = .{ .hook = "pngine/init-v1", .produces = &.{ "bind-group", "entry" } },
+            },
+        },
+    };
+    const schema = Schema.init(&.{ a_plug, b_plug, pngine });
+    const diags = try schema.validateLowering(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 2), diags.len);
+    try testing.expectEqual(Ast.Diagnostic.Code.ambiguous_form, diags[0].code);
+    try testing.expectEqual(Ast.Diagnostic.Code.unknown_form, diags[1].code);
+    try testing.expect(std.mem.indexOf(u8, diags[1].message, "slot-local to `bind-group` and resolves") != null);
+}
+
+test "buildLoweringGraph: a slot-local produces head adds no edge" {
+    // Locals never lower (loader-rejected, `Schema.init`-asserted), so the
+    // graph the cycle check and the export consume keeps only the global
+    // edge: `init → pngine/bind-group`, nothing for `entry`.
+    const p: Plugin.Plugin = .{
+        .name = "pngine",
+        .forms = &.{
+            .{
+                .name = "init",
+                .lowering = .{ .hook = "pngine/init-v1", .produces = &.{ "bind-group", "entry" } },
+            },
+            .{ .name = "bind-group", .local_forms = &.{.{ .name = "entry" }} },
+        },
+    };
+    const schema = Schema.init(&.{p});
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const nodes = try buildLoweringGraph(schema, arena.allocator());
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+    try testing.expectEqual(@as(usize, 1), nodes[0].edges.len);
+    try testing.expectEqualStrings("pngine/bind-group", nodes[0].edges[0]);
 }
 
 test "validateLowering: no-op when no forms declare :lowering" {

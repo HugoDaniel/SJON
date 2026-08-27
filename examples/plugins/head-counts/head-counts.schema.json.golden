@@ -8,6 +8,20 @@
       "message": "value-kind `pipeline-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
       "plugin": "head-counts",
       "kind": "pipeline-section"
+    },
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `bgl-resource` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin": "head-counts",
+      "kind": "bgl-resource"
+    },
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `data-shape-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin": "head-counts",
+      "kind": "data-shape-section"
     }
   ],
   "$defs": {
@@ -42,7 +56,7 @@
     },
     "form.head-counts.fragment": {
       "type": "object",
-      "description": "The fragment stage. Optional — a depth-only pass has none.",
+      "description": "The fragment stage. Optional, because a depth-only pass has none.",
       "properties": {
         "$form": {
           "const": "fragment"
@@ -164,13 +178,14 @@
       },
       "required": [
         "$form",
-        "name"
+        "name",
+        "$children"
       ],
       "additionalProperties": false
     },
     "form.head-counts.section-holder": {
       "type": "object",
-      "description": "Same kind, keyed slot — the counts ride along inertly here.",
+      "description": "Same kind, keyed slot: the counts ride along inertly here.",
       "properties": {
         "$form": {
           "const": "section-holder"
@@ -251,9 +266,279 @@
         }
       },
       "required": [
-        "$form"
+        "$form",
+        "$children"
       ],
       "additionalProperties": true
+    },
+    "form.head-counts.buffer": {
+      "type": "object",
+      "description": "A buffer binding.",
+      "properties": {
+        "$form": {
+          "const": "buffer"
+        },
+        "$ns": {
+          "const": "head-counts"
+        },
+        "type": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "$form",
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "form.head-counts.sampler": {
+      "type": "object",
+      "description": "A sampler binding.",
+      "properties": {
+        "$form": {
+          "const": "sampler"
+        },
+        "$ns": {
+          "const": "head-counts"
+        },
+        "type": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "$form",
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "form.head-counts.texture": {
+      "type": "object",
+      "description": "A texture binding.",
+      "properties": {
+        "$form": {
+          "const": "texture"
+        },
+        "$ns": {
+          "const": "head-counts"
+        },
+        "sample-type": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "$form",
+        "sample-type"
+      ],
+      "additionalProperties": false
+    },
+    "form.head-counts.bgl-entry": {
+      "type": "object",
+      "description": "Exactly one resource: the claim per-head bounds cannot make.",
+      "properties": {
+        "$form": {
+          "const": "bgl-entry"
+        },
+        "$ns": {
+          "const": "head-counts"
+        },
+        "binding": {
+          "type": "number"
+        },
+        "$children": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/form.head-counts.buffer"
+              },
+              {
+                "$ref": "#/$defs/form.head-counts.sampler"
+              },
+              {
+                "$ref": "#/$defs/form.head-counts.texture"
+              }
+            ],
+            "x-sjon-head-set": [
+              "buffer",
+              "sampler",
+              "texture"
+            ]
+          },
+          "allOf": [
+            {
+              "contains": {
+                "$ref": "#/$defs/form.head-counts.buffer"
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "$ref": "#/$defs/form.head-counts.sampler"
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "$ref": "#/$defs/form.head-counts.texture"
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/form.head-counts.buffer"
+                  },
+                  {
+                    "$ref": "#/$defs/form.head-counts.sampler"
+                  },
+                  {
+                    "$ref": "#/$defs/form.head-counts.texture"
+                  }
+                ]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            }
+          ]
+        }
+      },
+      "required": [
+        "$form",
+        "binding",
+        "$children"
+      ],
+      "additionalProperties": false
+    },
+    "form.head-counts.cube": {
+      "type": "object",
+      "properties": {
+        "$form": {
+          "const": "cube"
+        },
+        "$ns": {
+          "const": "head-counts"
+        },
+        "size": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "$form",
+        "size"
+      ],
+      "additionalProperties": false
+    },
+    "form.head-counts.sphere": {
+      "type": "object",
+      "properties": {
+        "$form": {
+          "const": "sphere"
+        },
+        "$ns": {
+          "const": "head-counts"
+        },
+        "radius": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "$form",
+        "radius"
+      ],
+      "additionalProperties": false
+    },
+    "form.head-counts.data": {
+      "type": "object",
+      "description": "At most one generator: a ceiling-only set bound.",
+      "properties": {
+        "$form": {
+          "const": "data"
+        },
+        "$ns": {
+          "const": "head-counts"
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "$children": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/form.head-counts.cube"
+              },
+              {
+                "$ref": "#/$defs/form.head-counts.sphere"
+              }
+            ],
+            "x-sjon-head-set": [
+              "cube",
+              "sphere"
+            ]
+          },
+          "allOf": [
+            {
+              "contains": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/form.head-counts.cube"
+                  },
+                  {
+                    "$ref": "#/$defs/form.head-counts.sphere"
+                  }
+                ]
+              },
+              "minContains": 0,
+              "maxContains": 1
+            }
+          ]
+        }
+      },
+      "required": [
+        "$form",
+        "name"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -274,6 +559,27 @@
     },
     {
       "$ref": "#/$defs/form.head-counts.scratch-pipeline"
+    },
+    {
+      "$ref": "#/$defs/form.head-counts.buffer"
+    },
+    {
+      "$ref": "#/$defs/form.head-counts.sampler"
+    },
+    {
+      "$ref": "#/$defs/form.head-counts.texture"
+    },
+    {
+      "$ref": "#/$defs/form.head-counts.bgl-entry"
+    },
+    {
+      "$ref": "#/$defs/form.head-counts.cube"
+    },
+    {
+      "$ref": "#/$defs/form.head-counts.sphere"
+    },
+    {
+      "$ref": "#/$defs/form.head-counts.data"
     }
   ]
 }

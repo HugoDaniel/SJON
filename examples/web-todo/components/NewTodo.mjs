@@ -14,7 +14,7 @@ export function NewTodo({ store, nextId }) {
         if (!trimmed) return;
         // Two dispatches: append the new todo, then bump next-id so
         // subsequent inserts don't collide. SJON Edit ops are atomic
-        // per action — we sequence them deliberately.
+        // per action, so we sequence them deliberately.
         store.dispatch(addTodo(nextId, trimmed));
         store.dispatch(bumpNextId(nextId + 1));
         setText("");

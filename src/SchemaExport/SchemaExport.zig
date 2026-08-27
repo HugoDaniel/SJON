@@ -321,7 +321,12 @@ fn lowerPlugin(
         kinds_out[i] = .{
             .name = try a.dupe(u8, vk.name),
             .description = try a.dupe(u8, vk.description),
-            .shape = try lowerValueKind(a, schema, plugin, vk, warnings),
+            // No slot: this pass exists for the value-kind table the
+            // Markdown and `--target=intermediate` channels render, and a
+            // head-set kind is reusable across slots with different local
+            // registries. `locals = null` says so, and downgrades an
+            // unresolved head to a note (see `Context.locals`).
+            .shape = try lowerValueKind(a, schema, plugin, vk, warnings, .{ .plugin_name = plugin.name }),
             .origin_plugin = try a.dupe(u8, plugin.name),
         };
     }
@@ -467,6 +472,21 @@ fn lowerForm(
         keys_out[i] = try lowerKey(a, schema, plugin, form, k, warnings);
     }
 
+    // Positional slot-local forms (`FormSpec.local_forms`) are the positional
+    // mirror of key-slot locals (see `lowerKey`): inline `(form …)` children
+    // that the slot resolves local-first, then additively against the global
+    // catalog. Lowered *before* the positional kind, because a head-set
+    // resolution embeds these bodies — each via `lowerForm`, so a
+    // discriminated local keeps its if/then, with recursion bounded by
+    // `MAX_LOCAL_FORM_DEPTH` (finite manifest tree).
+    const locals: []Model.Form = if (form.local_forms.len == 0) &.{} else blk: {
+        const out = try a.alloc(Model.Form, form.local_forms.len);
+        for (form.local_forms, 0..) |lf, i| {
+            out[i] = try lowerForm(a, schema, plugin, lf, warnings);
+        }
+        break :blk out;
+    };
+
     var positional: Model.Positional = switch (form.positional) {
         .none => .none,
         .any => .any,
@@ -474,6 +494,8 @@ fn lowerForm(
             const shape = try resolveNamedShape(a, schema, plugin, ref.name, ref.namespace, warnings, .{
                 .plugin_name = plugin.name,
                 .form_name = form.name,
+                .locals = form.local_forms,
+                .lowered_locals = locals,
             });
             break :blk .{ .kind = shape };
         },
@@ -483,27 +505,69 @@ fn lowerForm(
         .flag_set => .any,
     };
 
-    // Positional slot-local forms (`FormSpec.local_forms`) are the positional
-    // mirror of key-slot locals (see `lowerKey`): inline `(form …)` children
-    // resolve local-first against these specs, then fall back additively to the
-    // global catalog. They override the positional child *shape* to the same
-    // inline anonymous union (`.form_locals`) the keyed carrier uses — each
-    // local lowered via `lowerForm` (a discriminated local keeps its if/then),
-    // recursion bounded by `MAX_LOCAL_FORM_DEPTH` (finite manifest tree). The
-    // registry rides independent of the declared positional variant
-    // (`.any` / head-set `.kind`); a `:positional <head-set>` gate stays
-    // SJON-only (byte-equality on head text, never `$defs`), and the backends'
-    // trailing open branch is the additive global fallback.
     if (form.local_forms.len > 0) {
-        const locals = try a.alloc(Model.Form, form.local_forms.len);
-        for (form.local_forms, 0..) |lf, i| {
-            locals[i] = try lowerForm(a, schema, plugin, lf, warnings);
+        // Two shapes, and which one applies is decided by whether the
+        // declared positional already constrains *heads*.
+        //
+        //   * A head-set (`.form_heads`) closes the slot by head text, and
+        //     the resolution above has already embedded each local body
+        //     into the matching member. Keeping it is what preserves the
+        //     narrowing, the `x-sjon-head-set` annotation and the per-head
+        //     `contains` bounds — all three of which the old unconditional
+        //     override dropped.
+        //   * Anything else places no head constraint, so the locals open
+        //     the slot additively: the inline union plus a trailing open
+        //     generic branch for any global form.
+        //
+        // The loader guarantees only `.any` and `.kind` reach here with a
+        // non-empty registry: `.flag_set` beside locals is `invalid_manifest`
+        // and a bare `.none` is rewritten to `.any` so the locals aren't
+        // dead behind `positional_not_allowed` (`ManifestLoader.zig:707-716`).
+        const head_set: ?[]const Model.FormRef = switch (positional) {
+            .kind => |shape| switch (shape) {
+                .form_heads => |hs| hs.refs,
+                else => null,
+            },
+            .none, .any => null,
+        };
+        if (head_set) |refs| {
+            // A local outside the set is dead: narrowing rejects the head
+            // (`not_head_member`) before resolution reaches the registry,
+            // so the body is declared and unreachable. The exporter is
+            // the only pass holding both the set and the registry at once,
+            // which is why it is the one that notices.
+            for (form.local_forms) |lf| {
+                var in_set = false;
+                for (refs) |ref| {
+                    if (std.mem.eql(u8, ref.name, lf.name)) {
+                        in_set = true;
+                        break;
+                    }
+                }
+                if (in_set) continue;
+                try warnings.append(a, .{
+                    .code = .local_form_outside_head_set,
+                    .severity = .warn,
+                    .message = try std.fmt.allocPrint(
+                        a,
+                        "positional slot-local form `{s}` on `{s}` is outside the slot's head-set, so no child can ever reach it — add `{s}` to the head-set or delete the local",
+                        .{ lf.name, form.name, lf.name },
+                    ),
+                    .plugin_name = try a.dupe(u8, plugin.name),
+                    .form_name = try a.dupe(u8, form.name),
+                });
+            }
+        } else {
+            positional = .{ .kind = .{ .form_locals = locals } };
         }
-        positional = .{ .kind = .{ .form_locals = locals } };
         try warnings.append(a, .{
             .code = .local_forms_emitted_inline,
             .severity = .info,
-            .message = try std.fmt.allocPrint(
+            .message = if (head_set) |refs| try std.fmt.allocPrint(
+                a,
+                "positional slot on form `{s}` declares {d} local form(s) behind a {d}-head head-set — emitted as a closed inline union with no global fallback branch; a head outside the set is `not_head_member`",
+                .{ form.name, form.local_forms.len, refs.len },
+            ) else try std.fmt.allocPrint(
                 a,
                 "positional slot on form `{s}` declares {d} local form(s) — emitted as an inline union plus an open generic branch for the additive global fallback; local-first/global resolution order is SJON-only",
                 .{ form.name, form.local_forms.len },
@@ -538,8 +602,10 @@ fn lowerForm(
                 for (v.keys, 0..) |k, j| {
                     vk_keys[j] = try lowerKey(a, schema, plugin, form, k, warnings);
                 }
+                const when = try a.alloc([]const u8, v.when.len);
+                for (v.when, 0..) |w, j| when[j] = try a.dupe(u8, w);
                 variants_out[i] = .{
-                    .when = try a.dupe(u8, v.when),
+                    .when = when,
                     .keys = vk_keys,
                 };
             }
@@ -637,6 +703,11 @@ fn lowerKey(
         .plugin_name = plugin.name,
         .form_name = form.name,
         .key_name = key.name,
+        // A slot, with an empty registry — always empty, because the
+        // loader rejects keyed locals on anything but `:type form`
+        // (`ManifestLoader.zig:1312`), so a keyed slot can never carry
+        // both a head-set and locals. Non-null so the resolution judges.
+        .locals = &.{},
     });
 
     // Slot-local forms live on the key, not the type: a `:type form` slot
@@ -686,11 +757,46 @@ fn lowerKey(
     };
 }
 
+/// Where a value-kind is being lowered *from*. Carries the names that
+/// scope a warning, plus the slot-local form registry a head-set
+/// resolution needs.
 const Context = struct {
     plugin_name: []const u8,
     form_name: ?[]const u8 = null,
     key_name: ?[]const u8 = null,
     kind_name: ?[]const u8 = null,
+    /// The enclosing slot's `FormSpec.local_forms`, source side, or
+    /// `null` when there is **no slot** — `lowerPlugin`'s standalone pass
+    /// over every value-kind, which exists for the Markdown and
+    /// `--target=intermediate` channels.
+    ///
+    /// `null` versus empty is load-bearing and is why this is an optional
+    /// slice rather than a slice: "this slot declares no locals" is a
+    /// verdict a head-set resolution can act on, and "there is no slot"
+    /// is the absence of one. Only the first may call a head unresolvable.
+    locals: ?[]const Plugin.FormSpec = null,
+    /// The same registry, already lowered, index-parallel to `locals`. A
+    /// `.local` head embeds one of these, so `lowerForm` lowers its
+    /// locals *before* resolving the positional kind.
+    lowered_locals: []const Model.Form = &.{},
+
+    /// True when a slot is in hand and the head-set resolution is
+    /// therefore complete enough to call a head unresolvable.
+    fn judges(self: Context) bool {
+        return self.locals != null;
+    }
+
+    /// The slot-local form matching `head`, and its lowered body, or null.
+    /// Bare names only — a qualified head bypasses locals in the
+    /// validator (`Validator.validateFormHead` step 0) and must here too.
+    fn matchLocal(self: Context, head: []const u8) ?*const Model.Form {
+        const reg = self.locals orelse return null;
+        std.debug.assert(reg.len == self.lowered_locals.len);
+        for (reg, 0..) |lf, i| {
+            if (std.mem.eql(u8, lf.name, head)) return &self.lowered_locals[i];
+        }
+        return null;
+    }
 };
 
 fn lowerValueType(
@@ -743,7 +849,7 @@ fn resolveNamedShape(
 ) Error!Model.ValueShape {
     if (primitiveShortcut(name)) |shape| return shape;
     return switch (schema.lookupValueKind(name, namespace)) {
-        .found => |kind| try lowerValueKind(a, schema, plugin, kind.*, warnings),
+        .found => |kind| try lowerValueKind(a, schema, plugin, kind.*, warnings, ctx),
         .not_found, .ambiguous => blk: {
             const display = try formatQualified(a, name, namespace);
             try warnings.append(a, .{
@@ -796,10 +902,18 @@ fn lowerValueKind(
     plugin: Plugin.Plugin,
     vk: Plugin.ValueKind,
     warnings: *std.ArrayList(Warnings.Warning),
+    /// The site this kind is being lowered *for*. Pins the kind name and
+    /// carries the caller's slot (and its local registry) down to
+    /// `lowerFormKind`, which is the one arm whose output depends on it.
+    /// Callers pass their own context rather than one minted here, so a
+    /// head-set kind reached through a union alternative still knows
+    /// which slot it landed in.
+    outer: Context,
 ) Error!Model.ValueShape {
-    const ctx: Context = .{
-        .plugin_name = plugin.name,
-        .kind_name = vk.name,
+    const ctx: Context = blk: {
+        var c = outer;
+        c.kind_name = vk.name;
+        break :blk c;
     };
     // 1) Refinements that completely replace the underlying mapping.
     if (vk.cross_ref) |cr| {
@@ -908,7 +1022,7 @@ fn lowerValueKind(
         .number => lowerNumberKind(a, plugin, vk, warnings),
         .string => lowerStringKind(a, plugin, vk, warnings),
         .symbol => lowerSymbolKind(a, plugin, vk, warnings),
-        .form => lowerFormKind(a, schema, plugin, vk, warnings),
+        .form => lowerFormKind(a, schema, plugin, vk, warnings, ctx),
         .vector => try lowerVectorKind(a, schema, plugin, vk, warnings),
         .union_of => unreachable, // handled above
     };
@@ -1095,55 +1209,109 @@ fn lowerSymbolKind(
     return .symbol;
 }
 
+/// Lower a `.form`-underlying value-kind. With `:heads` this is the
+/// head-set resolution: one `Model.FormRef` per accepted head, resolved
+/// the way `Validator.validateFormHead` resolves the child that will
+/// carry it — **slot-local first, global catalog second**.
+///
+/// `ctx.locals` is what makes that possible, and what decides whether a
+/// miss is reported at all. See `Context.locals`: a slot judges, the
+/// standalone value-kind pass stays quiet.
 fn lowerFormKind(
     a: Allocator,
     schema: Schema.Schema,
     plugin: Plugin.Plugin,
     vk: Plugin.ValueKind,
     warnings: *std.ArrayList(Warnings.Warning),
+    ctx: Context,
 ) Error!Model.ValueShape {
-    if (vk.heads) |hs| {
-        try warnings.append(a, .{
-            .code = .head_set_emitted_via_oneof_refs,
-            .severity = .info,
-            .message = try std.fmt.allocPrint(
-                a,
-                "value-kind `{s}` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
-                .{vk.name},
-            ),
-            .plugin_name = try a.dupe(u8, plugin.name),
-            .kind_name = try a.dupe(u8, vk.name),
-        });
-        const refs = try a.alloc(Model.FormRef, hs.heads.len);
-        for (hs.heads, 0..) |entry, i| {
-            const n = entry.name;
-            const owner = switch (schema.lookupForm(n, null)) {
-                .found => |hit| hit.plugin.name,
-                .not_found, .ambiguous => blk: {
-                    try warnings.append(a, .{
-                        .code = .aggregate_phase_error,
-                        .severity = .err,
-                        .message = try std.fmt.allocPrint(
-                            a,
-                            "head-set member `{s}` on value-kind `{s}` does not resolve to a unique form",
-                            .{ n, vk.name },
-                        ),
-                        .plugin_name = try a.dupe(u8, plugin.name),
-                        .kind_name = try a.dupe(u8, vk.name),
-                    });
-                    break :blk "";
-                },
-            };
-            refs[i] = .{
-                .plugin = try a.dupe(u8, owner),
-                .name = try a.dupe(u8, n),
-                .min = entry.min,
-                .max = entry.max,
-            };
-        }
-        return .{ .form_heads = refs };
+    const hs = vk.heads orelse return .form_any;
+
+    const refs = try a.alloc(Model.FormRef, hs.heads.len);
+    var local_count: usize = 0;
+    for (hs.heads, 0..) |entry, i| {
+        const n = entry.name;
+        const owner, const body: Model.FormRef.Body = if (ctx.matchLocal(n)) |lf| blk: {
+            local_count += 1;
+            // A slot-local belongs to the plugin whose form declares it,
+            // which is the plugin being lowered — locals never cross a
+            // plugin boundary.
+            break :blk .{ plugin.name, .{ .local = lf } };
+        } else hit: {
+            const lookup = schema.lookupForm(n, null);
+            const ambiguous = lookup == .ambiguous;
+            switch (lookup) {
+                .found => |f| break :hit .{ f.plugin.name, Model.FormRef.Body.global },
+                .not_found, .ambiguous => {},
+            }
+            // Only a slot may call a head unresolvable, and only a slot
+            // says anything about one. The standalone value-kind pass
+            // (`lowerPlugin`, feeding the Markdown and IR channels) sees
+            // every head-set with `locals == null`, so a head-set written
+            // *for* a locals slot — the closed-positional-set recipe, and
+            // the shape this whole change exists for — would otherwise
+            // emit one note per member on every export, saying only that
+            // the question belongs elsewhere. The slots it belongs to all
+            // answer it, at `.err`. What that gives up is a head-set kind
+            // no slot references at all: its typo goes unreported, which
+            // is dead schema reported by nothing else either.
+            if (ctx.judges()) {
+                try warnings.append(a, .{
+                    .code = .head_set_member_unresolved,
+                    .severity = .err,
+                    .message = if (ambiguous) try std.fmt.allocPrint(
+                        a,
+                        "head-set member `{s}` on value-kind `{s}` is declared by more than one plugin; qualify it or rename one",
+                        .{ n, vk.name },
+                    ) else try std.fmt.allocPrint(
+                        a,
+                        "head-set member `{s}` on value-kind `{s}` resolves to no form in scope at this slot — no slot-local `(form :name {s} …)` and no global one",
+                        .{ n, vk.name, n },
+                    ),
+                    .plugin_name = try a.dupe(u8, plugin.name),
+                    .form_name = if (ctx.form_name) |f| try a.dupe(u8, f) else null,
+                    .key_name = if (ctx.key_name) |k| try a.dupe(u8, k) else null,
+                    .kind_name = try a.dupe(u8, vk.name),
+                });
+            }
+            break :hit .{ "", Model.FormRef.Body.unresolved };
+        };
+        refs[i] = .{
+            .plugin = try a.dupe(u8, owner),
+            .name = try a.dupe(u8, n),
+            .min = entry.min,
+            .max = entry.max,
+            .body = body,
+        };
     }
-    return .form_any;
+
+    // Scoped to slots for the same reason the miss above is: the note
+    // describes how a *slot's* `$children` was emitted, and the
+    // standalone value-kind pass emits no `$children` anywhere. Left
+    // unscoped it fired twice per locals-backed head-set — once with the
+    // slot's message and once with the generic one, which is exactly the
+    // pair `dedupeWarnings` used to collapse before the messages could
+    // differ. A global-only head-set on several slots still collapses to
+    // one line, because its message and fields are slot-independent.
+    const shape: Model.HeadSetShape = .{ .refs = refs, .min_children = hs.min_children, .max_children = hs.max_children };
+    if (!ctx.judges()) return .{ .form_heads = shape };
+    try warnings.append(a, .{
+        .code = .head_set_emitted_via_oneof_refs,
+        .severity = .info,
+        .message = if (local_count == 0) try std.fmt.allocPrint(
+            a,
+            "value-kind `{s}` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+            .{vk.name},
+        ) else try std.fmt.allocPrint(
+            a,
+            "value-kind `{s}` head-set emitted as a closed `oneOf` — {d} of {d} head(s) resolve to slot-local forms and are emitted inline, the rest as `$ref`s into `#/$defs/form.<plugin>.<head>`",
+            .{ vk.name, local_count, hs.heads.len },
+        ),
+        .plugin_name = try a.dupe(u8, plugin.name),
+        .form_name = if (local_count == 0) null else if (ctx.form_name) |f| try a.dupe(u8, f) else null,
+        .kind_name = try a.dupe(u8, vk.name),
+    });
+    return .{ .form_heads = shape };
 }
 
 fn lowerVectorKind(
@@ -1160,6 +1328,11 @@ fn lowerVectorKind(
     const elem_shape = try resolveNamedShape(a, schema, plugin, vs.element.name, vs.element.namespace, warnings, .{
         .plugin_name = plugin.name,
         .kind_name = vk.name,
+        // A vector *element* is a value, not a form child, so no
+        // slot-local registry ever reaches it (the validator attaches one
+        // only to a direct `.form` child of the slot). Empty rather than
+        // null: the resolution here is complete, so it may judge.
+        .locals = &.{},
     });
     const elem_ptr = try a.create(Model.ValueShape);
     elem_ptr.* = elem_shape;
@@ -1439,13 +1612,13 @@ fn writeShapeJson(w: *std.json.Stringify, shape: Model.ValueShape) std.Io.Writer
         .string_members => |names| try writeMembersJson(w, "string_members", names),
         .symbol_members_rich => |members| try writeRichMembersJson(w, "symbol_members_rich", members),
         .string_members_rich => |members| try writeRichMembersJson(w, "string_members_rich", members),
-        .form_heads => |refs| {
+        .form_heads => |hs| {
             try w.beginObject();
             try w.objectField("kind");
             try w.write("form_heads");
             try w.objectField("refs");
             try w.beginArray();
-            for (refs) |r| {
+            for (hs.refs) |r| {
                 try w.beginObject();
                 try w.objectField("plugin");
                 try w.write(r.plugin);
@@ -1464,9 +1637,45 @@ fn writeShapeJson(w: *std.json.Stringify, shape: Model.ValueShape) std.Io.Writer
                     try w.objectField("max");
                     try w.write(mx);
                 }
+                // Resolution route. Omitted for `.global`, which is what
+                // every head-set carried before slot-aware resolution, so
+                // a global-only head-set's IR stays byte-identical. An IR
+                // consumer that only knows the old shape therefore finds
+                // the key *absent* rather than reading a local body as a
+                // global `$ref` it cannot resolve — the same
+                // omit-when-inapplicable idiom `scope-form` and S4b's
+                // `target-forms` follow.
+                switch (r.body) {
+                    .global => {},
+                    .local => |lf| {
+                        try w.objectField("resolved");
+                        try w.write("local");
+                        try w.objectField("local");
+                        try writeFormJson(w, lf.*);
+                    },
+                    .unresolved => {
+                        try w.objectField("resolved");
+                        try w.write("unresolved");
+                    },
+                }
                 try w.endObject();
             }
             try w.endArray();
+            // The set's own count, beside the members rather than inside
+            // one of them — it belongs to the set, and an IR consumer
+            // that read it off a member would be reading a per-head
+            // claim. Omitted when absent, so a pre-S10 head-set's IR is
+            // byte-identical. Fifth plan running to need this: the
+            // `--target=intermediate` channel is a consumer surface, not
+            // a summary.
+            if (hs.min_children != 0) {
+                try w.objectField("min-children");
+                try w.write(hs.min_children);
+            }
+            if (hs.max_children) |mx| {
+                try w.objectField("max-children");
+                try w.write(mx);
+            }
             try w.endObject();
         },
         .form_locals => |forms| {
@@ -1927,11 +2136,11 @@ test "lowering: head-set resolves plugin per head and emits info warning" {
     const badge = result.model.plugins[0].forms[2];
     const key = badge.keys[0];
     try testing.expect(key.value == .form_heads);
-    try testing.expectEqual(@as(usize, 2), key.value.form_heads.len);
-    try testing.expectEqualStrings("circle", key.value.form_heads[0].name);
-    try testing.expectEqualStrings("x", key.value.form_heads[0].plugin);
-    try testing.expectEqualStrings("rect", key.value.form_heads[1].name);
-    try testing.expectEqualStrings("x", key.value.form_heads[1].plugin);
+    try testing.expectEqual(@as(usize, 2), key.value.form_heads.refs.len);
+    try testing.expectEqualStrings("circle", key.value.form_heads.refs[0].name);
+    try testing.expectEqualStrings("x", key.value.form_heads.refs[0].plugin);
+    try testing.expectEqualStrings("rect", key.value.form_heads.refs[1].name);
+    try testing.expectEqualStrings("x", key.value.form_heads.refs[1].plugin);
     // The head-set info warning replaces the M1 deferred_construct (warn).
     var saw_info = false;
     for (result.warnings) |wn| {
@@ -1944,6 +2153,324 @@ test "lowering: head-set resolves plugin per head and emits info warning" {
         }
     }
     try testing.expect(saw_info);
+}
+
+/// Count warnings matching `code` at `severity`, ignoring everything else.
+fn countWarnings(warnings: []const Warnings.Warning, code: Warnings.Code, severity: Warnings.Severity) usize {
+    var n: usize = 0;
+    for (warnings) |wn| {
+        if (wn.code == code and wn.severity == severity) n += 1;
+    }
+    return n;
+}
+
+test "lowering: an unresolvable head-set member errors once, at the slot" {
+    // Two lowerings reach the same head-set: the slot that references the
+    // kind, and `lowerPlugin`'s standalone pass over every value-kind (the
+    // one that feeds the Markdown and `--target=intermediate` channels).
+    // Only the first has a slot in hand, and only a slot can know which
+    // forms are in scope — a head-set kind is plugin-wide and reusable.
+    // So the slot judges and the kind table stays quiet; exactly one
+    // report, not two, and it names the slot.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "g",
+        .forms = &.{
+            .{ .name = "real" },
+            .{ .name = "root", .positional = .{ .kind = .{ .name = "items" } } },
+        },
+        .value_kinds = &.{.{
+            .name = "items",
+            .underlying = .form,
+            .heads = .{ .heads = &.{ .{ .name = "real" }, .{ .name = "ghost" } } },
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{});
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 1), countWarnings(result.warnings, .head_set_member_unresolved, .err));
+    try testing.expectEqual(@as(usize, 0), countWarnings(result.warnings, .head_set_member_unresolved, .info));
+    // The generic code this split replaced is gone from the head-set path;
+    // its two remaining jobs (real aggregate diagnostics, an unresolvable
+    // value-kind reference) are untouched.
+    try testing.expectEqual(@as(usize, 0), countWarnings(result.warnings, .aggregate_phase_error, .err));
+    // And it names the slot, which the kind-scoped message it replaced
+    // could not.
+    for (result.warnings) |wn| {
+        if (wn.code != .head_set_member_unresolved) continue;
+        try testing.expectEqualStrings("root", wn.form_name.?);
+        try testing.expectEqualStrings("items", wn.kind_name.?);
+    }
+    try testing.expect(result.hasErrors());
+}
+
+test "lowering: a head-set kind no slot references reports nothing at all" {
+    // The cost of the rule above, stated so it cannot be mistaken for an
+    // oversight: nothing can judge a kind nobody uses, so its typo goes
+    // unreported. The alternative was one note per member on every
+    // locals-backed head-set — noise on the shape this exists to support,
+    // to cover dead schema nothing else reports either.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "g",
+        .forms = &.{.{ .name = "real" }},
+        .value_kinds = &.{.{
+            .name = "unused",
+            .underlying = .form,
+            .heads = .{ .heads = &.{.{ .name = "ghost" }} },
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{});
+    defer result.deinit();
+    try testing.expectEqual(@as(usize, 0), countWarnings(result.warnings, .head_set_member_unresolved, .err));
+    try testing.expectEqual(@as(usize, 0), countWarnings(result.warnings, .head_set_member_unresolved, .info));
+    try testing.expect(!result.hasErrors());
+}
+
+test "lowering: a vector element and a union alternative are slots, so they judge" {
+    // Neither can ever carry a slot-local registry — no registry reaches a
+    // vector element or a union alternative's *own* resolution — so their
+    // resolution is complete and an unresolved head there is an error.
+    // `null` means "no slot"; empty means "a slot with no locals", and
+    // these are the second.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "g",
+        .forms = &.{
+            .{ .name = "vec-holder", .keys = &.{.{ .name = "xs", .value_type = .{ .named = .{ .name = "listy" } } }} },
+        },
+        .value_kinds = &.{
+            .{ .name = "heads", .underlying = .form, .heads = .{ .heads = &.{.{ .name = "ghost" }} } },
+            .{ .name = "listy", .underlying = .vector, .vector = .{ .element = .{ .name = "heads" } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{});
+    defer result.deinit();
+    try testing.expect(countWarnings(result.warnings, .head_set_member_unresolved, .err) >= 1);
+    try testing.expect(result.hasErrors());
+}
+
+/// The closed-positional-set recipe (`docs/portable-manifest-v1.md`
+/// §5.2): a head-set gating a positional slot whose locals supply the
+/// bodies. `bind-group-layout` is PNGine's shape, minus a level.
+const headset_locals_plugin: Plugin.Plugin = .{
+    .name = "p",
+    .forms = &.{
+        .{
+            .name = "root",
+            .positional = .{ .kind = .{ .name = "res" } },
+            .local_forms = &.{
+                .{ .name = "buffer", .keys = &.{.{ .name = "kind", .value_type = .symbol }} },
+                .{ .name = "storage-texture", .keys = &.{.{ .name = "format", .value_type = .symbol }} },
+            },
+        },
+    },
+    .value_kinds = &.{.{
+        .name = "res",
+        .underlying = .form,
+        .heads = .{ .heads = &.{ .{ .name = "buffer" }, .{ .name = "storage-texture" } } },
+    }},
+};
+
+test "lowering: a head-set slot resolves its members against the slot's locals first" {
+    // The bug S7b filed: the locals override *replaced* the head-set
+    // instead of supplying its bodies, so a head whose only form is a
+    // slot-local reported as unresolvable and the narrowing was dropped.
+    // The validator applies both mechanisms in order, and so must this.
+    const a = testing.allocator;
+    const schema = Schema.Schema.init(&.{headset_locals_plugin});
+    var result = try exportSchema(a, schema, .{ .target = .{ .json_schema = true, .ts_types = false } });
+    defer result.deinit();
+
+    // No global `(form :name buffer …)` exists anywhere, and that is fine.
+    try testing.expectEqual(@as(usize, 0), countWarnings(result.warnings, .head_set_member_unresolved, .err));
+    try testing.expect(!result.hasErrors());
+
+    // The slot keeps its head-set shape, with both heads resolved local.
+    const root = result.model.plugins[0].forms[0];
+    try testing.expect(root.positional == .kind);
+    const shape = root.positional.kind;
+    try testing.expect(shape == .form_heads);
+    try testing.expectEqual(@as(usize, 2), shape.form_heads.refs.len);
+    for (shape.form_heads.refs) |ref| {
+        try testing.expect(ref.body == .local);
+        try testing.expectEqualStrings("p", ref.plugin);
+    }
+    // Each local's body came along, not just its name.
+    try testing.expectEqualStrings("kind", shape.form_heads.refs[0].body.local.keys[0].name);
+    try testing.expectEqualStrings("format", shape.form_heads.refs[1].body.local.keys[0].name);
+
+    // And the emitted `$children` is CLOSED: `oneOf` over the two heads,
+    // with no trailing open branch. That branch is what made the slot
+    // accept `(ghost …)` — a head the validator rejects outright.
+    const bytes = result.json_schema_bytes.?;
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"x-sjon-head-set\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"x-sjon-local-forms\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"anyOf\"") == null);
+}
+
+test "lowering: a bounded head on a locals slot exports its counts" {
+    // S1's `contains` / `minContains` / `maxContains` never reached a slot
+    // that declared locals, because `writeChildrenBounds` reads
+    // `.form_heads` and the override had thrown it away. Same erasure as
+    // the narrowing above, counted twice.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "p",
+        .forms = &.{.{
+            .name = "doc",
+            .positional = .{ .kind = .{ .name = "sect" } },
+            .local_forms = &.{.{ .name = "pin", .keys = &.{.{ .name = "at", .value_type = .number }} }},
+        }},
+        .value_kinds = &.{.{
+            .name = "sect",
+            .underlying = .form,
+            .heads = .{ .heads = &.{ .{ .name = "pin", .min = 1, .max = 1 }, .{ .name = "note" } } },
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{ .target = .{ .json_schema = true, .ts_types = false } });
+    defer result.deinit();
+    const bytes = result.json_schema_bytes.?;
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"minContains\": 1") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"maxContains\": 1") != null);
+    // A local head's `contains` is the head-pin, not a `$ref` into a
+    // `$def` that does not exist.
+    try testing.expect(std.mem.indexOf(u8, bytes, "#/$defs/form.p.pin") == null);
+    // `note` is in the set but declared nowhere: err at the slot, and the
+    // set still lists it.
+    try testing.expectEqual(@as(usize, 1), countWarnings(result.warnings, .head_set_member_unresolved, .err));
+}
+
+test "lowering: a slot-local head shadows a same-named global" {
+    // The other corpus case's claim (`positional-local-headset-resolves-local`),
+    // at the export layer: local-first means the global is not referenced.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "p",
+        .forms = &.{
+            .{
+                .name = "bind-group",
+                .positional = .{ .kind = .{ .name = "bg-set" } },
+                .local_forms = &.{.{ .name = "entry", .keys = &.{.{ .name = "binding", .value_type = .number }} }},
+            },
+            // The shadow target: a global `entry` with a different key.
+            .{ .name = "entry", .keys = &.{.{ .name = "at", .value_type = .symbol }} },
+        },
+        .value_kinds = &.{.{
+            .name = "bg-set",
+            .underlying = .form,
+            .heads = .{ .heads = &.{.{ .name = "entry" }} },
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{ .target = .{ .json_schema = true, .ts_types = false } });
+    defer result.deinit();
+    const shape = result.model.plugins[0].forms[0].positional.kind;
+    try testing.expect(shape.form_heads.refs[0].body == .local);
+    try testing.expectEqualStrings("binding", shape.form_heads.refs[0].body.local.keys[0].name);
+    // The slot does not `$ref` the global `entry` — that is what
+    // "local-first" means, and a `$ref` there would validate the wrong
+    // body (`:at`, not `:binding`). The global keeps its own `$defs`
+    // entry and the document's root `oneOf` still points at it, so the
+    // claim is scoped to the slot: no member of *this* head-set is
+    // `.global`.
+    for (shape.form_heads.refs) |ref| try testing.expect(ref.body != .global);
+    // The global is still exported in its own right.
+    const bytes = result.json_schema_bytes.?;
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"form.p.entry\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"at\"") != null);
+}
+
+test "lowering: a positional local outside the head-set is reported as dead" {
+    // Head-set narrowing runs before resolution ever reaches the local
+    // registry, so a local whose name is outside the set can never match:
+    // `(dead …)` is `not_head_member`, and the body is declared and
+    // unreachable. Nothing said so before — and the exporter is the only
+    // pass that holds both the set and the registry at once.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "p",
+        .forms = &.{.{
+            .name = "root",
+            .positional = .{ .kind = .{ .name = "only-a" } },
+            .local_forms = &.{
+                .{ .name = "a", .keys = &.{.{ .name = "q", .value_type = .number }} },
+                .{ .name = "dead", .keys = &.{.{ .name = "z", .value_type = .number }} },
+            },
+        }},
+        .value_kinds = &.{.{
+            .name = "only-a",
+            .underlying = .form,
+            .heads = .{ .heads = &.{.{ .name = "a" }} },
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{ .target = .{ .json_schema = true, .ts_types = false } });
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 1), countWarnings(result.warnings, .local_form_outside_head_set, .warn));
+    // `.warn`, not `.err`: the manifest loads and every other local works.
+    try testing.expect(!result.hasErrors());
+    var named = false;
+    for (result.warnings) |wn| {
+        if (wn.code != .local_form_outside_head_set) continue;
+        try testing.expectEqualStrings("root", wn.form_name.?);
+        try testing.expect(std.mem.indexOf(u8, wn.message, "dead") != null);
+        named = true;
+    }
+    try testing.expect(named);
+
+    // The dead local is not emitted either — the slot accepts exactly the
+    // head set, and a branch no document can reach would misdescribe it.
+    const bytes = result.json_schema_bytes.?;
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"z\"") == null);
+}
+
+test "lowering: an unreachable local is only unreachable behind a head-set" {
+    // The negative half. Without a head-set the same two locals are both
+    // live, so the warning must not fire on the far more common shape.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "p",
+        .forms = &.{.{
+            .name = "root",
+            .positional = .any,
+            .local_forms = &.{ .{ .name = "a" }, .{ .name = "dead" } },
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{});
+    defer result.deinit();
+    try testing.expectEqual(@as(usize, 0), countWarnings(result.warnings, .local_form_outside_head_set, .warn));
+}
+
+test "lowering: locals with no head-set stay the open inline union" {
+    // The regression pin for the half that was already right. `.any` +
+    // locals — including the implied `.any` the loader writes when locals
+    // appear with no `:positional` — resolves local-first and then falls
+    // back to *any* global form, so the open branch is correct there and
+    // must not be closed by the head-set work.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "p",
+        .forms = &.{.{
+            .name = "canvas",
+            .positional = .any,
+            .local_forms = &.{.{ .name = "dot", .keys = &.{.{ .name = "r", .value_type = .number }} }},
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{ .target = .{ .json_schema = true, .ts_types = false } });
+    defer result.deinit();
+    const shape = result.model.plugins[0].forms[0].positional.kind;
+    try testing.expect(shape == .form_locals);
+    const bytes = result.json_schema_bytes.?;
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"anyOf\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"x-sjon-head-set\"") == null);
 }
 
 test "lowering: unit-shape :reject exports as a plain number, not number_with_unit" {

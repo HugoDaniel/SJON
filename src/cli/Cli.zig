@@ -3365,7 +3365,9 @@ fn renderPluginInfoHuman(
     wasm_sha: ?[]const u8,
 ) !void {
     const p = loaded.plugin;
-    try out.print("plugin    {s} {s}\n", .{ p.name, p.version });
+    // `:version` is optional; print `?` for an unversioned plugin, the same
+    // spelling `plugin list` and `project verify` use.
+    try out.print("plugin    {s} {s}\n", .{ p.name, if (p.version.len > 0) p.version else "?" });
     try out.print("manifest  {s}\n", .{manifest_path});
     if (p.license.len > 0) try out.print("license   {s}\n", .{p.license});
     if (p.homepage.len > 0) try out.print("homepage  {s}\n", .{p.homepage});

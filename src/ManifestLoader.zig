@@ -76,8 +76,8 @@ pub const Result = struct {
 /// `exclusive_group_invalid` / `exclusive_bundle_collision` (malformed
 /// `(exclusive-group …)`), `unspecified` (an `(expr-func …)` mixing the
 /// mono- and multi-signature encodings), and the advisories
-/// `license_unrecognized` / `too_many_keywords` / `sjon_format_unsupported`
-/// / `plugin_wasm_self_hash_malformed`. All are surfaced under the
+/// `license_unrecognized` / `too_many_keywords` /
+/// `plugin_wasm_self_hash_malformed`. All are surfaced under the
 /// `plugin`/`form-or-expr-func`/`key-or-…` hierarchical path so consumers
 /// can navigate to the offending node.
 pub fn load(gpa: Allocator, tree: Ast.Tree) Error!Result {
@@ -168,7 +168,6 @@ fn buildPlugin(
     var homepage: []const u8 = "";
     var repository: []const u8 = "";
     var keywords: []const []const u8 = &.{};
-    var sjon_format: []const u8 = "";
 
     var forms = std.ArrayList(Plugin.FormSpec).empty;
     var expr_funcs = std.ArrayList(Plugin.ExprFunc).empty;
@@ -224,14 +223,6 @@ fn buildPlugin(
                             try emitWarning(a, diags, .too_many_keywords, tree.spanOf(kv.value), &.{"plugin"}, ":keywords has {d} entries; advisory cap is {d}", .{ keywords.len, Plugin.MAX_KEYWORDS });
                         }
                     }
-                } else if (std.mem.eql(u8, kv.key, "sjon")) {
-                    if (tree.tagOf(kv.value) == .string) {
-                        const decl = try a.dupe(u8, tree.stringText(kv.value));
-                        if (compareSjonFormat(decl, Plugin.SUPPORTED_SJON_FORMAT) == .gt) {
-                            try emitDiag(a, diags, .sjon_format_unsupported, tree.spanOf(kv.value), &.{"plugin"}, "manifest declares `:sjon {s}` but host implements {s}", .{ decl, Plugin.SUPPORTED_SJON_FORMAT });
-                        }
-                        sjon_format = decl;
-                    }
                 }
                 // :description is declarative metadata not stored on
                 // Plugin — `:version` is now captured (above) so resolvers
@@ -264,7 +255,6 @@ fn buildPlugin(
         .homepage = homepage,
         .repository = repository,
         .keywords = keywords,
-        .sjon_format = sjon_format,
         .forms = try forms.toOwnedSlice(a),
         .expr_funcs = try expr_funcs.toOwnedSlice(a),
         .value_kinds = try value_kinds.toOwnedSlice(a),
@@ -345,26 +335,6 @@ fn isRecognizedSpdx(lic: []const u8) bool {
         if (std.mem.eql(u8, c, lic)) return true;
     }
     return false;
-}
-
-/// Compare two `:sjon` format versions of the shape `"<major>.<minor>"`.
-/// Returns `.less`/`.equal`/`.greater`. Malformed input compares equal
-/// so a typo doesn't masquerade as newer (and the loader's earlier
-/// `wrong_underlying`/parse step would have caught a missing string).
-fn compareSjonFormat(declared: []const u8, supported: []const u8) std.math.Order {
-    const dv = parseSimpleVersion(declared) orelse return .eq;
-    const sv = parseSimpleVersion(supported) orelse return .eq;
-    if (dv.major != sv.major) return std.math.order(dv.major, sv.major);
-    return std.math.order(dv.minor, sv.minor);
-}
-
-const SimpleVersion = struct { major: u32, minor: u32 };
-
-fn parseSimpleVersion(s: []const u8) ?SimpleVersion {
-    const dot = std.mem.indexOfScalar(u8, s, '.') orelse return null;
-    const major = std.fmt.parseInt(u32, s[0..dot], 10) catch return null;
-    const minor = std.fmt.parseInt(u32, s[dot + 1 ..], 10) catch return null;
-    return .{ .major = major, .minor = minor };
 }
 
 fn buildValueKind(
@@ -489,9 +459,10 @@ fn buildValueKind(
     }
     if (is_scalar_or_ref) {
         if (scalar_or_ref_idx) |si| {
-            // Pure load-time desugar: store an ordinary `.union_of` so the
-            // validator, exporter, and every downstream consumer see a
-            // plain `union [<base> <ref>]`.
+            // Pure load-time desugar: store an ordinary `.union_of`, and
+            // nothing else. The validator, the exporter, and every other
+            // consumer see a plain `union [<base> <ref>]` and cannot tell
+            // the shorthand from a union spelled out by hand.
             kind.union_of = try buildScalarOrRefShape(a, tree, si, kind.name, diags);
             kind.underlying = .union_of;
         } else {
@@ -515,7 +486,11 @@ fn buildValueKind(
 /// `union [<base> <ref>]` UnionShape. `scalar-or-ref` is a load-time
 /// shorthand — the stored kind is an ordinary `.union_of`, so the
 /// validator (try-each-alternative), the exporter (`oneOf` /
-/// `Base | Symbol_<…>`), and every downstream consumer inherit for free.
+/// `Base | Symbol_<…>`), and every downstream consumer inherit for free —
+/// reporting included. The two arms are disjoint by node shape, so a
+/// number or a symbol always has a determined arm and the validator names
+/// that arm's own failure (`number_above_max`, `not_cross_ref`, …); it is
+/// the general union rule, not an exception carried for the shorthand.
 ///
 /// `:ref` defaults to the primitive `symbol`, which is what the shorthand
 /// meant before the key existed and resolves via the union machinery's
@@ -660,6 +635,7 @@ fn buildForm(
     spec.keys = try keys.toOwnedSlice(a);
     if (variants.items.len > 0) {
         spec.variants = try variants.toOwnedSlice(a);
+        try checkVariantWhenDisjoint(a, diags, hdr.head_span, spec.name, spec.variants.?);
     }
 
     // Resolve discriminant_idx — a discriminant referencing a key not in
@@ -689,7 +665,20 @@ fn buildForm(
     );
 
     if (lowering_idx) |li| {
-        spec.lowering = try buildLoweringSpec(a, tree, li, spec.name, diags);
+        if (depth > 1) {
+            // A slot-local form cannot lower. Nothing downstream would honour
+            // the declaration: `Schema.validateLowering` and the produces
+            // graph walk only top-level forms, and the lowering worklist
+            // resolves a local head to its local body, which is never a hook
+            // — so the declaration would be silently dead (or, before the
+            // worklist resolved local-first, a same-named global's hook
+            // fired on it). Reject rather than carry a lie; the spec keeps
+            // `lowering == null` so the invariant holds even in the partial
+            // load. `Schema.init` asserts the same for static plugins.
+            try emitDiag(a, diags, .invalid_manifest, tree.spanOf(li), &.{ spec.name, "lowering" }, "slot-local form `{s}` declares `:lowering`; a slot-local form cannot lower — declare the sugar as a top-level (form …), or leave the local as plain data", .{spec.name});
+        } else {
+            spec.lowering = try buildLoweringSpec(a, tree, li, spec.name, diags);
+        }
     }
 
     // Positional slot-local form definitions (FormSpec.local_forms). Inline
@@ -921,6 +910,39 @@ fn indexOfKey(keys: []const Plugin.KeySpec, name: []const u8) ?usize {
     return null;
 }
 
+/// A discriminant value selects at most one variant. Two variants that
+/// both list a value — `:when a` twice, or `:when [a b]` beside
+/// `:when [b c]` — leave "which one applies" to declaration order, which
+/// is exactly the question the key-collision check exists to keep a schema
+/// from asking; the two are the same shape of ambiguity (a slot with two
+/// declarations) at the value level, so the second listing is
+/// `invalid_manifest`, once per repeated value, anchored on the form. Runs
+/// in the loader rather than the aggregate pass because it needs no
+/// resolution — the variants of one form are all in hand here.
+fn checkVariantWhenDisjoint(
+    a: Allocator,
+    diags: *std.ArrayList(Ast.Diagnostic),
+    span: Ast.Span,
+    form_name: []const u8,
+    variants: []const Plugin.Variant,
+) Error!void {
+    for (variants, 0..) |v, vi| {
+        std.debug.assert(v.when.len >= 1); // `buildVariant` supplies the placeholder
+        for (v.when) |w| {
+            // The unnameable placeholder a `:when`-less variant carries
+            // (see `buildVariant`) selects nothing and already reported
+            // `missing_required_key` at meta-validation; two of them are
+            // not a value listed twice.
+            if (w.len == 0) continue;
+            for (variants[0..vi]) |prior| {
+                if (!prior.selects(w)) continue;
+                try emitDiag(a, diags, .invalid_manifest, span, &.{ form_name, "variant", "when" }, "form `{s}` variant `:when {s}` lists `{s}`, already selected by variant `:when {s}` — a discriminant value selects at most one variant", .{ form_name, try v.whenText(a), w, try prior.whenText(a) });
+                break;
+            }
+        }
+    }
+}
+
 fn buildVariant(
     a: Allocator,
     tree: *const Ast.Tree,
@@ -931,7 +953,7 @@ fn buildVariant(
     /// may also carry slot-local forms, so the depth is threaded onward.
     depth: usize,
 ) Error!Plugin.Variant {
-    var variant: Plugin.Variant = .{ .when = "" };
+    var variant: Plugin.Variant = .{ .when = &.{} };
     var keys = std.ArrayList(Plugin.KeySpec).empty;
     var key_count: usize = 0;
     var groups = std.ArrayList(BuiltGroup).empty;
@@ -941,7 +963,7 @@ fn buildVariant(
             .kvpair => {
                 const kv = tree.kvpairHeader(ci);
                 if (std.mem.eql(u8, kv.key, "when")) {
-                    variant.when = try a.dupe(u8, tree.symbolText(kv.value));
+                    if (try parseVariantWhen(a, tree, kv.value, form_name, diags)) |when| variant.when = when;
                 }
             },
             .form => {
@@ -963,6 +985,15 @@ fn buildVariant(
         try emitTooManyKeys(a, diags, hdr.head_span, form_name, key_count);
     }
 
+    // `:when` is `:optional false`, so a missing one is already a
+    // `missing_required_key` from meta-validation — but this function must
+    // stay total, and `Variant.when` is documented `.len >= 1`. One
+    // unnameable value keeps the invariant: no member spells `""`, so the
+    // variant is selected by nothing, which is what a `:when`-less variant
+    // meant before `when` was a list.
+    if (variant.when.len == 0) variant.when = try oneSymbol(a, "");
+    std.debug.assert(variant.when.len >= 1);
+
     variant.keys = try keys.toOwnedSlice(a);
     variant.exclusive_groups = try resolveExclusiveGroups(
         a,
@@ -971,9 +1002,46 @@ fn buildVariant(
         variant.keys,
         null,
         form_name,
-        variant.when,
+        try variant.whenText(a),
     );
     return variant;
+}
+
+/// The `:when` of one `(variant …)`, normalised to the list
+/// `Plugin.Variant.when` holds. The meta-schema types the slot as
+/// `variant-when`, a union of `symbol` and `symbol-list`, so both shapes
+/// arrive here and a third has already reported `union_no_branch_matched`
+/// — that one is null, and `buildVariant` keeps whatever it had. Nothing
+/// downstream knows which spelling the author wrote, so the two rejections
+/// a list can earn — empty, or a value repeated — are decided here, where
+/// the spelling is still visible. Both are `invalid_manifest` on the
+/// value's span; the list is returned as written either way.
+fn parseVariantWhen(
+    a: Allocator,
+    tree: *const Ast.Tree,
+    value: Ast.NodeIndex,
+    form_name: []const u8,
+    diags: *std.ArrayList(Ast.Diagnostic),
+) Error!?[]const []const u8 {
+    switch (tree.tagOf(value)) {
+        .symbol => return try oneSymbol(a, tree.symbolText(value)),
+        .vector => {},
+        else => return null,
+    }
+    const when = try parseSymbolList(a, tree, value);
+    const span = tree.spanOf(value);
+    if (when.len == 0) {
+        try emitDiag(a, diags, .invalid_manifest, span, &.{ form_name, "variant", "when" }, "form `{s}` variant `:when []` lists no discriminant value — a variant nothing selects can never apply", .{form_name});
+    }
+    // O(n²) over a hand-written list of enum members.
+    for (when, 0..) |w, i| {
+        for (when[i + 1 ..]) |u| {
+            if (!std.mem.eql(u8, w, u)) continue;
+            try emitDiag(a, diags, .invalid_manifest, span, &.{ form_name, "variant", "when" }, "form `{s}` variant `:when` lists `{s}` twice; a value selects the variant once, so the repeat adds nothing and hides a likely typo", .{ form_name, w });
+            break;
+        }
+    }
+    return when;
 }
 
 /// Intermediate representation captured during the structural walk of
@@ -2428,7 +2496,11 @@ fn parseMemberDecl(
 ///     bare name.
 ///   * Rich — `(head-set (head :name a :min 1 :max 1) …)`, each
 ///     `(head …)` positional child parsed as a full `Head`. This is the
-///     only spelling that can carry counts.
+///     only spelling that can carry *per-head* counts.
+///
+/// `:min-children` / `:max-children` bound the whole set and are legal
+/// beside **either** spelling — the aggregate needs no per-head metadata,
+/// and "exactly one of these four" is the common case.
 ///
 /// Four `invalid_manifest` conditions, all shaped after `member-set`'s:
 /// mixing the two spellings, declaring neither, a duplicate `:name`, and
@@ -2437,6 +2509,10 @@ fn parseMemberDecl(
 /// reads `wrong_underlying` like every other out-of-range integer the
 /// loader meets (`(fixed N)`, `(range :min …)`); the condition is
 /// identical and a second message shape for it would be the drift.
+///
+/// Three more come with the set bounds, and the last two are the only
+/// checks in this loader that compare the two levels — see
+/// `checkAggregateBounds`.
 ///
 /// Diagnostics are the contract, not an abort: a rejected set still
 /// returns whatever the author spelled so downstream validation keeps
@@ -2451,12 +2527,30 @@ fn buildHeadSet(
     const hdr = tree.formHeader(idx);
     var compact_names: ?[]const []const u8 = null;
     var rich_count: usize = 0;
+    var min_children: u16 = 0;
+    var max_children: ?u16 = null;
     for (hdr.children) |ci| {
         switch (tree.tagOf(ci)) {
             .kvpair => {
                 const kv = tree.kvpairHeader(ci);
                 if (std.mem.eql(u8, kv.key, "names")) {
                     compact_names = try parseSymbolList(a, tree, kv.value);
+                } else if (std.mem.eql(u8, kv.key, "min-children") or std.mem.eql(u8, kv.key, "max-children")) {
+                    const is_min = kv.key[1] == 'i';
+                    const n = numericValue(tree, kv.value);
+                    if (boundedInt(u16, n)) |v| {
+                        if (is_min) min_children = v else max_children = v;
+                    } else {
+                        try emitNumericOutOfRange(
+                            a,
+                            diags,
+                            tree.spanOf(kv.value),
+                            try pathConcat(a, &.{ kind_name, "heads" }, &.{kv.key}),
+                            kv.key,
+                            std.math.maxInt(u16),
+                            n,
+                        );
+                    }
                 }
             },
             .form => rich_count += 1,
@@ -2468,10 +2562,20 @@ fn buildHeadSet(
         try emitDiag(a, diags, .invalid_manifest, hdr.head_span, &.{ kind_name, "heads" }, "value-kind `{s}` `:heads` mixes `:names` and `(head …)` children — pick one shape", .{kind_name});
     }
 
+    if (max_children) |mx| {
+        if (min_children > mx) {
+            try emitDiag(a, diags, .invalid_manifest, hdr.head_span, &.{ kind_name, "heads" }, "value-kind `{s}` `:heads` declares an empty child range (`:min-children {d}` > `:max-children {d}`)", .{ kind_name, min_children, mx });
+        }
+    }
+
     if (compact_names) |names| {
         const out = try a.alloc(Plugin.ValueKind.HeadSet.Head, names.len);
         for (names, 0..) |n, i| out[i] = .{ .name = n };
-        return .{ .heads = out };
+        // No per-head bound can exist on this spelling, so the two
+        // cross-level sums are `0` and infinity — both vacuous. Skipping
+        // `checkAggregateBounds` here says that, rather than relying on
+        // it to work it out.
+        return .{ .heads = out, .min_children = min_children, .max_children = max_children };
     }
 
     if (rich_count > 0) {
@@ -2493,11 +2597,55 @@ fn buildHeadSet(
             }
             wi += 1;
         }
-        return .{ .heads = out };
+        const hs: Plugin.ValueKind.HeadSet = .{ .heads = out, .min_children = min_children, .max_children = max_children };
+        try checkAggregateBounds(a, hs, kind_name, hdr.head_span, diags);
+        return hs;
     }
 
     try emitDiag(a, diags, .invalid_manifest, hdr.head_span, &.{ kind_name, "heads" }, "value-kind `{s}` `:heads` declares no heads (need `:names …` or `(head …)` children)", .{kind_name});
-    return .{ .heads = &.{} };
+    return .{ .heads = &.{}, .min_children = min_children, .max_children = max_children };
+}
+
+/// The two cross-level checks, and the only place this loader compares a
+/// per-head bound against the set's. Both are **sums**, not per-head
+/// comparisons, and that is the whole point:
+///
+///   * `Σ head.min > set.max` — heads `a :min 1` and `b :min 1` under a
+///     set `:max-children 1` is unsatisfiable, yet neither head's `:min`
+///     is above the set's `:max`. The weaker per-head spelling of this
+///     check lets it through.
+///   * `set.min > Σ head.max` — the mirror. Only meaningful when *every*
+///     head is bounded: one unbounded head makes the sum infinite and
+///     the set always fillable, so the check is vacuous and must not
+///     fire (a schema saying "at least 9, and `sampler` is unbounded" is
+///     perfectly satisfiable).
+///
+/// Accumulated in `u32`: `u16` heads summing over `u16` bounds overflows
+/// in the type the fields are declared in.
+///
+/// Both are `invalid_manifest`, like the four spelling refusals — the
+/// manifest declares something no document can satisfy, which is the
+/// same class of author error as an empty range.
+fn checkAggregateBounds(
+    a: Allocator,
+    hs: Plugin.ValueKind.HeadSet,
+    kind_name: []const u8,
+    head_span: Ast.Span,
+    diags: *std.ArrayList(Ast.Diagnostic),
+) Error!void {
+    if (hs.max_children) |set_max| {
+        var floor_sum: u32 = 0;
+        for (hs.heads) |h| floor_sum += h.min;
+        if (floor_sum > set_max) {
+            try emitDiag(a, diags, .invalid_manifest, head_span, &.{ kind_name, "heads" }, "value-kind `{s}` `:heads` is unsatisfiable: its heads require at least {d} child(ren) together, above `:max-children {d}`", .{ kind_name, floor_sum, set_max });
+        }
+    }
+    if (hs.min_children == 0) return;
+    var ceil_sum: u32 = 0;
+    for (hs.heads) |h| ceil_sum += h.max orelse return; // one unbounded head ⇒ vacuous
+    if (hs.min_children > ceil_sum) {
+        try emitDiag(a, diags, .invalid_manifest, head_span, &.{ kind_name, "heads" }, "value-kind `{s}` `:heads` is unsatisfiable: `:min-children {d}` is above the {d} child(ren) its heads allow together", .{ kind_name, hs.min_children, ceil_sum });
+    }
 }
 
 /// Parse one `(head :name X :min 1 :max 1 :description "…")` form into a
@@ -3126,6 +3274,14 @@ fn parseMemberNameList(
     return out;
 }
 
+/// A one-element symbol list owned by `a` — the shape a scalar `:when`
+/// normalises to (`Plugin.Variant.when` is always a list).
+fn oneSymbol(a: Allocator, text: []const u8) Error![]const []const u8 {
+    const list = try a.alloc([]const u8, 1);
+    list[0] = try a.dupe(u8, text);
+    return list;
+}
+
 fn parseSymbolList(a: Allocator, tree: *const Ast.Tree, idx: Ast.NodeIndex) Error![]const []const u8 {
     const elements = tree.vectorElements(idx);
     const out = try a.alloc([]const u8, elements.len);
@@ -3139,22 +3295,9 @@ fn parseSymbolList(a: Allocator, tree: *const Ast.Tree, idx: Ast.NodeIndex) Erro
 // Tests
 // ---------------------------------------------------------------------------
 //
-// The bulk of ManifestLoader's tests live in the sibling `ManifestLoader_tests.zig`
-// (wired at the bottom of this section). Only the test below stays inline: it
-// exercises the private helper `compareSjonFormat` directly, which the sibling
-// — reaching ManifestLoader through its public surface — cannot. (Sha256-pin
-// well-formedness now lives in the `Sha256Pin` leaf and is tested there.)
-
-const testing = std.testing;
-
-test "ManifestLoader: compareSjonFormat orders correctly" {
-    try testing.expectEqual(std.math.Order.eq, compareSjonFormat("1.0", "1.0"));
-    try testing.expectEqual(std.math.Order.lt, compareSjonFormat("1.0", "1.1"));
-    try testing.expectEqual(std.math.Order.gt, compareSjonFormat("2.0", "1.9"));
-    try testing.expectEqual(std.math.Order.gt, compareSjonFormat("1.10", "1.9"));
-    // Malformed input is equal — refuses to escalate on parse error.
-    try testing.expectEqual(std.math.Order.eq, compareSjonFormat("abc", "1.0"));
-}
+// ManifestLoader's tests live in the sibling `ManifestLoader_tests.zig`,
+// which reaches the loader through its public surface. (Sha256-pin
+// well-formedness lives in the `Sha256Pin` leaf and is tested there.)
 
 test {
     _ = @import("ManifestLoader_tests.zig");

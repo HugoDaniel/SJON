@@ -98,7 +98,7 @@
       "value_kinds": [
         {
           "name": "channel",
-          "description": "Normalized colour channel encoded as a u16 — integer in [0, 65535].",
+          "description": "Normalized colour channel encoded as a u16: an integer in [0, 65535].",
           "shape": {
             "kind": "number_bounded",
             "bounds": {}
@@ -114,7 +114,7 @@
         },
         {
           "name": "vertex-index",
-          "description": "Index into a vertex buffer — non-negative integer in [0, 2^32).",
+          "description": "Index into a vertex buffer: a non-negative integer in [0, 2^32).",
           "shape": {
             "kind": "number_bounded",
             "bounds": {}
@@ -133,14 +133,14 @@
         },
         {
           "name": "raw-uniform",
-          "description": "A raw uniform / push-constant value — bare number only, never a unit suffix.",
+          "description": "A raw uniform or push-constant value: a bare number only, never a unit suffix.",
           "shape": {
             "kind": "number"
           }
         },
         {
           "name": "u32-mask",
-          "description": "A 32-bit write/sample mask. Write it in hex — 0xFFFFFFFF, 0xF — the way the WebGPU spec does.",
+          "description": "A 32-bit write/sample mask. Write it in hex (0xFFFFFFFF, 0xF) the way the WebGPU spec does.",
           "shape": {
             "kind": "number_bounded",
             "bounds": {}

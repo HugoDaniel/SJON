@@ -5,7 +5,7 @@
 ;
 ; This file is also the receipt behind the landing page's "errors a
 ; model can repair" card, and its schema is mirrored by the LLM pack's
-; examples/llm/flows/01-unknown-key/ — keep the three in sync.
+; examples/llm/flows/01-unknown-key/. Keep the three in sync.
 (plugin :name demo :version "1.0.0"
   (form :name camera
     (key :name mode :type symbol :optional true)

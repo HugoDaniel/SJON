@@ -1,0 +1,15 @@
+; Control for `lowering-local-shadows-global-sugar`: the same schema, but
+; `(entry)` at the root, where no slot puts a local in scope. It resolves to
+; the global lowerable `entry`; `test/identity-v1` emits `(entry-normal)`
+; carrying no `:must` (the sugar declares no keys to copy), so the lowered
+; layer fails `missing_required_key`. That this fires here and not under
+; `bind-group` is the whole difference local-first resolution makes.
+(plugin :name p :version "1.0.0"
+  (form :name entry :open true
+    :lowering (lowering :hook test/identity-v1 :produces [entry-normal]))
+  (form :name entry-normal
+    (key :name must :type number :optional false))
+  (form :name bind-group
+    (form :name entry)))
+
+(entry)

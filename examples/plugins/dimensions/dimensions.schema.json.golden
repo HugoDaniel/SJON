@@ -95,7 +95,7 @@
                   "d-array"
                 ]
               },
-              "description": "A hyphenated digit-leading spelling — one token only because a `-` may join two letter runs inside a unit."
+              "description": "A hyphenated digit-leading spelling, one token only because a `-` may join two letter runs inside a unit."
             },
             {
               "const": {

@@ -9,15 +9,10 @@
 ; compiled extractor.
 ;
 ; `swatches` splits its source on newlines and calls every non-empty
-; line a name. That is the whole extractor — deliberately boring, so
+; line a name. That is the whole extractor, deliberately boring, so
 ; what this flow teaches is the *route* (a member set computed from a
 ; string in the document) and not colour-list parsing.
-;
-; `:sjon "1.2"` is the manifest format that introduced the provider
-; vocabulary. A host that predates it refuses this manifest outright
-; with `sjon_format_unsupported` rather than ignoring the two keys it
-; does not know.
-(plugin :name paint :version "1.0.0" :sjon "1.2"
+(plugin :name paint :version "1.0.0"
   (cross-ref-provider :name swatches
     :description "One swatch name per non-empty line of a palette's `:colors`."
     :impl "wasm:extract_lines")

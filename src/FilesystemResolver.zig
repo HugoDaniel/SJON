@@ -25,7 +25,7 @@
 //! `src/Host.zig` for the comparison and diagnostic emission.
 //!
 //! The *project file's* vocabulary is the opposite case, and the
-//! distinction is load-bearing: this file's nine keys and the
+//! distinction is load-bearing: this file's eight keys and the
 //! project-pin-vs-document-pin cross-check that emits
 //! `pin_disagreement` belong to THIS resolver, not to the language.
 //! `Resolver.zig` says so outright — the filesystem resolver is one
@@ -392,9 +392,6 @@ fn walkProjectForm(
             if (tree.tagOf(kv.value) == .string) {
                 self.project_version = try a.dupe(u8, tree.stringText(kv.value));
             }
-        } else if (std.mem.eql(u8, kv.key, "sjon")) {
-            // Project-format version. Currently accepted; mismatches
-            // emit `sjon_format_unsupported` in a future revision.
         } else if (std.mem.eql(u8, kv.key, "documents")) {
             self.project_documents = try parseStringVector(a, tree, kv.value);
         } else if (std.mem.eql(u8, kv.key, "search-roots")) {

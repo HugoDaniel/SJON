@@ -1,12 +1,12 @@
 ; Two exclusive-group fixtures in one plugin:
 ;
-;   * `(phrase …)` — `exactly_one [notes, events]`: every phrase
+;   * `(phrase …)`:  `exactly_one [notes, events]`: every phrase
 ;     row must declare exactly one rendering mode.
-;   * `(tag …)`    — `at_most_one [color, shape]`: a tag is either
+;   * `(tag …)`:     `at_most_one [color, shape]`: a tag is either
 ;     a colour mark or a shape mark, but it's also fine to leave
 ;     both off.
 ;
-;   * `(anchor …)` — `:requires`, the third and last way a form relates
+;   * `(anchor …)`:  `:requires`, the third and last way a form relates
 ;     its keys. Not a cardinality rule at all: `:offset` is meaningless
 ;     without `:target`, so writing one demands the other. Exclusive
 ;     groups bound *how many* may appear; a discriminant gates keys on a
@@ -19,7 +19,7 @@
 
 (plugin :name kit-xor :version "1.0.0"
   (form :name phrase
-    :description "A single phrase rendered either as notes or as events — never both, never neither."
+    :description "A single phrase rendered either as notes or as events, never both and never neither."
     (key :name name :type symbol)
     (key :name notes :type vector :optional true :description "Pitch-class sequence.")
     (key :name events :type vector :optional true :description "Time-stamped event list.")

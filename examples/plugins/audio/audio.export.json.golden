@@ -7,7 +7,7 @@
       "forms": [
         {
           "name": "phrase",
-          "description": "A note sequence — named (a reusable definition) or anonymous (inline).",
+          "description": "A note sequence, either named (a reusable definition) or anonymous (inline).",
           "open": false,
           "positional": "none",
           "keys": [

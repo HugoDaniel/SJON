@@ -1,0 +1,7 @@
+; Two diagnostics, both the union's. Neither `number_above_max` /
+; `not_cross_ref` (for the vector) nor `not_member` / `not_cross_ref` (for
+; the misspelled member) is emitted: no arm was determined, so no arm's
+; private cause is forwarded.
+(diagnostics
+  (diagnostic :code union_no_branch_matched :path [use q])
+  (diagnostic :code union_no_branch_matched :path [use m]))

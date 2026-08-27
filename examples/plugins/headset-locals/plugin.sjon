@@ -1,0 +1,78 @@
+; The closed positional set: a head-set gating a slot whose *locals*
+; supply the bodies (portable-manifest-v1 §5.2, "the head-set recipe").
+;
+; Two mechanisms stack here, and the whole point of this fixture is that
+; they stack rather than replace each other:
+;
+;   1. `:positional <head-set-kind>` narrows the slot by head TEXT,
+;      byte-equality against each `:name`, no catalog lookup. An
+;      out-of-set head is `not_head_member`.
+;   2. The narrowed head then resolves LOCAL-FIRST: a slot-local
+;      `(form …)` satisfies it with no global declaration anywhere, and
+;      shadows a same-named global if one exists.
+;
+; So `buffer` and `storage-texture` below need no global "dummy" form,
+; which is the thing `conformance/cases/positional-local-headset-no-global`
+; pins for the validator. This fixture pins the *export* of it.
+;
+; What that export looks like, and why each part is there:
+;
+;   * `$children.items` is `oneOf` over the head set with NO trailing open
+;     branch: the slot is closed, so `(ghost …)` is rejected. An open
+;     locals slot (no head-set) keeps its open branch; see the
+;     `local-forms` fixture for that shape.
+;   * A local head's body is emitted INLINE (locals have no global `$def`
+;     to `$ref`); a global head keeps its `$ref`. `head` below is the
+;     mixed case: it is in the set and declared globally, so one slot
+;     carries both spellings at once.
+;   * `x-sjon-head-set` lists every accepted head; `x-sjon-local-forms`
+;     lists the subset that resolved locally.
+;   * Per-head counts survive. `buffer` is `:max 1` and `binding` is
+;     `:min 1`, and both emit `contains` + `minContains` / `maxContains`
+;     beside `items`, a bounded head on a locals slot used to export no
+;     bounds at all.
+;   * A local head's `contains` is a head-pin
+;     (`{$form: {const: …}}`) rather than a `$ref`, because there is no
+;     `$def` to point at. It counts the same children: `items`' `oneOf`
+;     already forces every child to satisfy its own head's branch.
+(plugin :name headset-locals :version "1.0.0"
+  :description "Reference plugin for a head-set whose members resolve to slot-local forms."
+
+  ; A GLOBAL form that is also a head-set member, so one slot mixes an
+  ; inline local body with a `$ref` into `$defs`.
+  (form :name head
+    :description "A global form, reachable from the resource slot by the additive fallback."
+    (key :name text :type string :optional false))
+
+  (value-kind :name bgl-resource
+    :description "What one binding may hold. Local bodies, one global, and counts."
+    :underlying form
+    :heads (head-set
+      (head :name buffer          :max 1 :description "A buffer binding. At most one.")
+      (head :name storage-texture        :description "A storage texture. Any number.")
+      (head :name head                   :description "Free-text annotation; the one global member.")))
+
+  (value-kind :name bgl-entry-item
+    :description "One entry of a layout. Exactly one `entry` is required."
+    :underlying form
+    :heads (head-set
+      (head :name entry :min 1 :description "A binding entry. At least one.")))
+
+  (form :name bind-group-layout
+    :description "A layout whose entries are slot-local, behind a closed head-set."
+    :positional bgl-entry-item
+    (key :name name :type symbol :optional false)
+
+    ; Slot-local, and the ONLY declaration of `entry` anywhere. A head-set
+    ; member does not need a global form to be usable.
+    (form :name entry
+      :description "One binding. Its own positional slot is closed the same way."
+      :positional bgl-resource
+      (key :name binding :type number :optional false)
+
+      (form :name buffer
+        :description "Slot-local buffer resource; no global `buffer` exists."
+        (key :name kind :type symbol :optional false))
+      (form :name storage-texture
+        :description "Slot-local storage texture; no global one exists either."
+        (key :name format :type symbol :optional false)))))

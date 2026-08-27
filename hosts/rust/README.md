@@ -23,7 +23,7 @@ This is the second WASM-backed host wrapper, after the JS host in
 | `tests/host_mock_resolver.rs`           | Mock-resolver coverage (11 tests).                   |
 | `tests/host_d7_exec.rs`                 | Executable-plugin dispatch + host-result merging (14 tests). |
 | `tests/host_eval_expr.rs`               | `SjonHost::eval_expr` coverage (5 tests).            |
-| `tests/host_v11_metadata.rs`            | v1.1 manifest-metadata smoke tests (5 tests).        |
+| `tests/host_metadata.rs`                | Manifest-metadata smoke tests (4 tests).             |
 | `tests/filesystem_resolver.rs`          | `FilesystemResolver` semantics (8 tests).            |
 | `tests/conformance.rs`                  | 241 of 271 corpus fixtures (skips 29 `lowering-*` — Zig-host-only — and legacy `too-many-keys`). |
 | `tests/export_schema.rs`                | `SjonHost::export_schema` round-trip coverage (3 tests). |

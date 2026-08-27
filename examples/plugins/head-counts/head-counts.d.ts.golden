@@ -4,6 +4,8 @@
 //
 // Export warnings:
 //   [info head_set_emitted_via_oneof_refs] value-kind `pipeline-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
+//   [info head_set_emitted_via_oneof_refs] value-kind `bgl-resource` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
+//   [info head_set_emitted_via_oneof_refs] value-kind `data-shape-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 
 export type Keyword<S extends string = string> = { readonly $kw: S };
 export type Symbol_<S extends string = string> = { readonly $sym: S };
@@ -27,7 +29,7 @@ export interface HeadCounts_Vertex {
   entry: Symbol_;
 }
 
-/** The fragment stage. Optional — a depth-only pass has none. */
+/** The fragment stage. Optional, because a depth-only pass has none. */
 export interface HeadCounts_Fragment {
   $form: "fragment";
   $ns: "head-counts";
@@ -51,7 +53,7 @@ export interface HeadCounts_RenderPipeline {
   $children?: Array<{ readonly $form: "vertex" } | { readonly $form: "fragment" } | { readonly $form: "constant" }>;
 }
 
-/** Same kind, keyed slot — the counts ride along inertly here. */
+/** Same kind, keyed slot: the counts ride along inertly here. */
 export interface HeadCounts_SectionHolder {
   $form: "section-holder";
   $ns: "head-counts";
@@ -67,11 +69,69 @@ export interface HeadCounts_ScratchPipeline {
   [key: string]: unknown;
 }
 
+/** A buffer binding. */
+export interface HeadCounts_Buffer {
+  $form: "buffer";
+  $ns: "head-counts";
+  type: Symbol_;
+}
+
+/** A sampler binding. */
+export interface HeadCounts_Sampler {
+  $form: "sampler";
+  $ns: "head-counts";
+  type: Symbol_;
+}
+
+/** A texture binding. */
+export interface HeadCounts_Texture {
+  $form: "texture";
+  $ns: "head-counts";
+  "sample-type": Symbol_;
+}
+
+/** Exactly one resource: the claim per-head bounds cannot make. */
+export interface HeadCounts_BglEntry {
+  $form: "bgl-entry";
+  $ns: "head-counts";
+  binding: number;
+  /** Positional counts (not expressible in TS): buffer: 0..1; sampler: 0..1; texture: 0..1; any of the set: 1 */
+  $children?: Array<{ readonly $form: "buffer" } | { readonly $form: "sampler" } | { readonly $form: "texture" }>;
+}
+
+export interface HeadCounts_Cube {
+  $form: "cube";
+  $ns: "head-counts";
+  size: number;
+}
+
+export interface HeadCounts_Sphere {
+  $form: "sphere";
+  $ns: "head-counts";
+  radius: number;
+}
+
+/** At most one generator: a ceiling-only set bound. */
+export interface HeadCounts_Data {
+  $form: "data";
+  $ns: "head-counts";
+  name: Symbol_;
+  /** Positional counts (not expressible in TS): any of the set: 0..1 */
+  $children?: Array<{ readonly $form: "cube" } | { readonly $form: "sphere" }>;
+}
+
 export type SjonHeadCounts =
   | HeadCounts_Vertex
   | HeadCounts_Fragment
   | HeadCounts_Constant
   | HeadCounts_RenderPipeline
   | HeadCounts_SectionHolder
-  | HeadCounts_ScratchPipeline;
+  | HeadCounts_ScratchPipeline
+  | HeadCounts_Buffer
+  | HeadCounts_Sampler
+  | HeadCounts_Texture
+  | HeadCounts_BglEntry
+  | HeadCounts_Cube
+  | HeadCounts_Sphere
+  | HeadCounts_Data;
 

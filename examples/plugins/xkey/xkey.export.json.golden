@@ -47,7 +47,7 @@
         },
         {
           "name": "tag",
-          "description": "A tag decoration. Use `(prefix + suffix)` to flank, or `literal` alone — but never both.",
+          "description": "A tag decoration. Use `(prefix + suffix)` to flank, or `literal` alone, but never both.",
           "open": false,
           "positional": "none",
           "keys": [

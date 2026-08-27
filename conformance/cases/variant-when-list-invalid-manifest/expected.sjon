@@ -1,0 +1,14 @@
+; Four rejections: one each for the empty and repeated lists, two for the
+; overlap (`[b c]` repeats `b`, and the scalar `b` repeats it again). The
+; paths are the loader's `[<form> variant when]` shape. No
+; `variant_key_collision`: the three overlapping variants declare three
+; distinct keys — the value-level overlap is the whole finding.
+;
+; No document body: a manifest carrying `invalid_manifest` errors does not
+; register its forms, so any instance below would add an `unknown_form`
+; that says nothing about this case.
+(diagnostics
+  (diagnostic :code invalid_manifest :path [empty variant when])
+  (diagnostic :code invalid_manifest :path [repeat variant when])
+  (diagnostic :code invalid_manifest :path [overlap variant when])
+  (diagnostic :code invalid_manifest :path [overlap variant when]))

@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 1,
+  "x-sjon-export-warnings": [
+    {
+      "code": "variants_emitted_via_if_then",
+      "severity": "info",
+      "message": "discriminated form `primitive` — variants emitted as allOf+if/then; source-order (variant keys must follow the discriminant) is not enforced by JSON Schema",
+      "plugin": "variant-set",
+      "form": "primitive"
+    }
+  ],
+  "$defs": {
+    "form.variant-set.primitive": {
+      "type": "object",
+      "description": "Primitive assembly state. `:topology` selects the variant; the strip-index-format key exists only under a strip.",
+      "properties": {
+        "$form": {
+          "const": "primitive"
+        },
+        "$ns": {
+          "const": "variant-set"
+        },
+        "cull": {
+          "description": "none / front / back.",
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "topology": {
+          "description": "Defaults to triangle-list, as GPUPrimitiveState does.",
+          "enum": [
+            {
+              "$sym": "point-list"
+            },
+            {
+              "$sym": "line-list"
+            },
+            {
+              "$sym": "line-strip"
+            },
+            {
+              "$sym": "triangle-list"
+            },
+            {
+              "$sym": "triangle-strip"
+            }
+          ],
+          "default": {
+            "$sym": "triangle-list"
+          }
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "topology": {
+                "enum": [
+                  {
+                    "$sym": "triangle-strip"
+                  },
+                  {
+                    "$sym": "line-strip"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "topology"
+            ]
+          },
+          "then": {
+            "properties": {
+              "strip-index-format": {
+                "description": "The primitive-restart index format; only meaningful when the topology is a strip.",
+                "enum": [
+                  {
+                    "$sym": "uint16"
+                  },
+                  {
+                    "$sym": "uint32"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false,
+      "x-sjon-discriminant": {
+        "key": "topology",
+        "variants": [
+          {
+            "when": [
+              "triangle-strip",
+              "line-strip"
+            ],
+            "keys": [
+              "strip-index-format"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.variant-set.primitive"
+    }
+  ]
+}

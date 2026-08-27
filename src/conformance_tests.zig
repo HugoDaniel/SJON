@@ -884,6 +884,7 @@ fn replayInlineCaseBinary(a: Allocator, case_name: []const u8) !void {
         try lowering_registry.register(a, Lowering_test_hooks.webgpu_render_graph_v1);
         try lowering_registry.register(a, Lowering_test_hooks.test_synth_terminal_v1);
         try lowering_registry.register(a, Lowering_test_hooks.test_synth_positional_v1);
+        try lowering_registry.register(a, Lowering_test_hooks.test_nest_emit_v1);
     }
 
     var hr = try Host.validateDocument(a, doc_src, .{
@@ -966,6 +967,7 @@ fn runInlineManifestCase(a: Allocator, case_name: []const u8) !void {
         try lowering_registry.register(a, Lowering_test_hooks.webgpu_render_graph_v1);
         try lowering_registry.register(a, Lowering_test_hooks.test_synth_terminal_v1);
         try lowering_registry.register(a, Lowering_test_hooks.test_synth_positional_v1);
+        try lowering_registry.register(a, Lowering_test_hooks.test_nest_emit_v1);
     }
 
     var hr = try Host.validateDocument(a, doc_src, .{

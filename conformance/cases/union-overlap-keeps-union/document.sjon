@@ -1,0 +1,50 @@
+; The other side of `union-disjoint-reports-arm`: every way a union keeps
+; `union_no_branch_matched`, which names the alternatives and blames none.
+;
+; Two alternatives that share a node shape overlap, and overlap is where
+; declaration order is the rule and there is no arm to blame. Zero reachable
+; alternatives is the same answer for the opposite reason: the value could
+; not have meant any of them.
+(plugin :name overlap :version "1.0.0"
+  (value-kind :name f32-number :underlying number
+    :repr (repr-shape :type f32))
+  (value-kind :name f32-vector :underlying vector
+    :vector (vector-shape :element f32-number :min-len 1 :max-len 4))
+  (value-kind :name scalar-or-vector :underlying union
+    :union (union-shape :alternatives [f32-number f32-vector]))
+
+  (value-kind :name ease-name :underlying symbol
+    :members (member-set :values [linear smoothstep]))
+  (value-kind :name def-ref :underlying symbol
+    :cross-ref (cross-ref :target def :name-key name))
+  (value-kind :name both-symbol :underlying union
+    :union (union-shape :alternatives [ease-name def-ref]))
+
+  (value-kind :name small :underlying number
+    :numeric (numeric-bounds :min 0 :max 8))
+  (value-kind :name big :underlying number
+    :numeric (numeric-bounds :min 100 :max 200))
+  (value-kind :name sized :underlying union
+    :union (union-shape :alternatives [small big]))
+
+  (value-kind :name spring-form :underlying form
+    :heads (head-set :names [spring]))
+  (value-kind :name bounce-form :underlying form
+    :heads (head-set :names [bounce]))
+  (value-kind :name shape-spec :underlying union
+    :union (union-shape :alternatives [spring-form bounce-form]))
+
+  (form :name def (key :name name :type symbol))
+  (form :name spring :positional any)
+  (form :name bounce :positional any)
+  (form :name other  :positional any)
+  (form :name k
+    (key :name value :type scalar-or-vector :optional true)
+    (key :name both  :type both-symbol      :optional true)
+    (key :name size  :type sized            :optional true)
+    (key :name shape :type shape-spec       :optional true)))
+
+(k :value "nope")   ; zero arms: a string reaches neither number nor vector
+(k :both zzz)       ; two arms: both alternatives are symbol kinds
+(k :size 500)       ; two arms: both alternatives are number kinds
+(k :shape (other))  ; two arms: disjoint by HEAD, which is a refinement

@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "variant-set",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "primitive",
+          "description": "Primitive assembly state. `:topology` selects the variant; the strip-index-format key exists only under a strip.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "topology",
+              "optional": true,
+              "description": "Defaults to triangle-list, as GPUPrimitiveState does.",
+              "value": {
+                "kind": "symbol_members",
+                "names": [
+                  "point-list",
+                  "line-list",
+                  "line-strip",
+                  "triangle-list",
+                  "triangle-strip"
+                ]
+              },
+              "default": {
+                "$sym": "triangle-list"
+              }
+            },
+            {
+              "name": "cull",
+              "optional": true,
+              "description": "none / front / back.",
+              "value": {
+                "kind": "symbol"
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": [
+        {
+          "name": "topology",
+          "description": "How vertices assemble into primitives: the five WebGPU topologies.",
+          "shape": {
+            "kind": "symbol_members",
+            "names": [
+              "point-list",
+              "line-list",
+              "line-strip",
+              "triangle-list",
+              "triangle-strip"
+            ]
+          }
+        },
+        {
+          "name": "index-format",
+          "description": "The index buffer element type.",
+          "shape": {
+            "kind": "symbol_members",
+            "names": [
+              "uint16",
+              "uint32"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "code": "variants_emitted_via_if_then",
+      "severity": "info",
+      "message": "discriminated form `primitive` — variants emitted as allOf+if/then; source-order (variant keys must follow the discriminant) is not enforced by JSON Schema",
+      "plugin_name": "variant-set",
+      "form_name": "primitive"
+    }
+  ]
+}

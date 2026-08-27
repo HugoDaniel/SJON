@@ -5,14 +5,14 @@
 ;
 ;   - schema vocabulary: closed enums, typed keys, and form head-sets
 ;   - S-expression authoring: nested clauses that read like the API shape
-;   - diagnostics: typo / wrong-type / missing-reference errors at spans
+;   - diagnostics: typo, wrong-type, and missing-reference errors at spans
 ;   - computed values: safe expressions in value position
 ;   - transformation: a host-owned lowering hook for JS descriptor output
 ;
 ; The lowering hook named below is a contract a WebGPU host binds to code that
 ; turns `(render-pipeline ...)` into a descriptor for
-; `device.createRenderPipeline(...)`. A worked reference hook —
-; `webgpu/render-pipeline-v1` in `src/Lowering_test_hooks.zig` — is registered
+; `device.createRenderPipeline(...)`. A worked reference hook,
+; `webgpu/render-pipeline-v1` in `src/Lowering_test_hooks.zig`, is registered
 ; by a test that runs this very file through lower+validate, so the example
 ; stays executable instead of drifting into documentation-only rot.
 

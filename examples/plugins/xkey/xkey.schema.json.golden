@@ -130,7 +130,7 @@
     },
     "form.xkey.tag": {
       "type": "object",
-      "description": "A tag decoration. Use `(prefix + suffix)` to flank, or `literal` alone — but never both.",
+      "description": "A tag decoration. Use `(prefix + suffix)` to flank, or `literal` alone, but never both.",
       "properties": {
         "$form": {
           "const": "tag"

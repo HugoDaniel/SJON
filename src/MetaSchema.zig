@@ -51,7 +51,7 @@ test "MetaSchema: plugin is named meta" {
 
 test "MetaSchema: form / value-kind counts match meta.sjon" {
     try testing.expectEqual(@as(usize, 28), plugin.forms.len);
-    try testing.expectEqual(@as(usize, 36), plugin.value_kinds.len);
+    try testing.expectEqual(@as(usize, 37), plugin.value_kinds.len);
     try testing.expectEqual(@as(usize, 0), plugin.expr_funcs.len);
 }
 

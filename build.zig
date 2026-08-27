@@ -476,13 +476,13 @@ pub fn build(b: *std.Build) void {
     wasm_consumer_step.dependOn(&wasm_consumer_test.step);
 
     // ---------------------------------------------------------------------
-    // Playground TS unit tests — headless CodeMirror (`EditorState`, no DOM).
-    // Covers the `lsp-folding` fold-service mapping. Pure TS: no wasm/CLI
-    // dependency. node expands the glob itself (same as the package.json
-    // `test` script), so this list never goes stale as `.test.ts` files
-    // are added under `src/playground/`.
+    // Landing-page TS unit tests — headless CodeMirror (`EditorState`, no
+    // DOM) plus the lesson transforms. Pure TS: no wasm/CLI dependency. node
+    // expands the glob itself (same as the package.json `test` script), so
+    // this list never goes stale as `.test.ts` files are added anywhere under
+    // `landing-page/src/`.
     // ---------------------------------------------------------------------
-    const playground_test = nodeTest(b, &.{"landing-page/src/playground/*.test.ts"});
+    const playground_test = nodeTest(b, &.{"landing-page/src/**/*.test.ts"});
     const playground_test_step = b.step(
         "playground-test",
         "Run the landing-page playground TS unit tests (requires `node` ≥ 22.6 with --experimental-strip-types)",

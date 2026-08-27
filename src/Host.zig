@@ -2445,11 +2445,22 @@ fn loadResolvedManifest(
     // loaded plugin. Exact-string match — no semver ranges in v1.
     if (reference.version) |pinned_version| {
         if (!std.mem.eql(u8, loaded.plugin.version, pinned_version)) {
-            const mismatch_message = std.fmt.allocPrint(
-                a,
-                "(use-plugin \"{s}\" :version \"{s}\") pin differs from manifest :version `{s}`",
-                .{ reference.name, pinned_version, loaded.plugin.version },
-            ) catch |err| {
+            // `:version` is optional on the manifest; a pin against an
+            // unversioned plugin is a mismatch too, and the message says
+            // which of the two it is.
+            const mismatch_message = if (loaded.plugin.version.len == 0)
+                std.fmt.allocPrint(
+                    a,
+                    "(use-plugin \"{s}\" :version \"{s}\") pin, but the manifest declares no :version",
+                    .{ reference.name, pinned_version },
+                )
+            else
+                std.fmt.allocPrint(
+                    a,
+                    "(use-plugin \"{s}\" :version \"{s}\") pin differs from manifest :version `{s}`",
+                    .{ reference.name, pinned_version, loaded.plugin.version },
+                );
+            const mismatch_message_owned = mismatch_message catch |err| {
                 loaded.deinit();
                 return err;
             };
@@ -2457,7 +2468,7 @@ fn loadResolvedManifest(
                 .phase = .manifest,
                 .code = .plugin_version_mismatch,
                 .severity = .err,
-                .message = mismatch_message,
+                .message = mismatch_message_owned,
                 .span = reference.span,
                 .path = &.{},
                 .declaration_span = ref_head_span,
@@ -3087,7 +3098,7 @@ test "Host.manifestMeta surfaces cross-ref provider exports alongside expr-func 
     // extraction at validate time, which reads like a document problem
     // rather than a packaging one.
     const src =
-        \\(plugin :name glsl :version "1.0.0" :sjon "1.2"
+        \\(plugin :name glsl :version "1.0.0"
         \\  (expr-func :name double
         \\    :arity (fixed 1)
         \\    :params [number]

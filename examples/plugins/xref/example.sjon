@@ -1,17 +1,17 @@
 ; Example usage of the `xref` plugin. Each variant of `:cross-ref` is
 ; exercised:
 ;
-;   * bare cross-ref — `(edge :from a)` references a declared `(node :id a)`
-;   * acyclic — `(node :parent a)` chains nodes without cycling
-;   * scope-form — `(edge :phrase intro)` references a `(phrase :name intro)`
+;   * bare cross-ref:  `(edge :from a)` references a declared `(node :id a)`
+;   * acyclic:  `(node :parent a)` chains nodes without cycling
+;   * scope-form:  `(edge :phrase intro)` references a `(phrase :name intro)`
 ;     declared inside the enclosing `(piece …)`
-;   * provider — `(edge :uniform u_time)` references a name the `uniforms`
+;   * provider:  `(edge :uniform u_time)` references a name the `uniforms`
 ;     provider extracts from `(shader :code …)`. This fixture declares that
 ;     provider without an `:impl` (export never runs one), so a host
 ;     validating this document reports `cross_ref_provider_unavailable` at
-;     the shader and stays silent at the reference — loud once at the
+;     the shader and stays silent at the reference: loud once at the
 ;     source, not once per use.
-;   * target group — `(edge :group-pipeline blit)` references either kind of
+;   * target group:  `(edge :group-pipeline blit)` references either kind of
 ;     pipeline through ONE namespace. Read the two sections at the bottom
 ;     together: the union and the group answer the same question, and the
 ;     answers differ exactly where a name is defined twice.
@@ -39,7 +39,7 @@
 (edge :from a :to b :pipeline blit)     ; the render pipeline
 (edge :from a :to b :pipeline reduce)   ; the compute pipeline
 
-; Now give them the same name. Still no duplicate — still two namespaces —
+; Now give them the same name. Still no duplicate, still two namespaces,
 ; but the reference below now resolves in both, and the only thing choosing
 ; between them is that `render-pipeline-ref` is listed first in the union.
 
@@ -50,7 +50,7 @@
 
 ; The document above VALIDATES: `union_ambiguous` is a warning, first match
 ; still wins, and `shared` here is the render pipeline. What the warning
-; says is that a second reading exists — so a tool resolving `shared`
+; says is that a second reading exists, so a tool resolving `shared`
 ; through its own table instead of by alternative order would pick the
 ; compute pipeline, and neither it nor the validator would notice they
 ; disagreed.
@@ -62,7 +62,7 @@
 ; --- The same two targets, one namespace ----------------------------------
 ;
 ; `:group-pipeline` is `(cross-ref :target [render-pipeline compute-pipeline])`
-; — not a union of two cross-refs, but one cross-ref over two forms. Both
+; not a union of two cross-refs, but one cross-ref over two forms. Both
 ; names below resolve through it, and neither reference needs to know which
 ; form defined the name it points at.
 
@@ -72,7 +72,7 @@
 ; What the group changes is `shared`, declared twice above. Through
 ; `:pipeline` it is two names in two namespaces and every reference is
 ; `union_ambiguous`; through `:group-pipeline` it is one name defined twice
-; in one namespace, which is `duplicate_cross_ref_target` — reported once,
+; in one namespace, which is `duplicate_cross_ref_target`, reported once,
 ; at the declarations, where the mistake actually is.
 ;
 ; So this document carries both diagnostics, and that is the point of
@@ -81,6 +81,6 @@
 ; A schema author picks the group when the names are meant to be unique
 ; across the forms, and the union when they are not.
 
-(edge :from a :to b :group-pipeline shared)   ; resolves — the collision is
+(edge :from a :to b :group-pipeline shared)   ; resolves; the collision is
                                               ; reported at the declarations
 

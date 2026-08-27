@@ -11,7 +11,7 @@
 ; The document deliberately instantiates nothing: with the provider
 ; unresolved there is no member set to reference, and a reference would
 ; only add a second, downstream diagnostic on top of the root cause.
-(plugin :name probe :version "1.0.0" :sjon "1.2"
+(plugin :name probe :version "1.0.0"
   (form :name shader
     (key :name name :type symbol :optional false)
     (key :name src :type string :optional false))

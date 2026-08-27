@@ -1,22 +1,22 @@
-//! `todo-plugin` — companion wasm sidecar for examples/web-todo.
+//! `todo-plugin`: the companion wasm sidecar for examples/web-todo.
 //!
 //! Speaks the executable-plugin ABI (`docs/executable-plugin-abi.md`)
 //! end-to-end. Three expr-funcs:
 //!
-//!   - `(sum xs)`         — xs is a vector of numbers; returns the sum.
-//!   - `(count-done xs)`  — xs is a vector of `(todo …)` forms;
+//!   - `(sum xs)`:          xs is a vector of numbers; returns the sum.
+//!   - `(count-done xs)`:   xs is a vector of `(todo …)` forms;
 //!                          returns the count of items where `:done`
 //!                          decodes as boolean true.
-//!   - `(count-active xs)` — same, but counts the `:done false` items.
+//!   - `(count-active xs)`:  same, but counts the `:done false` items.
 //!
 //! Hand-rolls the slice of the v2 binary value codec the plugin needs:
 //! the number tag (for sums), the vector tag (for arg lists), the form
 //! tag (for individual `(todo …)` values), and the boolean tag (for
 //! the `:done` kvpair value the count funcs match on). Strings /
-//! keywords are skipped without binding their bytes — the plugin only
+//! keywords are skipped without binding their bytes; the plugin only
 //! cares about the `:done` flag.
 //!
-//! Imports MUST be empty per spec §7.1 — `std.heap.wasm_allocator` only
+//! Imports MUST be empty per spec §7.1: `std.heap.wasm_allocator` only
 //! uses the `@wasmMemoryGrow` / `@wasmMemorySize` intrinsics, never an
 //! `env.*` import.
 
@@ -48,7 +48,7 @@ export fn sjon_plugin_free(ptr: ?[*]u8, len: u32) callconv(.c) void {
     if (ptr) |p| wasm_allocator.free(p[0..len]);
 }
 
-/// `(sum xs)` — xs is a vector of numbers; returns the sum.
+/// `(sum xs)`: xs is a vector of numbers; returns the sum.
 export fn sum_vector(args_ptr: ?[*]const u8, args_len: u32) callconv(.c) ?[*]u8 {
     const p = args_ptr orelse return null;
     const args = p[0..args_len];
@@ -73,13 +73,13 @@ export fn sum_vector(args_ptr: ?[*]const u8, args_len: u32) callconv(.c) ?[*]u8 
     return numberFrame(sum);
 }
 
-/// `(count-done xs)` — xs is a vector of `(todo …)` forms; returns
+/// `(count-done xs)`: xs is a vector of `(todo …)` forms; returns
 /// the count of items where the `:done` kvpair is boolean `true`.
 export fn count_done(args_ptr: ?[*]const u8, args_len: u32) callconv(.c) ?[*]u8 {
     return countByDone(args_ptr, args_len, true);
 }
 
-/// `(count-active xs)` — symmetrical to `count_done` but counts the
+/// `(count-active xs)`: symmetrical to `count_done` but counts the
 /// items whose `:done` is boolean `false`.
 export fn count_active(args_ptr: ?[*]const u8, args_len: u32) callconv(.c) ?[*]u8 {
     return countByDone(args_ptr, args_len, false);
@@ -126,7 +126,7 @@ fn readFormAndCheckDone(dec: *Decoder, want: bool) CountError!bool {
     // ns_len, ns bytes
     const ns_len = dec.readU32() catch return error.Decode;
     _ = dec.skip(ns_len) catch return error.Truncated;
-    // child_count + children — we don't need positional children, just skip them.
+    // child_count + children; we don't need positional children, just skip them.
     const child_count = dec.readU32() catch return error.Decode;
     var i: u32 = 0;
     while (i < child_count) : (i += 1) try skipValue(dec);

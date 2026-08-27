@@ -362,7 +362,7 @@
         },
         {
           "name": "pipeline-ref",
-          "description": "Either pipeline. Tried in this order — render first.",
+          "description": "Either pipeline, tried in this order: render first.",
           "shape": {
             "kind": "union_of",
             "alternatives": [
@@ -399,7 +399,7 @@
         },
         {
           "name": "pipeline-group-ref",
-          "description": "Either pipeline, in one namespace — a name defined by both is a duplicate.",
+          "description": "Either pipeline, in one namespace, so a name defined by both is a duplicate.",
           "shape": {
             "kind": "cross_ref",
             "targets": [

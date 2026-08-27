@@ -1,0 +1,4 @@
+; One diagnostic, for `nope`; `tri-strip` is a member and passes. The
+; path is the aggregate pass's `[<plugin> <form> variant]`.
+(diagnostics
+  (diagnostic :code unknown_discriminant_value :path [gfx prim variant]))

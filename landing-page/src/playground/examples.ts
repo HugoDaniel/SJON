@@ -1,5 +1,5 @@
 /**
- * Curated playground examples — one per feature the server is worth showing off
+ * Curated playground examples, one per feature the server is worth showing off
  * for. Plain data, no imports: `scripts/check-examples.mjs` loads this module
  * under `node --experimental-strip-types` and runs every entry through the real
  * `sjon-lsp.wasm`, so nothing here may reach for a DOM or an Astro global.
@@ -11,7 +11,7 @@
  * one of them lights the playground up with `unknown_form`; the fixture pairs
  * under `examples/plugins/` do validate clean, but their prose is written for
  * fixture maintainers (JSON-Schema `$ref` layout, `.d.ts` emit) and reads as
- * noise to a visitor. Different audiences, different samples — the anti-rot
+ * noise to a visitor. Different audiences, different samples. The anti-rot
  * guarantee comes from `check-examples`, not from a shared string.
  *
  * Every entry either validates clean or declares the diagnostic codes it means
@@ -20,7 +20,7 @@
  */
 
 export interface PlaygroundExample {
-  /** Stable id — also the value the toolbar `<select>` carries. */
+  /** Stable id, and the value the toolbar `<select>` carries. */
   id: string;
   /** Dropdown label. */
   title: string;
@@ -39,7 +39,7 @@ export interface PlaygroundExample {
 }
 
 const WELCOME_DOC = `; Welcome to the SJON playground.
-; Parse, validate, and evaluate all run locally in your tab —
+; Parse, validate, and evaluate all run locally in your tab:
 ; diagnostics in the gutter, values under the editor, as you type.
 
 ; Math expressions, with the core plugin pre-allowed.
@@ -73,7 +73,7 @@ const SHAPES_SCHEMA = `; A schema declares the forms and keys a document may use
 `;
 
 const DEFAULTS_DOC = `; The schema tab beside this one gives :radius and :fill defaults.
-; Keys you leave out are drawn as ghost text — the effective document,
+; Keys you leave out are drawn as ghost text: the effective document,
 ; without rewriting the one you typed.
 
 (circle)
@@ -83,11 +83,11 @@ const DEFAULTS_DOC = `; The schema tab beside this one gives :radius and :fill d
 (circle :radius 8 :fill "tomato")
 `;
 
-const DIAGNOSTICS_DOC = `; Every mistake below is deliberate — this example is here to show what
+const DIAGNOSTICS_DOC = `; Every mistake below is deliberate; this example is here to show what
 ; the validator says. Hover a squiggle for the explanation. Where the
 ; server can name the repair, the gutter offers to apply it.
 
-(circle :radiuss 8)      ; a typo — this one has a quick fix
+(circle :radiuss 8)      ; a typo, and this one has a quick fix
 
 (circle :radius "wide")  ; the right key, the wrong type
 
@@ -115,7 +115,7 @@ const GRAPH_SCHEMA = `; \`:from\` and \`:to\` are declared as cross-refs, so the
 `;
 
 const GRAPH_DOC = `; Put the cursor on a node name and the other end lights up.
-; Rename one — or point an edge somewhere that does not exist — and
+; Rename one (or point an edge somewhere that does not exist) and
 ; the validator follows the reference for you.
 
 (node :id intro :label "Opening")
@@ -156,7 +156,7 @@ const THEME_SCHEMA = `; Half a schema: \`palette\` holds forms that live in the 
 
 (plugin :name theme :version "1.0.0"
   (value-kind :name swatch
-    :description "Either a colour or a gradient — both declared in \`swatches\`."
+    :description "Either a colour or a gradient, both declared in \`swatches\`."
     :underlying form
     :heads (head-set :names [color gradient]))
 
@@ -194,7 +194,7 @@ export const PLAYGROUND_EXAMPLES: readonly PlaygroundExample[] = [
   {
     id: 'welcome',
     title: 'Expressions',
-    blurb: 'Arithmetic, bindings, and units — evaluated in your tab as you type.',
+    blurb: 'Arithmetic, bindings, and units, evaluated in your tab as you type.',
     doc: WELCOME_DOC,
     schemas: [],
   },
@@ -216,7 +216,7 @@ export const PLAYGROUND_EXAMPLES: readonly PlaygroundExample[] = [
   {
     id: 'cross-refs',
     title: 'Cross-references',
-    blurb: 'Names checked across the document — go to definition, find references.',
+    blurb: 'Names checked across the document: go to definition, find references.',
     doc: GRAPH_DOC,
     schemas: [GRAPH_SCHEMA],
   },

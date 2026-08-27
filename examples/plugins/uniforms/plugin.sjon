@@ -1,4 +1,4 @@
-; Provider-backed cross-refs, end to end — the general route, actually
+; Provider-backed cross-refs, end to end: the general route, actually
 ; running. The sibling `examples/plugins/xref/` fixture declares all
 ; four `(cross-ref …)` axes but ships no `:impl` (export never executes
 ; an extractor); this example is the other half: a provider with a real
@@ -7,30 +7,25 @@
 ; extracts, registers, and resolves for real.
 ;
 ; The idea in one line: `(bind :uniform u_time)` is checked against
-; names that exist nowhere in the document's own syntax — they are
+; names that exist nowhere in the document's own syntax; they are
 ; inside each `(shader :src "…")` WGSL string, and the `uniforms`
 ; provider is the one consumer allowed to see into it. The blob stays
 ; opaque to SJON; validation stays a pure function of
 ; (document, schema, pinned plugin set).
-;
-; `:sjon "1.2"` is the manifest format that introduced
-; `(cross-ref-provider …)` and `(cross-ref :provider/:source-key …)`.
-; A host that predates it refuses the whole manifest with
-; `sjon_format_unsupported` rather than silently ignoring the vocabulary.
-(plugin :name uniforms :version "1.0.0" :sjon "1.2"
+(plugin :name uniforms :version "1.0.0"
   (cross-ref-provider :name uniforms
     :description "WGSL uniform declarations: the name of every module-scope `var<uniform>` in the source."
     :impl "wasm:extract_uniforms")
 
   (form :name shader
-    :description "A WGSL module. Its `:src` string is the member set for `uniform-ref`, read by the `uniforms` provider — `:name` is just a key, the provider route never touches it."
+    :description "A WGSL module. Its `:src` string is the member set for `uniform-ref`, read by the `uniforms` provider. `:name` is just a key; the provider route never touches it."
     (key :name name :type symbol :optional false)
     (key :name src :type string :optional false))
 
   ; The provider route: `:provider` replaces `:name-key` as the source
   ; of names, and `:source-key` names the string it reads (`src` is the
   ; default; spelled out here because this file is for reading). The two
-  ; are exclusive — a cross-ref naming both a provider and a `:name-key`
+  ; are exclusive: a cross-ref naming both a provider and a `:name-key`
   ; is rejected at manifest load.
   (value-kind :name uniform-ref
     :description "A uniform declared inside some `(shader …)`'s WGSL source."

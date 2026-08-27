@@ -17,10 +17,13 @@ const Expr = @import("Expr.zig");
 pub const Plugin = struct {
     /// Namespace token used in qualified lookups: `<name>/form`.
     name: []const u8,
-    /// Declared `:version` from the manifest. Resolvers compare this
-    /// against a `(use-plugin … :version "x.y.z")` pin and emit
-    /// `plugin_version_mismatch` on disagreement. Static plugin literals
-    /// may leave this empty; manifest-loaded plugins always populate it.
+    /// Declared `:version` from the manifest, or empty when the manifest
+    /// declares none — the key is optional; a plugin without one is
+    /// simply unversioned. The host compares this byte-for-byte against a
+    /// `(use-plugin … :version "x.y.z")` pin and emits
+    /// `plugin_version_mismatch` on disagreement, so a pin against an
+    /// unversioned plugin is always a mismatch. Static plugin literals
+    /// may leave this empty too.
     version: []const u8 = "",
     /// Optional manifest override naming the paired wasm sidecar path.
     /// Manifest-directory-relative; the resolver rejects paths that
@@ -53,11 +56,6 @@ pub const Plugin = struct {
     /// expected (`[gui rendering ecs]`). Capped at `MAX_KEYWORDS = 16`
     /// with an advisory `too_many_keywords` warning when exceeded.
     keywords: []const []const u8 = &.{},
-    /// Declared portable-manifest format version (e.g. `"1.0"`,
-    /// `"1.1"`). When the declared version exceeds the host's supported
-    /// max, the host emits `sjon_format_unsupported` and refuses to
-    /// validate. Empty / absent = treat as `"1.0"`.
-    sjon_format: []const u8 = "",
     /// Data-form constructors this plugin defines.
     forms: []const FormSpec = &.{},
     /// Safe-expression functions this plugin contributes.
@@ -75,11 +73,6 @@ pub const Plugin = struct {
 /// `too_many_keywords` (warning, not error) so manifests don't bloat into
 /// SEO-style keyword stuffing.
 pub const MAX_KEYWORDS: usize = 16;
-
-/// Highest portable-manifest format version this host understands.
-/// Bumped on incompatible spec changes. `sjon_format_unsupported` fires
-/// when a manifest declares a strictly higher version.
-pub const SUPPORTED_SJON_FORMAT: []const u8 = "1.3";
 
 /// Description of one data-form constructor (e.g. `(scene …)`).
 ///
@@ -146,6 +139,13 @@ pub const FormSpec = struct {
     /// (`produces`); the host binds the id to actual lowering code and
     /// produces canonical forms. `null` = no lowering, the form is final
     /// data as declared. See `docs/plugin-model-v1.md`.
+    ///
+    /// **Top-level forms only.** A slot-local form (either carrier) must
+    /// keep this `null`: `Schema.validateLowering` and the produces graph
+    /// walk top-level forms, and the lowering worklist resolves a local
+    /// head to its local body, never to a hook. `ManifestLoader` rejects a
+    /// local's `:lowering` as `invalid_manifest`; `Schema.init` asserts it
+    /// for static plugin literals.
     lowering: ?LoweringSpec = null,
 
     /// Find the base key spec named `name`, or null when this form
@@ -186,20 +186,73 @@ pub const LoweringSpec = struct {
     produces: []const []const u8,
 };
 
-/// One per-discriminant-value extra key set on a discriminated form.
-/// Used inside `FormSpec.variants`.
+/// One extra key set on a discriminated form, selected by the
+/// discriminant's value. Used inside `FormSpec.variants`.
 pub const Variant = struct {
-    /// Symbol value of the discriminant kvpair that activates this variant.
-    /// Must be a member of the discriminant key's `MemberSet`.
-    when: []const u8,
-    /// Extra keys allowed (and possibly required) when the discriminant
-    /// matches `when`. Cap is `MAX_FORM_KEYS` per variant.
+    /// The discriminant values that select this variant — the symbol(s)
+    /// the manifest wrote under `:when`, one or several (`:when a` and
+    /// `:when [a b]` are both spelled here as a list). `.len >= 1`. Every
+    /// entry must be a member of the discriminant key's `MemberSet`
+    /// (`unknown_discriminant_value` at aggregate time, once per entry),
+    /// and a value selects **at most one** variant of a form: the loader
+    /// rejects an empty vector, a repeat within one `:when`, and a value
+    /// listed by two variants, all `invalid_manifest`. Selection is
+    /// membership — see `selects`. One declaration reaching several
+    /// values is what keeps the key-collision check as strict as it is:
+    /// a key still lives in exactly one variant.
+    when: []const []const u8,
+    /// Extra keys allowed (and possibly required) while the discriminant's
+    /// value selects this variant. Cap is `MAX_FORM_KEYS` per variant.
     keys: []const KeySpec = &.{},
     /// Variant-scoped exclusive groups. Same semantics as
     /// `FormSpec.exclusive_groups`, but the alternatives reference keys
     /// declared on this variant rather than the form's common keys.
     exclusive_groups: []const ExclusiveGroup = &.{},
+
+    /// True when the discriminant value `value` selects this variant —
+    /// byte-equality against any entry of `when`. Both validator walkers,
+    /// the LSP and the overlay pre-resolution ask this one function.
+    pub fn selects(self: Variant, value: []const u8) bool {
+        for (self.when) |w| if (std.mem.eql(u8, w, value)) return true;
+        return false;
+    }
+
+    /// The `:when` as the author would spell it: one symbol bare
+    /// (`tri-strip`), a set bracketed (`[tri-strip line-strip]`). Every
+    /// message that names a variant renders it through here, so a
+    /// single-value variant reads exactly as it did when `:when` took one
+    /// symbol. Allocated from `a`; the caller owns the bytes.
+    pub fn whenText(self: Variant, a: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+        std.debug.assert(self.when.len >= 1);
+        if (self.when.len == 1) return try a.dupe(u8, self.when[0]);
+        var buf: std.ArrayList(u8) = .empty;
+        try buf.append(a, '[');
+        for (self.when, 0..) |w, i| {
+            if (i > 0) try buf.append(a, ' ');
+            try buf.appendSlice(a, w);
+        }
+        try buf.append(a, ']');
+        return try buf.toOwnedSlice(a);
+    }
 };
+
+test "Variant.selects is membership; whenText spells one bare and several bracketed" {
+    const one: Variant = .{ .when = &.{"a"} };
+    const many: Variant = .{ .when = &.{ "tri-strip", "line-strip" } };
+    try std.testing.expect(one.selects("a"));
+    try std.testing.expect(!one.selects("b"));
+    try std.testing.expect(many.selects("tri-strip"));
+    try std.testing.expect(many.selects("line-strip"));
+    try std.testing.expect(!many.selects("tri-list"));
+
+    const a = std.testing.allocator;
+    const t1 = try one.whenText(a);
+    defer a.free(t1);
+    try std.testing.expectEqualStrings("a", t1);
+    const t2 = try many.whenText(a);
+    defer a.free(t2);
+    try std.testing.expectEqualStrings("[tri-strip line-strip]", t2);
+}
 
 /// Cross-key cardinality constraint on a `FormSpec` or `Variant`.
 ///
@@ -871,7 +924,10 @@ pub const ValueKind = struct {
     /// matches `target_form` contributes its `:name-key` value.
     cross_ref: ?CrossRef = null,
     /// Only meaningful when `underlying == .union_of`. The alternatives
-    /// are tried in order; the first successful match wins.
+    /// are tried in order; the first successful match wins. A failure
+    /// reports the alternative the value's node shape could only have
+    /// meant, when there is exactly one (`Validator.determinedArm`);
+    /// otherwise the collapsed `union_no_branch_matched`.
     union_of: ?UnionShape = null,
     /// Only meaningful when `underlying == .string`. Length / pattern /
     /// format constraints. Orthogonal to `members`: both may co-exist —
@@ -1151,23 +1207,55 @@ pub const ValueKind = struct {
     /// `:shape (point | rect | circle)`.
     ///
     /// `heads` must be non-empty. An empty list is treated as "no
-    /// narrowing" by the validator (same as `heads = null`); plugin
-    /// authors should set the field to null rather than supply `&.{}`.
+    /// narrowing" by the validator (same as `heads = null`) — and by the
+    /// positional count sweep, which therefore tallies nothing even when
+    /// the set declares `min_children`. Plugin authors should set the
+    /// field to null rather than supply `&.{}`; the loader refuses
+    /// `(head-set)` outright, so only a Zig-constructed schema can get
+    /// here. Mirrors `MemberSet`'s rule, which `matchScalar` enforces.
     ///
-    /// Each entry may additionally carry a **count** bound — how many
-    /// positional children of one form may (or must) use that head.
-    /// Those bounds are enforced at a form's `:positional` slot and are
-    /// inert anywhere else the same kind is reused (a keyed slot holds
-    /// one value; a `vector-shape :element` is a value, not a child
-    /// list). See `docs/portable-manifest-v1.md` §4.5.
+    /// Counts come at two levels, and both are enforced at a form's
+    /// `:positional` slot and inert anywhere else the same kind is
+    /// reused (a keyed slot holds one value; a `vector-shape :element`
+    /// is a value, not a child list). See
+    /// `docs/portable-manifest-v1.md` §4.5.
+    ///
+    ///   * **Per head** — `Head.min` / `Head.max`: how many positional
+    ///     children may (or must) carry *that* head.
+    ///   * **Over the set** — `min_children` / `max_children`: how many
+    ///     children of *any* head in the set the slot holds. "Exactly
+    ///     one of buffer / sampler / texture" is this level and cannot
+    ///     be said by the first: every per-head bound is satisfied by a
+    ///     form carrying one of each, and by a form carrying none.
+    ///
+    /// The two are independent. `:max-children 2` over heads each
+    /// `:max 1` ("one of each, up to two") needs both; `:min-children 1
+    /// :max-children 1` over heads each `:max 1` is "exactly one, and
+    /// not two of the same", where the per-head ceilings are redundant
+    /// with the set's. That redundancy is why the validator states a
+    /// suppression rule — see `Validator.tallyPositionalHead`.
     pub const HeadSet = struct {
         heads: []const Head,
 
-        /// True when no entry carries a count bound. The compact
-        /// `:names [a b c]` spelling always lowers to this, and it is
-        /// the fast path for the validator's per-form count sweep:
-        /// nothing to tally, so the counters are never allocated.
+        /// Inclusive floor on how many positional children of the
+        /// enclosing form may carry *any* head in this set. 0 = no
+        /// floor. Wire syntax: `(head-set :min-children 1 …)`.
+        min_children: u16 = 0,
+        /// Inclusive ceiling over the whole set. `null` = unbounded.
+        max_children: ?u16 = null,
+
+        /// True when neither level carries a count bound — no head, and
+        /// not the set. This is the fast path for the validator's
+        /// per-form count sweep: nothing to tally, so the counters are
+        /// never allocated.
+        ///
+        /// Note that the compact `:names [a b c]` spelling no longer
+        /// implies this. It cannot carry a *per-head* bound (that needs
+        /// `(head …)` children), but `:min-children` / `:max-children`
+        /// sit on the set itself and are legal beside it — deliberately,
+        /// since "exactly one of these four" wants no per-head metadata.
         pub fn isUnbounded(self: HeadSet) bool {
+            if (self.min_children != 0 or self.max_children != null) return false;
             for (self.heads) |h| if (h.min != 0 or h.max != null) return false;
             return true;
         }

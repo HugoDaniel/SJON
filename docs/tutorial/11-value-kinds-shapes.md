@@ -2,50 +2,63 @@
 
 ## Goal
 
-This is part 1 of value kinds, covering underlying shapes, vector
-shapes (fixed and variable length), unit shapes, numeric bounds, and
-representation tags. Read a plugin-declared value kind and know what
-SJON value to write. Repair the common failures: wrong underlying
-shape, vector length, unit suffix, numeric bounds, and out-of-range
-representation.
+Read a plugin-declared value kind and know exactly what to type, and
+repair the five failures that follow from getting it wrong: the
+underlying shape, the vector length, the unit suffix, the numeric
+bound, and the representation range.
 
-## Mental Model
+## A Type That Is Not Syntax
 
-The phrase "value kind" appears in two related places:
+[Reading plugin schemas](09-reading-plugin-schemas.md) told you a key has a value
+type, and then quietly used names like `length`, `point`, `fill-rule`,
+and `shape-form` without saying where those come from. They come from
+the plugin, and they are the subject of this lesson and the next.
 
-- The parser sees base value kinds: `number`, `string`, `symbol`,
-  `vector`, `form`, and so on.
-- A plugin can give a name to a narrower contract: `length`, `point`,
-  `fill-rule`, `shape-form`, `duration`, `note-or-event`.
+The reason plugins need them is our camera's `:zoom`. Saying "number" is
+true and nearly useless: it does not say that a zoom is positive, that a
+delay carries a time unit, or that a centre is a pair. A plugin declares
+a **value kind** to say the useful part once and then point every slot
+that needs it at the same name.
 
-The named kind is not new syntax. If a slot is typed `point`, you do not
-write `point(160 120)` or `:point [160 120]`. You write the value whose
-shape satisfies the kind:
+The critical thing, and the thing people get wrong on first contact, is
+that a named kind is **not new syntax**. If a slot is typed `point`, you
+do not write `point(160 120)`, and you do not write `:point [160 120]`.
+You write the value whose shape satisfies the kind:
 
 ```sjon
 (circle :center [160 120])
 ```
 
-Read a named kind in this order:
+The name exists in the schema. In the document there are only the same
+value kinds you have been writing since
+[Atoms and intent](03-atoms-and-intent.md) and
+[Numbers, units, vectors](04-numbers-units-vectors.md).
 
-1. **Underlying shape** - should the value be a number, string, symbol,
-   vector, form, or union?
-2. **Refinement** - does the kind add a vector length, unit rule,
-   representation tag, closed member list, allowed head list, or list
-   of alternatives?
-3. **Surface value** - what do you actually type in the document?
+## Reading a Named Kind
 
-You do not define value kinds while authoring a document. You read the
-plugin docs and write values that satisfy them.
+Three steps, in this order, and the order matters because a mismatch at
+step one makes steps two and three irrelevant:
 
-Cross-references are also implemented as value-kind refinements, but
-they deserve their own authoring model. Chapter 13 covers them.
+1. **Underlying shape.** Should the value be a number, string, symbol,
+   vector, form, or one of several alternatives?
+2. **Refinement.** Does the kind add a vector length, a unit rule, a
+   representation tag, a closed member list, an allowed head list, or a
+   list of alternatives?
+3. **Surface value.** What do you actually type?
+
+You never define a value kind while authoring a document. You read one
+and satisfy it.
+
+Cross-references are also built as value-kind refinements, but they need
+an authoring model of their own, so they get a whole lesson,
+[Cross-references](13-cross-references.md).
 
 ## Worked Example
 
-The reference shapes plugin can be summarized like this:
+The reference shapes plugin, summarised with its kinds spelled out
+underneath:
 
-```text
+```text title="plugin summary"
 (circle ...)
   :center point optional
   :radius length optional
@@ -61,7 +74,7 @@ fill-rule: symbol, members evenodd | nonzero
 shape-form: form, heads circle | rect
 ```
 
-Now write the source from the contract:
+Now write the source straight off the contract:
 
 ```sjon
 (circle :center [160 120] :radius 32 :fill evenodd)
@@ -70,65 +83,59 @@ Now write the source from the contract:
   :shape (circle :center [0 0] :radius 1))
 ```
 
-Read the first form slowly:
+Read the first form one slot at a time, following the two hops from the
+slot line to the kind line and back:
 
-- `:center point` means "write a vector with two numeric elements."
-- `:radius length` means "write a number."
-- `:fill fill-rule` means "write one of the listed symbols."
+```
+:center point       -> point is "vector, length 2, element number"  -> [160 120]
+:radius length      -> length is "number"                           -> 32
+:fill   fill-rule   -> fill-rule is "symbol, members evenodd|nonzero" -> evenodd
+:label  string      -> a base kind, no hop needed                   -> "dot"
+:shape  shape-form  -> "form, heads circle|rect"                    -> (circle …)
+```
 
-Read the second form:
-
-- `:label string` means "write quoted text."
-- `:shape shape-form` means "write a nested form, but only with an
-  allowed head."
-
-The important habit: start from the slot line, then jump to the named
-kind line. The slot tells you which kind applies; the kind tells you
-which value shape is accepted.
+That two-hop habit is the whole skill. The slot line tells you which
+kind applies; the kind line tells you which value shape is accepted.
+Notice that `:fill evenodd` is a symbol and not a keyword, which is
+[Atoms and intent](03-atoms-and-intent.md)'s rule arriving with a schema behind
+it: a closed member set is exactly the case symbols exist for.
 
 ## Underlying Shape First
 
-Before worrying about refinements, make the broad shape match.
+Get the broad shape right before worrying about any refinement.
 
-```sjon
+```sjon del={1}
 (circle :center "160,120" :radius 32)
 ```
 
-This fails before the validator even cares about length 2. `point` is
-vector-underlying, so a string is the wrong underlying shape. Repair by
-using brackets:
+This fails before the validator gets anywhere near counting elements.
+`point` is vector-underlying, and a string is the wrong underlying
+shape:
 
-```sjon
+```sjon ins={1}
 (circle :center [160 120] :radius 32)
 ```
 
-Likewise:
+Same story one slot over:
 
-```sjon
+```sjon del={1}
 (circle :center [160 120] :radius "32")
 ```
 
-`:radius` is `length`, and `length` is number-underlying. A string
-produces `wrong_underlying`. Repair with a number:
+`length` is number-underlying, so a string gets `wrong_underlying`:
 
-```sjon
+```sjon ins={1}
 (circle :center [160 120] :radius 32)
 ```
 
 ## Vector Shapes
 
-A vector refinement usually answers two questions:
+A vector refinement answers two questions: how many elements, and what
+kind is each one.
 
-- How many elements?
-- What kind should each element have?
-
-For `point`:
-
-```text
+```text title="plugin summary"
 point: vector, length 2, element number
 ```
-
-That accepts:
 
 ```sjon
 [0 0]
@@ -136,61 +143,60 @@ That accepts:
 [1.5 -2]
 ```
 
-It rejects a vector with too few or too many elements:
+Wrong count:
 
-```sjon
+```sjon del={1}
 (circle :center [160] :radius 32)
 ```
 
-Likely diagnostic: `vector_length_mismatch`. Repair by writing exactly
-two elements:
+`vector_length_mismatch`. Write exactly two:
 
-```sjon
+```sjon ins={1}
 (circle :center [160 120] :radius 32)
 ```
 
-It also rejects a vector whose element has the wrong kind:
+Wrong element kind:
 
-```sjon
+```sjon del={1}
 (circle :center [160 "top"] :radius 32)
 ```
 
-The second element is a string, but `point` needs numbers. Repair the
-element:
+The second element is a string where `point` wants numbers:
 
-```sjon
+```sjon ins={1}
 (circle :center [160 120] :radius 32)
 ```
 
-Nested vectors use the same idea. If a plugin documents
-`points: vector, element point`, then the outer value is a vector and
-each element must satisfy `point`:
+Nesting works the same way. If a plugin documents
+`points: vector, element point`, the outer value is a vector and each
+element must itself satisfy `point`:
 
 ```sjon
 (shape :points [[0 0] [1 0] [1 1]])
 ```
 
-This is not the same shape:
+which is the flatten trap from
+[Numbers, units, vectors](04-numbers-units-vectors.md) wearing a
+schema:
 
 ```sjon
 (shape :points [0 0 1 0 1 1])
 ```
 
-That is one flat vector of numbers, not a vector of points.
+One flat vector of six numbers is not three points, and now something
+finally says so.
 
 ### Variable-Length Vectors
 
 A vector kind does not have to fix an exact length. Instead of a single
-`length`, a plugin can set a minimum, a maximum, or both; the value is
-then any vector whose element count lands in that window. The examples
-here come from a GPU-oriented plugin, where a vertex attribute is two to
-four float components.
+`length` it can set a minimum, a maximum, or both, and then any vector
+whose element count lands in the window is accepted. The case that
+motivates it is a GPU vertex attribute, which is two to four float
+components depending on what it holds:
 
-```text
+```text title="plugin summary"
 attribute: vector, length 2-4, element number
 ```
-
-`attribute` accepts a vec2, vec3, or vec4:
 
 ```sjon
 (vertex :position [0.0 1.0])
@@ -198,43 +204,35 @@ attribute: vector, length 2-4, element number
 (vertex :position [0.0 1.0 0.5 1.0])
 ```
 
-Too few elements:
+All three are fine. The edges are not:
 
 ```sjon
-(vertex :position [0.0])
+(vertex :position [0.0])                     ; vector_too_short
+(vertex :position [0.0 1.0 0.5 1.0 2.0])     ; vector_too_long
 ```
-
-Likely diagnostic: `vector_too_short`. Too many:
-
-```sjon
-(vertex :position [0.0 1.0 0.5 1.0 2.0])
-```
-
-Likely diagnostic: `vector_too_long`. Repair by writing a vector whose
-length lands in the documented range:
 
 ```sjon
 (vertex :position [0.0 1.0 0.5])
 ```
 
-This is a different contract from a fixed `length`. A fixed-length kind
-like `point` accepts exactly two elements and fires
-`vector_length_mismatch` for anything else; a variable-length kind
-accepts a range and fires `vector_too_short` or `vector_too_long` at the
-edges. Read the contract to know which rule applies.
+The two contracts produce different diagnostics, which is the fastest
+way to tell from an error message which one you are dealing with:
+
+```
+fixed length      exactly N        wrong count -> vector_length_mismatch
+variable length   min..max         under       -> vector_too_short
+                                   over        -> vector_too_long
+```
 
 ## Unit Shapes
 
-A unit refinement applies to a number-underlying kind. The plugin may
-allow unitless numbers, require a unit, or allow only specific suffixes.
+A unit refinement applies to a number-underlying kind, and the plugin
+picks one of three postures: unitless numbers allowed, a unit required,
+or only specific suffixes allowed.
 
-Example contract:
-
-```text
+```text title="plugin summary"
 duration: number, unit required, allowed s | ms | b
 ```
-
-Accepted values:
 
 ```sjon
 0.5s
@@ -242,146 +240,137 @@ Accepted values:
 4b
 ```
 
-Rejected because the unit is missing:
+Missing the unit:
 
-```sjon
+```sjon del={1}
 (delay :wait 4)
 ```
 
-Likely diagnostic: `unit_required`. Repair with an allowed suffix:
+`unit_required`. Supply one the contract lists:
 
-```sjon
+```sjon ins={1}
 (delay :wait 4b)
 ```
 
-Rejected because the suffix is not allowed:
+Wrong suffix:
 
-```sjon
+```sjon del={1}
 (delay :wait 90deg)
 ```
 
-Likely diagnostic: `unit_not_allowed`. Repair by using one of the
-suffixes in the kind contract:
+`unit_not_allowed`:
 
-```sjon
+```sjon ins={1}
 (delay :wait 250ms)
 ```
 
-Remember: SJON preserves unit suffixes but does not interpret them.
-The plugin decides whether `b`, `ms`, or `s` means anything useful.
+[Numbers, units, vectors](04-numbers-units-vectors.md) said SJON preserves unit
+suffixes without interpreting them, and that still holds. What changed
+is that a plugin can now insist on one, which is where the check you
+actually wanted lives.
 
-### Rejecting Units
+### Rejecting Every Unit
 
-The opposite of requiring a unit is rejecting every unit. A kind that
-sets `unit rejected` accepts a bare number and nothing else.
+The opposite posture is to accept a bare number and nothing else:
 
-```text
+```text title="plugin summary"
 raw-uniform: number, unit rejected
 ```
 
-Accepted:
+```sjon
+(draw :lod-bias 0.5)     ; accepted
+(draw :lod-bias 0.5f)    ; unit_forbidden
+```
+
+This rule earns its place, and the reason is a real bug it prevents.
+Recall from [Numbers, units, vectors](04-numbers-units-vectors.md) that the lexer
+reads a trailing letter run as a unit, so `0.5f` is not a float with a
+type hint, it is the number `0.5` carrying the unit `f`. Without a
+reject rule that value validates fine and lands downstream in a consumer
+that ignores units, which might well read it as `0`. A reject kind
+converts a silent wrong number into a diagnostic at the site where it
+was written:
 
 ```sjon
 (draw :lod-bias 0.5)
 ```
-
-Rejected, because the value carries a suffix:
-
-```sjon
-(draw :lod-bias 0.5f)
-```
-
-Likely diagnostic: `unit_forbidden`. Repair by dropping the suffix:
-
-```sjon
-(draw :lod-bias 0.5)
-```
-
-This rule earns its place. The lexer reads the trailing `f` in `0.5f`
-as a unit suffix, so without a reject rule a value you meant as a plain
-float lands as a number-with-unit, and a consumer that ignores units
-could read it as `0`. A reject kind turns that into a diagnostic at the
-value site instead of a wrong number downstream.
 
 ## Numeric Bounds
 
-A numeric bound refinement applies to a number-underlying kind and
-constrains the value's magnitude, integrality, or divisibility,
-orthogonal to any unit shape. The plugin may pin a minimum, maximum,
-either-exclusive, require integer values, or require a multiple.
+A numeric bound constrains a number's magnitude, integrality, or
+divisibility, independently of any unit rule:
 
-Example contracts:
-
-```text
+```text title="plugin summary"
 opacity:          number, range [0, 1]
 iteration-count:  number, min 1, integer
 duration-ms:      number, unit required ms, range [0ms, 10000ms]
 buffer-offset:    number, min 0, integer, multiple of 256
 ```
 
-Accepted values for `opacity`:
-
 ```sjon
-0
-0.5
-1
+(layer :opacity 0)
+(layer :opacity 0.5)
+(layer :opacity 1)
+(layer :opacity -0.1)   ; number_below_min
 ```
 
-Rejected because below `:min`:
+The whole family:
 
-```sjon
-(layer :opacity -0.1)
-```
+- `number_above_max`: greater than `:max`.
+- `number_at_or_below_exclusive_min`: `:exclusive-min true` and the
+  value is at or under `:min`.
+- `number_at_or_above_exclusive_max`: `:exclusive-max true` and the
+  value is at or over `:max`.
+- `number_not_integer`: `:integer true` and the value is fractional or
+  non-finite.
+- `number_not_multiple`: `:multiple-of N` and the value does not divide
+  evenly by `N`.
+- `numeric_bound_unit_mismatch`: the bound carries a unit and the value
+  either has none or carries a different one.
 
-Likely diagnostic: `number_below_min`. Other diagnostics in this
-family:
+Comparison keeps exact precision when both the bound and the value came
+from integer literals, so `9007199254740993` against a `:max` of
+`9007199254740992` correctly fires `number_above_max` even though both
+round to the same f64. For everyday plugins that just works; the corner
+only matters when a bound approaches 2^53.
 
-- `number_above_max`            — value greater than `:max`.
-- `number_at_or_below_exclusive_min` — `:exclusive-min true` and value ≤ `:min`.
-- `number_at_or_above_exclusive_max` — `:exclusive-max true` and value ≥ `:max`.
-- `number_not_integer`          — `:integer true` and value is fractional or non-finite.
-- `number_not_multiple`         — `:multiple-of N` and the value does not divide evenly by `N`.
-- `numeric_bound_unit_mismatch` — bound carries a unit but the value either has none or carries a different unit.
+### Divisibility, and the Order the Checks Run In
 
-Comparison preserves exact precision when both the bound and the
-value came from integer literals (`9007199254740993` vs a `:max`
-of `9007199254740992` correctly fires `number_above_max`, even
-though both round to the same f64). For everyday plugins this
-just works; the corner only matters when the bound itself
-approaches 2^53.
+`:multiple-of` is the one bound that a range and `:integer` together
+cannot express. "A byte offset aligned to 256" is not "between 0 and X"
+and it is not merely "a whole number", and before this existed a plugin
+had to check it in host code after validation had already passed.
 
-### Divisibility, and the order the checks run in
-
-`:multiple-of` is the one bound that a range and `:integer` cannot
-express between them. "A byte offset aligned to 256" is not "between 0
-and X" and not merely "a whole number" — it is a multiple of 256, and
-before this existed a plugin had to check it in host code after
-validation passed.
-
-```text
+```text title="plugin summary"
 buffer-offset: number, min 0, integer, multiple of 256
 ```
 
 ```sjon
-(binding :offset 0)      ; ✓ zero divides by anything
-(binding :offset 512)    ; ✓
-(binding :offset 250)    ; ✗ number_not_multiple
+(binding :offset 0)      ; fine, zero divides by anything
+(binding :offset 512)    ; fine
+(binding :offset 250)    ; number_not_multiple
 ```
 
-Divisibility is exact, not approximate: a value above 2^53 is compared
-in whole numbers rather than being rounded to a float first, so an odd
-number stays odd. (If a plugin ever declares a *fractional* divisor like
-`multiple of 0.25`, that one case is approximate — binary floating point
-has no exact answer — and the plugin author is warned when the schema
-loads. You will not see this in practice; alignment rules use whole
+Divisibility is exact rather than approximate: a value above 2^53 is
+compared in whole numbers instead of being rounded to a float first, so
+an odd number stays odd. (A *fractional* divisor such as
+`multiple of 0.25` is the one approximate case, because binary floating
+point has no exact answer for it, and the plugin author is warned when
+the schema loads. You will not meet this; alignment rules use whole
 numbers.) A divisor of zero or below is refused outright rather than
-warned about: dividing by zero has no answer at all, and a negative
+warned about, since dividing by zero has no answer at all and a negative
 divisor accepts exactly what its magnitude accepts.
 
 Now the part worth learning, because it decides which diagnostic you
-get. The three checks run in a fixed order — **integrality, then range,
-then divisibility** — and only the first failure is reported. Predict
-each of these against the contract above:
+get. The three checks run in a fixed order and only the first failure is
+reported:
+
+```
+      integrality  ->  range  ->  divisibility
+                only the first failure is reported
+```
+
+Predict all three of these against the contract above before reading on:
 
 ```sjon
 (binding :offset 250.5)
@@ -389,192 +378,158 @@ each of these against the contract above:
 (binding :offset 250)
 ```
 
-The first is `number_not_integer`. It also fails the alignment rule, but
-being fractional is the more basic problem, and telling you to align a
-number that is not whole yet would be useless advice.
+The first is `number_not_integer`. It fails alignment too, but being
+fractional is the more basic problem, and telling you to align a number
+that is not whole yet would be useless advice.
 
-The second is `number_below_min`. `-256` *is* a genuine multiple of 256,
-so the only thing wrong with it is that it is negative.
+The second is `number_below_min`. `-256` genuinely is a multiple of 256,
+so the only thing wrong with it is the sign.
 
-The third is `number_not_multiple` — the value is whole and in range, so
-divisibility is what is left.
+The third is `number_not_multiple`, because the value is whole and in
+range and divisibility is all that is left.
 
-The practical consequence: fix what the diagnostic says and re-run. A
-second complaint may be waiting behind the first.
+The practical consequence is one you will feel: fix what the diagnostic
+says and re-run, because a second complaint may be queued behind the
+first.
 
 ## Representation
 
 A representation tag pins the machine type a downstream tool will encode
-a number as - `u16`, `u32`, `i32`, `f32`, or `f16`. The value you write
-is still an ordinary SJON number; the tag tells the validator to check
-that the number actually fits that type.
+a number as: `u16`, `u32`, `i32`, `f32`, or `f16`. What you write is
+still an ordinary SJON number. The tag tells the validator to check that
+the number actually fits.
 
-```text
+```text title="plugin summary"
 channel:       number, repr u16
 scalar:        number, repr f32
 vertex-index:  number, repr u32
 ```
 
-Two things are checked, both at validate time:
+Two checks, both at validate time:
 
-- **Range** - the number must fall inside the type's span. `u16` is
+- **Range**, the number must fall inside the type's span. `u16` is
   `[0, 65535]`, `u32` is `[0, 2^32)`, and `i32` is the signed 32-bit
   range.
-- **Integrality** - an integer type (`u16`, `u32`, `i32`) rejects a
-  fractional value. A float type (`f32`, `f16`) carries no integrality
-  rule; any finite number in range is accepted.
-
-Accepted:
+- **Integrality**, where an integer type (`u16`, `u32`, `i32`) rejects a
+  fractional value. A float type (`f32`, `f16`) has no integrality rule,
+  so any finite number in range is accepted.
 
 ```sjon
-(vertex :tint 65535)
-(draw :line-width 1.5)
-(draw :base-vertex 32768)
+(vertex :tint 65535)        ; fits u16
+(draw :line-width 1.5)      ; a fine f32
+(draw :base-vertex 32768)   ; fits u32
 ```
 
-`65535` fits `u16`, `1.5` is a fine `f32`, and `32768` fits `u32`.
-
-Out of range:
+Both failures share one code:
 
 ```sjon
-(vertex :tint 70000)
+(vertex :tint 70000)        ; repr_out_of_range, above the u16 ceiling
+(draw :base-vertex 1.5)     ; repr_out_of_range, not whole under u32
 ```
 
-Likely diagnostic: `repr_out_of_range` - `70000` is above the `u16`
-ceiling of `65535`. The same code covers a non-integral value under an
-integer type:
-
-```sjon
-(draw :base-vertex 1.5)
-```
-
-Here the message names the integrality failure rather than the range.
-Repair by writing a number that fits - in range and, for an integer
-type, whole:
+The message names which of the two it was.
 
 ```sjon
 (vertex :tint 65535)
 ```
 
-One thing a repr tag does not do: it does not ask you to round for
-precision. An `f32` value that needs more than 32 bits of mantissa is
-still accepted - the precision narrowing is the downstream encoder's
-step, not a validation error. The tag guards range and integrality,
-nothing more.
+One thing a repr tag does **not** do: it never asks you to round for
+precision. An `f32` value needing more than 32 bits of mantissa is
+accepted, because narrowing precision is the downstream encoder's step
+rather than a validation error. The tag guards range and integrality,
+and nothing else.
 
 ## Exercises
 
-For each exercise, read the contract first, then repair the source.
+Read the contract first, then repair the source.
 
 ### Vector Shape
 
-Contract:
-
-```text
+```text title="plugin summary"
 point: vector, length 2, element number
 (circle ...)
   :center point optional
 ```
 
-```sjon
+```sjon del={1}
 (circle :center [160] :radius 32)
 ```
 
-Repair:
-
-```sjon
+```sjon ins={1}
 (circle :center [160 120] :radius 32)
 ```
 
 ### Vector Element Kind
 
-```sjon
+```sjon del={1}
 (circle :center [160 "top"] :radius 32)
 ```
 
-Repair:
-
-```sjon
+```sjon ins={1}
 (circle :center [160 120] :radius 32)
 ```
 
 ### Unit Shape
 
-Contract:
-
-```text
+```text title="plugin summary"
 duration: number, unit required, allowed s | ms | b
 (delay ...)
   :wait duration required
 ```
 
-```sjon
+```sjon del={1}
 (delay :wait 4)
 ```
 
-Repair:
-
-```sjon
+```sjon ins={1}
 (delay :wait 4b)
 ```
 
 ### Variable-Length Vector
 
-Contract:
-
-```text
+```text title="plugin summary"
 attribute: vector, length 2-4, element number
 (vertex ...)
   :position attribute required
 ```
 
-```sjon
+```sjon del={1}
 (vertex :position [0.0])
 ```
 
-Repair:
-
-```sjon
+```sjon ins={1}
 (vertex :position [0.0 1.0])
 ```
 
 ### Unit Rejection
 
-Contract:
-
-```text
+```text title="plugin summary"
 raw-uniform: number, unit rejected
 (draw ...)
   :lod-bias raw-uniform optional
 ```
 
-```sjon
+```sjon del={1}
 (draw :lod-bias 0.5f)
 ```
 
-Repair:
-
-```sjon
+```sjon ins={1}
 (draw :lod-bias 0.5)
 ```
 
 ### Representation
 
-Contract:
-
-```text
+```text title="plugin summary"
 channel: number, repr u16
 (vertex ...)
   :tint channel optional
 ```
 
-```sjon
+```sjon del={1}
 (vertex :tint 70000)
 ```
 
-Repair:
-
-```sjon
+```sjon ins={1}
 (vertex :tint 65535)
 ```
 

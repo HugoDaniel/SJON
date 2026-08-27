@@ -1356,7 +1356,7 @@ test "fuzz ManifestLoader.load: parsed tree → Result or known error" {
             // `:source-key` with no `:provider`, `:acyclic` on the provider
             // route), which are cheap to reach from a well-formed anchor and
             // essentially unreachable from random bytes.
-            "(plugin :name glsl :version \"1.0.0\" :sjon \"1.2\"\n  (cross-ref-provider :name lines :description \"one per line\" :impl \"wasm:extract_lines\")\n  (form :name shader (key :name name :type symbol :optional false) (key :name src :type string :optional false))\n  (value-kind :name uniform-name :underlying symbol\n    :cross-ref (cross-ref :target shader :provider lines :source-key src))\n  (form :name bind (key :name uniform :type uniform-name :optional false)))",
+            "(plugin :name glsl :version \"1.0.0\"\n  (cross-ref-provider :name lines :description \"one per line\" :impl \"wasm:extract_lines\")\n  (form :name shader (key :name name :type symbol :optional false) (key :name src :type string :optional false))\n  (value-kind :name uniform-name :underlying symbol\n    :cross-ref (cross-ref :target shader :provider lines :source-key src))\n  (form :name bind (key :name uniform :type uniform-name :optional false)))",
             // member-set value-kind (closed symbol set).
             "(plugin :name e :version \"1.0.0\"\n  (value-kind :name tag :underlying symbol\n    :members (member-set :values [a b c])))",
             // The `1.3` vocabulary in one well-formed anchor: per-head
@@ -1368,12 +1368,20 @@ test "fuzz ManifestLoader.load: parsed tree → Result or known error" {
             // `:max` on a head, two spellings of one member, a `:requires`
             // onto a required or excluded key), and those are one mutation
             // away from a well-formed anchor and unreachable from noise.
-            "(plugin :name gpu :version \"1.0.0\" :sjon \"1.3\"\n  (value-kind :name stage :underlying form\n    :heads (head-set (head :name vertex :min 1 :max 1) (head :name constant :max 4)))\n  (value-kind :name dim :underlying symbol\n    :members (member-set :values [1d 2d 2d-array]))\n  (value-kind :name aligned :underlying number\n    :numeric (numeric-bounds :min 0 :integer true :multiple-of 256))\n  (form :name vertex (key :name entry :type symbol :optional true))\n  (form :name constant (key :name name :type symbol :optional true))\n  (form :name render-pipeline :positional stage (key :name dim :type dim :optional true) (key :name off :type aligned :optional true)))",
-            "(plugin :name gpu2 :version \"1.0.0\" :sjon \"1.3\"\n  (value-kind :name pipe-name :underlying symbol\n    :cross-ref (cross-ref :target render-pipeline))\n  (value-kind :name any-pipe :underlying symbol\n    :cross-ref (cross-ref :target [render-pipeline compute-pipeline]))\n  (value-kind :name budget :underlying scalar-or-ref\n    :scalar-or-ref (scalar-or-ref-shape :base number :ref pipe-name))\n  (form :name render-pipeline (key :name name :type symbol :optional false))\n  (form :name compute-pipeline (key :name name :type symbol :optional false))\n  (form :name dispatch (key :name pipeline :type any-pipe :optional false) (key :name cap :type budget :optional true) (key :name tag :type symbol :optional true) (key :name mode :type symbol :optional true :requires [tag])))",
+            "(plugin :name gpu :version \"1.0.0\"\n  (value-kind :name stage :underlying form\n    :heads (head-set (head :name vertex :min 1 :max 1) (head :name constant :max 4)))\n  (value-kind :name dim :underlying symbol\n    :members (member-set :values [1d 2d 2d-array]))\n  (value-kind :name aligned :underlying number\n    :numeric (numeric-bounds :min 0 :integer true :multiple-of 256))\n  (form :name vertex (key :name entry :type symbol :optional true))\n  (form :name constant (key :name name :type symbol :optional true))\n  (form :name render-pipeline :positional stage (key :name dim :type dim :optional true) (key :name off :type aligned :optional true)))",
+            "(plugin :name gpu2 :version \"1.0.0\"\n  (value-kind :name pipe-name :underlying symbol\n    :cross-ref (cross-ref :target render-pipeline))\n  (value-kind :name any-pipe :underlying symbol\n    :cross-ref (cross-ref :target [render-pipeline compute-pipeline]))\n  (value-kind :name budget :underlying scalar-or-ref\n    :scalar-or-ref (scalar-or-ref-shape :base number :ref pipe-name))\n  (form :name render-pipeline (key :name name :type symbol :optional false))\n  (form :name compute-pipeline (key :name name :type symbol :optional false))\n  (form :name dispatch (key :name pipeline :type any-pipe :optional false) (key :name cap :type budget :optional true) (key :name tag :type symbol :optional true) (key :name mode :type symbol :optional true :requires [tag])))",
             // The refusing twin: every `1.3` load-time rejection at once, so
             // the mutator starts from a manifest whose diagnostics are the
             // interesting output rather than having to build one.
-            "(plugin :name bad :version \"1.0.0\" :sjon \"1.3\"\n  (value-kind :name empty-range :underlying form\n    :heads (head-set (head :name a :min 3 :max 1)))\n  (value-kind :name dup :underlying symbol\n    :members (member-set :values [2d 2.0d]))\n  (value-kind :name divisor :underlying number\n    :numeric (numeric-bounds :multiple-of -8))\n  (value-kind :name self :underlying scalar-or-ref\n    :scalar-or-ref (scalar-or-ref-shape :base number :ref number))\n  (value-kind :name empty-group :underlying symbol\n    :cross-ref (cross-ref :target []))\n  (value-kind :name cyclic :underlying symbol\n    :cross-ref (cross-ref :target [a b] :acyclic true))\n  (form :name a (key :name name :type symbol :optional false))\n  (form :name b (key :name name :type symbol :optional false))\n  (form :name needs (key :name x :type number :optional true :requires [ghost])))",
+            "(plugin :name bad :version \"1.0.0\"\n  (value-kind :name empty-range :underlying form\n    :heads (head-set (head :name a :min 3 :max 1)))\n  (value-kind :name dup :underlying symbol\n    :members (member-set :values [2d 2.0d]))\n  (value-kind :name divisor :underlying number\n    :numeric (numeric-bounds :multiple-of -8))\n  (value-kind :name self :underlying scalar-or-ref\n    :scalar-or-ref (scalar-or-ref-shape :base number :ref number))\n  (value-kind :name empty-group :underlying symbol\n    :cross-ref (cross-ref :target []))\n  (value-kind :name cyclic :underlying symbol\n    :cross-ref (cross-ref :target [a b] :acyclic true))\n  (form :name a (key :name name :type symbol :optional false))\n  (form :name b (key :name name :type symbol :optional false))\n  (form :name needs (key :name x :type number :optional true :requires [ghost])))",
+            // The `1.4` addition on top: `:min-children` / `:max-children`,
+            // both spellings of `:heads` carrying them, and one of each
+            // cross-level refusal. The two sums are what the mutator wants
+            // to reach — `Σ head.min > :max-children` and `:min-children >
+            // Σ head.max` — and neither is reachable from noise, since both
+            // need a well-formed head-set with bounds on *both* levels.
+            "(plugin :name agg :version \"1.0.0\"\n  (value-kind :name res :underlying form\n    :heads (head-set :min-children 1 :max-children 1\n      (head :name buffer :max 1) (head :name sampler :max 1)))\n  (value-kind :name gen :underlying form\n    :heads (head-set :names [cube sphere] :max-children 1))\n  (form :name buffer)\n  (form :name sampler)\n  (form :name cube)\n  (form :name sphere)\n  (form :name entry :positional res (key :name binding :type number :optional false))\n  (form :name data :positional gen))",
+            "(plugin :name aggbad :version \"1.0.0\"\n  (value-kind :name backwards :underlying form\n    :heads (head-set :names [a] :min-children 3 :max-children 1))\n  (value-kind :name floor-sum :underlying form\n    :heads (head-set :max-children 1 (head :name a :min 1) (head :name b :min 1)))\n  (value-kind :name ceil-sum :underlying form\n    :heads (head-set :min-children 3 (head :name a :max 1) (head :name b :max 1)))\n  (form :name a)\n  (form :name b))",
             // expr-func — mono signature.
             "(plugin :name fx :version \"1.0.0\"\n  (expr-func :name inc :arity (fixed 1) :params [number] :result number))",
             // slot-local nested forms (local_form_manifest_source).
@@ -1383,8 +1391,9 @@ test "fuzz ManifestLoader.load: parsed tree → Result or known error" {
             // implied `.any`; `group` nests BOTH carriers (a positional-local `leaf`
             // and a key-local `badge` on `:tag`) to exercise depth + composition.
             "(plugin :name plf :version \"1.0.0\"\n  (form :name bind-group\n    (form :name entry (key :name binding :type number :optional false))\n    (form :name buffer (key :name slot :type number :optional false))\n    (form :name group\n      (form :name leaf)\n      (key :name tag :type form (form :name badge)))))",
-            // Malformed / adversarial — the meta-validator's reject space.
+            // The smallest valid manifest — `:version` is optional.
             "(plugin :name p)",
+            // Malformed / adversarial — the meta-validator's reject space.
             "(plugin :version \"1.0.0\")",
             "(plugin :name 42 :version 1.0)",
             "(plugin :name p :version \"1.0.0\" (form))",
@@ -1475,6 +1484,14 @@ test "fuzz Host.validateDocument: arbitrary source → HostResult or OOM" {
             // local-first resolution (both `entry` and `buffer` resolve to the
             // `bind-group` locals) through the full three-phase pipeline.
             "(plugin :name plf :version \"1.0.0\"\n  (form :name bind-group\n    (form :name entry (key :name binding :type number :optional false))\n    (form :name buffer (key :name slot :type number :optional false))))\n(bind-group (entry :binding 0) (buffer :slot 1))",
+            // Both bound levels on one slot, driven through all three
+            // phases: the first `(entry …)` is inside every bound, the
+            // second breaches the set's ceiling with two *different* heads
+            // (so the set reports, not a head), the third breaches its
+            // floor. The suppression rule is one mutation away — make the
+            // second entry two `(buffer …)` and the per-head report takes
+            // over — which is the branch noise cannot reach.
+            "(plugin :name agg :version \"1.0.0\"\n  (value-kind :name res :underlying form\n    :heads (head-set :min-children 1 :max-children 1\n      (head :name buffer :max 1) (head :name sampler :max 1)))\n  (form :name buffer)\n  (form :name sampler)\n  (form :name entry :positional res (key :name binding :type number :optional false)))\n(entry :binding 0 (buffer))\n(entry :binding 1 (buffer) (sampler))\n(entry :binding 2)",
             // Positional locals colliding with a `(flag-set …)` — manifest-phase
             // `invalid_manifest`, then the data form hits the unknown-form path.
             "(plugin :name plf-bad :version \"1.0.0\"\n  (form :name task\n    :positional (flag-set (flag :name done) (flag :name archived))\n    (form :name entry (key :name binding :type number :optional false))))\n(task :done)",
@@ -1485,12 +1502,13 @@ test "fuzz Host.validateDocument: arbitrary source → HostResult or OOM" {
             // unchecked. Declaration-only on purpose — no host running this
             // harness has a runtime, and the poisoned path is the one with
             // arms that random bytes never reach.
-            "(plugin :name probe :version \"1.0.0\" :sjon \"1.2\"\n  (cross-ref-provider :name lines :description \"one per line\")\n  (form :name shader (key :name name :type symbol :optional false) (key :name src :type string :optional false))\n  (value-kind :name uniform-name :underlying symbol\n    :cross-ref (cross-ref :target shader :provider lines))\n  (form :name bind (key :name uniform :type uniform-name :optional false)))\n(shader :name main :src \"u_time\\nu_res\")\n(bind :uniform u_time)",
+            "(plugin :name probe :version \"1.0.0\"\n  (cross-ref-provider :name lines :description \"one per line\")\n  (form :name shader (key :name name :type symbol :optional false) (key :name src :type string :optional false))\n  (value-kind :name uniform-name :underlying symbol\n    :cross-ref (cross-ref :target shader :provider lines))\n  (form :name bind (key :name uniform :type uniform-name :optional false)))\n(shader :name main :src \"u_time\\nu_res\")\n(bind :uniform u_time)",
             // The same schema with two sources and no references — the
             // discovery walk's dedup arm (two distinct pairs) beside the
             // registration arm that never runs.
-            "(plugin :name probe :version \"1.0.0\" :sjon \"1.2\"\n  (cross-ref-provider :name lines :description \"one per line\")\n  (form :name shader (key :name name :type symbol :optional false) (key :name src :type string :optional false))\n  (value-kind :name uniform-name :underlying symbol\n    :cross-ref (cross-ref :target shader :provider lines)))\n(shader :name a :src \"x\")\n(shader :name b :src \"x\")",
-            // Malformed manifest declaration (manifest-phase diagnostic).
+            "(plugin :name probe :version \"1.0.0\"\n  (cross-ref-provider :name lines :description \"one per line\")\n  (form :name shader (key :name name :type symbol :optional false) (key :name src :type string :optional false))\n  (value-kind :name uniform-name :underlying symbol\n    :cross-ref (cross-ref :target shader :provider lines)))\n(shader :name a :src \"x\")\n(shader :name b :src \"x\")",
+            // A valid unversioned manifest that declares no `box` — the
+            // document's form is `unknown_form`, not a manifest-phase error.
             "(plugin :name p)\n(box :w 1)",
             // Parser-recovery inputs.
             "(",
@@ -1574,6 +1592,22 @@ test "fuzz SchemaExport.exportSchema: loaded plugin exports valid JSON" {
             "(plugin :name e :version \"1.0.0\"\n  (value-kind :name tag :underlying symbol\n    :members (member-set :values [a b c])))",
             "(plugin :name fx :version \"1.0.0\"\n  (expr-func :name inc :arity (fixed 1) :params [number] :result number))",
             "(plugin :name ui2 :version \"1.0.0\"\n  (form :name canvas\n    (key :name shape :type form\n      (form :name circle (key :name r :type number :optional false))\n      (form :name rect (key :name w :type number :optional false)))))",
+            // The closed-positional-set recipe: a head-set gating a slot
+            // whose locals supply the bodies. The anchor the exporter's
+            // slot-aware head-set resolution needs — the interesting
+            // mutations are which heads survive into the set and which
+            // locals survive beside it (a head with a local, a head with
+            // neither, a local outside the set), none of them reachable
+            // from noise. `ghost` and `dead` seed the two error paths.
+            "(plugin :name hl :version \"1.0.0\"\n  (value-kind :name item :underlying form\n    :heads (head-set (head :name entry :min 1) (head :name ghost)))\n  (form :name layout :positional item\n    (key :name name :type symbol :optional false)\n    (form :name entry (key :name binding :type number :optional false))\n    (form :name dead (key :name z :type number))))",
+            // Both bound levels at once, which is what the `$children`
+            // emitters branch on: a set with a floor (so `$children` joins
+            // `required` and `writeHeadContains` runs inside an `anyOf`),
+            // and a ceiling-only set on the compact spelling (so the set
+            // emits alone, with no per-head entry beside it). Every
+            // interesting mutation here is a bound moving between the two
+            // levels, which noise cannot reach.
+            "(plugin :name agg :version \"1.0.0\"\n  (value-kind :name res :underlying form\n    :heads (head-set :min-children 1 :max-children 1\n      (head :name buffer :max 1) (head :name sampler :max 1)))\n  (value-kind :name gen :underlying form\n    :heads (head-set :names [cube sphere] :max-children 1))\n  (form :name buffer)\n  (form :name sampler)\n  (form :name cube)\n  (form :name sphere)\n  (form :name entry :positional res (key :name binding :type number :optional false))\n  (form :name data :positional gen))",
         }, .{}),
     });
 }

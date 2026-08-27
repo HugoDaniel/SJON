@@ -1,6 +1,6 @@
 ; Over a ceiling. A second `(fragment …)` against `:max 1`.
 ;
-; The report lands on the second one — the line to delete — not on the
+; The report lands on the second one (the line to delete) and not on the
 ; enclosing form, and you get exactly one no matter how far over you go:
 ; the count crosses the ceiling once, and the message names the real total.
 ;

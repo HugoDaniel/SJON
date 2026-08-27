@@ -4,7 +4,7 @@ expects: not_cross_ref
 # Task: anchor a track to the `intro` phrase
 
 Schema: `:anchor` is typed `phrase-name`, a symbol value-kind carrying
-a `(cross-ref :target phrase)` refinement — its value must name a
+a `(cross-ref :target phrase)` refinement, so its value must name a
 declared `(phrase :name …)`.
 
 `attempt-1.sjon` declares `(phrase :name intro)` but anchors to

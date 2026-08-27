@@ -1,0 +1,17 @@
+; The lowering worklist resolves a form head local-first, exactly as the
+; validator does (S7): `(bind-group (entry))` writes `bind-group`'s slot-local
+; `entry`, which shadows the *global* `entry` — a lowerable sugar form. The
+; local body is never a hook, so nothing lowers. Before the worklist resolved
+; local-first it looked `entry` up globally, fired `test/identity-v1` on the
+; local node, and emitted an `(entry-normal)` missing its required `:must` —
+; see the sibling `lowering-global-sugar-at-root-lowers` for that shape where
+; it is intended.
+(plugin :name p :version "1.0.0"
+  (form :name entry :open true
+    :lowering (lowering :hook test/identity-v1 :produces [entry-normal]))
+  (form :name entry-normal
+    (key :name must :type number :optional false))
+  (form :name bind-group
+    (form :name entry)))
+
+(bind-group (entry))

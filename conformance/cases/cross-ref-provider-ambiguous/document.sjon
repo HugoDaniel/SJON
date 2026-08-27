@@ -8,11 +8,11 @@
 ; The two plugins carry distinct `:name`s on purpose — same-named plugins
 ; would die earlier, at `duplicate_plugin_name`, and this case would then
 ; be pinning the wrong thing.
-(plugin :name glsl :version "1.0.0" :sjon "1.2"
+(plugin :name glsl :version "1.0.0"
   (cross-ref-provider :name lines
     :description "One name per non-empty line."))
 
-(plugin :name sql :version "1.0.0" :sjon "1.2"
+(plugin :name sql :version "1.0.0"
   (cross-ref-provider :name lines
     :description "Also one name per non-empty line.")
 

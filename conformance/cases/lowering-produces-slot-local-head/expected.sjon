@@ -1,0 +1,5 @@
+; The manifest loads (both heads resolve — `wrap` globally, `leaf` as a
+; slot-local of the listed `wrap`), the hook's `(wrap (leaf))` passes the
+; contract, and the emitted `leaf` validates local-first under `wrap`. Zero
+; diagnostics.
+(diagnostics)

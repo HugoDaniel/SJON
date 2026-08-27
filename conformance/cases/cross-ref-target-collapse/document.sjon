@@ -13,7 +13,7 @@
 ;
 ; `.warning`, not `.err`: the schema still loads and every reference is
 ; still checked — just not the way the second kind declared.
-(plugin :name probe :version "1.0.0" :sjon "1.2"
+(plugin :name probe :version "1.0.0"
   (cross-ref-provider :name lines
     :description "One name per non-empty line.")
 

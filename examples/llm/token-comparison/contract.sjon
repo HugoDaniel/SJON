@@ -1,5 +1,5 @@
 ; The contract, SJON side: an inline (plugin …) manifest (the schema)
-; plus one document instance — everything a model reads and writes to
+; plus one document instance: everything a model reads and writes to
 ; author against this vocabulary. Mirrors flows/01-unknown-key.
 (plugin :name demo :version "1.0.0"
   (form :name camera

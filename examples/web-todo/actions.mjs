@@ -4,7 +4,7 @@
 //   * `path` is a JSON array of integer/string steps from the root.
 //   * Integer steps index positional children (kvpairs skipped).
 //   * String steps key into kvpairs.
-//   * `value` is decoded through `Json.fromJson` — canonical tagging
+//   * `value` is decoded through `Json.fromJson`, so canonical tagging
 //     applies (`{$sym}` for symbols, `{$kw}` for keywords, etc.).
 
 export const addTodo = (id, text) => ({
@@ -34,7 +34,7 @@ export const removeTodo = (index) => ({
 });
 
 // `:filter` is a symbol-typed slot (the `filter-kw` value-kind in
-// todo-app.sjon), so the canonical edit value is `{$sym}` — not
+// todo-app.sjon), so the canonical edit value is `{$sym}`, not
 // `{$kw}`, even though it reads like a keyword in the UI.
 export const setFilter = (name) => ({
     op: "set_keyword",

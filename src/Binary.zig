@@ -161,7 +161,8 @@ pub const ToBinaryOptions = struct {
     with_head_spans: bool = true,
     /// Emit `KeywordPair.key_span` inline (8 bytes per pair).
     with_kvpair_key_spans: bool = true,
-    /// Emit `Node.leading_comments` and `Form.trailing_comments`.
+    /// Emit `Node.leading_comments` and the container `trailing_comments`
+    /// of forms and (since wire v5) vectors.
     with_node_comments: bool = false,
     /// Emit `KeywordPair.leading_comments`.
     with_kvpair_comments: bool = false,

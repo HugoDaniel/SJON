@@ -126,7 +126,7 @@ pub const Resolver = struct {
 //
 //   (use-plugin "shapes")
 //   (use-plugin "shapes" :path "./vendor/shapes.sjon")
-//   (use-plugin "shapes" :version "1.x")
+//   (use-plugin "shapes" :version "1.0.0")   ; exact-string pin, no ranges
 //   (use-plugin "shapes" :hash "sha256-…")
 //
 // All parse failures become arena-allocated `Ast.Diagnostic` entries on
@@ -310,13 +310,13 @@ test "parseReference: with explicit path, version, and hash" {
     const a = testing.allocator;
     var got = try parseSingleRef(
         a,
-        "(use-plugin \"shapes\" :path \"./vendor/shapes.sjon\" :version \"1.x\" :hash \"sha256-abc\")\n",
+        "(use-plugin \"shapes\" :path \"./vendor/shapes.sjon\" :version \"1.0.0\" :hash \"sha256-abc\")\n",
     );
     defer got.tree.deinit();
 
     try testing.expectEqualStrings("shapes", got.parsed.reference.name);
     try testing.expectEqualStrings("./vendor/shapes.sjon", got.parsed.reference.explicit_path.?);
-    try testing.expectEqualStrings("1.x", got.parsed.reference.version.?);
+    try testing.expectEqualStrings("1.0.0", got.parsed.reference.version.?);
     try testing.expectEqualStrings("sha256-abc", got.parsed.reference.hash.?);
     try testing.expectEqual(@as(usize, 0), got.parsed.diagnostics.len);
 }

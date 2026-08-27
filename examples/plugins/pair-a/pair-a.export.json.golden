@@ -61,7 +61,7 @@
       "value_kinds": [
         {
           "name": "swatch-form",
-          "description": "Either a colour or a gradient — both declared in `pair-b`.",
+          "description": "Either a colour or a gradient, both declared in `pair-b`.",
           "shape": {
             "kind": "form_heads",
             "refs": [

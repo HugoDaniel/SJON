@@ -104,10 +104,14 @@ echo "==> Extracting \`git archive HEAD\` (SJON ${VERSION}) into $WORKTREE"
 git -C "$PROJECT_DIR" archive HEAD | tar -x -C "$WORKTREE"
 
 # --- Link check: every shipped Markdown link must resolve inside the cut ---
-# Two deliberate exclusions: root-absolute targets (`/playground#…`) address
-# the deployed site, not the file tree; and landing-page/src/content/ is
-# machine-generated from docs/tutorial/ (never hand-edited), whose sources
-# are checked here directly.
+# One deliberate exclusion: root-absolute targets (`/playground#…`) address the
+# deployed site, not the file tree.
+#
+# There used to be a second, for landing-page/src/content/, when that tree was
+# fifteen generated `content.md` files whose sources in docs/tutorial/ were
+# checked here anyway. The Starlight rebuild retired the generator; what lives
+# there now is three hand-written `.mdx` pages, which this check should see
+# rather than skip the day one of them becomes a `.md`.
 echo "==> Checking Markdown links in the cut"
 broken=0
 while IFS= read -r -d '' md; do
@@ -124,8 +128,7 @@ while IFS= read -r -d '' md; do
             broken=$((broken + 1))
         fi
     done < <(grep -oE '\]\([^)]+\)' "$md" 2>/dev/null | sed 's/^](//; s/)$//')
-done < <(find "$WORKTREE" -name '*.md' -type f \
-    -not -path '*/landing-page/src/content/*' -print0)
+done < <(find "$WORKTREE" -name '*.md' -type f -print0)
 if [ "$broken" -ne 0 ]; then
     echo "error: $broken broken Markdown link(s) — the cut must hold on its own" >&2
     exit 1

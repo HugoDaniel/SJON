@@ -37,7 +37,7 @@ export interface LocalForms_Line {
   to: Array<unknown>;
 }
 
-/** Global circle — shadowed by the local circle inside canvas.:shape. */
+/** Global circle, shadowed by the local circle inside canvas.:shape. */
 export interface LocalForms_Circle {
   $form: "circle";
   $ns: "local-forms";

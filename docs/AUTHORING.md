@@ -40,7 +40,7 @@ A nested scene:
 (scene :bpm 130 :name "intro"
   (canvas :name "main" :size [1920 1080]
     (camera :ortho :zoom 2)
-    (stack :mode :overlay
+    (stack :mode overlay
       (shape :sdf :radius 0.5 :color [0.9 0.4 0.2 1.0])
       (shape :path :closed true
         :points [[0 0] [1 0] [1 1] [0 1]]))))
@@ -1112,7 +1112,7 @@ message tells you which you hit:
 | --- | --- |
 | `dependent_key_missing` | "if this key, then also that one" |
 | `mutually_exclusive_keys_present` / `required_one_of_missing` | "how many of these may appear" |
-| `unknown_key` on a key that exists elsewhere | "this key applies only for a certain *value* of another key" (a variant) |
+| `unknown_key` on a key that exists elsewhere | "this key applies only for certain *values* of another key" (a variant — one value, or several: `:strip-index-format` exists under `triangle-strip` *and* `line-strip`, and under no list) |
 
 ### Defaults and effective values
 
@@ -1211,10 +1211,14 @@ plugin declared the slot:
 (mesh :bones MAX_BONE)
 ```
 
-If the shorthand names a `:ref` kind, this fails —
-`union_no_branch_matched`, naming both alternatives. If it does not, the
-reference half is a plain unchecked symbol and this **validates clean**,
-silently referring to nothing. If you are writing the plugin, prefer the
+If the shorthand names a `:ref` kind, this fails — `not_cross_ref`,
+naming the form the symbol had to be declared by, because a symbol can
+only have meant the reference half and the diagnostic is that half's
+own. (A number out of the base's range likewise reports the base's
+`number_above_max`, bound and all; only a value neither half could take,
+such as a string here, gets the union's `union_no_branch_matched`.) If it
+does not name a `:ref`, the reference half is a plain unchecked symbol
+and this **validates clean**, silently referring to nothing. If you are writing the plugin, prefer the
 checked form; if you are reading someone else's, that is the difference
 between a typo caught at validate time and one caught at runtime.
 
@@ -1324,6 +1328,55 @@ Three things worth knowing before you rely on it:
   `(vector-shape :element pipeline-section)` and the bounds ride along
   inertly — a keyed slot holds one value, so there is nothing to count.
   That is deliberate: it keeps a bounded kind shareable.
+
+#### …and how many altogether
+
+Per-head bounds cannot say "exactly one of these". Try it: give every
+head `:max 1` and a form with one of each is accepted; give one head
+`:min 1` and you have demanded *that* head, not any of them. The claim
+belongs to the set, so it is spelled on the set:
+
+```sjon
+(value-kind :name bgl-resource :underlying form
+  :heads (head-set :min-children 1 :max-children 1   ; exactly one, whichever
+    (head :name buffer  :max 1)                      ; …and not two of the same
+    (head :name sampler :max 1)
+    (head :name texture :max 1)))
+
+(form :name entry :positional bgl-resource
+  (key :name binding :type number))
+```
+
+```sjon
+(entry :binding 0 (buffer :type uniform))                    ; ✓
+(entry :binding 1 (buffer :type uniform) (sampler :type filtering))
+                                                             ; ✗ positional_too_many — two resources
+(entry :binding 2)                                           ; ✗ positional_missing — no resource
+(entry :binding 3 (buffer :type uniform) (buffer :type storage))
+                                                             ; ✗ positional_too_many — two buffers
+```
+
+Three things worth knowing here too:
+
+- **`:min-children` / `:max-children` work on `:names` as well.** The
+  aggregate needs no per-head metadata, so
+  `(head-set :names [cube sphere] :max-children 1)` — "at most one
+  generator" — is legal and is the common shape.
+- **Both levels report through the same two codes.** Tell them apart by
+  the message: a set-level one names a bracketed set (`at most 1
+  positional child from [buffer | sampler | texture]`) where a per-head
+  one names a head. The repair differs — pick one, versus de-duplicate.
+- **When both would fire, only the head does.** The last example above is
+  over `buffer`'s ceiling *and* the set's; you get one diagnostic, the
+  per-head one, because it points at the line to delete. So a set-level
+  message tells you the children are individually fine and there are
+  simply too many of them together.
+
+The loader refuses a set that no document could satisfy — `:min-children`
+above `:max-children`, heads whose `:min`s *sum* above `:max-children`,
+or a `:min-children` above what the heads' `:max`es allow between them.
+The middle one is why the check is a sum: two heads at `:min 1` under
+`:max-children 1` is unsatisfiable while neither head alone looks wrong.
 
 ### Embedding multi-line code
 
@@ -1506,14 +1559,17 @@ A few more that show up around the keyword-pairing rule (§7):
   closed-set list. Re-check the plugin's enum.
 - `not_head_member` — a form's head isn't in the slot's
   allowed list (HeadSet). Use one of the pinned heads.
-- `positional_too_many` — more positional children carry this head than
-  the head-set's `:max` allows. Reported on the child that crossed the
-  ceiling: delete or merge it, or raise the bound. Fires once per
-  crossing, so the count in the message is the real total.
-- `positional_missing` — fewer carry it than `:min` requires. Reported on
-  the parent form's head, since there's no child to point at: add the
-  missing child, or lower the bound. Neither code is silenced by
-  `:open true`.
+- `positional_too_many` — more positional children than a head-set
+  ceiling allows: the head's `:max`, or the set's `:max-children`.
+  Reported on the child that crossed it: delete or merge it, or raise the
+  bound. Fires once per crossing, so the count in the message is the real
+  total.
+- `positional_missing` — fewer than a floor requires, a head's `:min` or
+  the set's `:min-children`. Reported on the parent form's head, since
+  there's no child to point at: add the missing child, or lower the
+  bound. Neither code is silenced by `:open true`. For both, a message
+  naming a bracketed set rather than one head is the set-level bound
+  speaking; when both levels would fire, only the per-head one does.
 - `unit_required` / `unit_not_allowed` — the slot's `UnitShape`
   either requires a suffix you omitted (bare `90` when the slot
   wants `90deg`) or rejects the suffix you supplied (`90%` when

@@ -1,0 +1,5 @@
+; Post-graduation (axis D on): one `unknown_key` and nothing else — the
+; defaulted discriminant is present, it selects no variant, and the
+; strip-only key has no home under it.
+(diagnostics
+  (diagnostic :code unknown_key :path [prim strip-format]))

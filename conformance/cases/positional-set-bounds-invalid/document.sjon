@@ -1,0 +1,39 @@
+; Load-time rejections of the set-level counts. Three separate kinds so
+; each condition reports once against its own kind name.
+;
+;   `backwards`  — `:min-children` above `:max-children`. An empty range
+;                  admits nothing, exactly as the per-head `:min > :max`
+;                  case does.
+;   `floor-sum`  — the check the *weaker* per-head spelling would let
+;                  through: neither head's `:min 1` exceeds
+;                  `:max-children 1`, yet satisfying both needs two
+;                  children and the set allows one. Only the SUM sees it.
+;   `ceil-sum`   — the mirror: `:min-children 3` above the two children
+;                  its heads allow between them. Finite only because
+;                  every head is bounded; one unbounded head makes the
+;                  set always fillable and the check vacuous.
+(plugin :name gpu :version "1.0.0"
+  (form :name buffer)
+  (form :name sampler)
+
+  (value-kind :name backwards
+    :underlying form
+    :heads (head-set :names [buffer] :min-children 3 :max-children 1))
+
+  (value-kind :name floor-sum
+    :underlying form
+    :heads (head-set :max-children 1
+      (head :name buffer  :min 1)
+      (head :name sampler :min 1)))
+
+  (value-kind :name ceil-sum
+    :underlying form
+    :heads (head-set :min-children 3
+      (head :name buffer  :max 1)
+      (head :name sampler :max 1))))
+
+; A no-op literal, not a data form: a plugin whose manifest failed to
+; load is dropped entirely, so any form here would cascade into an
+; `unknown_form` unrelated to what this case is about. Same reason
+; `head-set-bounds-invalid` ends in a bare `42`.
+42

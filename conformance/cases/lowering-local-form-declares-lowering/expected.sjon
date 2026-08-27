@@ -1,0 +1,6 @@
+; One rejection per local that declares `:lowering`, at the local's own
+; `lowering` path — positional carrier first, keyed carrier second, in
+; manifest order.
+(diagnostics
+  (diagnostic :code invalid_manifest :path [entry lowering])
+  (diagnostic :code invalid_manifest :path [layout lowering]))

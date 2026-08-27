@@ -1,9 +1,9 @@
-; Audio plugin — exercises the `union_of` value-kind twice over. The
+; Audio plugin: exercises the `union_of` value-kind twice over. The
 ; `notes` key on `(phrase …)` is a vector of `note-or-event`, a union of
 ; `note-or-rest` (a closed symbol member-set) and `event` (a form-as-slot
 ; pinned to the `n` and `rest` heads). The `lead` key on `(track …)` is a
-; `phrase-or-ref` — a union of `phrase-inline` (an inline `(phrase …)` form)
-; and `phrase-ref` (a cross-ref symbol naming a `(phrase :name …)`) — so the
+; `phrase-or-ref` is a union of `phrase-inline` (an inline `(phrase …)` form)
+; and `phrase-ref` (a cross-ref symbol naming a `(phrase :name …)`), so the
 ; same slot accepts either an inline phrase or a reference to a named one.
 ; That `union{form, cross_ref}` shape is what plan 11's extract/inline LSP
 ; refactors convert between.
@@ -48,7 +48,7 @@
     :union (union-shape :alternatives [phrase-inline phrase-ref]))
 
   (form :name phrase
-    :description "A note sequence — named (a reusable definition) or anonymous (inline)."
+    :description "A note sequence, either named (a reusable definition) or anonymous (inline)."
     (key :name name :type symbol :optional true)
     (key :name notes :type notes-vec))
 

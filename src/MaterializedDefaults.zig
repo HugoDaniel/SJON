@@ -902,7 +902,7 @@ test "materializeDefaults: a variant-key default is NOT materialized (known limi
             .discriminant_name = "kind",
             .discriminant_idx = 0,
             .variants = &.{.{
-                .when = "special",
+                .when = &.{"special"},
                 .keys = &.{.{ .name = "size", .value_type = .number, .default = .{ .number = 10 } }},
             }},
         }},

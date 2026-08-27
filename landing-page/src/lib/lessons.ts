@@ -1,16 +1,29 @@
 // Single source of truth for the tutorial sequence.
 //
-// Drives:
-//   * src/components/LessonOutline.astro — landing-page TOC
-//   * src/layouts/Lesson.astro             — sidebar nav inside lessons
-//   * src/pages/[...slug].astro            — getStaticPaths()
-//   * scripts/migrate-tutorials.mjs        — re-import (kept duplicate to
-//                                             keep the migrator runnable
-//                                             without TS tooling)
-//   * plugins/sjon-link-rewriter.mjs       — sibling-link rewriting
+// The source prose lives in `docs/tutorial/NN-*.md` and carries no
+// frontmatter, so everything *about* a lesson — its title, its gloss, where it
+// sits in the sidebar, what URL it renders at — is settled here and nowhere
+// else. In particular the displayed title is not the source H1:
+// `02-first-document.md` opens "First Document" and renders "Your first
+// document".
 //
-// When you add or rename a lesson, update both this file *and* the
-// LESSONS array in scripts/migrate-tutorials.mjs.
+// Drives:
+//   * src/lib/docs-loader.ts             — reads `docs/tutorial/{sourceStem}.md`
+//                                          and synthesises the frontmatter
+//                                          Starlight needs (title, description,
+//                                          prev/next)
+//   * astro.config.mjs                   — the sidebar groups, through
+//                                          `groupedLessons()`, and the
+//                                          `/tutorial` redirect, through
+//                                          `FIRST_LESSON`
+//   * src/components/LessonOutline.astro — the homepage course outline
+//   * plugins/sjon-link-rewriter.mjs     — sibling-link rewriting, from
+//                                          `sourceStem` → `route`
+//
+// Adding or renaming a lesson is an edit to this file plus the matching
+// `docs/tutorial/NN-*.md`. There is no generator to re-run and no second copy
+// of the table to keep in step: the hand-run migrator that used to own both
+// was retired with the Starlight rebuild.
 
 export interface Lesson {
   num: number;
@@ -24,8 +37,6 @@ export interface Lesson {
   gloss: string;
   /** Full URL path under which the lesson is rendered. */
   route: string;
-  /** Disk path under src/content/tutorial (relative). */
-  dir: string;
   /** Coarse grouping: part name shown in the sidebar. */
   part: string;
   /** Finer grouping: chapter name shown in the sidebar. */
@@ -40,7 +51,6 @@ export const LESSONS: readonly Lesson[] = [
     title: 'Orientation',
     gloss: 'What SJON is, what it isn’t, how it differs from JSON.',
     route: '/foundations/syntax/orientation',
-    dir: '1-foundations/1-syntax/1-orientation',
     part: 'Foundations',
     chapter: 'Syntax and Atoms',
   },
@@ -51,7 +61,6 @@ export const LESSONS: readonly Lesson[] = [
     title: 'Your first document',
     gloss: 'Forms, keywords, vectors, and the canonical printer.',
     route: '/foundations/syntax/first-document',
-    dir: '1-foundations/1-syntax/2-first-document',
     part: 'Foundations',
     chapter: 'Syntax and Atoms',
   },
@@ -62,7 +71,6 @@ export const LESSONS: readonly Lesson[] = [
     title: 'Atoms and intent',
     gloss: 'Symbols, strings, numbers, booleans, nil. When to reach for which.',
     route: '/foundations/syntax/atoms-and-intent',
-    dir: '1-foundations/1-syntax/3-atoms-and-intent',
     part: 'Foundations',
     chapter: 'Syntax and Atoms',
   },
@@ -73,7 +81,6 @@ export const LESSONS: readonly Lesson[] = [
     title: 'Numbers, units, vectors',
     gloss: 'Unit suffixes, vector literals, when units are mandatory.',
     route: '/foundations/syntax/numbers-units-vectors',
-    dir: '1-foundations/1-syntax/4-numbers-units-vectors',
     part: 'Foundations',
     chapter: 'Syntax and Atoms',
   },
@@ -84,7 +91,6 @@ export const LESSONS: readonly Lesson[] = [
     title: 'Forms and keyword pairing',
     gloss: 'How keys parse, how positionals work, how to read a (form …).',
     route: '/foundations/syntax/forms-and-keyword-pairing',
-    dir: '1-foundations/1-syntax/5-forms-and-keyword-pairing',
     part: 'Foundations',
     chapter: 'Syntax and Atoms',
   },
@@ -95,7 +101,6 @@ export const LESSONS: readonly Lesson[] = [
     title: 'Comments and strings',
     gloss: 'Lossless comments, escape rules, raw strings.',
     route: '/foundations/syntax/comments-and-strings',
-    dir: '1-foundations/1-syntax/6-comments-and-strings',
     part: 'Foundations',
     chapter: 'Syntax and Atoms',
   },
@@ -106,7 +111,6 @@ export const LESSONS: readonly Lesson[] = [
     title: 'Safe expressions',
     gloss: 'Parens that compute. The closed expression vocabulary.',
     route: '/foundations/expressions/safe-expressions',
-    dir: '1-foundations/2-expressions/1-safe-expressions',
     part: 'Foundations',
     chapter: 'Expressions and Bindings',
   },
@@ -117,7 +121,6 @@ export const LESSONS: readonly Lesson[] = [
     title: 'Bindings and control flow',
     gloss: '(let …), (if …), (cond …). Bounded, deterministic, no recursion.',
     route: '/foundations/expressions/bindings-and-control-flow',
-    dir: '1-foundations/2-expressions/2-bindings-and-control-flow',
     part: 'Foundations',
     chapter: 'Expressions and Bindings',
   },
@@ -129,7 +132,6 @@ export const LESSONS: readonly Lesson[] = [
     gloss:
       'Forms, keys, required/optional, defaults, positional policy, open forms, schema export.',
     route: '/schemas/reading/reading-plugin-schemas',
-    dir: '2-schemas/1-reading/1-plugin-schemas',
     part: 'Schemas and Diagnostics',
     chapter: 'Reading Schemas',
   },
@@ -140,7 +142,6 @@ export const LESSONS: readonly Lesson[] = [
     title: 'Discriminated and exclusive forms',
     gloss: 'One head with variant shapes; exclusive groups; multi-key bundles.',
     route: '/schemas/reading/discriminated-and-exclusive-forms',
-    dir: '2-schemas/1-reading/2-discriminated-and-exclusive',
     part: 'Schemas and Diagnostics',
     chapter: 'Reading Schemas',
   },
@@ -152,7 +153,6 @@ export const LESSONS: readonly Lesson[] = [
     gloss:
       'Underlying shapes, vector shapes (fixed and variable length), unit shapes, numeric bounds, and representation tags.',
     route: '/schemas/reading/value-kinds-shapes',
-    dir: '2-schemas/1-reading/3-value-kinds-shapes',
     part: 'Schemas and Diagnostics',
     chapter: 'Reading Schemas',
   },
@@ -164,7 +164,6 @@ export const LESSONS: readonly Lesson[] = [
     gloss:
       'String bounds, member sets, head sets, unions, slot-local forms, and the diagnostic cheat sheet.',
     route: '/schemas/reading/value-kinds-refinements',
-    dir: '2-schemas/1-reading/4-value-kinds-refinements',
     part: 'Schemas and Diagnostics',
     chapter: 'Reading Schemas',
   },
@@ -175,7 +174,6 @@ export const LESSONS: readonly Lesson[] = [
     title: 'Cross-references',
     gloss: 'Document-spanning name lookups; acyclic constraints.',
     route: '/schemas/reading/cross-references',
-    dir: '2-schemas/1-reading/5-cross-references',
     part: 'Schemas and Diagnostics',
     chapter: 'Reading Schemas',
   },
@@ -186,7 +184,6 @@ export const LESSONS: readonly Lesson[] = [
     title: 'Diagnostics-driven repair',
     gloss: 'The stable diagnostic codes as a repair workflow. Read, repair, repeat.',
     route: '/schemas/repair/diagnostics-driven-repair',
-    dir: '2-schemas/2-repair/1-diagnostics-driven-repair',
     part: 'Schemas and Diagnostics',
     chapter: 'Repair and Style',
   },
@@ -197,7 +194,6 @@ export const LESSONS: readonly Lesson[] = [
     title: 'Style, portability, capstone',
     gloss: 'Canonical formatting, manifest portability, a capstone exercise.',
     route: '/schemas/repair/style-portability-capstone',
-    dir: '2-schemas/2-repair/2-style-portability-capstone',
     part: 'Schemas and Diagnostics',
     chapter: 'Repair and Style',
   },

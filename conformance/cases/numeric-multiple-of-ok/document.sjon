@@ -7,7 +7,7 @@
 ; judged on magnitude (-512 divides by 256 exactly), and a bound carrying a
 ; unit demands a byte-equal one on the value — the same rule `:min` and
 ; `:max` already follow.
-(plugin :name gfx :version "1.0.0" :sjon "1.3"
+(plugin :name gfx :version "1.0.0"
   (value-kind :name aligned-offset
     :underlying number
     :description "Byte offset into a buffer binding; WebGPU requires 256-byte alignment for uniform bindings."

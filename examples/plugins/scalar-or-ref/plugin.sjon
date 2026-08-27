@@ -1,5 +1,5 @@
 ; scalar-or-ref fixture. A slot that accepts EITHER a literal scalar OR a
-; bare symbol that names a constant defined elsewhere — the `#define`-style
+; bare symbol that names a constant defined elsewhere: the `#define`-style
 ; reference pattern (e.g. a compute dispatch sized either on a literal count
 ; or on a host-supplied `WORKGROUP_SIZE`).
 ;
@@ -7,28 +7,33 @@
 ; <kind>)` is a loader shorthand: at load time it desugars to
 ; `:underlying union` over the two alternatives `[<base> symbol]`. A value
 ; matching `<base>` takes the scalar alternative; a bare symbol takes the
-; `symbol` (reference) alternative; anything else trips
-; `union_no_branch_matched`. Misuse — `:scalar-or-ref` on another
-; underlying, or a missing `:scalar-or-ref` slot — is an `invalid_manifest`
-; at load. It needs no validator change: the loader rewrites it to an
-; ordinary union, so it exports through the union path as an `anyOf` of the
-; resolved alternatives plus an `x-sjon-union-alternatives` annotation, and
-; the TS surface renders the matching `<base-type> | Symbol_` union.
+; `symbol` (reference) alternative; a shape neither arm reaches (a string,
+; a vector) trips `union_no_branch_matched`. Misuse (`:scalar-or-ref` on
+; another underlying, or a missing `:scalar-or-ref` slot) is an
+; `invalid_manifest` at load. Matching needs no validator change: the
+; loader rewrites it to an ordinary union, so it exports through the union
+; path as an `anyOf` of the resolved alternatives plus an
+; `x-sjon-union-alternatives` annotation, and the TS surface renders the
+; matching `<base-type> | Symbol_` union. Only the failure REPORT knows
+; the shorthand: the two arms are disjoint by node shape, so a rejected
+; number reports the base arm's own diagnostic (its bound, unit, or repr)
+; and a rejected symbol the reference arm's `not_cross_ref`. See
+; `example.sjon`.
 ;
-; The optional `:ref` (format 1.3) names the reference alternative. Both
+; The optional `:ref` names the reference alternative. Both
 ; halves of the contrast are declared below, because the difference only
 ; shows up on a *misspelling*: the default leaves the reference half an
 ; unchecked `symbol`, so a typo validates clean and names nothing, while a
 ; `:ref` naming a cross-ref kind catches it. See `example.sjon`.
 
-(plugin :name scalar-or-ref :version "1.0.0" :sjon "1.3"
-  ; The scalar alternative — a plain workgroup-dimension count.
+(plugin :name scalar-or-ref :version "1.0.0"
+  ; The scalar alternative: a plain workgroup-dimension count.
   (value-kind :name dim-value
     :description "A literal workgroup dimension."
     :underlying number)
 
   ; The shorthand: a literal dim-value OR a symbol naming a constant.
-  ; No `:ref`, so the reference half is the primitive `symbol` — any
+  ; No `:ref`, so the reference half is the primitive `symbol`, and any
   ; spelling satisfies it, checked by nobody.
   (value-kind :name dim
     :description "A workgroup dimension: a literal count, or a symbol referencing a named constant."

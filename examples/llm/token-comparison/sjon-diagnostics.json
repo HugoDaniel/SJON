@@ -8,8 +8,8 @@
       "severity": "error",
       "message": "unknown keyword `:zom` in form `camera`",
       "span": {
-        "start": 256,
-        "end": 260,
+        "start": 253,
+        "end": 257,
         "line": 7,
         "column": 21
       },

@@ -1,4 +1,4 @@
-// Demo entry point — loads `sjon.wasm`, builds the store, mounts React.
+// Demo entry point: loads `sjon.wasm`, builds the store, mounts React.
 //
 // Run from the repo root with a static server that serves `.mjs`,
 // `.wasm`, and `.js` with sensible content-types, then visit

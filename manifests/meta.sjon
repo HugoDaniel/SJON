@@ -90,6 +90,17 @@
     :description "A cross-ref target: one form head, or a vector of heads sharing one namespace."
     :union (union-shape :alternatives [symbol symbol-list]))
 
+  ; A `(variant :when …)`: one discriminant value, or a vector of them. A
+  ; vector declares that ONE key set applies for several values — the
+  ; WebGPU `strip-index-format` shape, read for `triangle-strip` and
+  ; `line-strip` alike. The loader normalises both spellings to a list and
+  ; rejects what a list cannot carry (an empty vector, a repeat, a value
+  ; already selected by another variant of the form).
+  (value-kind :name variant-when
+    :underlying union
+    :description "A variant gate: one discriminant value, or a vector of values that share the variant's key set."
+    :union (union-shape :alternatives [symbol symbol-list]))
+
   ; A vector of type references (for expr-func :params).
   (value-kind :name type-list
     :underlying vector
@@ -248,18 +259,17 @@
     :open false
     :positional plugin-decl
     (key :name name        :type symbol      :optional false)
-    (key :name version     :type string      :optional false)
+    (key :name version     :type string      :optional true)
     (key :name description :type string      :optional true)
-    ; v1.1 packaging fields. Additive — every v1.0 manifest still
-    ; validates with these omitted.
+    ; Packaging metadata. Additive — a manifest that omits all of these
+    ; still validates.
     (key :name wasm-file   :type string      :optional true)
     (key :name wasm-sha256 :type sha256-hash :optional true)
     (key :name authors     :type vector      :optional true)
     (key :name license     :type spdx-id     :optional true)
     (key :name homepage    :type string      :optional true)
     (key :name repository  :type string      :optional true)
-    (key :name keywords    :type symbol-list :optional true)
-    (key :name sjon        :type string      :optional true))
+    (key :name keywords    :type symbol-list :optional true))
 
   ; ---- value-kind declarations --------------------------------------
 
@@ -360,14 +370,24 @@
     :positional flag-decl)
 
   (form :name head-set
-    :description "Closed-set head-name pinning for :form underlyings, optionally with per-head counts."
+    :description "Closed-set head-name pinning for :form underlyings, optionally with per-head and whole-set counts."
     :open false
     :positional head-decl
     ; `:names` is optional because an author may declare heads via
     ; `(head …)` positional children instead — the only spelling that
     ; can carry `:min` / `:max`. The loader rejects mixing both shapes
     ; in one `(head-set …)`, exactly as it does for `(member-set …)`.
-    (key :name names :type symbol-list :optional true))
+    (key :name names :type symbol-list :optional true)
+    ; The count over the whole set: how many positional children of any
+    ; head in the set the slot holds. Spelled `-children` rather than
+    ; bare `:min` / `:max` because `(head …)` *inside this same form*
+    ; already spells that pair with a different meaning — and because
+    ; this vocabulary reserves the bare pair for a value bound
+    ; (`numeric-bounds`) and qualifies every other axis (`:min-len` /
+    ; `:max-len` on `vector-shape` and `string-bounds`). Legal beside
+    ; either heads spelling, including compact `:names`.
+    (key :name min-children :type number :optional true)
+    (key :name max-children :type number :optional true))
 
   (form :name head
     :description "One entry in a (head-set …). Carries optional positional-count bounds and editor metadata."
@@ -411,10 +431,10 @@
     (key :name lowering      :type lowering-ref :optional true))
 
   (form :name variant
-    :description "Per-discriminant-value extra key set on a discriminated form."
+    :description "Extra key set on a discriminated form, selected by one or several discriminant values."
     :open false
     :positional key-decl
-    (key :name when :type symbol :optional false))
+    (key :name when :type variant-when :optional false))
 
   (form :name key
     :description "One declared :keyword value slot on a form."

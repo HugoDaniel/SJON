@@ -1,4 +1,4 @@
-; Same contract, with the :zom typo — the source for sjon-diagnostics.json.
+; Same contract, with the :zom typo: the source for sjon-diagnostics.json.
 (plugin :name demo :version "1.0.0"
   (form :name camera
     (key :name mode :type symbol :optional true)

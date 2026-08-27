@@ -1,4 +1,4 @@
-// SJON quickstart — Node consumer of the WASM artifacts.
+// SJON quickstart: a Node consumer of the WASM artifacts.
 //
 // Build the WASM artifacts once:
 //
@@ -27,7 +27,7 @@ const encoder = await SjonEncoder.load(path.join(wasmDir, "sjon.wasm"));
 const reader = await SjonReader.load(path.join(wasmDir, "sjon-binary.wasm"));
 
 // 1. Text → Binary IR. The IR is the portable wire format every host
-//    (Node, Rust, the browser) consumes — usually smaller than the
+//    (Node, Rust, the browser) consumes, usually smaller than the
 //    canonical text for repeating shapes.
 const doc = '{:name "main" :bpm 130 :tracks [1 2 3]}';
 const binary = encoder.toBinary(doc);
@@ -43,7 +43,7 @@ console.log(`diagnostics   : ${clean.diagnostics.length}`); // 0
 
 const checked = reader.validateBinary(encoder.toBinary("(scene :bpm 130)"));
 for (const d of checked.diagnostics) {
-    console.log(`  caught      : ${d.code} — ${d.message}`);
+    console.log(`  caught      : ${d.code}: ${d.message}`);
 }
 
 // 3. Evaluate a safe expression through the same read-only path.

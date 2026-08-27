@@ -1,0 +1,21 @@
+; A slot-local form cannot declare `:lowering`. Nothing would honour it —
+; `Schema.validateLowering` and the produces graph walk top-level forms only,
+; and the lowering worklist resolves a local head to its local body, never to
+; a hook — so the declaration would be silently dead: a schema carrying a
+; lie. The loader rejects it as `invalid_manifest` at `[<local> lowering]`,
+; on both carriers (a positional local under `bind-group`, a keyed local
+; under `pipeline`'s `:layout`). Move the sugar to a top-level `(form …)`, or
+; leave the local as plain data.
+;
+; No document body: a manifest carrying `invalid_manifest` errors does not
+; register its forms, so any instance below would add an `unknown_form`
+; that says nothing about this case.
+(plugin :name p :version "1.0.0"
+  (form :name bind-group
+    (form :name entry
+      :lowering (lowering :hook p/entry-v1 :produces [entry-normal])))
+  (form :name pipeline
+    (key :name layout :type form
+      (form :name layout
+        :lowering (lowering :hook p/layout-v1 :produces [pipeline]))))
+  (form :name entry-normal :open true))

@@ -7,7 +7,7 @@
 //!   Tree        →  sjon.print      →  canonical text
 //!
 //! Run with `zig build demo-binary`. Wired into `zig build test` so the
-//! demo can't bit-rot — any wire-format drift trips here in CI.
+//! demo can't bit-rot: any wire-format drift trips here in CI.
 //!
 //! Exits 0 on success; non-zero with a Zig stack trace on any divergence.
 
@@ -29,7 +29,7 @@ pub fn main() !void {
     const bin_stripped = try sjon.toBinary(a, tree, sjon.Binary.ToBinaryOptions.forMode(.compact));
     defer bin_stripped.deinit();
 
-    // Decode and confirm canonical text matches the direct print — the
+    // Decode and confirm canonical text matches the direct print, which is the
     // binary path must reach the same canonical layout.
     var rebuilt = try sjon.fromBinary(a, bin_lossless.data, .{});
     defer rebuilt.deinit();

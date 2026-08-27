@@ -1,0 +1,239 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 1,
+  "x-sjon-export-warnings": [
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `bgl-resource` head-set emitted as a closed `oneOf` — 2 of 3 head(s) resolve to slot-local forms and are emitted inline, the rest as `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin": "headset-locals",
+      "form": "entry",
+      "kind": "bgl-resource"
+    },
+    {
+      "code": "local_forms_emitted_inline",
+      "severity": "info",
+      "message": "positional slot on form `entry` declares 2 local form(s) behind a 3-head head-set — emitted as a closed inline union with no global fallback branch; a head outside the set is `not_head_member`",
+      "plugin": "headset-locals",
+      "form": "entry"
+    },
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `bgl-entry-item` head-set emitted as a closed `oneOf` — 1 of 1 head(s) resolve to slot-local forms and are emitted inline, the rest as `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin": "headset-locals",
+      "form": "bind-group-layout",
+      "kind": "bgl-entry-item"
+    },
+    {
+      "code": "local_forms_emitted_inline",
+      "severity": "info",
+      "message": "positional slot on form `bind-group-layout` declares 1 local form(s) behind a 1-head head-set — emitted as a closed inline union with no global fallback branch; a head outside the set is `not_head_member`",
+      "plugin": "headset-locals",
+      "form": "bind-group-layout"
+    }
+  ],
+  "$defs": {
+    "form.headset-locals.head": {
+      "type": "object",
+      "description": "A global form, reachable from the resource slot by the additive fallback.",
+      "properties": {
+        "$form": {
+          "const": "head"
+        },
+        "$ns": {
+          "const": "headset-locals"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "$form",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "form.headset-locals.bind-group-layout": {
+      "type": "object",
+      "description": "A layout whose entries are slot-local, behind a closed head-set.",
+      "properties": {
+        "$form": {
+          "const": "bind-group-layout"
+        },
+        "$ns": {
+          "const": "headset-locals"
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "$children": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "description": "One binding. Its own positional slot is closed the same way.",
+                "properties": {
+                  "$form": {
+                    "const": "entry"
+                  },
+                  "$ns": {
+                    "const": "headset-locals"
+                  },
+                  "binding": {
+                    "type": "number"
+                  },
+                  "$children": {
+                    "type": "array",
+                    "items": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "description": "Slot-local buffer resource; no global `buffer` exists.",
+                          "properties": {
+                            "$form": {
+                              "const": "buffer"
+                            },
+                            "$ns": {
+                              "const": "headset-locals"
+                            },
+                            "kind": {
+                              "type": "object",
+                              "properties": {
+                                "$sym": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "$sym"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "required": [
+                            "$form",
+                            "kind"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "description": "Slot-local storage texture; no global one exists either.",
+                          "properties": {
+                            "$form": {
+                              "const": "storage-texture"
+                            },
+                            "$ns": {
+                              "const": "headset-locals"
+                            },
+                            "format": {
+                              "type": "object",
+                              "properties": {
+                                "$sym": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "$sym"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "required": [
+                            "$form",
+                            "format"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "$ref": "#/$defs/form.headset-locals.head"
+                        }
+                      ],
+                      "x-sjon-head-set": [
+                        "buffer",
+                        "storage-texture",
+                        "head"
+                      ],
+                      "x-sjon-local-forms": [
+                        "buffer",
+                        "storage-texture"
+                      ]
+                    },
+                    "allOf": [
+                      {
+                        "contains": {
+                          "type": "object",
+                          "properties": {
+                            "$form": {
+                              "const": "buffer"
+                            }
+                          },
+                          "required": [
+                            "$form"
+                          ]
+                        },
+                        "minContains": 0,
+                        "maxContains": 1
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "$form",
+                  "binding"
+                ],
+                "additionalProperties": false
+              }
+            ],
+            "x-sjon-head-set": [
+              "entry"
+            ],
+            "x-sjon-local-forms": [
+              "entry"
+            ]
+          },
+          "allOf": [
+            {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "$form": {
+                    "const": "entry"
+                  }
+                },
+                "required": [
+                  "$form"
+                ]
+              },
+              "minContains": 1
+            }
+          ]
+        }
+      },
+      "required": [
+        "$form",
+        "name",
+        "$children"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.headset-locals.head"
+    },
+    {
+      "$ref": "#/$defs/form.headset-locals.bind-group-layout"
+    }
+  ]
+}

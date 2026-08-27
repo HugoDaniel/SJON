@@ -11,7 +11,7 @@
 ;
 ; Get the order wrong and an author chasing an alignment error is told to
 ; align a number that is not even whole yet.
-(plugin :name gfx :version "1.0.0" :sjon "1.3"
+(plugin :name gfx :version "1.0.0"
   (value-kind :name aligned-offset
     :underlying number
     :numeric (numeric-bounds :min 0 :integer true :multiple-of 256))

@@ -1,19 +1,19 @@
 ; Numeric + string bounds fixture. Exercises every M3 bound surface:
 ;
-;   * `score`  — `(number :min 0 :max 100)` (inclusive)
-;   * `ratio`  — `(number :exclusive-min 0 :max 1)`
-;   * `count`  — integer (`:integer true`) with `:min 0`
-;   * `big`    — exact-int `:max 9007199254740993` (> 2^53; triggers
+;   * `score`:   `(number :min 0 :max 100)` (inclusive)
+;   * `ratio`:   `(number :exclusive-min 0 :max 1)`
+;   * `count`:   integer (`:integer true`) with `:min 0`
+;   * `big`:     exact-int `:max 9007199254740993` (> 2^53; triggers
 ;                `x-sjon-exact-bound.max` annotation and the
 ;                `numeric_bound_exceeds_double_range` info warning)
-;   * `offset` — `:multiple-of 256` (divisibility; the one bound JSON
+;   * `offset`:  `:multiple-of 256` (divisibility; the one bound JSON
 ;                Schema expresses natively but TS cannot express at all)
-;   * `email`  — string with `:format email`
-;   * `slug`   — string with `:min-len 3 :max-len 32 :pattern "^[a-z][a-z0-9-]*$"`
-;   * `uri`    — string with `:format uri`
-;   * `uuid`   — string with `:format uuid`
-;   * `version`— string with `:format semver` (custom format → `x-sjon-format`)
-;   * `path`   — string with `:format path` (custom format → `x-sjon-format`)
+;   * `email`:   string with `:format email`
+;   * `slug`:    string with `:min-len 3 :max-len 32 :pattern "^[a-z][a-z0-9-]*$"`
+;   * `uri`:     string with `:format uri`
+;   * `uuid`:    string with `:format uuid`
+;   * `version`: string with `:format semver` (custom format → `x-sjon-format`)
+;   * `path`:    string with `:format path` (custom format → `x-sjon-format`)
 ;
 ; All bounds carry through to the emitted JSON Schema as native
 ; `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`/`minLength`/
@@ -42,7 +42,7 @@
     :numeric (numeric-bounds :min 0 :max 99999999999999999 :integer true))
 
   (value-kind :name aligned-offset
-    :description "Byte offset aligned to a 256-byte boundary — the constraint a range and an integrality flag cannot express between them."
+    :description "Byte offset aligned to a 256-byte boundary, the constraint a range and an integrality flag cannot express between them."
     :underlying number
     :numeric (numeric-bounds :min 0 :integer true :multiple-of 256))
 
@@ -67,12 +67,12 @@
     :string-bounds (string-bounds :format uuid))
 
   (value-kind :name version-tag
-    :description "Semver string — `x-sjon-format` only (not JSON-Schema standard)."
+    :description "Semver string, `x-sjon-format` only (not JSON-Schema standard)."
     :underlying string
     :string-bounds (string-bounds :format semver))
 
   (value-kind :name file-path
-    :description "Path string — `x-sjon-format` only."
+    :description "Path string, `x-sjon-format` only."
     :underlying string
     :string-bounds (string-bounds :format path))
 

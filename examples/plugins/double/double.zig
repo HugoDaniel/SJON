@@ -1,46 +1,46 @@
-//! `double` — minimal executable-plugin fixture.
+//! `double`: a minimal executable-plugin fixture.
 //!
 //! Implements three expr-func bodies in a single freestanding wasm32
 //! module that satisfies the full ABI surface
 //! (`docs/executable-plugin-abi.md`):
 //!
-//!   - `sjon_plugin_abi_version()`     — returns 2.
-//!   - `sjon_plugin_alloc(len)`        — alloc inside the plugin's linear memory.
-//!   - `sjon_plugin_free(ptr, len)`    — paired free.
+//!   - `sjon_plugin_abi_version()`:      returns 2.
+//!   - `sjon_plugin_alloc(len)`:         alloc inside the plugin's linear memory.
+//!   - `sjon_plugin_free(ptr, len)`:     paired free.
 //!
-//! The expr-func exports — picked to exercise both the happy path and
+//! The expr-func exports, picked to exercise both the happy path and
 //! the host-detected dispatch-time failure modes from spec §10
-//! end-to-end, plus the §18 stretch round-trip coverage — are:
+//! end-to-end, plus the §18 stretch round-trip coverage, are:
 //!
-//!   - `double(args_ptr, args_len)`    — happy path: read one number,
+//!   - `double(args_ptr, args_len)`:     happy path: read one number,
 //!     double it, frame `(ok=1, number)`.
-//!   - `trap(args_ptr, args_len)`      — calls `unreachable`. Web/Rust
+//!   - `trap(args_ptr, args_len)`:       calls `unreachable`. Web/Rust
 //!     hosts catch the trap and surface `plugin_func_trapped`.
-//!   - `fail(args_ptr, args_len)`      — returns an `ok=0` structured-
+//!   - `fail(args_ptr, args_len)`:       returns an `ok=0` structured-
 //!     error frame with code `domain` and a deterministic detail string.
 //!     Hosts surface this as `plugin_func_failed`.
-//!   - `huge(args_ptr, args_len)`      — returns a frame whose header
+//!   - `huge(args_ptr, args_len)`:       returns a frame whose header
 //!     claims a ~4 GiB payload without actually allocating it. Hosts
 //!     MUST cap the reported length before allocating mirror buffers;
 //!     they surface the rejection as `plugin_func_alloc_failed`.
-//!   - `tag(args_ptr, args_len)`       — identity on a keyword arg. Pins
+//!   - `tag(args_ptr, args_len)`:        identity on a keyword arg. Pins
 //!     the `0x04` vs `0x05` tag distinction (string vs keyword) round-
 //!     trip across the plugin boundary. Used by
 //!     `plugin-exec-keyword-roundtrip`.
-//!   - `vec3_length(args_ptr, args_len)` — `sqrt(x² + y² + z²)` over a
+//!   - `vec3_length(args_ptr, args_len)`:  `sqrt(x² + y² + z²)` over a
 //!     3-element number vector. Proves nested-value round-trip; the
 //!     happy-path `double` only crosses bare numbers. Used by
 //!     `plugin-exec-vector-roundtrip`.
-//!   - `vector_sum(args_ptr, args_len)`  — sums all numeric elements
+//!   - `vector_sum(args_ptr, args_len)`:   sums all numeric elements
 //!     of an arbitrarily-sized number vector. Stress-tests the codec
 //!     allocator path and the host's mirror-buffer cap at length
 //!     boundaries. Used by `plugin-exec-large-vector`.
-//!   - `form_arity(args_ptr, args_len)`  — reads a form arg whose
+//!   - `form_arity(args_ptr, args_len)`:   reads a form arg whose
 //!     children-vector is empty and whose kvpair values are all
 //!     numbers, returns `children_count + kvpair_count`. Pins the
 //!     `Tag.form` (`0x07`) wire payload across the plugin boundary.
 //!     Used by `plugin-exec-form-roundtrip`.
-//!   - `forms_arity_sum(args_ptr, args_len)` — same shape applied to
+//!   - `forms_arity_sum(args_ptr, args_len)`:  same shape applied to
 //!     a vector-of-form arg, summing each element's arity. Pins
 //!     `Tag.form` inside `Tag.vector`. Used by
 //!     `plugin-exec-form-roundtrip`.
@@ -50,7 +50,7 @@
 //! host-side SDK dependency; the byte layout is pinned cross-host by
 //! `src/PluginValueCodec.zig`'s tests.
 //!
-//! Imports MUST be empty per spec §7.1 — `std.heap.wasm_allocator` only
+//! Imports MUST be empty per spec §7.1: `std.heap.wasm_allocator` only
 //! uses the `@wasmMemoryGrow` / `@wasmMemorySize` intrinsics, never an
 //! `env.*` import, so the produced module satisfies that constraint.
 
@@ -108,7 +108,7 @@ export fn double(args_ptr: ?[*]const u8, args_len: u32) callconv(.c) ?[*]u8 {
     return frame.ptr;
 }
 
-/// Trap-on-call body. Argument shape is ignored — the host doesn't get
+/// Trap-on-call body. Argument shape is ignored, since the host doesn't get
 /// to see them. Used by host-side `plugin_func_trapped` coverage.
 export fn trap(args_ptr: ?[*]const u8, args_len: u32) callconv(.c) ?[*]u8 {
     _ = args_ptr;
@@ -118,7 +118,7 @@ export fn trap(args_ptr: ?[*]const u8, args_len: u32) callconv(.c) ?[*]u8 {
 
 /// Returns a frame whose header claims a payload length far larger
 /// than any reasonable plugin would emit (~4 GiB). The plugin only
-/// allocates the 8-byte header — there is no real payload behind it.
+/// allocates the 8-byte header; there is no real payload behind it.
 /// Hosts MUST cap the reported length before allocating mirror
 /// buffers; without the cap, the host would attempt a multi-GiB
 /// allocation or read past the plugin's linear memory. Used by host-
@@ -137,7 +137,7 @@ export fn huge(args_ptr: ?[*]const u8, args_len: u32) callconv(.c) ?[*]u8 {
 /// codec's allocator/framing path at length boundaries; the host
 /// must cap its mirror buffer before the plugin runs. Used by
 /// `plugin-exec-large-vector` with a 10k-element vector. The decoder
-/// rejects any non-number element tag — partial sums on hostile
+/// rejects any non-number element tag, because partial sums on hostile
 /// input are uninteresting; we want a clean reject.
 export fn vector_sum(args_ptr: ?[*]const u8, args_len: u32) callconv(.c) ?[*]u8 {
     const p = args_ptr orelse return null;
@@ -179,11 +179,11 @@ export fn vector_sum(args_ptr: ?[*]const u8, args_len: u32) callconv(.c) ?[*]u8 
     return frame.ptr;
 }
 
-/// `sqrt(x² + y² + z²)` over a 3-element number vector — proves
+/// `sqrt(x² + y² + z²)` over a 3-element number vector. Proves
 /// nested-value (vector-of-number) round-trip across the plugin
 /// boundary. Used by `plugin-exec-vector-roundtrip`. The decoder
 /// rejects any shape other than `[u32 count=1][u8 tag=0x06][u32
-/// vec_count=3][u8 tag=0x01][f64] × 3]` — anything else is a host
+/// vec_count=3][u8 tag=0x01][f64] × 3]`; anything else is a host
 /// bug or a hostile fixture, both surfaced as `null`.
 export fn vec3_length(args_ptr: ?[*]const u8, args_len: u32) callconv(.c) ?[*]u8 {
     const p = args_ptr orelse return null;
@@ -224,7 +224,7 @@ export fn vec3_length(args_ptr: ?[*]const u8, args_len: u32) callconv(.c) ?[*]u8
     return frame.ptr;
 }
 
-/// Identity on a keyword arg — `(tag :hello) → :hello`. Reads tag
+/// Identity on a keyword arg: `(tag :hello) → :hello`. Reads tag
 /// `0x05` + length-prefixed UTF-8, frames the same back. Used by
 /// `plugin-exec-keyword-roundtrip` to pin the `0x04` vs `0x05`
 /// distinction across the plugin boundary.
@@ -285,7 +285,7 @@ export fn fail(args_ptr: ?[*]const u8, args_len: u32) callconv(.c) ?[*]u8 {
     return frame.ptr;
 }
 
-/// Result of walking one flat form payload — the new offset lets the
+/// Result of walking one flat form payload; the new offset lets the
 /// caller chain walks (e.g. `forms_arity_sum` walking a vector of forms).
 const FormWalk = struct { arity: u32, end: usize };
 
@@ -293,7 +293,7 @@ const FormWalk = struct { arity: u32, end: usize };
 /// has already been consumed). `head_len/head/ns_len/ns/child_count/
 /// kv_count + kvpairs` per §9.1. Returns `null` on any size/tag
 /// mismatch, on a non-zero `child_count` (this fixture only crosses
-/// flat forms — children-bearing forms are a future fixture), or on
+/// flat forms; children-bearing forms are a future fixture), or on
 /// a kvpair value that isn't `Tag.number`.
 fn walkFormFlat(buf: []const u8, start: usize) ?FormWalk {
     var off = start;

@@ -34,20 +34,20 @@ const matrix_plugin: Plugin.Plugin = .{
             .discriminant_idx = 0,
             .variants = &.{
                 .{
-                    .when = "kick",
+                    .when = &.{"kick"},
                     .keys = &.{
                         .{ .name = "step", .value_type = .number, .optional = false },
                         .{ .name = "volume", .value_type = .number, .optional = true },
                     },
                 },
                 .{
-                    .when = "bass",
+                    .when = &.{"bass"},
                     .keys = &.{
                         .{ .name = "sequence", .value_type = .vector, .optional = false },
                     },
                 },
                 .{
-                    .when = "hat",
+                    .when = &.{"hat"},
                     .keys = &.{
                         .{ .name = "pattern", .value_type = .symbol, .optional = false },
                         .{ .name = "swing", .value_type = .number, .optional = true },
@@ -65,13 +65,13 @@ const matrix_plugin: Plugin.Plugin = .{
             .discriminant_idx = 0,
             .variants = &.{
                 .{
-                    .when = "single",
+                    .when = &.{"single"},
                     .keys = &.{
                         .{ .name = "value", .value_type = .number, .optional = false },
                     },
                 },
                 .{
-                    .when = "batch",
+                    .when = &.{"batch"},
                     .keys = &.{
                         .{ .name = "values", .value_type = .vector, .optional = true },
                     },
@@ -88,13 +88,13 @@ const matrix_plugin: Plugin.Plugin = .{
             .discriminant_idx = 0,
             .variants = &.{
                 .{
-                    .when = "dc",
+                    .when = &.{"dc"},
                     .keys = &.{
                         .{ .name = "level", .value_type = .number, .optional = false },
                     },
                 },
                 .{
-                    .when = "none",
+                    .when = &.{"none"},
                     .keys = &.{},
                 },
             },
@@ -316,4 +316,95 @@ fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
         }
     }
     return count;
+}
+
+// ---------------------------------------------------------------------------
+// S7b — the two head-set corpus cases, exported.
+//
+// The corpus has no export-schema runner: `conformance/classifier.json`'s
+// markers are `legacy` / `query` / `inline` and no case references the
+// verb, so there is nowhere in `conformance/cases/` to hang "this
+// document exports cleanly". Adding a fourth marker would be a much
+// larger change than the claim needs, so the gate lives here and reads
+// the corpus documents directly — the pin is on the real cases, which is
+// the part that matters. Tests run with cwd at the repo root, the same
+// assumption `src/conformance_tests.zig` makes.
+// ---------------------------------------------------------------------------
+
+const Host = @import("../Host.zig");
+
+fn readCorpusDocument(a: std.mem.Allocator, rel: []const u8) ![:0]u8 {
+    const io = std.testing.io;
+    var path_buf: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "conformance/cases/{s}", .{rel});
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .unlimited);
+    defer a.free(bytes);
+    const buf = try a.allocSentinel(u8, bytes.len, 0);
+    @memcpy(buf, bytes);
+    return buf;
+}
+
+/// Export a corpus document and return its err-severity warning count.
+/// Fails the test if the document does not even validate, so a broken
+/// fixture reads as a broken fixture rather than as a clean export.
+fn exportCorpusErrCount(a: std.mem.Allocator, rel: []const u8) !usize {
+    const src = try readCorpusDocument(a, rel);
+    defer a.free(src);
+    var bundle = try Host.exportSchemaFromSource(a, src, .{}, .{});
+    defer bundle.deinit();
+    try testing.expect(!bundle.host_result.hasErrors());
+    var n: usize = 0;
+    for (bundle.export_result.warnings) |wn| {
+        if (wn.severity == .err) n += 1;
+    }
+    return n;
+}
+
+test "S7b: both head-set corpus cases export with no err-severity warning" {
+    // 07 pinned that a global dummy form is not *required* to make a
+    // head-set name resolvable. The exporter disagreed: both of these
+    // exited 1, including the one filed as the clean control — its
+    // head-set is `[entry buffer]` and only `entry` had a global, so it
+    // failed on `buffer` for exactly the same reason. A fix that
+    // green-lights only the first has fixed half the case.
+    const a = testing.allocator;
+    try testing.expectEqual(
+        @as(usize, 0),
+        try exportCorpusErrCount(a, "positional-local-headset-no-global/document.sjon"),
+    );
+    try testing.expectEqual(
+        @as(usize, 0),
+        try exportCorpusErrCount(a, "positional-local-headset-resolves-local/schema.sjon"),
+    );
+}
+
+test "S7b: the no-global case exports a closed head-set with both bodies inline" {
+    // The exit code is the half PNGine filed; this is the half that makes
+    // deleting the dummy worth anything. Before, the slot's `$children`
+    // was `anyOf` over the local bodies closed by an open branch that
+    // accepts *any* form — no narrowing, no `x-sjon-head-set`. So the
+    // dummy bought an exit code and left the schema identical.
+    const a = testing.allocator;
+    const src = try readCorpusDocument(a, "positional-local-headset-no-global/document.sjon");
+    defer a.free(src);
+    var bundle = try Host.exportSchemaFromSource(a, src, .{}, .{
+        .target = .{ .json_schema = true, .ts_types = false },
+    });
+    defer bundle.deinit();
+    const bytes = bundle.export_result.json_schema_bytes.?;
+
+    // Both head-sets narrowed, and every member resolved to a local.
+    try testing.expectEqual(@as(usize, 2), countOccurrences(bytes, "\"x-sjon-head-set\""));
+    try testing.expectEqual(@as(usize, 2), countOccurrences(bytes, "\"x-sjon-local-forms\""));
+    // Closed: no open generic branch anywhere, which is what makes
+    // `(ghost …)` a rejection rather than an acceptance.
+    try testing.expectEqual(@as(usize, 0), countOccurrences(bytes, "\"anyOf\""));
+    // The local bodies are inline, so a consumer sees the keys …
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"format\"") != null);
+    // … and no `$ref` points at a `$def` that was never emitted. Only
+    // `bind-group-layout` has one: `entry`, `buffer` and `storage-texture`
+    // are slot-locals with no global declaration anywhere.
+    try testing.expect(std.mem.indexOf(u8, bytes, "#/$defs/form.p.storage-texture") == null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "#/$defs/form.p.buffer") == null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "#/$defs/form.p.entry") == null);
 }

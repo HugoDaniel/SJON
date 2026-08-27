@@ -104,12 +104,13 @@ children are declaration sub-forms (`(value-kind …)`, `(form …)`,
   …)
 ```
 
-Required keys: `:name` (symbol), `:version` (string).
+Required key: `:name` (symbol). `(plugin :name x)` is a complete manifest.
 
 Optional keys:
 
 | Key            | Type                                | Notes                                                                                                       |
 |----------------|-------------------------------------|-------------------------------------------------------------------------------------------------------------|
+| `:version`     | string (`"1.0.0"`)                  | The plugin's own version — the `(use-plugin … :version …)` pin target and the lockfile row (§9). Absent = unversioned. |
 | `:description` | string                              | Free-form prose.                                                                                            |
 | `:wasm-file`   | string                              | Manifest-dir-relative path to the paired wasm binary. Escapes outside the package emit `plugin_wasm_resolved_outside_package`. |
 | `:wasm-sha256` | string (`sha256-<64 hex>`)          | Author's stamp of the published wasm bytes. The host verifies on load; mismatch → `plugin_wasm_self_hash_mismatch`. |
@@ -118,7 +119,12 @@ Optional keys:
 | `:homepage`    | string                              | Informational URL.                                                                                           |
 | `:repository`  | string                              | Informational URL.                                                                                           |
 | `:keywords`    | vector of symbols                   | Soft cap at 16 entries; advisory `too_many_keywords` past that.                                              |
-| `:sjon`        | string (`"1.0"` / `"1.1"` / …)      | Declared portable-manifest format version. Host emits `sjon_format_unsupported` when its max is lower.       |
+
+There is no format-version key. The manifest vocabulary has one version —
+the SJON release — and `CHANGELOG.md` says which release each keyword or
+declaration arrived in. (An earlier revision had `:sjon "1.x"`; it enabled
+nothing on the host reading it and was retired. A leftover `:sjon` is an
+unknown key on `(plugin …)`, reported like any other.)
 
 `:wasm-sha256` is the **author's** stamp and is complementary to the
 consumer-side `(use-plugin … :hash …)` pin. The lockfile (Pillar C of
@@ -227,7 +233,7 @@ bounds whole numbers below 2^53 when exact precision matters.
 `:integer true` rejects NaN, ±inf, and any fractional f64 value.
 Negative-zero passes: `floor(-0.0) == -0.0` in IEEE-754.
 
-**`:multiple-of` (format 1.3).** The value must divide evenly by this
+**`:multiple-of`.** The value must divide evenly by this
 divisor — the alignment constraint a range and `:integer` cannot express
 between them. It carries a unit like `:min` / `:max`, under the table
 above, so `:multiple-of 256b` beside `:min 0b` is expressible. The
@@ -314,7 +320,7 @@ For `:underlying symbol`, the names are bare symbol identifiers (no
 leading `:`). For `:underlying string`, the names are still bare
 symbols whose textual content is matched against the string literal.
 
-#### Digit-leading spellings (format 1.3)
+#### Digit-leading spellings
 
 `member-name` (§8) is a symbol **or** a number, because some enums name
 their members with a digit first — WebGPU's `GPUTextureDimension` is
@@ -379,12 +385,16 @@ expose `:label` / `:description` as completion `detail` / `documentation`.
 ### 4.5 `(head-set …)`
 
 ```
-; Compact — set-only declaration. Every head unbounded.
+; Compact — set-only declaration. Every *head* unbounded.
 (head-set
-  :names <symbol-list>)           ; closed set of allowed form heads
+  :names <symbol-list>            ; closed set of allowed form heads
+  :min-children <number>?         ; see "A count over the whole set"
+  :max-children <number>?)
 
 ; Rich — per-head positional counts + editor metadata.
 (head-set
+  :min-children <number>?         ; legal on either spelling
+  :max-children <number>?
   (head :name <symbol>            ; required
         :min <number>             ; optional, inclusive floor, default 0
         :max <number>             ; optional, inclusive ceiling, default unbounded
@@ -402,6 +412,19 @@ a separate, later step, and that step resolves **local-first**: a
 slot-local `(form …)` in scope at the slot satisfies it with no global
 declaration anywhere. A global "dummy" form is not required to make a
 head-set name usable.
+
+**Schema export resolves the same way.** `sjon export-schema` emits one
+branch per accepted head, resolved at the slot: a `$ref` into
+`#/$defs/form.<plugin>.<head>` for a global, the local's body *inline*
+for a slot-local (locals have no global `$def` to point at), and a
+head-pinned open object — `{"$form": {"const": "<head>"}}` — for a head
+that resolves to neither. So a head-set whose members are all
+slot-locals exports cleanly with no global dummy, which is the whole
+point of the paragraph above. A head that resolves to nothing *at a slot*
+is an export error (`head_set_member_unresolved`); the same head-set
+lowered on its own for the value-kind table is not judged at all, because
+which forms are in scope is a property of the slot and a head-set kind is
+reusable across slots (see the scope note below).
 
 A head-set name with no form in either scope is admitted by the
 head-set and then reported as `unknown_local_form` at the slot — one
@@ -463,6 +486,15 @@ because rejecting it would make a bounded head-set kind un-shareable for
 no gain. (Counting vector elements is a coherent extension and is
 deliberately not part of this version.)
 
+**Counts survive a slot that also declares locals.** The positional slot
+is the positional slot whether or not it carries inline `(form …)`
+children (§5.2), so a bounded head on a locals slot is enforced and
+exported like any other — `contains` + `minContains` / `maxContains`,
+one entry per bounded head. A local head's `contains` is the head-pin
+rather than a `$ref`, since there is no `$def` to point at; it counts the
+same children, because the slot's `oneOf` already forces every child to
+satisfy its own head's branch.
+
 **`:open true` suppresses neither code.** Openness widens which
 *keywords* a form accepts; a positional count is a different surface, and
 declaring `:positional <bounded-kind>` opts into it. This makes
@@ -477,7 +509,86 @@ byte-for-byte.** A head outside the set fails `not_head_member` and a
 non-form positional fails `wrong_underlying`; neither consumes a tally.
 So an out-of-set child cannot accidentally satisfy some other head's
 floor, and a repair sees both problems at once rather than one hiding the
-other.
+other. The same rule governs the set-level count below — a child that
+counts towards no head counts towards the set either.
+
+#### A count over the whole set
+
+Per-head bounds cannot bound the *set*. "Exactly one of buffer /
+sampler / texture" is satisfied, under every per-head spelling, by a form
+carrying one of each and by a form carrying none: each head's `:max 1`
+holds, and no head's `:min` can be raised without demanding that
+particular head. `:min-children` / `:max-children` sit on the
+`(head-set …)` itself and count children of *any* head in it:
+
+```sjon
+(value-kind :name bgl-resource
+  :underlying form
+  :heads (head-set :min-children 1 :max-children 1
+    (head :name buffer  :max 1)
+    (head :name sampler :max 1)
+    (head :name texture :max 1)))
+```
+
+— "exactly one resource, and not two of the same". The two levels are
+independent claims, and both are needed: drop the set's and one of each
+is accepted; drop the heads' and `:max-children 2` over three heads
+would allow two buffers where "one of each, up to two" was meant.
+
+**Both spellings carry them, including compact `:names`.** The aggregate
+needs no per-head metadata, so
+`(head-set :names [cube sphere] :max-children 1)` is legal and is the
+common case. A compact head-set is therefore no longer always unbounded.
+
+**Why `-children` and not bare `:min` / `:max`.** This vocabulary
+reserves the bare pair for a *value* bound (`(numeric-bounds :min …)`)
+and qualifies every other axis — `:min-len` / `:max-len` on both
+`(vector-shape …)` and `(string-bounds …)`. Here the collision would be
+worse than `vector-shape`'s, because `(head …)` *inside the same form*
+already spells `:min` / `:max` with a different meaning: bare keys would
+put two different bounds one line apart under identical names.
+
+**Three more `invalid_manifest` refusals**, on top of §4.5's four. The
+set's own empty range (`:min-children` above `:max-children`), and two
+cross-level checks that are **sums** rather than per-head comparisons:
+
+- `Σ head.min > :max-children` — heads `a :min 1` and `b :min 1` under a
+  set `:max-children 1` is unsatisfiable, yet neither head's `:min`
+  exceeds the set's `:max`. Only the sum sees it.
+- `:min-children > Σ head.max` — the mirror, and only meaningful when
+  *every* head is bounded. One unbounded head makes the set always
+  fillable, so the check is vacuous and does not fire.
+
+A `:min-children` / `:max-children` that is negative, fractional, or
+above 65535 reports `wrong_underlying`, as the per-head pair does.
+
+**Both codes are reused, and the set yields to the head.** A set-level
+breach reports `positional_too_many` / `positional_missing` with the set
+named in the message (`at most 1 positional child from
+[buffer | sampler | texture], found 2`) instead of a head. The two levels
+overlap by construction — `:min-children 1 :max-children 1` over heads
+each `:max 1` is exactly the redundant case — so a second `(buffer …)`
+under it would cross both ceilings on one child, at one span, with one
+path and one code. **Only the per-head report fires.** It names the line
+to delete and the set's claim follows from it; the reverse does not hold.
+The same rule applies to the floor: a head whose `:min` went unmet
+suppresses the set's floor report for that form.
+
+That is what makes reusing the codes safe rather than merely cheap — no
+host can observe a same-code-same-span pair, so nothing has to read prose
+to tell the levels apart. A host that *wants* to knows by the bracketed
+set in the message.
+
+**Export.** The set's bound is one more `contains` in the same `allOf`,
+whose subschema is the `anyOf` of the members' — "a child whose head is
+in the set", which is what the validator tallies. `minItems`/`maxItems`
+would say the same thing here and only here (a head-set slot is closed,
+so the positional population *is* the set); `contains` is right in both
+readings and keeps the two claims the same shape. A floor at **either**
+level also puts `$children` in `required`: the JSON bridge omits the key
+entirely for a childless form, so a `minContains` inside the `$children`
+subschema would have nothing to judge on precisely the document that
+breaches the floor hardest.
 
 ### 4.6 `(cross-ref …)`
 
@@ -648,9 +759,6 @@ unrunnable provider must still say so at every source instance that
 needed it (`cross_ref_provider_unavailable`), because staying quiet would
 mean claiming a member set nobody computed.
 
-Providers require `:sjon "1.2"`; a manifest declaring an older format
-version is read by a host whose vocabulary predates the route.
-
 **Determinism is the provider's obligation.** The same source bytes must
 yield the same names in the same order on every host and every run. Order
 is provider-chosen — it is not sorted for you — and it is observable:
@@ -694,13 +802,13 @@ lossy step, not a validation failure.
 A **shorthand**, not a base underlying. `:underlying scalar-or-ref` with
 a `:scalar-or-ref (scalar-or-ref-shape :base <kind>)` slot desugars at
 load to a `:underlying union` over `[<base>, <ref>]` — so the stored
-kind is an ordinary union and every consumer inherits its behaviour. It
-captures "a literal `<base>` value, *or* a bare-symbol reference to one
-defined elsewhere": a `<base>` value takes the scalar alternative, a
-symbol the reference alternative, and anything else fails with
-`union_no_branch_matched`. Declaring `:underlying scalar-or-ref` without
-the `:scalar-or-ref` slot — or a `:scalar-or-ref` slot on any other
-underlying — emits `invalid_manifest` at load.
+kind is an ordinary union and every consumer inherits its *matching*
+behaviour. It captures "a literal `<base>` value, *or* a bare-symbol
+reference to one defined elsewhere": a `<base>` value takes the scalar
+alternative, a symbol the reference alternative, and anything else fails
+with `union_no_branch_matched`. Declaring `:underlying scalar-or-ref`
+without the `:scalar-or-ref` slot — or a `:scalar-or-ref` slot on any
+other underlying — emits `invalid_manifest` at load.
 
 ```sjon
 (value-kind :name count-value :underlying number)
@@ -709,7 +817,7 @@ underlying — emits `invalid_manifest` at load.
   :scalar-or-ref (scalar-or-ref-shape :base count-value))
 ```
 
-**`:ref` (format 1.3).** Omitted, the reference alternative is the
+**`:ref`.** Omitted, the reference alternative is the
 primitive `symbol` — an *unchecked* name, so any spelling at all
 satisfies it and a misspelled constant validates clean. That is the
 shorthand's behaviour in every earlier format version and it does not
@@ -723,12 +831,42 @@ change. Naming a kind there instead makes the reference half checked:
   :scalar-or-ref (scalar-or-ref-shape :base count-value :ref define-ref))
 ```
 
-A reference that names no `(define …)` now fails. Note *which*
-diagnostic: because the stored kind is an ordinary union, the failure is
-the union's `union_no_branch_matched` naming both alternatives, not the
-`not_cross_ref` the reference half would raise on its own. Per-branch
-causes are swallowed in favour of naming the alternatives, exactly as
-for a hand-written union.
+A reference that names no `(define …)` now fails — with the reference
+half's own `not_cross_ref`, naming the form the symbol had to be
+declared by.
+
+**Failure reporting names the arm.** The desugar keeps nothing beyond
+the union — the stored kind is indistinguishable from one spelled out
+by hand — and the arm report is the general union rule of §4.9, which
+this shape always satisfies: a scalar-or-ref's two arms are disjoint by
+*node shape*, a number can only have meant the base and a symbol only
+the ref, so a number or a symbol always has a determined arm and
+validation reports **that arm's diagnostic**: the bound that refused
+(`number_above_max`, `number_below_min`, `number_not_integer`,
+`number_not_multiple`, `unit_forbidden`, `repr_out_of_range`, …) or the
+reference that names nothing (`not_cross_ref`). A shape neither arm
+reaches — a string or a vector in a `number | symbol` slot — keeps
+`union_no_branch_matched`, and so does a shape both reach, which is a
+`:base` that is itself a symbol kind (a member set): blaming the
+reference half there would misdirect a misspelled member.
+
+```sjon
+(value-kind :name qty-value :underlying number
+  :numeric (numeric-bounds :min 0 :max 16 :integer true))
+(value-kind :name qty
+  :underlying scalar-or-ref
+  :scalar-or-ref (scalar-or-ref-shape :base qty-value :ref define-ref))
+```
+
+| Document        | Diagnostic                                    |
+|-----------------|-----------------------------------------------|
+| `:qty 32`       | `number_above_max` — value 32 above maximum 16 |
+| `:qty -1`       | `number_below_min`                            |
+| `:qty MAX_BONE` | `not_cross_ref` — no `(define :name …)` declares it |
+| `:qty [1 2]`    | `union_no_branch_matched` — no arm reaches a vector |
+
+Spelling the same two kinds by hand as a `(union-shape …)` reports
+exactly the same four diagnostics. §4.9 has the rule.
 
 One rejection at load, `invalid_manifest`: `:ref` equal to `:base`,
 which spells one alternative twice (a union needs two distinct
@@ -758,16 +896,39 @@ bare name would collide.
 
 **Alternatives are tried in declaration order and the first full match
 accepts the value.** No alternative is "more specific" than another and
-none is preferred by shape — order is the whole rule. A value that no
-alternative accepts fails with `union_no_branch_matched`, which names
-the alternatives rather than leaking each branch's own cause. An
-alternative that resolves to another union is rejected by the aggregate
-pass with `nested_union`, so dispatch stays a flat loop.
+none is preferred by shape — order is the whole rule. An alternative
+that resolves to another union is rejected by the aggregate pass with
+`nested_union`, so dispatch stays a flat loop.
+
+**A value that no alternative accepts fails with the diagnostic of the
+one alternative its shape could have reached, when there is exactly
+one; otherwise with `union_no_branch_matched`, naming the
+alternatives.** Reachability is asked per value, before any refinement:
+resolve each alternative's underlying and ask whether a node of this
+shape (number, string, symbol, vector, form) can reach it at all. One
+reachable alternative means nothing else could have been meant, so its
+own cause — the bound that refused, the member set it is not in, the
+head set it is outside, the reference that names nothing — is what the
+author can act on. Two alternatives that share a node shape overlap,
+and overlap is where order is the rule and no arm is to blame; zero
+reachable is the same collapse for the opposite reason.
+
+The rule is per *value*, so one union can be disjoint for one shape and
+overlapping for another: in `[small-count big-count define-ref]` a
+symbol determines the reference arm while a number reaches two and
+keeps the collapse. And it stops at the node shape: two `:underlying
+form` kinds with disjoint head-sets both *reach* a form, so
+`[spring-form bounce-form]` keeps the collapse — deciding between them
+would mean running the refinement, which is matching. Matching is
+untouched throughout: no document changes verdict, only the code a
+rejected one fails with.
 
 Order being load-bearing is usually the design. `[byte-count symbol]`
 means "a count if it parses as one, otherwise a name", and putting
 `symbol` first would swallow every count. Write overlapping unions
-narrowest-first and the order documents itself.
+narrowest-first and the order documents itself. Those two alternatives
+are disjoint by shape, so a number out of `byte-count`'s range in that
+slot reports the bound it broke, not the collapsed code.
 
 **One overlap is not a design decision.** When two alternatives are
 `:cross-ref` kinds pointing at *different* targets, and the document
@@ -819,16 +980,22 @@ A form declaration says what `(name …)` looks like in user documents.
 (form :name <symbol>
   :open       <bool>?             ; default false
   :positional <type-ref>|(flag-set …)?  ; positional child policy; omit for none
+  :discriminant <symbol>?         ; one of this form's keys; gates (variant …) (§5.3)
+  :lowering   (lowering …)?       ; host-owned lowering contract; top-level forms only (§5.4)
   :description <string>?
 
   (key …)*                        ; zero or more (key …) sub-forms
+  (variant …)*                    ; keys gated on the discriminant's value (§5.3)
+  (exclusive-group …)*            ; how many of a set may be present (LANGUAGE.md §6.2.1)
   (form …)*                       ; zero or more positional slot-local forms (§5.2)
   )
 ```
 
 The sub-forms of a `(form …)` declaration include its `(key …)` slots
-(§5.1) and inline `(form …)` **positional slot-local** definitions
-(§5.2). An unrecognized sub-form head is rejected.
+(§5.1), `(variant …)` gates (§5.3), `(exclusive-group …)` constraints
+(LANGUAGE.md §6.2.1), and inline `(form …)` **positional slot-local**
+definitions (§5.2). An unrecognized sub-form head is rejected. The
+`:lowering` kvpair carries a `(lowering …)` form (§5.4).
 
 `:positional` interpretation:
 
@@ -918,7 +1085,7 @@ small. The meta-schema itself uses it on exactly one slot — the
 `(key …)` form's own `:default` — which is why `manifests/meta.sjon`
 can describe expression-bearing defaults without special-casing.
 
-#### `:requires` — presence implies presence (format 1.3)
+#### `:requires` — presence implies presence
 
 `:requires [buffer]` says: *if this key is present, `:buffer` must be
 present too*. An **absent** dependent key constrains nothing, so the rule
@@ -977,7 +1144,7 @@ common mistake. They are not interchangeable:
 |---|---|---|
 | `:requires` | one key's presence demanding another's | "if `:offset`, then also `:buffer`" |
 | `(exclusive-group …)` | *how many* of a set may be present | "at most one of `:color`, `:gradient`" |
-| `(variant …)` | which keys exist, given a key's **value** | "`:strip-index-format` only when `:topology` is `triangle-strip`" |
+| `(variant …)` | which keys exist, given a key's **value** | "`:strip-index-format` only when `:topology` is a strip — `[triangle-strip line-strip]`" |
 
 The test: if the rule names a specific **value**, you want a variant. If
 it **counts**, you want a group. If it says "then also", you want
@@ -1031,10 +1198,166 @@ local bodies. This is the closed-set shape a host reaches for when a
 positional child name (`entry`) would otherwise collide with a global
 form of the same name.
 
+**What it exports.** The two mechanisms stack rather than replace each
+other, and the exported `$children` says both: `oneOf` over exactly the
+head set, **with no trailing open branch** (the slot is closed, so an
+out-of-set head is rejected by the schema as well as by the validator),
+each branch being the local's inline body or a `$ref` for a member that
+resolved globally. `x-sjon-head-set` lists every accepted head and
+`x-sjon-local-forms` the subset that resolved locally. Per-head counts
+ride along as usual (§4.5). Contrast the open shape above — locals with
+no head-set — which keeps the trailing `{"$form"}` branch for the
+additive global fallback and therefore cannot reject anything.
+
+A local whose name is **outside** the head-set is unreachable: narrowing
+rejects the head before resolution ever consults the registry. That is a
+declaration with no way to be used, so the exporter reports it
+(`local_form_outside_head_set`, warning) rather than emitting a branch no
+document can reach. `examples/plugins/headset-locals/` is the worked
+fixture for all of this.
+
 **Depth.** Positional locals count against the same
 `Plugin.MAX_LOCAL_FORM_DEPTH` as key-locals and compose with them — a
 positional local may carry `(key …)` slot-locals and vice-versa —
 nesting no deeper than the shared ceiling.
+
+### 5.3 `(variant …)` — keys gated on the discriminant's value
+
+```
+(form :name <symbol>
+  :discriminant <key-name>            ; one of the form's own (key …) slots
+  (key :name <key-name> :type <symbol-kind> …)
+  (variant :when <symbol> | [<symbol> …]   ; the discriminant value(s) that select it
+    (key …)*                              ; keys that exist only while selected
+    (exclusive-group …)*)                 ; groups over this variant's keys
+  …)
+```
+
+One head, several shapes, picked by a value. `:discriminant` names one
+of the form's keys; its type must resolve to a `:underlying symbol`
+kind with a non-empty `(member-set …)` (`discriminant_not_closed_enum`
+otherwise). Each `(variant …)` declares keys that are allowed — and,
+when not `:optional`, required — only while the discriminant's value
+selects it. Common keys are always in scope.
+
+**`:when` takes one value or a vector of values, and selection is
+membership.** This is WebGPU's own rule for `stripIndexFormat`, read
+when the topology is a strip — and there are two strips — and ignored
+for the three list topologies:
+
+```sjon
+(form :name primitive
+  :discriminant topology
+  (key :name topology :type primitive-topology :optional true :default triangle-list)
+  (variant :when [triangle-strip line-strip]
+    (key :name strip-index-format :type index-format :optional true)))
+```
+
+Before `:when` took a vector that rule could not be declared: one
+variant named one value, and two identical single-value variants
+collided on the key (`variant_key_collision` — rightly, two declarations
+of one slot can drift). One declaration reaching several values is what
+keeps that check exactly as strict as it is: a key still lives in one
+variant.
+
+Rules, in the order they are checked:
+
+- **A value selects at most one variant.** Three load-time rejections,
+  all `invalid_manifest` at `[<form> variant when]`: an empty `:when []`
+  (a variant nothing selects can never apply); a value listed twice in
+  one `:when`; and a value two variants both list — `:when [b c]` after
+  `:when [a b]`, or two variants with the same single `:when` — reported
+  once per repeated value, naming the variant that already listed it.
+  Otherwise "which variant applies" would fall to declaration order,
+  which is exactly the question the key-collision rule exists to keep a
+  schema from asking.
+- **Every listed value is a member.** The aggregate pass checks each
+  value against the discriminant's member set, once per value:
+  `:when [triangle-strip nope]` reports `nope`
+  (`unknown_discriminant_value`) and keeps `triangle-strip`, so a set
+  with one typo names the typo rather than rejecting the declaration.
+- **A key lives in exactly one place.** A variant key may not repeat a
+  common key or another variant's key (`variant_key_collision`, at
+  aggregate time). Unchanged by multi-value `:when`.
+- **Selection.** The validator resolves the variant from the discriminant
+  kvpair's symbol — author-written, or supplied by a `:default` under
+  effective axis D (LANGUAGE.md §7.8). A variant-only key written before
+  the discriminant, or under a value that selects no variant (a list
+  topology above), is `unknown_key`; a form with no discriminant value
+  at all is `missing_discriminant_key`; the selected variant's required
+  keys, `(exclusive-group …)`s and `:requires` are swept like the
+  form's own. Every message that names a variant spells its `:when` as
+  the author did — `:when line-strip` bare, `:when [triangle-strip
+  line-strip]` bracketed — so a single-value variant reads exactly as
+  it always has.
+- **A variant key's slot opt-ins follow its acceptance.** A `(key …)`
+  under a variant may carry `:walk-opaque` and slot-local `(form …)`s
+  like any key (§5.1); they are in scope exactly when the key is —
+  while its variant is active, after the discriminant. Under another
+  variant, or ahead of the discriminant, the key is `unknown_key` and
+  puts nothing in scope: its value form resolves against the global
+  catalog (`unknown_form` if nothing declares it) and is walked. Both
+  walkers and every host answer alike; the conformance case is
+  `local-form-variant-key`.
+- **`:open true`** suppresses the discriminant and variant sweeps with
+  every other closed-shape rule (§5).
+
+Export does not multiply the branch. JSON Schema guards the variant's one
+`if/then` with `const` for a single value and `enum` for several, and
+lists the values under `x-sjon-discriminant` (`"when": "a"` /
+`"when": ["a", "b"]` — the manifest's own spelling); TypeScript narrows
+the discriminant brand to `Symbol_<"triangle-strip" | "line-strip">` and
+adds one residual branch for the members no variant selects, so a
+`triangle-list` primitive has a type; Markdown heads the variant
+`:topology [triangle-strip line-strip]`. See `docs/SCHEMA_EXPORT.md`.
+`examples/plugins/variant-set/` is the fixture for all of this.
+
+### 5.4 `(lowering …)` — a host-owned lowering contract
+
+```
+:lowering (lowering
+  :hook     <symbol>              ; contract id, by convention <vendor>/<surface>-v<n>
+  :produces [<symbol> …])         ; closed set of form heads the hook may emit; non-empty, no repeats
+```
+
+`:lowering` marks the form as *surface sugar*: a host that implements
+`:hook` lowers each instance into ordinary forms before final validation.
+The manifest carries the declaration only — the hook is host code, never
+manifest content — and a host without the hook must fail loudly
+(`lowering_hook_missing`) rather than validate the sugar as final data.
+Runtime semantics (staging, limits, provenance, container lowering) are
+in `docs/plugin-model-v1.md`, "Host Lowering"; this section is the
+manifest side.
+
+**`:produces` resolution.** The contract checks every emitted form's head
+against `:produces`, at every depth, so the list names every head the
+hook writes, nested ones included. At schema load every entry must
+resolve to a declared form, and a bare entry resolves **local-first**,
+the same order a form head takes at validation (§5.2, LANGUAGE.md
+§6.3.1): a bare entry may name a **slot-local form reachable through the
+list** — declared, at any depth and through either carrier, inside a form
+the same list resolves — or a global form across the loaded plugins,
+where a bare collision is `ambiguous_form`. A qualified entry
+(`<plugin>/<form>`) targets that plugin's global catalog and bypasses
+locals. A local listed without its declaring form is `unknown_form`, and
+the message names the form the list is missing.
+
+```sjon
+(form :name init
+  :lowering (lowering :hook pngine/init-v1
+    :produces [bind-group entry]))          ; `entry` resolves through `bind-group`
+(form :name bind-group
+  (form :name entry (key :name binding :type number :optional false)))
+```
+
+**Load-time refusals.** An empty `:produces` or a head listed twice is
+`wrong_underlying` at `[<form> lowering produces]`. `:lowering` on a
+**slot-local** form (either carrier) is `invalid_manifest` at
+`[<local> lowering]` — a local body is never a hook, so the declaration
+would be silently dead; declare the sugar as a top-level `(form …)`. A
+`:produces` graph that cycles is `lowering_cycle` at aggregate time; a
+qualified head into a plugin that is not loaded is
+`lowering_target_plugin_absent`.
 
 ## 6. `(expr-func …)` declarations
 
@@ -1151,7 +1474,7 @@ emits `unknown_element_kind` at load time.
 `<symbol-list>` is a `[…]` vector of bare symbols:
 `[ortho perspective]`.
 
-`<member-name>` (format 1.3) is a member spelling: a bare symbol, or a
+`<member-name>` is a member spelling: a bare symbol, or a
 digit-leading spelling that lexes as a unit-bearing number (`1d`, `2d`).
 `<member-name-list>` is a `[…]` vector of those: `[1d 2d cube 3d]`. Both
 appear only inside `(member-set …)` — see §4.4 for which numbers count as
@@ -1172,6 +1495,12 @@ manifests — see §10.
   semver ranges — to keep reproducibility audits deterministic. Any
   `:version "X.Y.Z"` value is accepted as a string by the loader; semantic
   interpretation lives at the `(use-plugin)` callsite, not the manifest.
+  The key is optional: a manifest that declares none is *unversioned*, not
+  invalid — it loads and validates like any other, the CLI prints its
+  version as `?`, and the lockfile records an empty row. A pin is a claim
+  about a version the manifest declares, so pinning an unversioned plugin
+  is a `plugin_version_mismatch` whose message says the manifest declares
+  no `:version`.
 
 ## 10. Symbolic `:impl` binding
 
@@ -1355,8 +1684,9 @@ Pinned for the format spec so the meta-plugin is unambiguous.
    the same kind catalog. Primitives (§8) shadow any user-declared
    kind of the same name.
 4. **Booleans are native `true` / `false`.** Settled (§9).
-5. **`:version` is the resolver's pin target.** Exact-string match against
-   `(use-plugin … :version "x")`. Settled (§9).
+5. **`:version` is the resolver's pin target, and optional.** Exact-string
+   match against `(use-plugin … :version "x")`; absent = unversioned, and
+   a pin against it is a mismatch. Settled (§9).
 6. **`:default` is `any`-typed at the manifest layer.** The loader
    does the literal-tag-vs-`:type` check post-parse and emits
    `wrong_underlying` on failure. Expression-shaped defaults snapshot
@@ -1376,19 +1706,23 @@ Pinned for the format spec so the meta-plugin is unambiguous.
 
 ## 14. Forward compatibility
 
-The format evolves additively:
+The format evolves additively, and it carries no version of its own:
 
-- New optional keys may be added to existing declarations. Old loaders
-  ignore them (or warn, depending on host policy).
-- New refinement axes may be added on `value-kind`. Each is gated by
-  one `:underlying` and is silently absent on old loaders.
-- New `:impl` schemes may be added (`wasm:`, `native:`, …). Old
-  loaders treat unknown schemes as "validation works, evaluation
-  unavailable."
+- New optional keys may be added to existing declarations, and new
+  refinement axes to `value-kind`. A manifest that omits them means what
+  it always meant.
+- New `:impl` schemes may be added (`wasm:`, `native:`, …). Loaders
+  treat unknown schemes as "validation works, evaluation unavailable."
 - New `expr-func` encodings may be added. Mono and multi-signature are
-  the v1 set; future encodings get a distinct positional sub-form
+  the current set; future encodings get a distinct positional sub-form
   shape.
 
-Removing or renaming a declaration is a breaking change. v1's
-contract is "additive evolution only"; revisions that need to break
-this contract bump the manifest format version.
+A manifest read by a host *older* than the vocabulary it uses fails
+loudly, not partially: every form in `manifests/meta.sjon` is
+`:open false`, so an unknown keyword is `unknown_key` and an unknown
+declaration head is `unknown_form` at meta-validation, and the plugin is
+dropped. Which SJON release a keyword needs is what `CHANGELOG.md`
+records; nothing in the manifest declares it.
+
+Removing or renaming a declaration is a breaking change, and takes a
+SJON major.

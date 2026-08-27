@@ -50,9 +50,11 @@ test('loader: every (variant …) is captured with its own keys', () => {
   const r = loadManifest(manifestRootsOrThrow(DISCRIMINATED));
   const form = r.plugin.forms.find((f) => f.name === 'track');
   assert.ok(form?.variants, 'expected variants');
+  // `:when kick` normalises to a one-element list — `Variant.when` is always
+  // a list, so `:when [a b]` needs no second shape.
   assert.deepStrictEqual(
     form.variants.map((v) => v.when),
-    ['kick', 'bass'],
+    [['kick'], ['bass']],
   );
   assert.deepStrictEqual(
     form.variants.map((v) => v.keys.map((k) => k.name)),

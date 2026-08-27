@@ -25,6 +25,8 @@ export type WarningCode =
   | 'variants_emitted_via_if_then'
   | 'union_emitted_via_anyof'
   | 'head_set_emitted_via_oneof_refs'
+  | 'head_set_member_unresolved'
+  | 'local_form_outside_head_set'
   | 'local_forms_emitted_inline'
   | 'rich_members_emitted_with_annotations'
   | 'numeric_bounds_emitted_via_min_max'

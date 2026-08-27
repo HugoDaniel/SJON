@@ -1,0 +1,26 @@
+; The first of the ask's two probes: an `(entry …)` with two *different*
+; resources. Every per-head `:max 1` is satisfied — there is one buffer
+; and one sampler — and the entry is still not a bind-group-layout entry.
+; Only the set's `:max-children 1` can say so.
+(plugin :name gpu :version "1.0.0"
+  (value-kind :name bgl-resource
+    :underlying form
+    :heads (head-set :min-children 1 :max-children 1
+      (head :name buffer  :max 1)
+      (head :name sampler :max 1)
+      (head :name texture :max 1)))
+
+  (form :name buffer
+    (key :name type :type symbol))
+  (form :name sampler
+    (key :name type :type symbol))
+  (form :name texture
+    (key :name sample-type :type symbol))
+
+  (form :name entry
+    :positional bgl-resource
+    (key :name binding :type number)))
+
+(entry :binding 1
+  (buffer  :type uniform)
+  (sampler :type filtering))

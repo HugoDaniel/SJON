@@ -1,97 +1,133 @@
 ---
-import Marketing from '../layouts/Marketing.astro';
+// The playground.
+//
+// A Starlight page rather than a collection entry, because the editor is a
+// script island with its own DOM contract rather than prose. `template:
+// 'splash'` is the flag that matters: it is the one that kills *both* the
+// sidebar and the right-hand table of contents (`getToC` returns undefined for
+// splash). `hasSidebar: false` alone would leave a 300px ToC column claiming
+// space for a single entry.
+//
+// This file must stay at this path: `lsp-failure.test.ts` reads it as text to
+// check the failure banner's hooks still exist, so extracting the shell into a
+// component would make that gate vanish with an ENOENT rather than a failure.
+//
+// Do not enable `<ClientRouter>` anywhere on this site. `mountPlayground`
+// tears down on `beforeunload`, which a view-transition navigation never
+// fires, so the LSP worker and its wasm instance would leak on every click.
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
 import { PLAYGROUND_EXAMPLES } from '../playground/examples';
+import { FIRST_LESSON } from '../lib/lessons.ts';
 import '../styles/playground.css';
+
+// Nobody applies `base` to an href written into markup, so the lede's one link
+// carries it the same way the hero actions on the home page do.
+const base = import.meta.env.BASE_URL.replace(/\/+$/, '');
 ---
 
-<Marketing
-  title="SJON Playground"
-  description="Write SJON in your browser. Parses, validates, and evaluates as you type — nothing leaves the tab."
+<StarlightPage
+  frontmatter={{
+    title: 'SJON Playground',
+    description:
+      'Write SJON in your browser. It parses, validates, and evaluates as you type, and nothing leaves the tab.',
+    template: 'splash',
+    // Inert while `/playground` is a sidebar link rather than a sidebar entry,
+    // but pagination would appear under the editor the moment that changes.
+    prev: false,
+    next: false,
+    pagefind: true,
+  }}
 >
-  <section class="playground">
-    <p class="kicker">/ playground</p>
-    <h1>Try SJON in your browser.</h1>
-    <p class="lede">
-      Type below. The parser, validator, and expression evaluator all run
-      locally in your tab — diagnostics show up in the gutter, and every
-      expression's value shows up under the editor, as you go.
-    </p>
-    <div class="editor-frame">
-      <div class="pg-stale" data-pg-stale hidden>
-        <strong>LSP assets out of date.</strong> The running language server disagrees
-        with the last build — run <code>zig build landing-page-assets</code> to refresh it.
-      </div>
-      <!-- Unhidden by `showLspFailure` (src/playground/lsp-failure.ts) when the
-           language server fails to boot on both backends. Without it the page
-           looks healthy and every server-fed panel is silently empty forever.
-           `lsp-failure.test.ts` asserts both hooks below still exist here. -->
-      <div class="pg-failed" data-pg-lsp-failed hidden role="alert">
-        <strong>Language server failed to load.</strong> Diagnostics, the outline,
-        and evaluated values are unavailable — editing, examples, and highlighting
-        still work. <code data-pg-lsp-failed-reason></code>
-      </div>
-      <div class="pg-tabs">
-        <div class="pg-tablist" role="tablist" aria-label="Playground panes" data-pg-tablist>
-          <div
-            class="pg-tab"
-            role="tab"
-            id="pg-tab-document"
-            aria-selected="true"
-            aria-controls="pg-pane-document"
-            tabindex="0"
-            data-pg-tab="document"
-          >
-            <span class="pg-tab__label">document</span>
-          </div>
-        </div>
-        <button class="pg-tab--add" type="button" data-pg-add aria-label="Add a schema">
-          + schema
-        </button>
-        <label class="pg-examples">
-          <span class="sr-only">Load an example</span>
-          <select class="pg-examples__select" data-pg-examples>
-            {/* Placeholder for a document the visitor edited or arrived at
-                through a share link. Hidden from the open list, but it is
-                what the closed picker reads once an example stops matching. */}
-            <option value="" hidden>Custom</option>
-            {PLAYGROUND_EXAMPLES.map((example) => (
-              <option value={example.id} title={example.blurb}>{example.title}</option>
-            ))}
-          </select>
-        </label>
-        <button
-          class="pg-copy-link"
-          type="button"
-          data-pg-outline-toggle
-          aria-expanded="false"
-          aria-controls="pg-outline">Outline</button>
-        <button class="pg-copy-link" type="button" data-pg-format>Format</button>
-        <button class="pg-copy-link" type="button" data-pg-copy>Copy link</button>
-      </div>
-      <div class="pg-body">
-        <div class="pg-panes" data-pg-panes>
-          <div
-            class="pg-pane"
-            id="pg-pane-document"
-            role="tabpanel"
-            aria-labelledby="pg-tab-document"
-            data-pg-pane="document"
-          >
-            <div id="sjon-editor"></div>
-          </div>
-        </div>
-        <aside class="pg-outline" id="pg-outline" data-pg-outline hidden>
-          <p class="pg-outline__title">outline</p>
-          <nav class="pg-outline__rows" data-pg-outline-rows aria-label="Document outline"></nav>
-        </aside>
-      </div>
-      <section class="pg-eval" data-pg-eval>
-        <p class="pg-eval__title">values</p>
-        <div class="pg-eval__rows" data-pg-eval-rows aria-live="polite"></div>
-      </section>
+  <p>
+    Type below. The parser, the validator and the expression evaluator here are
+    the same ones the command line runs, compiled to WebAssembly and loaded
+    into this tab: diagnostics land in the gutter, values appear under the
+    editor as you type, and nothing you write leaves the page. Pick an example
+    to start from, or bring the camera
+    from <a href={`${base}${FIRST_LESSON.route}`}>section 1 of the tutorial</a> and break
+    it on purpose.
+  </p>
+
+  {/* `not-content` opts this subtree out of `.sl-markdown-content`, whose
+      rules reach every descendant and would restyle the editor chrome. It sits
+      here rather than on the section so the lede above still reads as prose.
+      `data-pagefind-ignore` keeps the editor shell out of the search index —
+      it is furniture, not page text. */}
+  <div class="editor-frame not-content" data-pagefind-ignore>
+    <div class="pg-stale" data-pg-stale hidden>
+      <strong>LSP assets out of date.</strong> The running language server disagrees
+      with the last build. Run <code>zig build landing-page-assets</code> to refresh it.
     </div>
-  </section>
-</Marketing>
+    <!-- Unhidden by `showLspFailure` (src/playground/lsp-failure.ts) when the
+         language server fails to boot on both backends. Without it the page
+         looks healthy and every server-fed panel is silently empty forever.
+         `lsp-failure.test.ts` asserts both hooks below still exist here. -->
+    <div class="pg-failed" data-pg-lsp-failed hidden role="alert">
+      <strong>Language server failed to load.</strong> Diagnostics, the outline,
+      and evaluated values are unavailable. Editing, examples, and highlighting
+      still work. <code data-pg-lsp-failed-reason></code>
+    </div>
+    <div class="pg-tabs">
+      <div class="pg-tablist" role="tablist" aria-label="Playground panes" data-pg-tablist>
+        <div
+          class="pg-tab"
+          role="tab"
+          id="pg-tab-document"
+          aria-selected="true"
+          aria-controls="pg-pane-document"
+          tabindex="0"
+          data-pg-tab="document"
+        >
+          <span class="pg-tab__label">document</span>
+        </div>
+      </div>
+      <button class="pg-tab--add" type="button" data-pg-add aria-label="Add a schema">
+        + schema
+      </button>
+      <label class="pg-examples">
+        <span class="sr-only">Load an example</span>
+        <select class="pg-examples__select" data-pg-examples>
+          {/* Placeholder for a document the visitor edited or arrived at
+              through a share link. Hidden from the open list, but it is
+              what the closed picker reads once an example stops matching. */}
+          <option value="" hidden>Custom</option>
+          {PLAYGROUND_EXAMPLES.map((example) => (
+            <option value={example.id} title={example.blurb}>{example.title}</option>
+          ))}
+        </select>
+      </label>
+      <button
+        class="pg-copy-link"
+        type="button"
+        data-pg-outline-toggle
+        aria-expanded="false"
+        aria-controls="pg-outline">Outline</button>
+      <button class="pg-copy-link" type="button" data-pg-format>Format</button>
+      <button class="pg-copy-link" type="button" data-pg-copy>Copy link</button>
+    </div>
+    <div class="pg-body">
+      <div class="pg-panes" data-pg-panes>
+        <div
+          class="pg-pane"
+          id="pg-pane-document"
+          role="tabpanel"
+          aria-labelledby="pg-tab-document"
+          data-pg-pane="document"
+        >
+          <div id="sjon-editor"></div>
+        </div>
+      </div>
+      <aside class="pg-outline" id="pg-outline" data-pg-outline hidden>
+        <p class="pg-outline__title">outline</p>
+        <nav class="pg-outline__rows" data-pg-outline-rows aria-label="Document outline"></nav>
+      </aside>
+    </div>
+    <section class="pg-eval" data-pg-eval>
+      <p class="pg-eval__title">values</p>
+      <div class="pg-eval__rows" data-pg-eval-rows aria-live="polite"></div>
+    </section>
+  </div>
+</StarlightPage>
 
 <script>
   import { mountPlayground } from '../playground/boot';

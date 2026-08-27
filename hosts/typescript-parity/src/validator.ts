@@ -37,6 +37,7 @@ import type {
   FormSpec,
   ExprFunc,
   Head,
+  HeadSet,
   KeySpec,
   Member,
   ValueType,
@@ -46,18 +47,22 @@ import type {
   QualifiedRef,
   Repr,
   StringBounds,
+  Variant,
 } from './plugin.ts';
 import {
   MAX_KIND_DEPTH,
   canonicalSpelling,
   checkArity,
   crossRefBucketKey,
+  headSetIsUnbounded,
   effectiveOptional,
   lookupExprFunc,
   lookupForm,
   lookupValueKind,
   paramTypeAt,
   spellingKeyOf,
+  variantSelects,
+  variantWhenText,
 } from './plugin.ts';
 import * as StringFormats from './stringFormats.ts';
 
@@ -862,24 +867,43 @@ function visit(
         if (r.kind === 'found') ownSpec = r.value;
       }
       let positionalCount = 0;
+      // The active variant while walking the children in order — set the
+      // moment the discriminant kvpair selects one, exactly as
+      // `validateFormKeys` resolves it. A variant key's `localForms` are in
+      // scope only while its variant is active (and after the
+      // discriminant): outside that the key is `unknown_key` and puts
+      // nothing in scope. Mirrors the Zig tree walker's `Frame.matched_key`
+      // (attachment equals acceptance) and the binary walker's inline rule.
+      // No overlay leg here — this port has no materialized defaults.
+      let activeVariant: Variant | null = null;
       for (const child of formNode.children) {
         if (child.tag === 'kvpair') {
           const kvPath = [...path, child.key];
           const value = child.value;
           let valuePath = kvPath;
           let childScope: LocalFormScope | null = null;
+          // The KeySpec this kvpair is accepted under: a common key by name,
+          // else the active variant's key by name.
+          let matchedKey: KeySpec | null = null;
+          if (ownSpec) {
+            const commonIdx = ownSpec.keys.findIndex((k) => k.name === child.key);
+            if (commonIdx >= 0) {
+              matchedKey = ownSpec.keys[commonIdx]!;
+              if (ownSpec.discriminantIdx === commonIdx && value.tag === 'symbol') {
+                const sym = value.text;
+                const selected = (ownSpec.variants ?? []).find((v) => variantSelects(v, sym));
+                if (selected) activeVariant = selected;
+              }
+            } else if (activeVariant) {
+              matchedKey = activeVariant.keys.find((vk) => vk.name === child.key) ?? null;
+            }
+          }
           if (value.tag === 'form') {
             if (value.head.length > 0) valuePath = [...kvPath, value.head];
-            // Attach the slot's local registry when the matching KeySpec
+            // Attach the slot's local registry when the accepted KeySpec
             // carries local forms (slot path = the kvpair's own path).
-            if (ownSpec) {
-              for (const k of ownSpec.keys) {
-                if (k.name !== child.key) continue;
-                if (k.localForms && k.localForms.length > 0) {
-                  childScope = { registry: k.localForms, slotPath: kvPath };
-                }
-                break;
-              }
+            if (matchedKey?.localForms && matchedKey.localForms.length > 0) {
+              childScope = { registry: matchedKey.localForms, slotPath: kvPath };
             }
           }
           visit(schema, registry, value, valuePath, chain, treeScope, treeIdx, diags, childScope);
@@ -1143,14 +1167,26 @@ function describeType(t: ValueType): string {
  * reused on a keyed slot or a `vector-shape :element` carries its bounds
  * inertly. Mirrors Zig's `boundedPositionalHeads`.
  */
-function boundedPositionalHeads(schema: Schema, spec: FormSpec): readonly Head[] | null {
+function boundedPositionalHeads(schema: Schema, spec: FormSpec): HeadSet | null {
   if (spec.positional.kind !== 'kind') return null;
   const hit = lookupValueKind(schema, spec.positional.name, spec.positional.namespace);
   if (hit.kind !== 'found') return null;
   const vk = hit.value;
   if (vk.underlying !== 'form' || !vk.heads) return null;
-  const bounded = vk.heads.some((h) => (h.min ?? 0) !== 0 || h.max !== undefined);
-  return bounded ? vk.heads : null;
+  // An empty set narrows nothing, so it counts nothing either — else a
+  // `:min-children` floor would demand a child from a set that names none.
+  if (vk.heads.heads.length === 0) return null;
+  return headSetIsUnbounded(vk.heads) ? null : vk.heads;
+}
+
+/**
+ * Render a head-set as `[a | b | c]`, in `not_head_member`'s vocabulary.
+ * What separates a set-level message from a per-head one — and therefore
+ * what makes reusing the two codes the right call. Mirrors Zig's
+ * `writeHeadSetList`.
+ */
+function headSetList(heads: readonly Head[]): string {
+  return `[${heads.map((h) => h.name).join(' | ')}]`;
 }
 
 /**
@@ -1159,10 +1195,16 @@ function boundedPositionalHeads(schema: Schema, spec: FormSpec): readonly Head[]
  * therefore counted nowhere. The emit fires exactly once — on the
  * transition from `max` to `max + 1` — so a form five children over its
  * ceiling still gets one diagnostic. Mirrors Zig's `tallyPositionalHead`.
+ *
+ * Both bound levels are judged here, and **the set yields to the head**:
+ * `:min-children 1 :max-children 1` over heads each `:max 1` is "exactly
+ * one, and not two of the same", so a second `(buffer …)` crosses both
+ * ceilings on one child — same span, same path, same code. The per-head
+ * report names the line to delete and the set's claim is implied by it.
  */
 function tallyPositionalHead(
   diags: Diagnostic[],
-  bounds: readonly Head[],
+  bounds: HeadSet,
   counts: number[],
   formName: string,
   head: string,
@@ -1170,12 +1212,11 @@ function tallyPositionalHead(
   posPath: readonly string[],
 ): void {
   if (head.length === 0) return;
-  for (let i = 0; i < bounds.length; i++) {
-    const h = bounds[i]!;
+  for (let i = 0; i < bounds.heads.length; i++) {
+    const h = bounds.heads[i]!;
     if (h.name !== head) continue;
     counts[i] = counts[i]! + 1;
-    if (h.max === undefined) return;
-    if (counts[i] === h.max + 1) {
+    if (h.max !== undefined && counts[i] === h.max + 1) {
       emit(
         diags,
         span,
@@ -1184,7 +1225,24 @@ function tallyPositionalHead(
         `form \`${formName}\` accepts at most ${h.max} \`${h.name}\` positional ` +
           `child${h.max === 1 ? '' : 'ren'}, found ${counts[i]}`,
       );
+      return;
     }
+    // The set half, reached only for a child that matched a head and did
+    // not report for it. The running total is Σ counts rather than a
+    // counter of its own: a child counts towards the set exactly when it
+    // counts towards a head. Mirrors Zig's `tallyPositionalSet`.
+    if (bounds.maxChildren === undefined) return;
+    const total = counts.reduce((acc, n) => acc + n, 0);
+    if (total !== bounds.maxChildren + 1) return;
+    emit(
+      diags,
+      span,
+      posPath,
+      'positional_too_many',
+      `form \`${formName}\` accepts at most ${bounds.maxChildren} positional ` +
+        `child${bounds.maxChildren === 1 ? '' : 'ren'} from ${headSetList(bounds.heads)}, ` +
+        `found ${total}`,
+    );
     return;
   }
 }
@@ -1261,7 +1319,7 @@ function validateFormKeys(
   // Resolved once per form; null for every unbounded head-set, which is
   // the fast path the compact `:names [a b c]` spelling always takes.
   const posBounds = boundedPositionalHeads(schema, spec);
-  const posCounts: number[] = posBounds ? posBounds.map(() => 0) : [];
+  const posCounts: number[] = posBounds ? posBounds.heads.map(() => 0) : [];
   for (const child of node.children) {
     if (child.tag === 'kvpair') {
       const matchIdx = spec.keys.findIndex((k) => k.name === child.key);
@@ -1275,9 +1333,9 @@ function validateFormKeys(
         // selecting a branch on a name the schema does not admit.
         if (spec.discriminantIdx === matchIdx && child.value.tag === 'symbol') {
           const sym = child.value.text;
-          const vi = variants.findIndex((v) => v.when === sym);
+          const vi = variants.findIndex((v) => variantSelects(v, sym));
           if (vi >= 0) {
-            resolvedWhen = variants[vi]!.when;
+            resolvedWhen = variantWhenText(variants[vi]!.when);
             resolvedVariantIdx = vi;
           }
         }
@@ -1412,11 +1470,15 @@ function validateFormKeys(
   // is a different surface, and `:positional <bounded-kind>` opts into
   // it. Mirrors `validateFormKeys` phase 3b in the reference walker.
   if (posBounds) {
-    for (let i = 0; i < posBounds.length; i++) {
-      const h = posBounds[i]!;
+    let anyHeadReported = false;
+    let total = 0;
+    for (let i = 0; i < posBounds.heads.length; i++) {
+      const h = posBounds.heads[i]!;
       const min = h.min ?? 0;
       const n = posCounts[i]!;
+      total += n;
       if (min === 0 || n >= min) continue;
+      anyHeadReported = true;
       emit(
         diags,
         node.headSpan,
@@ -1424,6 +1486,22 @@ function validateFormKeys(
         'positional_missing',
         `form \`${spec.name}\` requires at least ${min} \`${h.name}\` positional ` +
           `child${min === 1 ? '' : 'ren'}, found ${n}`,
+      );
+    }
+    // The set's own floor, and it yields to the head for the same reason
+    // the ceiling does: under `:min-children 2` with a head `:min 1`, an
+    // empty form breaches both and "add a `buffer`" is the more
+    // actionable of the two. Mirrors Zig's `emitPositionalMissing`.
+    const setMin = posBounds.minChildren ?? 0;
+    if (!anyHeadReported && setMin > 0 && total < setMin) {
+      emit(
+        diags,
+        node.headSpan,
+        path,
+        'positional_missing',
+        `form \`${spec.name}\` requires at least ${setMin} positional ` +
+          `child${setMin === 1 ? '' : 'ren'} from ${headSetList(posBounds.heads)}, ` +
+          `found ${total}`,
       );
     }
   }
@@ -1499,6 +1577,9 @@ function validateFormKeys(
   if (resolvedVariantIdx !== null) {
     const v = variants[resolvedVariantIdx]!;
     const variantGroups = v.exclusiveGroups ?? [];
+    // The active variant's `:when` as written — one value bare, a set
+    // bracketed — so a single-value variant's messages read as before.
+    const whenText = variantWhenText(v.when);
     for (let vki = 0; vki < v.keys.length; vki++) {
       const vk = v.keys[vki]!;
       if (effectiveOptional(vk)) continue;
@@ -1510,7 +1591,7 @@ function validateFormKeys(
         node.headSpan,
         path,
         'missing_required_key',
-        `form \`${spec.name}\` (variant \`:when ${v.when}\`) is missing required keyword \`:${vk.name}\``,
+        `form \`${spec.name}\` (variant \`:when ${whenText}\`) is missing required keyword \`:${vk.name}\``,
       );
     }
     emitExclusiveGroupDiagnostics(
@@ -1519,7 +1600,7 @@ function validateFormKeys(
       v.keys,
       seenVariantIdx,
       spec.name,
-      v.when,
+      whenText,
       node.headSpan,
       path,
     );
@@ -1532,7 +1613,7 @@ function validateFormKeys(
       spec.keys,
       seenIdx,
       spec.name,
-      v.when,
+      whenText,
       node.headSpan,
       path,
     );
@@ -2020,8 +2101,17 @@ function matchKind(
       return null;
     case 'form':
       if (node.tag !== 'form') return wrongUnderlying('form');
-      if (kind.heads && !kind.heads.some((h) => h.name === node.head)) {
-        return notHeadMember(node.head, kind.heads);
+      // An empty closed set is "no narrowing", not "reject everything" —
+      // the contract `MemberSet` states and `matchScalar` honours. Both
+      // spellings are `invalid_manifest` at load, so this only governs a
+      // hand-built schema; the point is that the two sibling constructs
+      // answer it the same way, on every host. Mirrors Zig.
+      if (
+        kind.heads &&
+        kind.heads.heads.length > 0 &&
+        !kind.heads.heads.some((h) => h.name === node.head)
+      ) {
+        return notHeadMember(node.head, kind.heads.heads);
       }
       return null;
     case 'union_of': {
@@ -2031,7 +2121,13 @@ function matchKind(
       // When none does, the value is rejected (parity with the Zig
       // validator's union arm — the previous stub accepted everything,
       // which was dead code until `scalar-or-ref` made unions loadable).
-      for (const alt of us.alternatives) {
+      // A union whose alternatives are disjoint by node shape has a
+      // determined arm even then (see `determinedArm`); its failure is
+      // what gets reported.
+      const arm = determinedArm(schema, kind, shapeOfNode(node));
+      let armFail: MatchFail | null = null;
+      for (let ai = 0; ai < us.alternatives.length; ai++) {
+        const alt = us.alternatives[ai]!;
         const fail = matchType(
           schema,
           registry,
@@ -2042,10 +2138,89 @@ function matchKind(
           depth,
         );
         if (!fail) return null;
+        if (arm === ai) armFail = fail;
       }
-      return unionNoBranchMatched(node, us.alternatives);
+      return armFail ?? unionNoBranchMatched(node, us.alternatives);
     }
   }
+}
+
+/** The shape axis a union arm is selected on. Coarser than the node tag on
+ *  purpose — it is the projection the Zig tree and binary walkers agree on
+ *  (`Validator.NodeShape`), so this port answers as they do. */
+type NodeShape = 'number' | 'string' | 'symbol' | 'vector' | 'form' | 'other';
+
+function shapeOfNode(node: Node): NodeShape {
+  switch (node.tag) {
+    case 'number':
+    case 'string':
+    case 'symbol':
+    case 'vector':
+    case 'form':
+      return node.tag;
+    default:
+      return 'other';
+  }
+}
+
+/** True when a value of `shape` can reach `alt` at all — when `alt` resolves
+ *  to an underlying whose slot admits that shape *before* any refinement
+ *  (bounds, members, cross-ref, head-set) is asked. `any` reaches
+ *  everything; a nested union and an unresolvable name reach nothing.
+ *  Mirrors `alternativeReaches` in `src/Validator.zig`. */
+function alternativeReaches(schema: Schema, alt: QualifiedRef, shape: NodeShape): boolean {
+  const prim = PRIMITIVE_NORMALIZE.get(alt.name);
+  if (prim !== undefined) {
+    switch (prim) {
+      case 'any':
+        return true;
+      case 'number':
+      case 'string':
+      case 'symbol':
+      case 'vector':
+        return shape === prim;
+      case 'form':
+      case 'expr':
+        return shape === 'form';
+      default:
+        return false;
+    }
+  }
+  const lookup = lookupValueKind(schema, alt.name, alt.namespace);
+  if (lookup.kind !== 'found') return false;
+  switch (lookup.value.underlying) {
+    case 'number':
+    case 'string':
+    case 'symbol':
+    case 'vector':
+    case 'form':
+      return shape === lookup.value.underlying;
+    default:
+      return false;
+  }
+}
+
+/** The one alternative a node of `shape` could have meant, as an index into
+ *  `kind.unionOf.alternatives` — or null when the shape reaches no
+ *  alternative, or more than one. Matching is unchanged by this: alternatives
+ *  are tried in declaration order and the first to accept wins. It decides
+ *  only what a *failure* says — with exactly one reachable arm, nothing else
+ *  could have been meant, so that arm's own failure (the bound that refused,
+ *  the reference that names nothing) is the actionable one. Zero reachable (a
+ *  string against `number | symbol`) or two (a symbol against
+ *  `member-set | cross-ref`) keeps `union_no_branch_matched`. The rule stops
+ *  at the node shape and does not look through refinements, so two form kinds
+ *  with disjoint head-sets keep the collapse. Mirrors `determinedArm` in
+ *  `src/Validator.zig`. */
+function determinedArm(schema: Schema, kind: ValueKind, shape: NodeShape): number | null {
+  if (!kind.unionOf) return null;
+  let only: number | null = null;
+  for (let i = 0; i < kind.unionOf.alternatives.length; i++) {
+    if (!alternativeReaches(schema, kind.unionOf.alternatives[i]!, shape)) continue;
+    if (only !== null) return null; // two reach: overlap, no arm to blame
+    only = i;
+  }
+  return only;
 }
 
 function wrongUnderlying(expected: string): MatchFail {

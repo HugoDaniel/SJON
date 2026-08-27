@@ -1,7 +1,7 @@
 ; First half of the per-plugin layout fixture pair.
 ;
 ; `pair-a` declares a `(palette …)` form whose `:swatch` slot is a
-; head-set referencing `(color …)` and `(gradient …)` — both of which
+; head-set referencing `(color …)` and `(gradient …)`, both of which
 ; live in `pair-b`. The per-plugin emit produces:
 ;
 ;   * `pair-a.schema.json` with `$ref` paths that resolve to
@@ -15,7 +15,7 @@
 
 (plugin :name pair-a :version "1.0.0"
   (value-kind :name swatch-form
-    :description "Either a colour or a gradient — both declared in `pair-b`."
+    :description "Either a colour or a gradient, both declared in `pair-b`."
     :underlying form
     :heads (head-set :names [color gradient]))
 

@@ -1,0 +1,39 @@
+; The three things a `:when` list cannot carry. Each is `invalid_manifest`
+; — the same class as a cross-ref target group's exclusions: a shape that
+; is internally incoherent, decided by looking at the form alone.
+;
+;   `empty`     `:when []` lists no value; a variant nothing selects can
+;               never apply, and is a typo.
+;   `repeat`    `:when [a b a]` lists `a` twice; a value selects the
+;               variant once, so the repeat adds nothing and hides a
+;               likely typo in the entry it duplicates.
+;   `overlap`   `:when [b c]` after `:when [a b]`, and a scalar `:when b`
+;               after both — a discriminant value selects AT MOST ONE
+;               variant, or "which one applies" would fall to declaration
+;               order, the very question the key-collision check exists
+;               to keep a schema from asking. Reported once per repeated
+;               value, naming the variant that already listed it. Two
+;               single-value variants with the same `:when` are the same
+;               shape and are caught by the same rule.
+(plugin :name p :version "1.0.0"
+  (value-kind :name tag :underlying symbol
+    :members (member-set :values [a b c d]))
+
+  (form :name empty :discriminant k
+    (key :name k :type tag :optional false)
+    (variant :when []
+      (key :name x :type number :optional true)))
+
+  (form :name repeat :discriminant k
+    (key :name k :type tag :optional false)
+    (variant :when [a b a]
+      (key :name x :type number :optional true)))
+
+  (form :name overlap :discriminant k
+    (key :name k :type tag :optional false)
+    (variant :when [a b]
+      (key :name x :type number :optional true))
+    (variant :when [b c]
+      (key :name y :type number :optional true))
+    (variant :when b
+      (key :name z :type number :optional true))))

@@ -25,7 +25,7 @@ export type F16 = number & { readonly __sjonRepr?: "f16" };
 
 // ----- plugin: audio -----
 
-/** A note sequence — named (a reusable definition) or anonymous (inline). */
+/** A note sequence, either named (a reusable definition) or anonymous (inline). */
 export interface Audio_Phrase {
   $form: "phrase";
   $ns: "audio";

@@ -109,12 +109,12 @@ Type: `ref → (compute-pipeline :name …)`.
 
 ### pipeline-ref
 
-Either pipeline. Tried in this order — render first.
+Either pipeline, tried in this order: render first.
 
 Type: `render-pipeline-ref | compute-pipeline-ref`.
 
 ### pipeline-group-ref
 
-Either pipeline, in one namespace — a name defined by both is a duplicate.
+Either pipeline, in one namespace, so a name defined by both is a duplicate.
 
 Type: `ref → (render-pipeline | compute-pipeline :name …)`.

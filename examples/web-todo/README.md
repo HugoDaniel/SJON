@@ -1,11 +1,11 @@
-# `web-todo` — Redux-style TODO app on SJON
+# `web-todo`: a Redux-style TODO app on SJON
 
 A self-contained browser demo that uses [SJON](../../README.md) as the
 state container behind a React TODO list:
 
 - **State** is a single canonical `(todo-app …)` form, held in memory
   as SJON source text and persisted to `localStorage` as Binary IR.
-- **Reducer** is `host.encoder.applyEdit(source, action)` — a pure
+- **Reducer** is `host.encoder.applyEdit(source, action)`, a pure
   `(state, action) → state` function. Actions are JSON `Edit` ops
   decoded by `src/Edit.zig`. (`host.encoder` is the plain `SjonEncoder`;
   `host` itself adds resolver-aware `validateDocument` / `hostEvalExpr`.)
@@ -22,7 +22,7 @@ state container behind a React TODO list:
 ## Run it
 
 ```sh
-# 1. Build everything the demo needs — both wasm artifacts, the sidecar
+# 1. Build everything the demo needs: both wasm artifacts, the sidecar
 #    plugin, and the browser-ESM build of the host (hosts/web/dist/):
 zig build web-todo
 
@@ -35,7 +35,7 @@ open http://localhost:8000/examples/web-todo/
 ```
 
 > **Import idiom.** `main.mjs` imports the host from
-> `hosts/web/dist/sjon-reader.js` — the pre-compiled ESM — because a
+> `hosts/web/dist/sjon-reader.js` (the pre-compiled ESM) because a
 > browser can't strip TypeScript types (same for `examples/web-canvas/`).
 > The Node-only `examples/quickstart-web.mjs` instead imports the
 > `hosts/web/*.ts` source directly and leans on Node ≥ 22.6's
@@ -43,14 +43,14 @@ open http://localhost:8000/examples/web-todo/
 
 Then play with it:
 
-- Type a todo, press Enter — new row, counter updates, the action is
+- Type a todo, press Enter: new row, counter updates, the action is
   logged to the console.
-- Tick / untick a checkbox — `count-done` and `count-active`
+- Tick or untick a checkbox: `count-done` and `count-active`
   immediately re-evaluate; both numbers come from
   `todo-plugin.wasm` walking the vector-of-form.
-- Filter by All / Active / Done — `:filter` is set in state, not in
+- Filter by All / Active / Done: `:filter` is set in state, not in
   the URL.
-- Refresh — the list survives (Binary IR rehydration from
+- Refresh: the list survives (Binary IR rehydration from
   `localStorage["web-todo:state"]`).
 - In DevTools, drive the store directly: `__store.dispatch({…})`,
   `__store.getState()`, `__store.getSource()`.
@@ -72,7 +72,7 @@ Then play with it:
 | `components/*.mjs` | React components using [`htm`](https://github.com/developit/htm) tagged templates (no JSX build step). |
 | `style.css` | Minimal styling. |
 | `todo-app.sjon` | SJON plugin manifest: forms, value-kinds, three expr-funcs. |
-| `todo-plugin/plugin.zig` | Sidecar wasm source — `(sum …)`, `(count-done …)`, `(count-active …)` per the v2 plugin ABI. |
+| `todo-plugin/plugin.zig` | Sidecar wasm source: `(sum …)`, `(count-done …)`, `(count-active …)` per the v2 plugin ABI. |
 | `todo-plugin.wasm` | Built artifact (staged by `zig build web-todo`). |
 | `sjon.wasm` | Kitchen-sink SJON wasm (staged by `zig build web-todo`). |
 

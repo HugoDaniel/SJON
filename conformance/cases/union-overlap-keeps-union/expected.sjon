@@ -1,0 +1,13 @@
+; Four collapses, for two reasons.
+;
+; `:value` reaches nothing — a string is neither the number arm nor the
+; vector arm — so there is no arm to report. `:both`, `:size` and `:shape`
+; each reach two, so reporting one would be a guess about which the author
+; meant. `:shape` is the sharp case: the two form kinds accept disjoint
+; HEADS, which looks like disjointness but is a refinement, and deciding it
+; would mean running the match. Reachability stops at the node shape.
+(diagnostics
+  (diagnostic :code union_no_branch_matched :path [k value])
+  (diagnostic :code union_no_branch_matched :path [k both])
+  (diagnostic :code union_no_branch_matched :path [k size])
+  (diagnostic :code union_no_branch_matched :path [k shape]))

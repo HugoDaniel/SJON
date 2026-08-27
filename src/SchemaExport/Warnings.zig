@@ -66,9 +66,27 @@ pub const Code = enum {
     /// vocabulary (e.g. `path`, `semver`); emitted under `x-sjon-format`
     /// only.
     string_format_unknown_to_jsonschema,
-    /// Aggregate-phase validators flagged a schema-level issue. The
-    /// exporter still produces output but flags the consumer.
+    /// Aggregate-phase validators flagged a schema-level issue, or a
+    /// value-type reference resolved to no value-kind. The exporter still
+    /// produces output but flags the consumer. (It used to carry a third,
+    /// unrelated job — the head-set catalog probe, which is not an
+    /// aggregate-phase validator at all — now `head_set_member_unresolved`.)
     aggregate_phase_error,
+    /// A `(head-set …)` member resolves to neither a slot-local form nor
+    /// a unique global one, so no document can ever put that head in the
+    /// slot. `.err` wherever a slot is in hand — the resolution is then
+    /// complete, and a dead branch in a manifest is worth an exit code —
+    /// and `.info` from `lowerPlugin`'s standalone value-kind pass, which
+    /// has no slot and therefore cannot know which locals are in scope. A
+    /// head-set kind is plugin-wide and reusable, so that is a property of
+    /// the slot, not of the kind.
+    head_set_member_unresolved,
+    /// A form declares a positional slot-local `(form …)` whose name is
+    /// outside the `:positional` head-set, so the narrowing rejects it
+    /// (`not_head_member`) before resolution ever reaches the local. Dead
+    /// code: the body is declared and unreachable. `.warn` — the manifest
+    /// loads and every other local still works.
+    local_form_outside_head_set,
     /// A discriminated form's variants were emitted as `allOf + oneOf +
     /// if/then` chain in JSON Schema and as a per-variant union of
     /// interfaces in TS. Informational because source-order ("variant

@@ -2,10 +2,10 @@
 ;
 ; Demonstrates:
 ;   * `:open` form (`scene`) accepting ad-hoc metadata keywords (:author).
-;   * Nested forms — canvas contains shapes, group contains shapes.
+;   * Nested forms:  canvas contains shapes, group contains shapes.
 ;   * Value-typed keywords: :radius is a `length`, :center / :origin are points.
 ;   * Safe expressions in value position: (* 2 1.5) for :radius, (+ 0 320) for :w.
-;   * Comments — both leading and trailing — round-trip via the lossless printer.
+;   * Comments (both leading and trailing) round-trip via the lossless printer.
 
 (scene :title "shapes demo" :author "ada"
 

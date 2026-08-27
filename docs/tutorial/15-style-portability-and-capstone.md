@@ -2,42 +2,136 @@
 
 ## Goal
 
-Combine authoring habits into one complete document: readable structure,
-correct value kinds, useful comments, raw string payloads, safe
-expressions, and portable head choices.
+Put all fourteen lessons into one document, and leave with habits that
+make a `.sjon` file predictable to a reader before any validator has
+looked at it.
 
-## Mental Model
+## Where the Camera Ended Up
 
-Good SJON is predictable before validation:
+We started in [Orientation](01-orientation.md) with this:
 
-- Put keys before positional children unless there is a strong local
-  reason not to.
-- Use symbols for schema-resolved options.
-- Use strings for labels and opaque text.
-- Use keyword flags only when they are really flags.
-- Use raw strings for large text payloads.
-- Keep expressions small and local.
-- Rely on plugin defaults only when the omitted value is genuinely the
-  value you want.
-- Qualify domain-specific heads when a document must travel across
-  multiple host setups.
-- Leave core expression heads bare.
+```sjon
+(camera :ortho :zoom 2)
+```
 
-Bare heads are fine for one known host:
+Every lesson since has pointed a new piece of machinery at it. Here it
+is carrying all of them at once. First the contract, in the summary
+shape from [Reading plugin schemas](09-reading-plugin-schemas.md):
+
+```text title="plugin summary"
+(camera ...)
+  discriminant: projection
+  :name       symbol required          ; declares a name others can reference
+  :projection projection required      ; member set [ortho perspective]
+  :delay      duration optional
+  :alpha      number optional
+  variant when ortho
+    :zoom     number required
+  variant when perspective
+    :fov      number optional, unit required deg
+
+(shot ...)
+  :through camera-name required
+
+projection:  symbol, members ortho | perspective
+duration:    number, unit required, allowed s | ms | b
+camera-name: symbol, cross-reference to (camera :name ...)
+```
+
+And then the document:
+
+```sjon
+;; Two cameras and a shot that names one of them.
+
+(camera :name wide :projection ortho
+  ; 2 keeps the whole 1920-wide plate on screen at 960 logical units.
+  :zoom 2
+  :delay 4b)
+
+(camera :name close :projection perspective
+  :fov 60deg
+  :alpha (let [phase (clamp t 0 1)]
+           (lerp 1 0 phase)))
+
+(shot :through wide)
+```
+
+Read what each line is doing, with the lesson each piece arrived in on
+the right, and you have the whole course:
+
+```
+:name wide          a symbol, because it is a name something resolves    (atoms, cross-refs)
+:projection ortho   a symbol, not a keyword, because of the pairing rule (atoms, pairing)
+:zoom 2             legal only under the ortho variant                   (variants)
+:delay 4b           a number carrying a unit the plugin required         (units, kinds)
+:fov 60deg          legal only under the perspective variant             (variants)
+:alpha (let …)      a bounded expression over a host-supplied `t`        (expressions, bindings)
+(shot :through wide) a cross-reference resolved from the document        (cross-refs)
+; and ;;            comments that survive a lossless round-trip          (comments)
+```
+
+Go back to any of them: [Atoms and intent](03-atoms-and-intent.md),
+[Numbers, units, vectors](04-numbers-units-vectors.md),
+[Forms and keyword pairing](05-forms-and-keyword-pairing.md),
+[Comments and strings](06-comments-and-strings.md),
+[Safe expressions](07-safe-expressions.md),
+[Bindings and control flow](08-bindings-and-control-flow.md),
+[Discriminated and exclusive forms](10-discriminated-and-exclusive-forms.md),
+[Value kinds: shapes](11-value-kinds-shapes.md), and
+[Cross-references](13-cross-references.md).
+Nothing there is new. That is the point: fourteen lessons of rules, and
+the file still reads as a file.
+
+## What Makes a Document Predictable
+
+The habits below are the ones I would defend in review. None of them
+changes what a document *means*; all of them change how long it takes
+somebody else to be sure of it.
+
+- **Keys before positional children**, unless there is a local reason
+  not to. [Your first document](02-first-document.md)'s argument holds: it keeps a
+  diff to one line.
+- **Symbols for schema-resolved options, strings for opaque text.** The
+  spelling tells the next reader whether anything is checking this
+  value.
+- **Keyword flags only when they really are flags.**
+  [Forms and keyword pairing](05-forms-and-keyword-pairing.md) exists because this is
+  the one that goes wrong quietly.
+- **Raw strings for large payloads**, escaped strings for prose.
+- **Expressions small and local.** When the arithmetic stops fitting on
+  a line or two, lift it into the host and pass data in.
+- **Lean on a default only when the default is the value you want.** An
+  omitted key means "whatever the schema says", which is fine right up
+  until the schema changes.
+- **Comments that explain intent, not syntax.** Nobody needs
+  `; the radius`. Everybody needs `; 2 keeps the whole plate on screen`.
+
+## Portability
+
+One more choice, and it depends on where a document is going to be read.
+A bare head is resolved against whatever plugin set the host loaded, so
+it is short, readable, and dependent on that set:
 
 ```sjon
 (circle :center [0 0] :radius 1)
 ```
 
-Qualified heads are more portable when plugin collisions are possible:
+A qualified head names the plugin, so it survives a host where two
+plugins both declare `circle`, which is the situation that produces
+`ambiguous_form`:
 
 ```sjon
 (shapes/circle :center [0 0] :radius 1)
 ```
 
+Use bare heads for a document that lives with one known host. Qualify
+domain heads when the document travels. Either way, leave core
+expression heads bare: `let`, `lerp`, and `clamp` are the substrate, not
+somebody's plugin, and qualifying them buys nothing.
+
 ## Worked Example
 
-A local-authoring version:
+The local-authoring version:
 
 ```sjon
 (scene :title "capstone" :author "ada" :draft false
@@ -59,7 +153,7 @@ A local-authoring version:
                      :fill evenodd))))
 ```
 
-A more portable version qualifies domain heads:
+The same document, qualified for travel:
 
 ```sjon
 (shapes/scene :title "capstone" :author "ada" :draft false
@@ -79,13 +173,12 @@ A more portable version qualifies domain heads:
                             :fill evenodd))))
 ```
 
-Core expression heads remain bare: `let`, `lerp`, and `clamp`.
+`let`, `lerp`, and `clamp` stayed bare in both.
 
 ## Exercises
 
-Style pass:
-
-Rewrite this for readability without changing meaning:
+Style pass. Rewrite this so a reviewer can check it at a glance, without
+changing what it means:
 
 ```sjon
 (scene (canvas (circle :radius 1 :center [0 0]) :bg "black" :h 240 :w 320) :title "demo")
@@ -99,9 +192,8 @@ One clean answer:
     (circle :center [0 0] :radius 1)))
 ```
 
-Portability pass:
-
-Qualify domain heads but leave core expression heads bare:
+Portability pass. Qualify the domain heads and leave the expression
+heads alone:
 
 ```sjon
 (scene :title "demo"
@@ -109,45 +201,45 @@ Qualify domain heads but leave core expression heads bare:
     (circle :center [160 120] :radius (clamp 32 0 64))))
 ```
 
-Portable form:
-
 ```sjon
 (shapes/scene :title "demo"
   (shapes/canvas :w (+ 300 20) :h 240
     (shapes/circle :center [160 120] :radius (clamp 32 0 64))))
 ```
 
-Raw payload pass:
-
-Add a raw string payload to a scene metadata slot or a host-specific
-form. Keep the opener on the same line as the first payload byte if you
-do not want a leading newline.
+Raw payload pass. Add a raw string to a metadata slot, and decide on
+purpose whether its first byte is a newline.
+[Comments and strings](06-comments-and-strings.md) has the rule; the point of the
+exercise is that you now choose rather than discover.
 
 ## Capstone
 
-Author a complete SJON document that includes:
+Write one complete document containing all of this:
 
 - One top-level scene-like root.
-- At least three nested levels.
-- One vector of points or repeated point-like values.
+- At least three levels of nesting.
+- One vector of points, or repeated point-like values.
 - One string label and one raw string payload.
 - One boolean or nil value.
 - One safe expression using `lerp` or `clamp`.
 - One `let`, `if`, or `cond`.
-- One form-valued slot such as a badge shape.
-- Comments that explain intent, not syntax.
+- One form-valued slot, such as a badge shape.
+- Comments that explain intent rather than syntax.
 
-Then intentionally break six things:
+Then break it on purpose, six times:
 
 1. Misspell one form head.
 2. Misspell one key.
 3. Duplicate one key.
-4. Use `:keyword` where a symbol value is expected.
-5. Use a disallowed form head in a head-set slot.
-6. Give a typed expression function an obviously wrong literal argument.
+4. Write `:keyword` where a symbol value belongs.
+5. Put a disallowed head in a head-set slot.
+6. Give a typed expression function an obviously wrong literal.
 
-Repair each break by naming the likely diagnostic category before
-changing the source.
+For each one, name the diagnostic you expect **before** you run
+anything, then run it and see whether you were right. Being wrong is the
+useful outcome: it means there is a layer in the stack from
+[Diagnostics-driven repair](14-diagnostics-driven-repair.md#read-the-code-not-the-sentence)
+you have not internalised yet, and now you know which.
 
 ## Mastery Check
 

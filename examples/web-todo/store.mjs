@@ -1,15 +1,15 @@
-// SjonStore — a Redux-shaped wrapper around an SJON document.
+// SjonStore: a Redux-shaped wrapper around an SJON document.
 //
 // State is held as canonical SJON source text. Every dispatch:
 //   1. asks `host.encoder.applyEdit(source, action)` for the candidate
 //      next text (immutable reducer);
 //   2. validates the candidate against the `todo-app` plugin manifest
-//      via `host.validateDocument` — if any error diagnostic comes
+//      via `host.validateDocument`. If any error diagnostic comes
 //      back, the previous state survives and the error rides into the
 //      cached projection under `__error`;
 //   3. on success, projects the new text through `to_json` (compact
 //      mode) and runs `host.hostEvalExpr` against the projected items
-//      to compute done/active counts — both are real `(count-done …)`
+//      to compute done/active counts; both are real `(count-done …)`
 //      / `(count-active …)` plugin expr-funcs dispatched through the
 //      sidecar `todo-plugin.wasm`.
 //
@@ -67,7 +67,7 @@ export async function createStore({ wasmUrl, manifestUrl, pluginWasmUrl, seed })
     // `host` layers resolver-aware validation (`validateDocument`) and
     // plugin-dispatching eval (`hostEvalExpr`) over the pure encoder.
     // The reducer / projection / persistence below go through
-    // `host.encoder` — the `SjonEncoder` (`applyEdit` / `toJson` /
+    // `host.encoder` is the `SjonEncoder` (`applyEdit` / `toJson` /
     // `toBinary` / `fromBinary`), which does no plugin resolution.
 
     // Hydrate from localStorage if available. Binary IR is the
@@ -194,7 +194,7 @@ export async function createStore({ wasmUrl, manifestUrl, pluginWasmUrl, seed })
  * canonical-printed (todo-app …) document, so it can be spliced
  * straight into a `(count-done …)` / `(count-active …)` expression
  * without re-stringifying through JSON. We rely on the canonical
- * printer's deterministic shape — `:items` followed by `[…]` — and
+ * printer's deterministic shape (`:items` followed by `[…]`) and
  * walk brackets to find the matching close. Returns the substring
  * including the brackets, or `null` if we can't locate it.
  *

@@ -1,0 +1,52 @@
+; The suppression rule, on the shape that forces it: set `:min-children 1
+; :max-children 1` over heads each `:max 1` — "exactly one, and not two
+; of the same". The two levels are redundant there by construction, so a
+; child can cross both ceilings at once, at the same span, with the same
+; path and the same code, separable only by prose.
+;
+; **The set yields to the head.** A child that already reported for its
+; own head does not report again for the set, and a head whose `:min`
+; went unmet suppresses the set's floor report. The per-head diagnostic
+; names the line to delete; the set's claim is implied by it, and not the
+; other way round.
+;
+; Two forms below, one per emit point. Without the rule this case
+; reports four diagnostics instead of two, which is the whole reason it
+; exists.
+(plugin :name gpu :version "1.0.0"
+  (value-kind :name bgl-resource
+    :underlying form
+    :heads (head-set :min-children 1 :max-children 1
+      (head :name buffer  :max 1)
+      (head :name sampler :max 1)))
+
+  ; A head with its own floor, so the *floor* side of the rule has
+  ; something to yield to as well.
+  (value-kind :name needs-two
+    :underlying form
+    :heads (head-set :min-children 2
+      (head :name buffer :min 1)
+      (head :name sampler)))
+
+  (form :name buffer
+    (key :name type :type symbol))
+  (form :name sampler
+    (key :name type :type symbol))
+
+  (form :name entry
+    :positional bgl-resource
+    (key :name binding :type number))
+
+  (form :name pair
+    :positional needs-two
+    (key :name binding :type number)))
+
+; Ceiling side: the second `(buffer …)` crosses `buffer`'s `:max 1` AND
+; the set's `:max-children 1`. One diagnostic, the per-head one.
+(entry :binding 0
+  (buffer :type uniform)
+  (buffer :type storage))
+
+; Floor side: empty, so `buffer`'s `:min 1` is unmet AND the set's
+; `:min-children 2` is unmet. One diagnostic, the per-head one.
+(pair :binding 1)

@@ -1,4 +1,4 @@
-; Slot-local forms — a `:type form` slot carrying its own inline form set.
+; Slot-local forms: a `:type form` slot carrying its own inline form set.
 ;
 ; The `canvas.:shape` slot declares local `circle` / `rect` / `group`. A form
 ; value there resolves local-first (a local shadows a same-named global), then
@@ -19,10 +19,10 @@
     (key :name shape :type form :optional false
       :description "Slot-local: circle | rect | group (plus any global form)."
       (form :name circle
-        :description "Slot-local circle — shadows the global circle."
+        :description "Slot-local circle; shadows the global circle."
         (key :name r :type number :optional false))
       (form :name rect
-        :description "Slot-local rectangle (local-only — invisible globally)."
+        :description "Slot-local rectangle (local only, invisible globally)."
         (key :name w :type number :optional false)
         (key :name h :type number :optional false))
       (form :name group
@@ -38,5 +38,5 @@
 
   ; The shadow target: a global `circle` requiring :radius (not :r).
   (form :name circle
-    :description "Global circle — shadowed by the local circle inside canvas.:shape."
+    :description "Global circle, shadowed by the local circle inside canvas.:shape."
     (key :name radius :type number :optional false)))

@@ -2,40 +2,58 @@
 
 ## Goal
 
-Read plugin documentation as an author: identify form heads, keys,
-required slots, optional slots, defaults, positional policy, open forms,
-value types, and host lowering metadata.
+Read a plugin's author-facing documentation and know, before you write a
+line, which heads exist, which keys they take, which are required, what
+happens when you leave one out, and where a positional child is allowed.
 
-## Mental Model
+## The Schema Is the Other Half of the Language
 
-A plugin tells the host what forms and expression functions exist. As an
-author, you only need the author-facing shape:
+[Orientation](01-orientation.md) through
+[Bindings and control flow](08-bindings-and-control-flow.md) covered
+everything SJON knows on its own, and you may have noticed how little
+that is. It knows
+`(camera :ortho :zoom 2)` is a form with a flag and a kvpair. It does
+not know that a camera has a zoom, that the zoom is a number, that two
+is a sensible one, or that there is any such thing as a camera.
 
-- **Form name** - the head you write: `(circle ...)`.
-- **Keys** - the `:key value` slots the form accepts.
-- **Required or optional** - whether omission is allowed.
-- **Default** - a literal value, or an expression form like `(pi)` /
-  `(* 2 16)`, that the host materializes when the key is omitted.
-  Expression defaults are type-checked at schema-build against the
-  key's type and can still fail at materialization time.
-- **Value type** - what kind of value each key expects.
-- **Positional policy** - whether nested positional children are allowed.
-- **Open form** - whether unknown keys are accepted.
-- **Lowering metadata** - whether a host-owned hook must lower the form
+All of that lives in a **plugin**, and the plugin is where the second
+half of the language is written. When the validator tells you `:zom` is
+not a key on `camera`, it is quoting the plugin. So learning to read one
+is not optional extra credit: it is how you find out what you are
+allowed to write, and it is how you understand the diagnostic when you
+write something else.
+
+You do not load a plugin. [Orientation](01-orientation.md) said that and
+it still holds: the host loads the set, and you write source that
+matches it.
+
+## What You Need Off a Schema
+
+Eight things, and a plugin's docs should give you all eight:
+
+- **Form name**: the head you write, as in `(circle …)`.
+- **Keys**: the `:key value` slots the form accepts.
+- **Required or optional**: whether leaving it out is an error.
+- **Default**: the value the host materialises when you omit the key.
+  It can be a literal, or an expression form such as `(pi)` or
+  `(* 2 16)`.
+- **Value type**: what kind of value each key expects, which is where
+  [Atoms and intent](03-atoms-and-intent.md)'s choice between symbol and string
+  finally gets decided for you.
+- **Positional policy**: whether nested positional children are allowed.
+- **Open form**: whether unknown keys are accepted.
+- **Lowering metadata**: whether a host-owned hook rewrites the form
   before final validation.
-
-Ordinary `.sjon` files do not import plugins. The host loads the plugin
-set; you write source that matches it.
 
 ## Worked Example
 
-The [`../../examples/plugins/README.md`](../../examples/plugins/README.md)
-file describes the reference `shapes` plugin. Its scene example lives in
+[`../../examples/plugins/README.md`](../../examples/plugins/README.md)
+documents the reference `shapes` plugin, and its scene lives in
 [`../../examples/plugins/shapes-scene.sjon`](../../examples/plugins/shapes-scene.sjon).
+Here is the whole vocabulary in the summary shape I will use for the
+rest of this course:
 
-Author-facing summary:
-
-```text
+```text title="plugin summary"
 (canvas ...)
   :w length optional
   :h length optional
@@ -68,12 +86,12 @@ Author-facing summary:
   positional: none
 ```
 
-The reference plugin keeps these keys optional so small examples can be
-written incrementally. Other plugin docs may mark keys required; when
-they do, omission is a validation error unless the key declares a
-default. A default makes the key effectively optional for validation,
-but you should still read what the default means before relying on it.
-The table is still enough to author meaningful source:
+Every key in the reference plugin is optional, which is a teaching
+choice rather than a normal one: it lets a small example be written a
+piece at a time. Real plugins mark keys required, and then leaving one
+out is a validation error unless the key declares a default.
+
+That table is already enough to author against:
 
 ```sjon
 (scene :title "demo" :author "ada"
@@ -83,19 +101,88 @@ The table is still enough to author meaningful source:
       (rect :origin [0 0] :size [320 4]))))
 ```
 
-Because `scene` is open, `:author "ada"` can be accepted as ad-hoc
-metadata. Because `circle` has positional `none`, a stray child under
-`circle` should be rejected.
+Two lines of that document are only legal because of what the table
+says. `:author "ada"` survives because `scene` is **open**. And nothing
+may be nested under `circle`, because `circle` says `positional: none`.
 
-Open forms are not "anything goes" forms. Openness treats a form as an
-extensible bag: unknown keys are accepted, missing-required-key checks
-are skipped, and closed-shape sweeps such as `positional: none`,
-discriminants, and exclusive groups do not run. Declared key types,
-duplicate keys, and typed positional children still matter.
+## What "Open" Actually Relaxes
+
+An open form is not an anything-goes form, and the difference matters
+because openness is the one switch that turns checks off. It treats the
+form as an extensible bag:
+
+```
+open: true turns OFF          open: true leaves ON
+  unknown-key errors            declared key types
+  missing-required-key checks   duplicate keys
+  positional: none sweeps       typed positional children
+  discriminant selection
+  exclusive-group checks
+```
+
+So `(scene :title 42)` is still wrong on an open `scene`, because
+`:title` is declared as a string and declared types always apply. The
+right way to read `open: true` is "this form accepts keys I have not
+heard of", not "this form accepts anything".
+
+## Author, Default, Effective
+
+Three words you need before the next drill, because plugin docs use them
+without defining them:
+
+- **Author value**: the kvpair the document actually writes.
+- **Default value**: the fallback the schema declares on the key.
+- **Effective value**: the author value if there is one, otherwise the
+  materialised default.
+
+The mechanism is worth a picture, because the obvious guess about it is
+wrong. Defaults are *not* spliced into your document:
+
+```
+your document (unchanged)          the overlay (computed alongside)
+
+(render-target :w 320 :h 240)      w  -> 320   authored
+                                   h  -> 240   authored
+                                   bg -> "black"  from :default
+```
+
+The host never rewrites the tree. It computes an effective view in a
+side table next to the validation result, so when you read a form back
+you walk the tree for what the author wrote and ask the overlay for
+anything omitted. Two consequences fall straight out of that split:
+
+- **Explicit values always win.** Writing `:bg "navy"` beats the
+  schema's `:default "black"` even when `"navy"` goes on to fail a type
+  check. A default never quietly overrides a choice you made.
+- **A default can pass schema-build and still fail later.** The
+  validator checks an expression default's declared `:result` against
+  the key's `:type` when the schema is built, but a head such as
+  `(nope)` declaring `:result number` with no implementation clears that
+  static check and then emits `default_eval_failed` when the host tries
+  to evaluate it. Read the diagnostics rather than assuming an omitted
+  key has a usable value.
+
+Effective values are not second-class once computed. A defaulted name
+can be indexed as a cross-reference target, a defaulted reference slot
+is checked like an authored one, a defaulted discriminant can select a
+variant, and a defaulted alternative can satisfy an exclusive group when
+no sibling was written.
+[Discriminated and exclusive forms](10-discriminated-and-exclusive-forms.md)
+and [Cross-references](13-cross-references.md) are where those three
+words turn up again.
+The author rule stays the one above: explicit wins, so writing one
+alternative of an exclusive group is never quietly contradicted by a
+sibling's default.
+
+Some schemas also carry **lowering metadata** for surface forms.
+Lowering is host-owned: the manifest names a hook contract, it does not
+contain rewrite code. A hook reads the same effective view you do,
+author values first and materialised defaults after, and the forms it
+produces are validated like any other data.
 
 ## Exercises
 
-Write one valid form for each shape:
+Write one valid form for each head in the table:
 
 ```sjon
 (canvas :w 320 :h 240 :bg "black")
@@ -106,7 +193,7 @@ Write one valid form for each shape:
 (badge :label "dot" :shape (circle :center [0 0] :radius 1))
 ```
 
-Now nest the forms according to positional policy:
+Now nest them, obeying the positional column:
 
 ```sjon
 (scene :title "demo"
@@ -116,15 +203,16 @@ Now nest the forms according to positional policy:
       (rect :origin [0 0] :size [320 4]))))
 ```
 
-Repair positional misuse:
+Repair the positional misuse:
 
 ```sjon
 (circle :center [160 120] :radius 32
   (rect :origin [0 0] :size [10 10]))
 ```
 
-If `circle` accepts no positional children, move the peer forms under a
-container:
+`circle` takes no positional children, so the rect is not a child of the
+circle, it is a peer. Give the two of them a container that accepts
+children:
 
 ```sjon
 (group :name "marks"
@@ -132,148 +220,101 @@ container:
   (rect :origin [0 0] :size [10 10]))
 ```
 
-Repair unknown key:
+Repair the unknown key:
 
-```sjon
+```sjon del={1}
 (canvas :width 320 :height 240)
 ```
 
-Use the schema's declared key names:
+The table says `:w` and `:h`. Guessing longer names is exactly the
+mistake the schema exists to catch:
 
-```sjon
+```sjon ins={1}
 (canvas :w 320 :h 240)
 ```
 
-Required-key reading drill:
+Required-key reading drill. Take our running camera, and read this as if
+a plugin's docs handed it to you:
 
-```text
-(render-target ...)
-  :w length required
-  :h length required
-  :bg string optional
+```text title="plugin summary"
+(camera ...)
+  :zoom number required
+  :near length required
+  :far  length default 1000
+  positional: none
 ```
 
 This source is missing a required key:
 
-```sjon
-(render-target :w 320 :bg "black")
+```sjon del={1}
+(camera :zoom 2 :far 500)
 ```
 
-Repair by adding `:h`:
+`:near` is required and has no default, so add it:
 
-```sjon
-(render-target :w 320 :h 240 :bg "black")
+```sjon ins={1}
+(camera :zoom 2 :near 0.1 :far 500)
 ```
 
-Default reading drill:
-
-```text
-(render-target ...)
-  :w length required
-  :h length required
-  :bg string default "black"
-```
-
-This source can validate because `:bg` has a default:
+And this one validates even though it names only two of the three keys:
 
 ```sjon
-(render-target :w 320 :h 240)
+(camera :zoom 2 :near 0.1)
 ```
 
-Defaults can be literals (`60`, `"red"`, `[0 0]`) or expression forms
-(`(pi)`, `(* 2 16)`, `(vec3 0 0 0)`). The validator checks that an
-expression default's declared `:result` is compatible with the key's
-`:type` at schema-build; opaque heads like `(let …)` defer to runtime.
+`:far` is omitted, has a default, and so has an effective value of
+`1000` that never appears in the file. Anything reading this camera
+sees a far plane; anything reading the *document* sees two keys. That is
+the overlay from the diagram above, and it is the single most useful
+thing to hold onto from this lesson.
 
-Three vocabulary words you need before reading a schema:
+## Exporting a Schema for Tools That Do Not Speak SJON
 
-- **Author value** — the kvpair the document explicitly writes.
-- **Default value** — the fallback the schema declares on the key.
-- **Effective value** — the author value if present, otherwise the
-  materialized default.
+Reading a schema is one job; handing it to a tool that has never heard
+of SJON is another. `sjon export-schema` turns a fully-resolved schema
+into JSON Schema 2020-12 plus a TypeScript `.d.ts`, both describing the
+canonical JSON shape that `sjon to-json` produces:
 
-The host never rewrites the document to insert defaults. The author
-tree stays as you wrote it; the host computes effective values in a
-side-table overlay alongside the validation result. When you read a
-form, you walk the tree for author input and ask the overlay for the
-effective value of any omitted defaulted key. Two consequences worth
-internalising:
-
-- Writing `:bg "navy"` always wins over the schema's `:default
-  "black"`, even if `"navy"` later fails a type check. The schema's
-  default never silently overrides an explicit author choice.
-- An expression default can succeed at schema-build (its declared
-  `:result` matches the key's `:type`) and still fail at
-  materialization time — for example, `(nope)` declared with
-  `:result number` but no `:impl` clears the static check and then
-  emits `default_eval_failed` when the host tries to evaluate it.
-  Read the diagnostics, not just the schema, before assuming an
-  omitted key has a usable effective value.
-
-Effective values also participate in production validation. A defaulted
-name can be indexed as a cross-reference target; a defaulted reference
-slot is checked like an authored reference; a defaulted discriminant can
-select a variant; and a defaulted exclusive-group alternative can
-satisfy the group when no sibling alternative was explicitly written.
-The important author rule stays simple: explicit values win. If you
-write one exclusive-group alternative, a sibling's default does not
-silently fight it.
-
-Some schemas also declare lowering metadata for surface forms. Lowering
-is host-owned: the manifest names a hook contract, but does not contain
-rewrite code. When a host runs a lowering hook, that hook reads the same
-effective view you do — author values first, then materialized
-defaults — and the final lowered forms are validated like normal data.
-
-## Section 7 — Exporting schemas for external tools
-
-Reading a schema is one thing; handing it to a tool that doesn't speak
-SJON is another. `sjon export-schema` converts a fully-resolved schema
-into JSON Schema 2020-12 + TypeScript `.d.ts` describing the canonical
-JSON shape of `sjon to-json` output. A one-liner:
-
-```
+```sh
 sjon export-schema mydoc.sjon --target=both --output=./gen
 ```
 
-Produces:
+- `./gen/schema.json` goes into Ajv 2020 or `python-jsonschema`, and
+  validates `sjon to-json --canonical` output without the SJON validator
+  being involved at all.
+- `./gen/types.d.ts` goes into a TypeScript project that reads
+  SJON-as-JSON, for autocomplete and structural checking.
 
-- `./gen/schema.json` — feed into Ajv 2020 / `python-jsonschema` to
-  validate `sjon to-json --canonical` output without involving the
-  SJON validator.
-- `./gen/types.d.ts` — import into a TypeScript project that reads
-  SJON-as-JSON to get autocomplete and basic structural checking.
-
-The exporter is **lossy** on constraints JSON Schema can't enforce
-(cross-references, expression evaluation, source-order rules,
-multi-key exclusive bundles). Every loss is recorded as an
-`x-sjon-export-warnings` entry at the top of the schema and as a
-matching `// WARNING:` header in the `.d.ts`. Discriminated forms
-become `allOf` of `if/then` chains; head-sets become `oneOf` of
-`$ref`s — plus, when a head declares a positional count, one
-`contains` / `minContains` / `maxContains` entry per bounded head in the
-`$children` array's `allOf`; exclusive groups become `oneOf`/`not:{allOf}`. See
-[`docs/SCHEMA_EXPORT.md`](../SCHEMA_EXPORT.md) for the full mapping
-table, lossiness budget, and worked examples for the `kit`, `audio`,
+The exporter is **lossy**, and deliberately so, because JSON Schema
+cannot express cross-references, expression evaluation, source-order
+rules, or multi-key exclusive bundles. Every loss is recorded rather
+than hidden: an `x-sjon-export-warnings` entry at the top of the schema,
+and a matching `// WARNING:` header in the `.d.ts`. What does survive
+gets translated: discriminated forms become an `allOf` of `if/then`
+chains, head-sets become a `oneOf` of `$ref`s (plus, when a head
+declares a positional count, one `contains` / `minContains` /
+`maxContains` entry per bounded head in the `$children` array's
+`allOf`), and exclusive groups become `oneOf` and `not:{allOf}`.
+[`docs/SCHEMA_EXPORT.md`](../SCHEMA_EXPORT.md) has the full mapping
+table, the lossiness budget, and worked examples for the `kit`, `audio`,
 `enum-rich`, and `kit-xor` fixtures.
 
-You can call the exporter from a host too — useful when your tooling
-pipeline already lives in Node, Rust, or a TypeScript codebase:
+The exporter is callable from a host too, which is what you want when
+the pipeline already lives somewhere else:
 
-- **Node** (`hosts/web/SjonHost.exportSchema`) — wraps the WASM
-  export; returns a parsed envelope with `aggregated.jsonSchema` /
-  `tsTypes` / `intermediate` as strings.
-- **Rust** (`sjon_host::SjonHost::export_schema`) — wasmtime-backed
-  binding; same envelope, serde-deserialized into
-  `ExportSchemaResult` with typed `ExportTarget` /
-  `ExportLayoutOption` knobs.
-- **TypeScript-parity** (`hosts/typescript-parity/src/Host.exportSchema`)
-  — native TS port, no WASM. Same input shape, structurally
+- **Node**, `hosts/web/SjonHost.exportSchema`, wraps the WASM export and
+  returns a parsed envelope with `aggregated.jsonSchema`, `tsTypes`, and
+  `intermediate` as strings.
+- **Rust**, `sjon_host::SjonHost::export_schema`, is wasmtime-backed and
+  gives the same envelope serde-deserialized into `ExportSchemaResult`,
+  with typed `ExportTarget` and `ExportLayoutOption` knobs.
+- **TypeScript-parity**, `hosts/typescript-parity/src/Host.exportSchema`,
+  is a native TS port with no WASM, same input shape and structurally
   equivalent output.
 
-See [`docs/SCHEMA_EXPORT.md` § Calling the
-exporter](../SCHEMA_EXPORT.md#calling-the-exporter) for working code
-samples per host.
+[`docs/SCHEMA_EXPORT.md` § Calling the
+exporter](../SCHEMA_EXPORT.md#calling-the-exporter) has working code per
+host.
 
 ## Mastery Check
 

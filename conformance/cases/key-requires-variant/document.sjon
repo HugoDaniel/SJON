@@ -9,7 +9,7 @@
 ; Note also the interaction with variant selection. `:index-format` cannot be
 ; present under `triangle-list` at all, so nothing depends on anything there
 ; and the dependency simply does not arise.
-(plugin :name gfx :version "1.0.0" :sjon "1.3"
+(plugin :name gfx :version "1.0.0"
   (value-kind :name topology-kind :underlying symbol
     :members (member-set :values [triangle-list triangle-strip]))
 

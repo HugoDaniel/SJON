@@ -1,0 +1,50 @@
+; variant-set fixture. A discriminated form whose variant is selected by
+; SEVERAL discriminant values: `(variant :when [a b] …)`.
+;
+; `:when` takes one symbol or a vector of symbols; selection is
+; membership. This is WebGPU's own rule for `GPUPrimitiveState`:
+; `stripIndexFormat` is read when the topology is a strip (and there
+; are two strips), and ignored for the three list topologies. Before
+; `:when` took a vector the rule could not be declared: one variant named
+; one value, and two identical single-value variants collided on the key
+; (`variant_key_collision`, rightly: two declarations of one slot can
+; drift). One declaration reaching several values is what keeps that
+; check exactly as strict as it is: a key still lives in one variant.
+;
+; A value selects at most one variant. The loader rejects an empty
+; `:when []`, a repeat within one list, and a value two variants both
+; list (all `invalid_manifest`), and the aggregate pass checks every
+; listed value against the discriminant's member set, once per value
+; (`unknown_discriminant_value` naming the offender, keeping the rest).
+;
+; The exporters do not multiply the branch: JSON Schema guards the one
+; `if/then` with `enum` where a single value uses `const`, and lists the
+; values under `x-sjon-discriminant`; TypeScript narrows the discriminant
+; brand to `Symbol_<"triangle-strip" | "line-strip">`; Markdown heads the
+; variant `:topology [triangle-strip line-strip]`, each spelled as the
+; manifest was, so a single-value variant's output is byte-for-byte what
+; it was before. The M2 schema-export demo regenerates
+; `variant-set.schema.json.golden`, `variant-set.d.ts.golden`,
+; `variant-set.md.golden`, and `variant-set.export.json.golden` against
+; this manifest.
+
+(plugin :name variant-set :version "1.0.0"
+  (value-kind :name topology
+    :description "How vertices assemble into primitives: the five WebGPU topologies."
+    :underlying symbol
+    :members (member-set :values [point-list line-list line-strip triangle-list triangle-strip]))
+
+  (value-kind :name index-format
+    :description "The index buffer element type."
+    :underlying symbol
+    :members (member-set :values [uint16 uint32]))
+
+  (form :name primitive
+    :description "Primitive assembly state. `:topology` selects the variant; the strip-index-format key exists only under a strip."
+    :discriminant topology
+    (key :name topology :type topology :optional true :default triangle-list
+      :description "Defaults to triangle-list, as GPUPrimitiveState does.")
+    (key :name cull :type symbol :optional true :description "none / front / back.")
+    (variant :when [triangle-strip line-strip]
+      (key :name strip-index-format :type index-format :optional true
+        :description "The primitive-restart index format; only meaningful when the topology is a strip."))))

@@ -22,6 +22,7 @@ const value_kinds = [_]Plugin.ValueKind{
     .{ .name = "member-name", .underlying = .union_of, .description = "A member spelling: a bare symbol, or a digit-leading spelling that lexes as a unit-bearing number (1d, 2d).", .union_of = .{ .alternatives = &.{ .{ .name = "symbol" }, .{ .name = "number" } } } },
     .{ .name = "member-name-list", .underlying = .vector, .description = "Vector of member spellings.", .vector = .{ .element = .{ .name = "member-name" } } },
     .{ .name = "form-target", .underlying = .union_of, .description = "A cross-ref target: one form head, or a vector of heads sharing one namespace.", .union_of = .{ .alternatives = &.{ .{ .name = "symbol" }, .{ .name = "symbol-list" } } } },
+    .{ .name = "variant-when", .underlying = .union_of, .description = "A variant gate: one discriminant value, or a vector of values that share the variant's key set.", .union_of = .{ .alternatives = &.{ .{ .name = "symbol" }, .{ .name = "symbol-list" } } } },
     .{ .name = "type-list", .underlying = .vector, .description = "Vector of type references (primitive names or value-kind names).", .vector = .{ .element = .{ .name = "type-ref" } } },
     .{ .name = "plugin-decl", .underlying = .form, .description = "A declaration sub-form inside (plugin …).", .heads = .{ .heads = &.{ .{ .name = "value-kind" }, .{ .name = "form" }, .{ .name = "expr-func" }, .{ .name = "cross-ref-provider" } } } },
     .{ .name = "key-decl", .underlying = .form, .description = "A (key …) | (variant …) | (exclusive-group …) sub-form.", .heads = .{ .heads = &.{ .{ .name = "key" }, .{ .name = "variant" }, .{ .name = "exclusive-group" } } } },
@@ -53,7 +54,7 @@ const value_kinds = [_]Plugin.ValueKind{
 const forms = [_]Plugin.FormSpec{
     .{ .name = "plugin", .description = "Top-level manifest form — wraps a plugin's declarations.", .positional = .{ .kind = .{ .name = "plugin-decl" } }, .keys = &.{
         .{ .name = "name", .value_type = .symbol, .optional = false },
-        .{ .name = "version", .value_type = .string, .optional = false },
+        .{ .name = "version", .value_type = .string },
         .{ .name = "description", .value_type = .string },
         .{ .name = "wasm-file", .value_type = .string },
         .{ .name = "wasm-sha256", .value_type = .{ .named = .{ .name = "sha256-hash" } } },
@@ -62,7 +63,6 @@ const forms = [_]Plugin.FormSpec{
         .{ .name = "homepage", .value_type = .string },
         .{ .name = "repository", .value_type = .string },
         .{ .name = "keywords", .value_type = .{ .named = .{ .name = "symbol-list" } } },
-        .{ .name = "sjon", .value_type = .string },
     } },
     .{ .name = "value-kind", .description = "Declares a named refinement of one underlying primitive.", .keys = &.{
         .{ .name = "name", .value_type = .symbol, .optional = false },
@@ -127,8 +127,10 @@ const forms = [_]Plugin.FormSpec{
         .{ .name = "link", .value_type = .string },
     } },
     .{ .name = "flag-set", .description = "Closed set of positional keyword flags for a form's :positional.", .positional = .{ .kind = .{ .name = "flag-decl" } } },
-    .{ .name = "head-set", .description = "Closed-set head-name pinning for :form underlyings, optionally with per-head counts.", .positional = .{ .kind = .{ .name = "head-decl" } }, .keys = &.{
+    .{ .name = "head-set", .description = "Closed-set head-name pinning for :form underlyings, optionally with per-head and whole-set counts.", .positional = .{ .kind = .{ .name = "head-decl" } }, .keys = &.{
         .{ .name = "names", .value_type = .{ .named = .{ .name = "symbol-list" } } },
+        .{ .name = "min-children", .value_type = .number },
+        .{ .name = "max-children", .value_type = .number },
     } },
     .{ .name = "head", .description = "One entry in a (head-set …). Carries optional positional-count bounds and editor metadata.", .keys = &.{
         .{ .name = "name", .value_type = .symbol, .optional = false },
@@ -155,8 +157,8 @@ const forms = [_]Plugin.FormSpec{
         .{ .name = "discriminant", .value_type = .symbol },
         .{ .name = "lowering", .value_type = .{ .named = .{ .name = "lowering-ref" } } },
     } },
-    .{ .name = "variant", .description = "Per-discriminant-value extra key set on a discriminated form.", .positional = .{ .kind = .{ .name = "key-decl" } }, .keys = &.{
-        .{ .name = "when", .value_type = .symbol, .optional = false },
+    .{ .name = "variant", .description = "Extra key set on a discriminated form, selected by one or several discriminant values.", .positional = .{ .kind = .{ .name = "key-decl" } }, .keys = &.{
+        .{ .name = "when", .value_type = .{ .named = .{ .name = "variant-when" } }, .optional = false },
     } },
     .{ .name = "key", .description = "One declared :keyword value slot on a form.", .positional = .{ .kind = .{ .name = "key-local-decl" } }, .keys = &.{
         .{ .name = "name", .value_type = .symbol, .optional = false },

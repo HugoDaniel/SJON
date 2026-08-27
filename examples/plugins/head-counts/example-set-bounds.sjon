@@ -1,0 +1,27 @@
+; The two shapes the *set* bound catches and no per-head bound can. Both
+; are errors, which is why this is a sibling of `example.sjon` rather than
+; part of it: the schema-export round-trip feeds `example.sjon` to ajv and
+; needs it clean.
+;
+;   sjon validate examples/plugins/head-counts/example-set-bounds.sjon \
+;     --plugin examples/plugins/head-counts/plugin.sjon
+
+; Two DIFFERENT resources. `buffer: at most 1` and `sampler: at most 1` are
+; both satisfied, since there is one of each. `:max-children 1` is the only
+; thing that refuses it.
+(bgl-entry :binding 0
+  (buffer  :type uniform)
+  (sampler :type filtering))
+
+; NO resource. Every per-head bound is a ceiling, so an empty child list
+; satisfies all of them; writing `(head :name buffer :min 1)` instead would
+; demand a *buffer* specifically, which is a different and wrong claim.
+; `:min-children 1` is "at least one of these, whichever".
+(bgl-entry :binding 1)
+
+; Two of the SAME. This one breaches both levels at once, and the validator
+; reports only the per-head diagnostic: it names the line to delete, and
+; the set's claim is implied by it. That is the suppression rule.
+(bgl-entry :binding 2
+  (buffer :type uniform)
+  (buffer :type storage))

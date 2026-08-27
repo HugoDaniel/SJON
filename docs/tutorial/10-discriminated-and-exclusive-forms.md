@@ -2,26 +2,37 @@
 
 ## Goal
 
-Read schemas for forms that re-use one head across multiple shapes
-(discriminated forms) or that allow exactly-one or at-most-one of a set
-of keys (exclusive groups). Predict how the validator partitions allowed
-keys based on a discriminant value, and use the right diagnostic codes
-to repair common breakage.
+Read a schema for a form that wears several shapes under one head, or
+that allows only one of a set of keys, and predict which key is legal
+where before the validator tells you.
 
-## Mental Model
+## One Head, Several Shapes
 
-Chapter 9 covered the basics of a form schema: keys, required vs
-optional, defaults, positional policy, and open forms. This chapter adds
-the three structural patterns plugins use to keep one head's vocabulary
-manageable: a single form name with several variant shapes selected by a
-discriminant key, forms that declare a bundle of keys as mutually
-exclusive, and keys that demand other keys. Each produces its own family
-of diagnostic codes, and the first two interact with the keyword-pairing
-rule from chapter 5 in ways worth knowing before you read the error
-messages.
+Our camera has been an orthographic camera since
+[Orientation](01-orientation.md), because `:ortho` was sitting in it as a
+flag. A real camera plugin has to handle the perspective case too, and
+there are three ways it could:
 
-The three are easy to confuse, so hold on to the distinction from the
-start — it is what tells you which part of the plugin to reread:
+```
+three heads              (ortho-camera :zoom 2)
+                         (perspective-camera :fov 60deg)
+
+one open head            (camera :zoom 2 :fov 60deg)     nothing checked
+
+one discriminated head   (camera :projection ortho :zoom 2)
+                         (camera :projection perspective :fov 60deg)
+```
+
+The first makes you remember three names for one concept, and makes
+every consumer switch on the head. The second gives up: `:fov` on an
+orthographic camera is meaningless and nothing says so. The third is
+what this lesson is about. One head, one key whose *value* decides
+which other keys exist, and a validator that will tell you when you have
+written `:fov` on a camera that has no field of view.
+
+There are three patterns like this, and they are easy to mix up, so here
+is the distinction first. It is the thing that tells you which part of a
+plugin's docs to reread:
 
 | Pattern | Constrains | Reads as |
 | --- | --- | --- |
@@ -29,18 +40,16 @@ start — it is what tells you which part of the plugin to reread:
 | Exclusive group | **how many** of a set may appear | "at most one of `:color`, `:gradient`" |
 | Key dependency | one key's presence demanding another's | "if `:offset`, then also `:buffer`" |
 
+Value, count, and implication. Every constraint you meet is one of the
+three, and I will come back to the question of how to tell them apart
+from prose once all three are on the table.
+
 ## Discriminated Forms
 
-Some forms reuse one head for several closely related shapes, gated by
-the value of one key. The schema doc will tell you two things about
-such a form:
+The gating key is called the **discriminant**, and each set of keys it
+gates is a **variant**. A plugin's summary tells you both:
 
-- **Discriminant** - the gating key, e.g. `discriminant: kind`.
-- **Variants** - one extra key set per allowed discriminant value.
-
-An author-facing summary for a discriminated form looks like:
-
-```text
+```text title="plugin summary"
 (track ...)
   discriminant: kind
   :name symbol required
@@ -57,91 +66,141 @@ An author-facing summary for a discriminated form looks like:
     :parent symbol optional
 ```
 
-Read it like this: `:name`, `:kind`, and `:from` are the **common keys**
-- always allowed. The variant blocks list **extra keys** that are only
-allowed when `:kind` matches the variant's `when` value. So
-`(track :kind kick :step 4)` is valid; `(track :kind kick :mesh logo)`
-is not - `:mesh` only exists under the `animation` variant.
+The keys before the first `variant` line are **common keys**, always
+allowed. Each variant block lists keys that exist *only* while the
+discriminant holds that value:
 
-Two author rules follow from the streaming validator:
+```
+                     :kind kick        :kind groove      :kind animation
+common   :name          allowed           allowed           allowed
+         :kind          allowed           allowed           allowed
+         :from          allowed           allowed           allowed
+variant  :step          allowed        unknown_key       unknown_key
+         :volume        allowed        unknown_key       unknown_key
+         :pattern    unknown_key          allowed        unknown_key
+         :swing      unknown_key          allowed        unknown_key
+         :mesh       unknown_key       unknown_key          allowed
+         :parent     unknown_key       unknown_key          allowed
+```
 
-1. **Set the discriminant first.** Write `:kind` before any
-   variant-only key. A variant key encountered before the
-   discriminant is set is reported as `unknown_key` with a hint
-   ("`:kind` must be set before variant-only keys"), even if the key
-   is valid for some variant.
-2. **The discriminant value must be in the closed member set.** The
-   schema documents which values are allowed (here:
-   `kick | groove | animation`). Any other symbol gets `not_member`
-   on the discriminant slot itself.
+So `(track :kind kick :step 4)` is fine and
+`(track :kind kick :mesh logo)` is not, because there is no `:mesh`
+column under `kick`.
 
-Worked example:
+Two author rules fall out of the validator being a streaming one, which
+is to say it reads your form left to right and decides as it goes.
+
+**Write the discriminant first.** The validator cannot know which column
+of that table it is in until it has seen `:kind`, so a variant-only key
+encountered before the discriminant is reported as `unknown_key`, with a
+hint saying `:kind` must be set before variant-only keys. The key may be
+perfectly valid for the variant you intended. The validator simply had
+not been told yet.
+
+**The discriminant value must be in the closed member set.** Here that
+is `kick | groove | animation`, and any other symbol gets `not_member`
+on the discriminant slot itself rather than a pile of confusing key
+errors.
+
+Both of these validate cleanly:
 
 ```sjon
 (track :kind kick :name k1 :step 4 :volume 0.7)
 (track :kind animation :name a1 :mesh logo :parent root)
 ```
 
-Both validate cleanly. The mental model: one form name, several
-shapes, picked by the discriminant.
+And here are the three ways it goes wrong. Ordering:
 
-Common breakage and repair:
-
-```sjon
+```sjon del={1}
 (track :name k1 :step 4 :kind kick)
 ```
 
-`:step` is encountered before `:kind`. Diagnostic: `unknown_key` on
-`:step` with the discriminant-first hint. Repair by ordering the
-discriminant first:
+`:step` arrives before `:kind`, so it is `unknown_key` with the
+discriminant-first hint. Put the discriminant first:
 
-```sjon
+```sjon ins={1}
 (track :kind kick :name k1 :step 4)
 ```
 
 Cross-variant misuse:
 
-```sjon
+```sjon del={1}
 (track :kind kick :name k1 :mesh logo)
 ```
 
-`:mesh` is an `animation` variant key. Diagnostic: `unknown_key` -
-`:mesh` is not allowed when `:kind = kick`. Repair either by changing
-the discriminant or by removing the wrong-variant key:
+`:mesh` is an `animation` key, so `unknown_key` again. Repair by
+changing whichever half you got wrong, the discriminant or the key:
 
-```sjon
+```sjon ins={1}
 (track :kind animation :name k1 :mesh logo)
 ```
 
-Discriminant absent:
+Discriminant missing entirely:
 
-```sjon
+```sjon del={1}
 (track :name k1 :from 0)
 ```
 
-Diagnostic: `missing_discriminant_key`. The validator skips the
-variant required-key sweep in this case - it does not pile on
-`missing_required_key :step` etc. Repair by adding `:kind`:
+This is `missing_discriminant_key`, and notice what does *not* happen:
+the validator skips the variant required-key sweep rather than piling
+`missing_required_key :step` on top. One root cause, one diagnostic.
 
-```sjon
+```sjon ins={1}
 (track :kind kick :name k1 :step 4 :from 0)
 ```
 
-## Exclusive Groups (Exactly-One-Of)
+### One Variant, Several Values
 
-Some forms accept several keys but only allow one of them at a time.
-A plugin can declare this directly with an **exclusive group** —
-the schema doc names the group, lists its alternatives, and tags it
-with one of two cardinalities:
+A variant's `when` can list several discriminant values, and the variant
+is selected when the value is any of them. The summary shows the set in
+brackets:
 
-- **`exactly-one`** — exactly one alternative must be present.
-  Omitting all and supplying more than one are both errors.
-- **`at-most-one`** — zero or one. Omission is fine; supplying two
-  or more is an error.
+```text title="plugin summary"
+(primitive ...)
+  discriminant: topology
+  :topology topology optional (default triangle-list)
+      ; member set [point-list line-list line-strip triangle-list triangle-strip]
+  variant when [triangle-strip line-strip]
+    :strip-index-format index-format optional
+```
 
-An author-facing summary looks like:
+Read it as: `:strip-index-format` exists under either strip topology and
+under no list topology, which is WebGPU's own rule, declared once
+instead of twice. So both of these are fine:
 
-```text
+```sjon
+(primitive :topology triangle-strip :strip-index-format uint16)
+(primitive :topology line-strip :strip-index-format uint16)
+```
+
+and this is `unknown_key` on `:strip-index-format`, because
+`triangle-list` selects no variant at all:
+
+```sjon
+(primitive :topology triangle-list :strip-index-format uint16)
+```
+
+Two things follow. A value selects **at most one** variant, so a plugin
+can never list the same value under two variants; if you see
+`variant when [a b]` and `variant when [b c]` in a summary, that plugin
+would have failed to load. And when a diagnostic names the active
+variant it quotes the plugin's own spelling, so you will read both
+``(variant `:when line-list`)`` and
+``(variant `:when [triangle-strip line-strip]`)``. The bracketed one is
+a multi-value variant, not a different construct.
+
+## Exclusive Groups
+
+The second pattern counts. A form accepts several keys but allows only
+one of them at a time, and the plugin says so directly with an
+**exclusive group**: a named set of alternatives tagged with one of two
+cardinalities.
+
+- **`exactly-one`**: one alternative must be present. Both zero and two
+  are errors.
+- **`at-most-one`**: zero or one. Omission is fine, two is not.
+
+```text title="plugin summary"
 (phrase ...)
   :name symbol required
   :notes vector optional
@@ -151,75 +210,70 @@ An author-facing summary looks like:
     alt :events
 ```
 
-Read it like this: `:notes` and `:events` are individually optional
-(either column may be absent on its own), but the group rule says
-that, taken together, exactly one must be present. The plugin is
-saying "a phrase is *either* a note list *or* an event list — never
-both, never neither."
-
-Worked example:
+`:notes` and `:events` are each individually optional, and the group
+says that taken together exactly one must be there. The plugin is
+saying "a phrase is either a note list or an event list, never both and
+never neither", which is a sentence that no per-key required flag can
+express.
 
 ```sjon
 (phrase :name p0 :notes [E4 G4 A4 G4])
 (phrase :name p1 :events [(n E4 0.5b) (rest 0.25b)])
 ```
 
-Both validate cleanly: each phrase carries one alternative.
+Both clean. Now the two failures, which have separate codes because
+they are separate mistakes:
 
-Common breakage and repair:
-
-```sjon
+```sjon del={1}
 (phrase :name p2 :notes [E4 G4] :events [(n A4 0.5b)])
 ```
 
-Diagnostic: `mutually_exclusive_keys_present`. The message lists
-the alternatives (`:notes | :events`). Repair by removing one:
+`mutually_exclusive_keys_present`, and the message lists the
+alternatives as `:notes | :events`. Drop one:
 
-```sjon
+```sjon ins={1}
 (phrase :name p2 :notes [E4 G4])
 ```
 
-Required-one-of missing:
-
-```sjon
+```sjon del={1}
 (phrase :name p3)
 ```
 
-Diagnostic: `required_one_of_missing`. The group's cardinality is
-`exactly-one`, so omitting both alternatives is rejected. Repair by
-adding one:
+`required_one_of_missing`, because the cardinality is `exactly-one`. Add
+one:
 
-```sjon
+```sjon ins={1}
 (phrase :name p3 :notes [E4])
 ```
 
-Two author rules follow:
+Two author rules again.
 
-1. **The group is the source of truth for presence, not the keys'
-   `optional` flag.** Even if the schema marks both keys
-   `optional false`, a key participating in an `exactly-one` group
-   will not produce its own `missing_required_key` — the group's
-   `required_one_of_missing` covers it. You see one diagnostic per
-   root cause, not two.
-2. **Open forms bypass the group sweep.** If the plugin marks the
-   form `open: true`, exclusive groups do not fire — not for "both
-   present" and not for "neither present." Open forms are bags, and
-   group cardinality is a closed-shape rule. If a plugin needs both
-   extension metadata and an exclusive group, make the governed form
-   closed and put free-form metadata in a separate open child form.
+**The group owns presence, not the keys' `optional` flags.** A key
+inside an `exactly-one` group never produces its own
+`missing_required_key`, because `required_one_of_missing` already covers
+that root cause. You get one diagnostic per problem, not two per key.
 
-A form may declare more than one exclusive group, and a variant
-inside a discriminated form may declare its own groups. The same
-key cannot appear in two groups on the same scope (the plugin
-author would get a manifest-load error). As an author you only
-need to read the group blocks the schema documents — the rules
-above apply identically per group.
+**Open forms bypass the group sweep entirely.** If the plugin marks the
+form `open: true`, exclusive groups do not fire, neither for "both
+present" nor for "neither present". That follows from the table in
+[Reading plugin schemas](09-reading-plugin-schemas.md#what-open-actually-relaxes):
+open forms are bags, and group cardinality is a closed-shape rule. A
+plugin that needs both extension metadata and an exclusive group should
+keep the governed form closed and put free-form metadata in a separate
+open child form.
 
-**Multi-key bundles.** An alternative may name *more than one* key;
-a multi-key bundle is "present" iff every key in the bundle is
-present on the form. The wire shape looks like:
+A form may declare more than one group, and a variant inside a
+discriminated form may declare its own. The same key cannot appear in
+two groups on the same scope, which is a manifest-load error for the
+plugin author rather than anything you will see. Per group, the rules
+above apply unchanged.
 
-```text
+### Multi-Key Bundles
+
+An alternative may name more than one key, and such a bundle counts as
+present only when *every* key in it is present:
+
+```text title="plugin summary"
 (route ...)
   :name symbol required
   :from symbol optional
@@ -230,35 +284,32 @@ present on the form. The wire shape looks like:
     alt :keys [at]         ; bundle: just `at`
 ```
 
-Read it as: `(route :from a :to b)` validates clean (the `[from to]`
-bundle is fully present); `(route :at c)` also validates clean. Both
-of these are errors:
-
-```sjon
-(route :name r0 :from a)              ; partial bundle — :to is missing
-(route :name r1 :from a :to b :at c)  ; both bundles present
+```
+(route :from a :to b)          [from to] present, [at] absent    -> clean
+(route :at c)                  [from to] absent,  [at] present   -> clean
+(route :from a)                [from to] PARTIAL                 -> exclusive_bundle_partial
+(route :from a :to b :at c)    both present                      -> mutually_exclusive_keys_present
 ```
 
-The first fires `exclusive_bundle_partial` because `:from` is set but
-`:to` is missing; the second fires
-`mutually_exclusive_keys_present`. Either way, the diagnostic message
-lists each bundle with `+`-joined keys (`:from+:to | :at`) so the
-source of the rule is obvious.
+The partial case gets its own code because it is its own mistake: you
+started an alternative and did not finish it, which is different from
+having chosen two. Either way the message lists each bundle with its
+keys joined by `+`, as `:from+:to | :at`, so the rule you tripped over
+is readable straight off the diagnostic.
 
-Multi-key bundles round-trip through `sjon export-schema` as
-`{required: [<bundle-keys>]}` entries inside `oneOf`. JSON Schema's
-`required` keyword is all-or-nothing per the standard, so partial
-bundles fail validation as `oneOf` mismatch — they don't produce a
-"partial bundle" message at the JSON Schema layer. Use the SJON
-validator (or the IR's warning list) for the more specific
-diagnostic.
+One caveat if you export the schema. Multi-key bundles round-trip
+through `sjon export-schema` as `{required: [<bundle-keys>]}` entries
+inside `oneOf`, and JSON Schema's `required` is all-or-nothing per the
+standard, so a partial bundle fails there as a plain `oneOf` mismatch.
+The specific "partial bundle" message exists only in the SJON validator
+and the IR's warning list.
 
 ## Key Dependencies
 
-The third pattern is the smallest. A key may declare that its presence
-demands other keys:
+The third pattern is the smallest one. A key can declare that its
+presence demands other keys:
 
-```text
+```text title="plugin summary"
 (entry ...)
   :binding number required
   :buffer  buffer-ref optional
@@ -266,8 +317,8 @@ demands other keys:
   :size    byte-count optional, requires :buffer
 ```
 
-The reason is usually that the dependent key is *measured from* the one
-it needs. A byte offset into no buffer describes nothing.
+The reason is almost always that the dependent key is *measured from*
+the one it needs. A byte offset into no buffer describes nothing.
 
 ```sjon
 (entry :binding 0 :buffer uniforms :offset 256)   ; satisfied
@@ -275,9 +326,10 @@ it needs. A byte offset into no buffer describes nothing.
 (entry :binding 0 :buffer uniforms)               ; the requirement alone
 ```
 
-All three are clean. That last one is worth pausing on, because the rule
-runs **one way only**: `:offset` drags `:buffer` in, never the reverse.
-Writing only the key that others depend on is always fine.
+All three are clean, and the third is the one worth pausing on, because
+the rule runs **one way only**. `:offset` drags `:buffer` in; `:buffer`
+never drags anything. Writing only the key that others depend on is
+always fine.
 
 The failure:
 
@@ -285,73 +337,71 @@ The failure:
 (entry :binding 0 :offset 256)
 ```
 
-Likely diagnostic: `dependent_key_missing`, naming `:buffer`.
+`dependent_key_missing`, naming `:buffer`.
 
-Two counting rules, and they pull in opposite directions. Write two
-dependent keys with the same requirement missing and you get **two**
-diagnostics, one per key that went unsatisfied:
+Two counting rules, and they point in opposite directions, which is
+deliberate. Two dependent keys with the same missing requirement give
+you **two** diagnostics, one per unsatisfied key:
 
 ```sjon
 (entry :binding 0 :offset 256 :size 64)   ; two diagnostics
 ```
 
-But a single key missing *several* of its requirements produces **one**
-diagnostic naming them all. A key with three unmet dependencies has one
-problem, not three.
+One key missing several of its requirements gives you **one**
+diagnostic naming them all. The principle underneath both is that a
+diagnostic is per *problem*, and a key with three unmet dependencies has
+one problem.
 
-### Choosing Between The Three
+## Which of the Three Is It?
 
-Now the whole point of putting these in one chapter. Given a constraint
-in prose, which pattern is it?
+This is the whole reason the three patterns share a lesson. Given a
+constraint written in prose, you can pick the mechanism off the wording
+alone:
 
-- If the rule names a specific **value** — "only when the mode is
-  `stream`" — it is a **variant**.
-- If the rule **counts** — "exactly one of", "at most one of" — it is an
+- The rule names a specific **value** ("only when the mode is
+  `stream`"): a **variant** on a discriminated form.
+- The rule **counts** ("exactly one of", "at most one of"): an
   **exclusive group**.
-- If the rule says "then also" — it is a **key dependency**.
+- The rule says "then also": a **key dependency**.
 
-They compose, too: a key can sit inside an exclusive group *and* carry a
-dependency. The one combination a plugin cannot declare is a key
-requiring another key in its own exclusive group — the group forbids
-exactly what the dependency demands, so the plugin is rejected at load
-rather than producing a form nobody can write correctly.
+They compose. A key can sit inside an exclusive group and carry a
+dependency at the same time. The one combination a plugin cannot
+declare is a key requiring another key in its own exclusive group, since
+the group forbids precisely what the dependency demands; that plugin is
+rejected at load rather than producing a form nobody can write
+correctly.
 
 ## Exercises
 
-Discriminated-form drill. Use the `(track ...)` summary above:
+Discriminated-form drill, using the `(track ...)` summary:
 
-```sjon
+```sjon del={1}
 (track :kind groove :name g1 :step 4)
 ```
 
-`:step` is a `kick`-variant key, not a `groove` key. Repair to a
-groove-variant shape:
+`:step` is a `kick` key. Repair into a groove shape:
 
-```sjon
+```sjon ins={1}
 (track :kind groove :name g1 :pattern straight :swing 0.1)
 ```
 
 Discriminant ordering drill:
 
-```sjon
+```sjon del={1}
 (track :name a1 :mesh logo :kind animation)
 ```
 
-Repair by writing the discriminant first:
-
-```sjon
+```sjon ins={1}
 (track :kind animation :name a1 :mesh logo)
 ```
 
-Exclusive-group drill. Use the `(phrase ...)` summary above:
+Exclusive-group drill, using the `(phrase ...)` summary:
 
-```sjon
+```sjon del={1}
 (phrase :name p4 :notes [E4 G4] :events [(n A4 0.5b)])
 ```
 
-Both alternatives are present. Repair by keeping one:
-
-```sjon
+```sjon ins={1}
 (phrase :name p4 :notes [E4 G4])
 ```
 
@@ -361,44 +411,42 @@ Empty-of-required drill:
 (phrase :name p5)
 ```
 
-Neither alternative is present and the group is `exactly-one`.
-Repair by supplying one:
-
 ```sjon
 (phrase :name p5 :events [(n A4 0.5b)])
 ```
 
-Key-dependency drill. Use the `(entry ...)` summary above:
+Key-dependency drill, using the `(entry ...)` summary:
 
-```sjon
+```sjon del={1}
 (entry :binding 0 :offset 256)
 ```
 
-`:offset` requires `:buffer`, which is absent. Two repairs, and which one
-is right depends on what you meant. Supply the requirement:
+`:offset` requires `:buffer`, which is absent. There are two repairs and
+which one is right depends on what you meant. Supply the requirement:
 
-```sjon
+```sjon ins={1}
 (entry :binding 0 :buffer uniforms :offset 256)
 ```
 
-Or drop the dependent key, if the offset was written by mistake:
+Or drop the dependent key, if the offset was a mistake:
 
 ```sjon
 (entry :binding 0)
 ```
 
 Pick-the-mechanism drill. Each of these is a constraint stated in prose.
-Which of the three patterns would a plugin use for it?
+Decide which of the three a plugin would use, before reading the
+answers:
 
 1. "A texture binding may declare a sampler or a comparison sampler, but
    not both."
 2. "`:mip-level-count` is only meaningful on a `2d` texture."
 3. "If you give `:array-layer`, you must also give `:array-layer-count`."
 
-Answers: (1) counts, so an **exclusive group** — `at-most-one`. (2)
-names a *value* of another key, so a **variant** on a discriminated form.
-(3) says "then also", so a **key dependency** — `:array-layer` declares
-`:requires [array-layer-count]`.
+The first counts, so it is an **exclusive group** with `at-most-one`.
+The second names a *value* of another key, so it is a **variant** on a
+discriminated form. The third says "then also", so it is a **key
+dependency**: `:array-layer` declares `:requires [array-layer-count]`.
 
 ## Mastery Check
 
@@ -406,6 +454,10 @@ names a *value* of another key, so a **variant** on a discriminated form.
   before variant-only keys?
 - What's the difference between a common key and a variant key on a
   discriminated form?
+- A summary shows `variant when [triangle-strip line-strip]`. Which
+  topologies accept that variant's keys, and what does
+  `(primitive :topology triangle-list :strip-index-format uint16)`
+  report?
 - For an `exactly-one` exclusive group, what's the difference between
   the diagnostic for "both present" and "neither present"?
 - Why doesn't a key inside an `exactly-one` group also trigger

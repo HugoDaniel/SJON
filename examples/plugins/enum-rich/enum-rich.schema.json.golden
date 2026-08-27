@@ -52,7 +52,7 @@
               "title": "Fatal",
               "description": "Unrecoverable; the host is about to halt.",
               "deprecated": true,
-              "x-sjon-deprecation-message": "Use `error` instead — fatality is signalled out-of-band by the exit code."
+              "x-sjon-deprecation-message": "Use `error` instead; fatality is signalled out-of-band by the exit code."
             }
           ]
         },

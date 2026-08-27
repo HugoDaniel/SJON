@@ -1,14 +1,14 @@
 ; Example usage of the `gpu` plugin. Each slot exercises one refinement
 ; with a value that validates clean:
 ;
-;   * :position — a 3-component attribute, inside the 2..4 arity window.
-;   * :tint     — 65535, the top of the u16 `:repr` range (integer, in range).
-;   * :line-width — 1.5, an f32 scalar (fractional is fine; floats aren't integers).
-;   * :base-vertex — 0, a u32 index (non-negative integer).
-;   * :lod-bias — 0.5, a BARE number. Writing `0.5f` here would trip
-;     `unit_forbidden` (the `:reject` unit shape) — the very `1.0f -> 0`
+;   * :position:  a 3-component attribute, inside the 2..4 arity window.
+;   * :tint:      65535, the top of the u16 `:repr` range (integer, in range).
+;   * :line-width:  1.5, an f32 scalar (fractional is fine; floats aren't integers).
+;   * :base-vertex:  0, a u32 index (non-negative integer).
+;   * :lod-bias:  0.5, a BARE number. Writing `0.5f` here would trip
+;     `unit_forbidden` (the `:reject` unit shape): the very `1.0f -> 0`
 ;     defect the slot exists to catch.
-;   * :write-mask / :sample-mask — hex integers. `0xFFFFFFFF` is u32.max
+;   * :write-mask / :sample-mask:  hex integers. `0xFFFFFFFF` is u32.max
 ;     exactly, so it sits on the top edge of the `:repr u32` range; one more
 ;     (`0x1_0000_0000`) would be `repr_out_of_range`. Underscores group hex
 ;     digits the same way they group decimal ones, and case is free on both

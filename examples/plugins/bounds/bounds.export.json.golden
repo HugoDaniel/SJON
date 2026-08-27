@@ -246,7 +246,7 @@
         },
         {
           "name": "aligned-offset",
-          "description": "Byte offset aligned to a 256-byte boundary — the constraint a range and an integrality flag cannot express between them.",
+          "description": "Byte offset aligned to a 256-byte boundary, the constraint a range and an integrality flag cannot express between them.",
           "shape": {
             "kind": "number_bounded",
             "bounds": {
@@ -308,7 +308,7 @@
         },
         {
           "name": "version-tag",
-          "description": "Semver string — `x-sjon-format` only (not JSON-Schema standard).",
+          "description": "Semver string, `x-sjon-format` only (not JSON-Schema standard).",
           "shape": {
             "kind": "string_with_bounds",
             "min_len": null,
@@ -319,7 +319,7 @@
         },
         {
           "name": "file-path",
-          "description": "Path string — `x-sjon-format` only.",
+          "description": "Path string, `x-sjon-format` only.",
           "shape": {
             "kind": "string_with_bounds",
             "min_len": null,

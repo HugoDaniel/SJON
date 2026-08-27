@@ -212,12 +212,12 @@ export type DiagnosticCode =
   // or vector-element slot carries its bounds inertly.
   | 'positional_too_many'
   | 'positional_missing'
-  // v1.1 manifest-metadata diagnostics. All emitted by the manifest
-  // loader; mirror src/ManifestLoader.zig + src/Ast.zig.
+  // Manifest-metadata diagnostics. All emitted by the manifest loader;
+  // mirror src/ManifestLoader.zig + src/Ast.zig.
   // `plugin_wasm_self_hash_malformed` is err-severity (well-formedness);
   // `license_unrecognized` and `too_many_keywords` are advisory warnings;
-  // `sjon_format_unsupported` is err-severity (host refuses to validate
-  // against a manifest declaring a higher format version).
+  // `sjon_format_unsupported` is RETIRED — kept in the wire-stable list,
+  // never emitted (the manifest format version it guarded was removed).
   | 'plugin_wasm_self_hash_malformed'
   | 'license_unrecognized'
   | 'too_many_keywords'

@@ -61,7 +61,7 @@ test('re-pulling with a matching previousResultId yields an unchanged report', a
 // to one even if it had it — this is the browser's permanent condition, not
 // a property of this manifest.
 const PROVIDER_SCHEMA = [
-  '(plugin :name glsl :version "1.0.0" :sjon "1.2"',
+  '(plugin :name glsl :version "1.0.0"',
   '  (cross-ref-provider :name lines)',
   '  (form :name shader',
   '    (key :name name :type symbol :optional false)',

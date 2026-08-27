@@ -37,7 +37,7 @@ import type {
   ModelUnitShape,
   ModelValueShape,
 } from './model.ts';
-import { isBoundedRef } from './model.ts';
+import { anyBoundedInSet, isBoundedRef, isBoundedSet, refBody } from './model.ts';
 import type { Warning } from './warnings.ts';
 import type { Repr } from '../plugin.ts';
 import { assertNever } from '../internal.ts';
@@ -166,6 +166,10 @@ function collectCrossPluginRefsFromShape(
   switch (shape.kind) {
     case 'form_heads':
       for (const head of shape.heads) {
+        // Only a global head names a type in another file. A local body is
+        // emitted inline (same as `form_locals`, which this walk also
+        // skips) and an unresolved head names nothing at all.
+        if (refBody(head).kind !== 'global') continue;
         if (!head.plugin || head.plugin === thisPlugin) continue;
         if (!seen.has(head.plugin)) seen.set(head.plugin, new Set());
         seen.get(head.plugin)!.add(head.name);
@@ -223,24 +227,49 @@ function writeDiscriminatedFormType(
   ctx: EmitContext,
 ): string {
   let out = `export type ${formTypeName(plugin.name, form.name)} =`;
-  for (const v of disc.variants) {
-    out += '\n  | {\n';
-    out += `      $form: "${form.name}";\n`;
-    out += `      $ns: "${plugin.name}";\n`;
+  const branch = (when: readonly string[], overlay: readonly ModelKey[]): string => {
+    let b = '\n  | {\n';
+    b += `      $form: "${form.name}";\n`;
+    b += `      $ns: "${plugin.name}";\n`;
     for (const k of sortKeys(form.keys)) {
-      out +=
+      b +=
         k.name === disc.keyName
-          ? writeDiscriminantKey(k, v.when, '      ')
+          ? writeDiscriminantKey(k, when, '      ')
           : writeKey(k, '      ', ctx);
     }
-    for (const vk of sortKeys(v.keys)) {
-      out += writeKey(vk, '      ', ctx);
+    for (const vk of sortKeys(overlay)) {
+      b += writeKey(vk, '      ', ctx);
     }
-    out += writeChildren(form, '      ', ctx);
-    if (form.open) out += '      [key: string]: unknown;\n';
-    out += '    }';
-  }
+    b += writeChildren(form, '      ', ctx);
+    if (form.open) b += '      [key: string]: unknown;\n';
+    b += '    }';
+    return b;
+  };
+  for (const v of disc.variants) out += branch(v.when, v.keys);
+  // Members no variant selects get one residual branch — common keys only,
+  // discriminant narrowed to exactly those members — so the union covers the
+  // whole member set the validator accepts. Mirrors Zig.
+  const residual = residualMembers(form, disc);
+  if (residual.length > 0) out += branch(residual, []);
   return `${out};\n\n`;
+}
+
+/** Every member of the discriminant's set that no variant's `:when` lists —
+ *  the values that validate with common keys only. Empty when the variants
+ *  cover the set (or the discriminant key is not a symbol member-set, which
+ *  `discriminant_not_closed_enum` keeps from reaching export). Mirrors
+ *  `memberNameAt` + `variantCovers` in `src/SchemaExport/TsTypes.zig`. */
+function residualMembers(form: ModelForm, disc: ModelDiscriminator): string[] {
+  const key = form.keys.find((k) => k.name === disc.keyName);
+  if (!key) return [];
+  const shape = key.value;
+  const names =
+    shape.kind === 'symbol_members'
+      ? shape.members
+      : shape.kind === 'symbol_members_rich'
+        ? shape.members.map((m) => m.name)
+        : [];
+  return names.filter((n) => !disc.variants.some((v) => v.when.includes(n)));
 }
 
 function sortKeys(keys: readonly ModelKey[]): ModelKey[] {
@@ -260,14 +289,25 @@ function sortKeys(keys: readonly ModelKey[]): ModelKey[] {
  */
 function childCountsDoc(shape: ModelValueShape, indent: string): string {
   if (shape.kind !== 'form_heads') return '';
-  const bounded = shape.heads.filter(isBoundedRef);
-  if (bounded.length === 0) return '';
-  const parts = bounded.map((h) => {
-    const min = h.min ?? 0;
-    if (h.max === undefined) return `${h.name}: ${min}..`;
-    return h.max === min ? `${h.name}: ${h.max}` : `${h.name}: ${min}..${h.max}`;
-  });
+  if (!anyBoundedInSet(shape)) return '';
+  const parts = shape.heads
+    .filter(isBoundedRef)
+    .map((h) => `${h.name}: ${countRange(h.min ?? 0, h.max)}`);
+  // The set's own count, named `any of the set` rather than by a head — a
+  // reader has to be able to tell "at most one buffer" from "at most one
+  // resource of any kind" when both sit on one line. Mirrors Zig.
+  if (isBoundedSet(shape)) {
+    parts.push(`any of the set: ${countRange(shape.minChildren ?? 0, shape.maxChildren)}`);
+  }
   return `${indent}/** Positional counts (not expressible in TS): ${parts.join('; ')} */\n`;
+}
+
+/** `2` for an exact count, `0..1` for a range, `1..` for a floor with no
+ *  ceiling. Shared by the per-head entries and the set's so the two read
+ *  alike on one line. Mirrors Zig's `writeCountRange`. */
+function countRange(min: number, max: number | undefined): string {
+  if (max === undefined) return `${min}..`;
+  return max === min ? `${max}` : `${min}..${max}`;
 }
 
 /** The `$children` line for a form's positional slot, shared by the interface
@@ -290,11 +330,18 @@ function writeChildren(form: ModelForm, indent: string, ctx: EmitContext): strin
 }
 
 /** The discriminant key inside a variant branch: narrowed to that branch's
- *  `:when` rather than the whole member set, which is what makes the union
- *  discriminate. */
-function writeDiscriminantKey(key: ModelKey, when: string, indent: string): string {
+ *  `:when` values rather than the whole member set, which is what makes the
+ *  union discriminate. */
+function writeDiscriminantKey(key: ModelKey, when: readonly string[], indent: string): string {
   const doc = key.description ? `${indent}/** ${key.description} */\n` : '';
-  return `${doc}${indent}${escapeIdentifier(key.name)}: Symbol_<"${when}">;\n`;
+  return `${doc}${indent}${escapeIdentifier(key.name)}: ${whenBrand(when)};\n`;
+}
+
+/** `Symbol_<"a">` for a one-value variant, `Symbol_<"a" | "b">` for a
+ *  multi-value one — the brand's `S extends string` parameter takes a literal
+ *  union, so one field spells the whole set. Mirrors `writeWhenBrand`. */
+function whenBrand(when: readonly string[]): string {
+  return `Symbol_<${when.map((w) => `"${w}"`).join(' | ')}>`;
 }
 
 function writeFormDoc(form: ModelForm): string {
@@ -337,21 +384,25 @@ function writeInlineLocalForm(form: ModelForm, ctx: EmitContext): string {
   const sortedKeys = [...form.keys].sort((a, b) => a.name.localeCompare(b.name));
   if (form.discriminator) {
     const disc = form.discriminator;
-    const variants = disc.variants.map((v) => {
+    const branch = (when: readonly string[], overlay: readonly ModelKey[]): string => {
       let s = `{ $form: "${form.name}"; $ns?: string;`;
       for (const k of sortedKeys) {
         s +=
           k.name === disc.keyName
-            ? ` ${escapeIdentifier(k.name)}: Symbol_<"${v.when}">;`
+            ? ` ${escapeIdentifier(k.name)}: ${whenBrand(when)};`
             : ` ${writeInlineLocalKey(k, ctx)}`;
       }
-      const sortedVKeys = [...v.keys].sort((a, b) => a.name.localeCompare(b.name));
+      const sortedVKeys = [...overlay].sort((a, b) => a.name.localeCompare(b.name));
       for (const vk of sortedVKeys) s += ` ${writeInlineLocalKey(vk, ctx)}`;
       if (form.open) s += ' [key: string]: unknown;';
       s += ' }';
       return s;
-    });
-    return `(${variants.join(' | ')})`;
+    };
+    const branches = disc.variants.map((v) => branch(v.when, v.keys));
+    // The residual branch, as in `writeDiscriminatedFormType`.
+    const residual = residualMembers(form, disc);
+    if (residual.length > 0) branches.push(branch(residual, []));
+    return `(${branches.join(' | ')})`;
   }
   let s = `{ $form: "${form.name}"; $ns?: string;`;
   for (const k of sortedKeys) s += ` ${writeInlineLocalKey(k, ctx)}`;
@@ -503,11 +554,15 @@ function writeShape(shape: ModelValueShape, ctx: EmitContext): string {
     case 'form_any':
       return '{ readonly $form: string }';
     case 'form_heads': {
+      // A slot-local head has no global type to name, so it emits the same
+      // inline object literal the `form_locals` arm emits — the local's
+      // keys are what a consumer wants IntelliSense on.
       const branches = shape.heads.map((head) => {
-        const ident = head.plugin
+        const body = refBody(head);
+        if (body.kind === 'local') return writeInlineLocalForm(body.form, ctx);
+        return head.plugin
           ? formTypeName(head.plugin, head.name)
           : `{ readonly $form: "${head.name}" }`;
-        return ident;
       });
       return branches.length > 0 ? branches.join(' | ') : 'never';
     }

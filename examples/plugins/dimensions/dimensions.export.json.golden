@@ -75,7 +75,7 @@
                   },
                   {
                     "name": "2d-array",
-                    "description": "A hyphenated digit-leading spelling — one token only because a `-` may join two letter runs inside a unit.",
+                    "description": "A hyphenated digit-leading spelling, one token only because a `-` may join two letter runs inside a unit.",
                     "numeric_spelling": {
                       "magnitude": 2,
                       "unit": "d-array"
@@ -133,7 +133,7 @@
         },
         {
           "name": "view-dimension",
-          "description": "GPUTextureViewDimension — digit-leading and ordinary members in one set.",
+          "description": "GPUTextureViewDimension: digit-leading and ordinary members in one set.",
           "shape": {
             "kind": "symbol_members_rich",
             "members": [
@@ -155,7 +155,7 @@
               },
               {
                 "name": "2d-array",
-                "description": "A hyphenated digit-leading spelling — one token only because a `-` may join two letter runs inside a unit.",
+                "description": "A hyphenated digit-leading spelling, one token only because a `-` may join two letter runs inside a unit.",
                 "numeric_spelling": {
                   "magnitude": 2,
                   "unit": "d-array"

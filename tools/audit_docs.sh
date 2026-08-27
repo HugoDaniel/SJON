@@ -10,6 +10,13 @@
 #      `Binary.wire_version` (the literal lives in src/BinaryFormat.zig).
 #   2. docs/DESIGN.md must mention the current wire version, and must not
 #      carry a stale "Wire version stays 0xNN" claim for a *different* NN.
+#   2b. docs/LANGUAGE.md states the wire version three times — the §10.1
+#      header table `version` row, the §10.3 "current wire version is
+#      `0xNN`" sentence, and the glossary's "Wire version is currently
+#      `0xNN`" — and each must equal `Binary.wire_version`. Added after
+#      the spec sat a full bump behind (0x04 while the code was 0x05)
+#      with README and DESIGN both green: the audit covered the two
+#      files that had drifted the previous time and not the third.
 #   3. The "<n> fixtures" (README) and "<n> corpus cases" (CLAUDE.md)
 #      counts must equal the live conformance case count — dirs under
 #      conformance/cases/ carrying schema.sjon or document.sjon, the same
@@ -98,6 +105,26 @@ if [ -n "$stale" ]; then
 else
     pass "docs/DESIGN.md carries no stale 'Wire version stays' claim"
 fi
+
+# --- check 2b: LANGUAGE.md's three wire-version statements ---
+# Each anchor must be present (a vanished anchor is a failure, not a pass)
+# and must carry the current byte. `check_wire_anchor FILE LABEL REGEX`
+# greps REGEX, pulls the first 0xNN out of the match, and compares.
+check_wire_anchor() {
+    local file="$1" label="$2" regex="$3"
+    local hex
+    hex=$(grep -oiE "$regex" "$file" | grep -oiE '0x[0-9A-Fa-f]+' | head -1 | tr 'A-F' 'a-f')
+    if [ -z "$hex" ]; then
+        bad "$file has no $label anchor (expected 0xNN == $wire)"
+    elif [ "$hex" = "$wire" ]; then
+        pass "$file $label = $wire"
+    else
+        bad "$file $label is '$hex', expected '$wire' (BinaryFormat.zig wire_version)"
+    fi
+}
+check_wire_anchor docs/LANGUAGE.md 'wire-table version row' '^\| `version` \| 1 B \| `0x[0-9A-Fa-f]+` \|'
+check_wire_anchor docs/LANGUAGE.md '"current wire version is" sentence' 'current wire version is `0x[0-9A-Fa-f]+`'
+check_wire_anchor docs/LANGUAGE.md 'glossary "Wire version is currently"' 'version is currently `0x[0-9A-Fa-f]+`'
 
 # --- check 3: corpus counts (README fixtures, CLAUDE corpus cases) ---
 # Reconcile every `<n> <phrase>` occurrence in $file against $want (defaults

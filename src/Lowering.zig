@@ -588,30 +588,58 @@ pub fn runLoweringPassBudgeted(
     // with an explicit worklist (frame-stack discipline, matching the
     // other walkers). Children are pushed in reverse so siblings pop
     // left-to-right, preserving the document order the recursive walk
-    // produced.
-    var work: std.ArrayList(Ast.NodeIndex) = .empty;
+    // produced. Each frame carries the slot-local registry its enclosing
+    // slot puts in scope, so a head resolves **local-first** exactly as
+    // the validator resolves it (`Validator.validateFormHead` step 0): a
+    // local body is never a hook, so a local head that shadows a global
+    // *lowerable* form must not fire the global's hook — the runtime half
+    // of the S7 rule ("a local shadows a same-named global").
+    var work: std.ArrayList(WorkFrame) = .empty;
     defer work.deinit(gpa);
+    // Per-form scratch, reused across the walk: the `KeySpec` each kvpair
+    // child is accepted under (`matchKvpairKeys`), which is what decides
+    // the registry a kvpair-value form child takes.
+    var matched: std.ArrayList(?*const Plugin.KeySpec) = .empty;
+    defer matched.deinit(gpa);
     var seed = data_forest.len;
     while (seed > 0) {
         seed -= 1;
-        try work.append(gpa, data_forest[seed]);
+        try work.append(gpa, .{ .idx = data_forest[seed] });
     }
 
-    while (work.pop()) |idx| {
+    while (work.pop()) |fr| {
+        const idx = fr.idx;
         if (tree.tagOf(idx) != .form) continue;
         const hdr = tree.formHeader(idx);
         // Parser-recovery synthetic form — skip, mirroring materializeDefaults.
         if (hdr.head.len == 0) continue;
 
-        const hit = schema.lookupForm(hdr.head, hdr.namespace);
+        // Local-first: a bare head in a slot with a registry resolves to the
+        // local body when one matches; a qualified head bypasses locals. A
+        // local never lowers (`FormSpec.lowering` is null on every local —
+        // loader-rejected, `Schema.init`-asserted), so only a global hit can
+        // fire a hook.
+        const local_hit = matchLocalHead(fr.local_registry, hdr);
+        var spec: ?*const Plugin.FormSpec = local_hit;
         var parent_lowerable = false;
-        if (hit == .found) {
-            const form_spec = hit.found.form;
-            if (form_spec.lowering) |*low| {
-                parent_lowerable = true;
-                try lowerOneForm(gpa, arena, tree, idx, hdr, form_spec, low, schema, view, registry, axes, env, &invocations, &diags, emitted, budget);
+        if (local_hit == null) {
+            const hit = schema.lookupForm(hdr.head, hdr.namespace);
+            if (hit == .found) {
+                const form_spec = hit.found.form;
+                spec = form_spec;
+                if (form_spec.lowering) |*low| {
+                    parent_lowerable = true;
+                    try lowerOneForm(gpa, arena, tree, idx, hdr, form_spec, low, schema, view, registry, axes, env, &invocations, &diags, emitted, budget);
+                }
             }
         }
+
+        // Which key each kvpair child is accepted under — the same rule the
+        // validator's key-typing pass applies, so a variant key's locals are
+        // in scope only while its variant is active.
+        matched.clearRetainingCapacity();
+        try matched.appendNTimes(gpa, null, hdr.children.len);
+        if (spec) |sp| matchKvpairKeys(sp, tree, idx, hdr, materialized, axes, matched.items);
 
         // A lowerable child of a lowerable parent is the one self-
         // contradictory container setup (`:lowering` on both): the
@@ -629,18 +657,22 @@ pub fn runLoweringPassBudgeted(
         // from the reverse push below: folding the check into that loop
         // would emit siblings last-to-first.
         if (parent_lowerable) {
-            for (hdr.children) |child| {
-                if (tree.childForm(child)) |cf| try checkNestedLowerable(gpa, tree, cf, schema, &diags);
+            for (hdr.children, 0..) |child, ci| {
+                if (tree.childForm(child)) |cf| try checkNestedLowerable(gpa, tree, cf, childLocalRegistry(spec, tree, child, matched.items[ci]), schema, &diags);
             }
         }
 
         // Descend into form-shaped children so nested sugar forms also
         // lower. Push in reverse so the worklist pops them in document
-        // order (matches the prior recursive descent).
+        // order (matches the prior recursive descent). Each child frame
+        // takes the registry this form's spec puts in scope for it.
         var c = hdr.children.len;
         while (c > 0) {
             c -= 1;
-            if (tree.childForm(hdr.children[c])) |cf| try work.append(gpa, cf);
+            const child = hdr.children[c];
+            if (tree.childForm(child)) |cf| {
+                try work.append(gpa, .{ .idx = cf, .local_registry = childLocalRegistry(spec, tree, child, matched.items[c]) });
+            }
         }
     }
 
@@ -650,23 +682,155 @@ pub fn runLoweringPassBudgeted(
     };
 }
 
+/// One worklist frame of `runLoweringPassBudgeted`: a form node plus the
+/// slot-local registry its enclosing slot puts in scope for its head — the
+/// parent's `FormSpec.local_forms` for a positional form child, the matched
+/// key's `KeySpec.local_forms` for a kvpair-value form, null otherwise
+/// (`childLocalRegistry`). Mirrors the validator's frame fields so the two
+/// walkers resolve a head the same way.
+const WorkFrame = struct {
+    idx: Ast.NodeIndex,
+    local_registry: ?[]const Plugin.FormSpec = null,
+};
+
+/// The local body a form head resolves to under `registry`, or null: a bare
+/// head with a matching local, and nothing else. A qualified head bypasses
+/// locals; no registry means no locals in scope. The gate is the same one
+/// `Validator.validateFormHead` step 0 applies before consulting the
+/// global catalog.
+fn matchLocalHead(registry: ?[]const Plugin.FormSpec, hdr: Ast.FormHeader) ?*const Plugin.FormSpec {
+    if (hdr.namespace != null) return null;
+    const reg = registry orelse return null;
+    return Validator.matchLocalForm(reg, hdr.head);
+}
+
+/// The slot-local registry a form whose resolved spec is `parent_spec` puts
+/// in scope for its child node `child` (a positional child or a kvpair, as
+/// listed in `FormHeader.children`): the parent's own `local_forms` for a
+/// form-shaped positional child; for a kvpair whose value is a form, the
+/// `local_forms` of `matched_key` — the key the validator accepts the kvpair
+/// under (`matchKvpairKeys`), so an unaccepted key puts nothing in scope;
+/// null when the parent is unresolved, the child is neither, or the carrier
+/// is empty.
+fn childLocalRegistry(
+    parent_spec: ?*const Plugin.FormSpec,
+    tree: *const Ast.Tree,
+    child: Ast.NodeIndex,
+    matched_key: ?*const Plugin.KeySpec,
+) ?[]const Plugin.FormSpec {
+    const spec = parent_spec orelse return null;
+    switch (tree.tagOf(child)) {
+        .form => return if (spec.local_forms.len > 0) spec.local_forms else null,
+        .kvpair => {
+            const kvh = tree.kvpairHeader(child);
+            if (tree.tagOf(kvh.value) != .form) return null;
+            const key = matched_key orelse return null;
+            return if (key.local_forms.len > 0) key.local_forms else null;
+        },
+        else => return null,
+    }
+}
+
+/// Fill `out[i]` with the `KeySpec` the validator's key-typing pass accepts
+/// kvpair child `i` of the form under (positional children and unaccepted
+/// keys stay null): a common key by name; a variant key by name only while
+/// its variant is **active** — selected by the discriminant kvpair seen
+/// *earlier* among the children (the position rule of
+/// `Validator.matchAndTypecheckDeclaredKey` / `matchAndTypecheckVariantKey`:
+/// discriminant first) or, when the author omitted the discriminant, by its
+/// overlay default under axis D (`Validator.preresolveDiscriminantViaOverlay`).
+/// A discriminant value no variant selects leaves the active variant as it
+/// was, as there. The tree walker hands its frames the typing pass's own
+/// matches, so this is the one restatement of the rule; the lowering
+/// worklist needs it because it resolves heads on the authored tree before
+/// validation runs.
+fn matchKvpairKeys(
+    spec: *const Plugin.FormSpec,
+    tree: *const Ast.Tree,
+    form_idx: Ast.NodeIndex,
+    hdr: Ast.FormHeader,
+    materialized: *const MaterializedDefaults.MaterializedDefaults,
+    axes: Validator.EffectiveAxes,
+    out: []?*const Plugin.KeySpec,
+) void {
+    std.debug.assert(out.len == hdr.children.len);
+    const variants = spec.variants orelse &.{};
+    var active: ?usize = null;
+    // Axis D: an omitted discriminant with an overlay default pre-selects.
+    if (axes.variant) {
+        if (spec.discriminant_idx) |didx| {
+            const dkey = spec.keys[didx];
+            if (!Validator.authorWroteKvpair(tree, hdr, dkey.name)) {
+                if (materialized.defaultFor(form_idx, dkey.name)) |entry| {
+                    // Symbol defaults reach the overlay as `.keyword`;
+                    // strings are accepted too, as the validator does.
+                    const stext: ?[]const u8 = switch (entry.value) {
+                        .keyword => |k| k,
+                        .string => |t| t,
+                        else => null,
+                    };
+                    if (stext) |t| {
+                        for (variants, 0..) |v, vi| {
+                            if (v.selects(t)) {
+                                active = vi;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (hdr.children, 0..) |ch, ci| {
+        if (tree.tagOf(ch) != .kvpair) continue;
+        const kvh = tree.kvpairHeader(ch);
+        if (spec.keyByName(kvh.key)) |k| {
+            out[ci] = k;
+            if (spec.discriminant_idx) |didx| {
+                if (k == &spec.keys[didx] and tree.tagOf(kvh.value) == .symbol) {
+                    const sym = tree.symbolText(kvh.value);
+                    for (variants, 0..) |v, vi| {
+                        if (v.selects(sym)) {
+                            active = vi;
+                            break;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        const vi = active orelse continue;
+        for (variants[vi].keys) |*vk| {
+            if (std.mem.eql(u8, vk.name, kvh.key)) {
+                out[ci] = vk;
+                break;
+            }
+        }
+    }
+}
+
 /// Emit `lowering_nested_lowerable` when `child` resolves to a form whose own
 /// `FormSpec` declares `:lowering`. The worklist calls this only when the
 /// *parent* is itself lowerable, so a plain-data parent holding lowerable sugar
-/// (the supported nested-sugar shape) never trips it. The diagnostic points at
-/// the child's head with path `[<child-head>, lowering]`. Emit-only: the
-/// caller still descends into `child`, so both hooks run and the contradictory
+/// (the supported nested-sugar shape) never trips it. Resolution is
+/// local-first under `local_registry` (the parent's slot registry for this
+/// child): a local body never lowers, so a local head that shadows a global
+/// lowerable form is not a nested-lowerable. The diagnostic points at the
+/// child's head with path `[<child-head>, lowering]`. Emit-only: the caller
+/// still descends into `child`, so both hooks run and the contradictory
 /// output still forms — the clear diagnostic is the headline, not a veto.
 fn checkNestedLowerable(
     gpa: Allocator,
     tree: *const Ast.Tree,
     child: Ast.NodeIndex,
+    local_registry: ?[]const Plugin.FormSpec,
     schema: Schema.Schema,
     diags: *std.ArrayList(Ast.Diagnostic),
 ) Allocator.Error!void {
     const chdr = tree.formHeader(child);
     // Parser-recovery synthetic form — no head to resolve or report.
     if (chdr.head.len == 0) return;
+    if (matchLocalHead(local_registry, chdr) != null) return;
     const chit = schema.lookupForm(chdr.head, chdr.namespace);
     if (chit != .found) return;
     if (chit.found.form.lowering == null) return;
@@ -2831,4 +2995,191 @@ test "runLoweringPass: unknown child head does not trip the nested-lowerable lin
     // lowerable. Invocations are left unasserted: surface validation may gate
     // outer's hook on the unknown child, which is orthogonal to the guard.
     try expectNested(testing.allocator, "(outer (bogus))", &.{.{ .name = "outer" }}, &.{}, null);
+}
+
+// --- Slot-local resolution: the worklist mirrors the validator ---------------
+//
+// A form head resolves local-first at validation (S7): a bare head in a slot
+// that declares locals takes the local body, shadowing a same-named global.
+// The worklist must resolve the same way, or a local `entry` under
+// `bind-group` fires the hook of a global lowerable `entry` it never meant.
+// Both carriers, the qualified bypass, and the nested-lowerable lint.
+
+/// Schema for the shadowing tests: a global lowerable `entry` (identity hook →
+/// `entry-normal`), a `bind-group` whose positional local `entry` and keyed
+/// local (`:layout`) `entry` shadow it, and a lowerable `outer` carrying the
+/// same positional local. Everything `:open` so surface validation never
+/// gates a hook.
+fn shadowSchema(a: Allocator) !Schema.Schema {
+    const entry_produces = try a.alloc([]const u8, 1);
+    entry_produces[0] = "entry-normal";
+    const outer_produces = try a.alloc([]const u8, 1);
+    outer_produces[0] = "outer-normal";
+
+    const local_entry = try a.alloc(Plugin.FormSpec, 1);
+    local_entry[0] = .{ .name = "entry", .open = true };
+    const layout_key = try a.alloc(Plugin.KeySpec, 1);
+    layout_key[0] = .{ .name = "layout", .value_type = .form, .local_forms = local_entry };
+
+    const forms = try a.alloc(Plugin.FormSpec, 5);
+    forms[0] = .{ .name = "entry", .open = true, .lowering = .{ .hook = "test/identity-v1", .produces = entry_produces } };
+    forms[1] = .{ .name = "entry-normal", .open = true };
+    forms[2] = .{ .name = "bind-group", .open = true, .positional = .any, .local_forms = local_entry, .keys = layout_key };
+    forms[3] = .{ .name = "outer", .open = true, .positional = .any, .local_forms = local_entry, .lowering = .{ .hook = "test/identity-v1", .produces = outer_produces } };
+    forms[4] = .{ .name = "outer-normal", .open = true };
+
+    const plugins = try a.alloc(Plugin.Plugin, 1);
+    plugins[0] = .{ .name = "p", .forms = forms };
+    return .{ .plugins = plugins };
+}
+
+fn runShadow(gpa: Allocator, src: [:0]const u8, expected_invocations: usize, expected_nested: []const []const u8) !void {
+    var schema_arena = std.heap.ArenaAllocator.init(gpa);
+    defer schema_arena.deinit();
+    const schema = try shadowSchema(schema_arena.allocator());
+
+    var tree = try Parser.parse(gpa, src);
+    defer tree.deinit();
+
+    const overlay = MaterializedDefaults.MaterializedDefaults{};
+    var registry: LoweringRegistry = .{};
+    defer registry.deinit(gpa);
+    try registry.register(gpa, .{ .id = "test/identity-v1", .lower = identityRenameHook });
+
+    var pass_arena = std.heap.ArenaAllocator.init(gpa);
+    defer pass_arena.deinit();
+    var pr = try runLoweringPass(gpa, pass_arena.allocator(), &tree, tree.root, schema, &overlay, &registry, .{});
+    defer pr.deinit(gpa);
+
+    try testing.expectEqual(expected_invocations, pr.invocations.len);
+    try expectNestedHeadsInOrder(pr.diagnostics, expected_nested);
+}
+
+test "runLoweringPass: a global lowerable head lowers at the root (control)" {
+    // `(entry)` at the root has no registry in scope: the global lowerable
+    // `entry` resolves and its hook fires once.
+    try runShadow(testing.allocator, "(entry)", 1, &.{});
+}
+
+test "runLoweringPass: an authored positional local that shadows a global lowerable head does not lower" {
+    // `(bind-group (entry))` — `entry` is `bind-group`'s positional local, so
+    // it resolves to the local body (never a hook). Before the worklist
+    // resolved local-first this fired the global `entry`'s hook on it.
+    try runShadow(testing.allocator, "(bind-group (entry))", 0, &.{});
+}
+
+test "runLoweringPass: an authored keyed local that shadows a global lowerable head does not lower" {
+    // The keyed carrier: `(bind-group :layout (entry))` — `:layout` declares
+    // the local `entry`, so the kvpair-value form resolves to it.
+    try runShadow(testing.allocator, "(bind-group :layout (entry))", 0, &.{});
+}
+
+test "runLoweringPass: a qualified head bypasses the slot's locals and lowers the global" {
+    // `(bind-group (p/entry))` — the qualified spelling bypasses locals, as
+    // it does at the site, so the global lowerable `entry` fires.
+    try runShadow(testing.allocator, "(bind-group (p/entry))", 1, &.{});
+}
+
+test "runLoweringPass: a local under a slot with no matching local falls back to the global" {
+    // `(bind-group (other))` where `other` is nobody's local: the registry is
+    // in scope but does not match, so resolution falls through to the global
+    // catalog (which has no `other` either) — nothing lowers, nothing lints.
+    try runShadow(testing.allocator, "(bind-group (other))", 0, &.{});
+}
+
+test "runLoweringPass: nested-lowerable lint ignores a local that shadows a global lowerable head" {
+    // `(outer (entry))` — `outer` is lowerable AND declares the positional
+    // local `entry`. The child resolves to the local, which never lowers, so
+    // it is not a nested-lowerable: one invocation (`outer`), no lint.
+    try runShadow(testing.allocator, "(outer (entry))", 1, &.{});
+}
+
+test "runLoweringPass: nested-lowerable lint still fires for a qualified child that names the global" {
+    // The lint's control: `(outer (p/entry))` bypasses the local, resolves
+    // the global lowerable `entry`, and both fire — flagged at `entry`.
+    try runShadow(testing.allocator, "(outer (p/entry))", 2, &.{"entry"});
+}
+
+// --- Variant-key locals: in scope only while the variant is active ----------
+//
+// A key declared on a `(variant …)` is accepted by the validator only under
+// the active variant, discriminant first (or with the discriminant omitted
+// and defaulted, under axis D). Its `local_forms` are in scope exactly then
+// (`Validator.zig`'s "variant-key locals (dual)" tests); the worklist decides
+// the same way through `matchKvpairKeys`, so a local that shadows a global
+// lowerable head shadows it only where the validator would resolve the local.
+
+/// A global lowerable `entry` and a discriminated `thing` (`:kind` ∈ {a, b},
+/// defaulting to `a`) whose variant `a` declares `:extra` (form, local
+/// `entry`); variant `b` declares nothing. Everything `:open`.
+fn variantShadowSchema(a: Allocator) !Schema.Schema {
+    const entry_produces = try a.alloc([]const u8, 1);
+    entry_produces[0] = "entry-normal";
+    const local_entry = try a.alloc(Plugin.FormSpec, 1);
+    local_entry[0] = .{ .name = "entry", .open = true };
+    const a_keys = try a.alloc(Plugin.KeySpec, 1);
+    a_keys[0] = .{ .name = "extra", .value_type = .form, .optional = true, .local_forms = local_entry };
+    const variants = try a.alloc(Plugin.Variant, 2);
+    variants[0] = .{ .when = &.{"a"}, .keys = a_keys };
+    variants[1] = .{ .when = &.{"b"} };
+    const thing_keys = try a.alloc(Plugin.KeySpec, 1);
+    thing_keys[0] = .{ .name = "kind", .value_type = .{ .named = .{ .name = "k" } }, .optional = false, .default = .{ .symbol = "a" } };
+
+    const forms = try a.alloc(Plugin.FormSpec, 3);
+    forms[0] = .{ .name = "entry", .open = true, .lowering = .{ .hook = "test/identity-v1", .produces = entry_produces } };
+    forms[1] = .{ .name = "entry-normal", .open = true };
+    forms[2] = .{ .name = "thing", .open = true, .keys = thing_keys, .discriminant_name = "kind", .discriminant_idx = 0, .variants = variants };
+    const kinds = try a.alloc(Plugin.ValueKind, 1);
+    kinds[0] = .{ .name = "k", .underlying = .symbol, .members = .{ .members = &.{ .{ .name = "a" }, .{ .name = "b" } } } };
+    const plugins = try a.alloc(Plugin.Plugin, 1);
+    plugins[0] = .{ .name = "p", .forms = forms, .value_kinds = kinds };
+    return .{ .plugins = plugins };
+}
+
+/// Run `src` through the pass with the schema's *materialized* overlay (so
+/// an omitted `:kind` carries its default) under `axes`, and count hook
+/// invocations: 0 = the local `entry` shadowed the global; 1 = it fired.
+fn runVariantShadow(gpa: Allocator, src: [:0]const u8, axes: Validator.EffectiveAxes, expected_invocations: usize) !void {
+    var schema_arena = std.heap.ArenaAllocator.init(gpa);
+    defer schema_arena.deinit();
+    const schema = try variantShadowSchema(schema_arena.allocator());
+
+    var tree = try Parser.parse(gpa, src);
+    defer tree.deinit();
+
+    var pass_arena = std.heap.ArenaAllocator.init(gpa);
+    defer pass_arena.deinit();
+    var mat = try MaterializedDefaults.materializeDefaults(gpa, pass_arena.allocator(), &tree, tree.root, schema);
+    defer mat.deinit(gpa);
+
+    var registry: LoweringRegistry = .{};
+    defer registry.deinit(gpa);
+    try registry.register(gpa, .{ .id = "test/identity-v1", .lower = identityRenameHook });
+
+    var pr = try runLoweringPass(gpa, pass_arena.allocator(), &tree, tree.root, schema, &mat.materialized, &registry, axes);
+    defer pr.deinit(gpa);
+    try testing.expectEqual(expected_invocations, pr.invocations.len);
+}
+
+test "runLoweringPass: a local on the active variant's key shadows the global lowerable" {
+    try runVariantShadow(testing.allocator, "(thing :kind a :extra (entry))", .{}, 0);
+}
+
+test "runLoweringPass: a local on an inactive variant's key is not in scope — the global fires" {
+    // `:extra` belongs to variant `a`; with `b` active the validator rejects
+    // the key and resolves `(entry)` globally, so the worklist does too.
+    try runVariantShadow(testing.allocator, "(thing :kind b :extra (entry))", .{}, 1);
+}
+
+test "runLoweringPass: a variant key ahead of the discriminant is not in scope — the global fires" {
+    // The position rule: discriminant first. `:extra` here precedes `:kind a`.
+    try runVariantShadow(testing.allocator, "(thing :extra (entry) :kind a)", .{}, 1);
+}
+
+test "runLoweringPass: an omitted discriminant with an overlay default selects the variant (axis D)" {
+    // `:kind` defaults to `a`; with axis D on the validator pre-resolves
+    // variant `a`, accepts `:extra`, and resolves `(entry)` locally.
+    try runVariantShadow(testing.allocator, "(thing :extra (entry))", .{}, 0);
+    // With axis D off the omitted discriminant selects nothing.
+    try runVariantShadow(testing.allocator, "(thing :extra (entry))", .{ .variant = false }, 1);
 }

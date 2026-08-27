@@ -19,7 +19,6 @@ export const patternPlugin: Plugin = {
   homepage: '',
   repository: '',
   keywords: [],
-  sjonFormat: '',
   exprFuncs: [],
   valueKinds: [],
   crossRefProviders: [],

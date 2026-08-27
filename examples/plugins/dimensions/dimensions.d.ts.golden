@@ -35,7 +35,7 @@ export interface Dimensions_Texture {
   /**
    * @member 1d
    * @member 2d — 2D: The default view dimension.
-   * @member 2d-array: A hyphenated digit-leading spelling — one token only because a `-` may join two letter runs inside a unit.
+   * @member 2d-array: A hyphenated digit-leading spelling, one token only because a `-` may join two letter runs inside a unit.
    * @member cube
    * @member cube-array
    * @member 3d

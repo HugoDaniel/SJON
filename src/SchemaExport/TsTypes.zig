@@ -140,8 +140,13 @@ fn emitCrossPluginRefsForShape(
     seen_len: *usize,
 ) std.Io.Writer.Error!void {
     switch (shape) {
-        .form_heads => |refs| {
-            for (refs) |ref| {
+        .form_heads => |hs| {
+            for (hs.refs) |ref| {
+                // Only a `.global` head names a type in another file. A
+                // `.local` body is emitted inline (same as `form_locals`,
+                // which this walk also skips) and an `.unresolved` head
+                // names nothing at all.
+                if (ref.body != .global) continue;
                 if (ref.plugin.len == 0) continue;
                 if (std.mem.eql(u8, ref.plugin, this_plugin)) continue;
                 // Dedupe by (plugin, name) — repeated references across
@@ -319,39 +324,47 @@ fn writeChildCountsDoc(
     shape: Model.ValueShape,
     indent: []const u8,
 ) std.Io.Writer.Error!void {
-    const refs = switch (shape) {
-        .form_heads => |r| r,
+    const hs = switch (shape) {
+        .form_heads => |h| h,
         else => return,
     };
-    var any = false;
-    for (refs) |ref| {
-        if (ref.isBounded()) {
-            any = true;
-            break;
-        }
-    }
-    if (!any) return;
+    if (!hs.anyBounded()) return;
 
     try w.writeAll(indent);
     try w.writeAll("/** Positional counts (not expressible in TS):");
     var first = true;
-    for (refs) |ref| {
+    for (hs.refs) |ref| {
         if (!ref.isBounded()) continue;
         try w.writeAll(if (first) " " else "; ");
         first = false;
         try w.writeAll(ref.name);
         try w.writeAll(": ");
-        if (ref.max) |mx| {
-            if (ref.min == mx) {
-                try w.print("{d}", .{mx});
-            } else {
-                try w.print("{d}..{d}", .{ ref.min, mx });
-            }
-        } else {
-            try w.print("{d}..", .{ref.min});
-        }
+        try writeCountRange(w, ref.min, ref.max);
+    }
+    // The set's own count, named `any of the set` rather than by a head —
+    // a reader has to be able to tell "at most one buffer" from "at most
+    // one resource of any kind", and the two sit on the same line.
+    if (hs.isBounded()) {
+        try w.writeAll(if (first) " " else "; ");
+        try w.writeAll("any of the set: ");
+        try writeCountRange(w, hs.min_children, hs.max_children);
     }
     try w.writeAll(" */\n");
+}
+
+/// `2` for an exact count, `0..1` for a range, `1..` for a floor with no
+/// ceiling. Shared by the per-head entries and the set's so the two read
+/// alike on one line.
+fn writeCountRange(w: *std.Io.Writer, min: u16, max: ?u16) std.Io.Writer.Error!void {
+    if (max) |mx| {
+        if (min == mx) {
+            try w.print("{d}", .{mx});
+        } else {
+            try w.print("{d}..{d}", .{ min, mx });
+        }
+    } else {
+        try w.print("{d}..", .{min});
+    }
 }
 
 /// Emit a discriminated form as a union of per-variant object types.
@@ -370,43 +383,65 @@ fn writeDiscriminatedFormType(
     try writeFormTypeName(w, p.name, f.name);
     try w.writeAll(" =");
     for (d.variants) |v| {
-        try w.writeAll("\n  | {\n");
-        try w.writeAll("      $form: \"");
-        try w.writeAll(f.name);
-        try w.writeAll("\";\n");
-        try w.writeAll("      $ns: \"");
-        try w.writeAll(p.name);
-        try w.writeAll("\";\n");
-        // Common + discriminant keys, sorted alphabetically. The
-        // discriminant gets its brand narrowed to the variant's `when`.
-        const indices = Model.sortedKeys(f.keys);
-        for (indices.slice()) |idx| {
-            const k = f.keys[idx];
-            if (std.mem.eql(u8, k.name, d.key_name)) {
-                try writeDiscriminantKey(w, k, v.when, "      ");
-            } else {
-                try writeKey(w, k, "      ");
-            }
+        try writeDiscriminatedBranch(w, p, f, d, .{ .list = v.when }, v.keys);
+    }
+    // Members no variant selects get one residual branch — common keys
+    // only, discriminant narrowed to exactly those members — so the union
+    // covers the whole member set the validator accepts.
+    if (discriminantKey(f, d)) |dk| {
+        if (hasResidualMembers(dk, d)) {
+            try writeDiscriminatedBranch(w, p, f, d, .{ .residual = .{ .members = dk.value, .d = d } }, &.{});
         }
-        // Variant overlay keys.
-        const v_indices = Model.sortedKeys(v.keys);
-        for (v_indices.slice()) |idx| {
-            try writeKey(w, v.keys[idx], "      ");
-        }
-        switch (f.positional) {
-            .none => {},
-            .any => try w.writeAll("      $children?: unknown[];\n"),
-            .kind => |shape| {
-                try writeChildCountsDoc(w, shape, "      ");
-                try w.writeAll("      $children?: Array<");
-                try writeShape(w, shape);
-                try w.writeAll(">;\n");
-            },
-        }
-        if (f.open) try w.writeAll("      [key: string]: unknown;\n");
-        try w.writeAll("    }");
     }
     try w.writeAll(";\n\n");
+}
+
+/// One `| { … }` branch of a discriminated form's union: `$form`/`$ns`,
+/// the common keys with the discriminant narrowed to `when`, then
+/// `overlay` (a variant's keys, or none for the residual branch).
+fn writeDiscriminatedBranch(
+    w: *std.Io.Writer,
+    p: Model.Plugin_,
+    f: Model.Form,
+    d: Model.Discriminator,
+    when: WhenSet,
+    overlay: []const Model.Key,
+) std.Io.Writer.Error!void {
+    try w.writeAll("\n  | {\n");
+    try w.writeAll("      $form: \"");
+    try w.writeAll(f.name);
+    try w.writeAll("\";\n");
+    try w.writeAll("      $ns: \"");
+    try w.writeAll(p.name);
+    try w.writeAll("\";\n");
+    // Common + discriminant keys, sorted alphabetically. The
+    // discriminant gets its brand narrowed to the branch's `when`.
+    const indices = Model.sortedKeys(f.keys);
+    for (indices.slice()) |idx| {
+        const k = f.keys[idx];
+        if (std.mem.eql(u8, k.name, d.key_name)) {
+            try writeDiscriminantKey(w, k, when, "      ");
+        } else {
+            try writeKey(w, k, "      ");
+        }
+    }
+    // Variant overlay keys.
+    const v_indices = Model.sortedKeys(overlay);
+    for (v_indices.slice()) |idx| {
+        try writeKey(w, overlay[idx], "      ");
+    }
+    switch (f.positional) {
+        .none => {},
+        .any => try w.writeAll("      $children?: unknown[];\n"),
+        .kind => |shape| {
+            try writeChildCountsDoc(w, shape, "      ");
+            try w.writeAll("      $children?: Array<");
+            try writeShape(w, shape);
+            try w.writeAll(">;\n");
+        },
+    }
+    if (f.open) try w.writeAll("      [key: string]: unknown;\n");
+    try w.writeAll("    }");
 }
 
 fn writeKey(w: *std.Io.Writer, k: Model.Key, indent: []const u8) std.Io.Writer.Error!void {
@@ -684,7 +719,7 @@ fn writeMemberDocLine(w: *std.Io.Writer, m: Model.Member, indent: []const u8) st
 fn writeDiscriminantKey(
     w: *std.Io.Writer,
     k: Model.Key,
-    when: []const u8,
+    when: WhenSet,
     indent: []const u8,
 ) std.Io.Writer.Error!void {
     if (k.description.len > 0) {
@@ -695,9 +730,91 @@ fn writeDiscriminantKey(
     }
     try w.writeAll(indent);
     try writeKeyName(w, k.name);
-    try w.writeAll(": Symbol_<\"");
-    try w.writeAll(when);
-    try w.writeAll("\">;\n");
+    try w.writeAll(": ");
+    try writeWhenBrand(w, when);
+    try w.writeAll(";\n");
+}
+
+/// The discriminant values one union branch stands for: a variant's `:when`
+/// list, or the **residual** — every member of the discriminant's set that
+/// no variant selects. Members no variant selects still validate (the
+/// discriminant just gains no keys), so they need a branch too, or a
+/// `triangle-list` primitive beside a strip-only variant would have no
+/// type at all. The residual is written straight off the member shape,
+/// skipping covered names, so no list is materialised.
+const WhenSet = union(enum) {
+    list: []const []const u8,
+    residual: struct { members: Model.ValueShape, d: Model.Discriminator },
+};
+
+/// `Symbol_<"a">` for a one-value variant, `Symbol_<"a" | "b">` for a
+/// multi-value one (or the residual set) — the brand's `S extends string`
+/// parameter takes a literal union, so one field spells the whole set.
+fn writeWhenBrand(w: *std.Io.Writer, when: WhenSet) std.Io.Writer.Error!void {
+    try w.writeAll("Symbol_<");
+    switch (when) {
+        .list => |list| for (list, 0..) |x, i| {
+            if (i > 0) try w.writeAll(" | ");
+            try w.writeByte('"');
+            try w.writeAll(x);
+            try w.writeByte('"');
+        },
+        .residual => |r| {
+            var written: usize = 0;
+            var i: usize = 0;
+            while (memberNameAt(r.members, i)) |name| : (i += 1) {
+                if (variantCovers(r.d, name)) continue;
+                if (written > 0) try w.writeAll(" | ");
+                try w.writeByte('"');
+                try w.writeAll(name);
+                try w.writeByte('"');
+                written += 1;
+            }
+            // The residual branch is emitted only behind `hasResidualMembers`,
+            // which walks the same members with the same cover test — an
+            // empty `Symbol_<>` here means the two drifted apart.
+            std.debug.assert(written >= 1);
+        },
+    }
+    try w.writeAll(">");
+}
+
+/// The `i`th member name of a symbol member-set shape, compact or rich;
+/// null past the end, and null for any other shape (a discriminant that
+/// is not a closed symbol set is `discriminant_not_closed_enum` at
+/// aggregate time and never reaches export).
+fn memberNameAt(shape: Model.ValueShape, i: usize) ?[]const u8 {
+    return switch (shape) {
+        .symbol_members => |ms| if (i < ms.len) ms[i] else null,
+        .symbol_members_rich => |ms| if (i < ms.len) ms[i].name else null,
+        else => null,
+    };
+}
+
+/// True when some variant of `d` lists `name` in its `:when`.
+fn variantCovers(d: Model.Discriminator, name: []const u8) bool {
+    for (d.variants) |v| {
+        for (v.when) |x| if (std.mem.eql(u8, x, name)) return true;
+    }
+    return false;
+}
+
+/// True when the discriminant's member set has a member no variant
+/// selects — the condition for the residual branch. `key` is the
+/// discriminant key.
+fn hasResidualMembers(key: Model.Key, d: Model.Discriminator) bool {
+    var i: usize = 0;
+    while (memberNameAt(key.value, i)) |name| : (i += 1) {
+        if (!variantCovers(d, name)) return true;
+    }
+    return false;
+}
+
+/// The discriminant key of `f`, or null when `d.key_name` names no key
+/// (a hand-built Model; the loader guarantees the key exists).
+fn discriminantKey(f: Model.Form, d: Model.Discriminator) ?Model.Key {
+    for (f.keys) |k| if (std.mem.eql(u8, k.name, d.key_name)) return k;
+    return null;
 }
 
 fn writeKeyName(w: *std.Io.Writer, name: []const u8) std.Io.Writer.Error!void {
@@ -778,14 +895,24 @@ fn writeShape(w: *std.Io.Writer, shape: Model.ValueShape) std.Io.Writer.Error!vo
             }
         },
         .form_any => try w.writeAll("{ readonly $form: string; readonly $ns?: string }"),
-        .form_heads => |refs| {
+        .form_heads => |hs| {
+            const refs = hs.refs;
             // Union of `{$form: "<name>"}` literals. TS narrows on the
             // `$form` discriminant. In per-plugin mode, cross-plugin
             // refs use the imported type name (`<Other>_<Name>`) so the
             // `import type` line at the top of the file actually carries
             // weight in the consumer's type tree.
+            // A slot-local head has no global type to name, so it emits the
+            // same inline object literal the `form_locals` arm below emits
+            // — the local's keys are what a consumer wants IntelliSense on,
+            // and `{$form: "<name>"}` alone would say less than the open
+            // union it replaced.
             for (refs, 0..) |ref, i| {
                 if (i > 0) try w.writeAll(" | ");
+                if (ref.body == .local) {
+                    try writeInlineLocalForm(w, ref.body.local.*);
+                    continue;
+                }
                 const use_imported = if (current_filter) |this|
                     ref.plugin.len > 0 and !std.mem.eql(u8, ref.plugin, this)
                 else
@@ -858,26 +985,14 @@ fn writeInlineLocalForm(w: *std.Io.Writer, f: Model.Form) std.Io.Writer.Error!vo
         try w.writeByte('(');
         for (d.variants, 0..) |v, vi| {
             if (vi > 0) try w.writeAll(" | ");
-            try w.writeAll("{ $form: \"");
-            try w.writeAll(f.name);
-            try w.writeAll("\"; $ns?: string;");
-            const indices = Model.sortedKeys(f.keys);
-            for (indices.slice()) |idx| {
-                const k = f.keys[idx];
-                try w.writeByte(' ');
-                if (std.mem.eql(u8, k.name, d.key_name)) {
-                    try writeInlineDiscriminantKey(w, k, v.when);
-                } else {
-                    try writeInlineKey(w, k);
-                }
+            try writeInlineDiscriminatedBranch(w, f, d, .{ .list = v.when }, v.keys);
+        }
+        // The residual branch, as in `writeDiscriminatedFormType`.
+        if (discriminantKey(f, d)) |dk| {
+            if (hasResidualMembers(dk, d)) {
+                if (d.variants.len > 0) try w.writeAll(" | ");
+                try writeInlineDiscriminatedBranch(w, f, d, .{ .residual = .{ .members = dk.value, .d = d } }, &.{});
             }
-            const v_indices = Model.sortedKeys(v.keys);
-            for (v_indices.slice()) |idx| {
-                try w.writeByte(' ');
-                try writeInlineKey(w, v.keys[idx]);
-            }
-            if (f.open) try w.writeAll(" [key: string]: unknown;");
-            try w.writeAll(" }");
         }
         try w.writeByte(')');
         return;
@@ -914,13 +1029,45 @@ fn writeInlineKey(w: *std.Io.Writer, k: Model.Key) std.Io.Writer.Error!void {
     try w.writeByte(';');
 }
 
+/// One `{ … }` branch of an inline discriminated local's union — the
+/// one-line mirror of `writeDiscriminatedBranch`.
+fn writeInlineDiscriminatedBranch(
+    w: *std.Io.Writer,
+    f: Model.Form,
+    d: Model.Discriminator,
+    when: WhenSet,
+    overlay: []const Model.Key,
+) std.Io.Writer.Error!void {
+    try w.writeAll("{ $form: \"");
+    try w.writeAll(f.name);
+    try w.writeAll("\"; $ns?: string;");
+    const indices = Model.sortedKeys(f.keys);
+    for (indices.slice()) |idx| {
+        const k = f.keys[idx];
+        try w.writeByte(' ');
+        if (std.mem.eql(u8, k.name, d.key_name)) {
+            try writeInlineDiscriminantKey(w, k, when);
+        } else {
+            try writeInlineKey(w, k);
+        }
+    }
+    const v_indices = Model.sortedKeys(overlay);
+    for (v_indices.slice()) |idx| {
+        try w.writeByte(' ');
+        try writeInlineKey(w, overlay[idx]);
+    }
+    if (f.open) try w.writeAll(" [key: string]: unknown;");
+    try w.writeAll(" }");
+}
+
 /// Compact discriminant key for an inline local-form variant branch:
-/// `kind: Symbol_<"<when>">;`. Mirrors `writeDiscriminantKey`.
-fn writeInlineDiscriminantKey(w: *std.Io.Writer, k: Model.Key, when: []const u8) std.Io.Writer.Error!void {
+/// `kind: Symbol_<"<when>">;` (or the `Symbol_<"a" | "b">` set). Mirrors
+/// `writeDiscriminantKey`.
+fn writeInlineDiscriminantKey(w: *std.Io.Writer, k: Model.Key, when: WhenSet) std.Io.Writer.Error!void {
     try writeKeyName(w, k.name);
-    try w.writeAll(": Symbol_<\"");
-    try w.writeAll(when);
-    try w.writeAll("\">;");
+    try w.writeAll(": ");
+    try writeWhenBrand(w, when);
+    try w.writeAll(";");
 }
 
 fn writeBrandedUnion(w: *std.Io.Writer, brand: []const u8, names: []const []const u8) std.Io.Writer.Error!void {
@@ -1316,11 +1463,11 @@ test "emit: discriminated form becomes a union of per-variant object types" {
             },
             .discriminant_idx = 0,
             .variants = &.{
-                .{ .when = "kick", .keys = &.{
+                .{ .when = &.{"kick"}, .keys = &.{
                     .{ .name = "step", .value_type = .number, .optional = false },
                     .{ .name = "volume", .value_type = .number, .optional = true },
                 } },
-                .{ .when = "bass", .keys = &.{
+                .{ .when = &.{"bass"}, .keys = &.{
                     .{ .name = "sequence", .value_type = .vector, .optional = false },
                 } },
             },
@@ -1342,6 +1489,74 @@ test "emit: discriminated form becomes a union of per-variant object types" {
     // Variant overlay keys are present in each branch.
     try testing.expect(std.mem.indexOf(u8, bytes, "step: number") != null);
     try testing.expect(std.mem.indexOf(u8, bytes, "sequence: ") != null);
+}
+
+test "emit: a multi-value variant narrows the discriminant brand to a literal union" {
+    // `(variant :when [tri-strip line-strip] …)` is one branch whose
+    // discriminant field is `Symbol_<"tri-strip" | "line-strip">` — the
+    // brand's `S extends string` parameter takes the union — not two
+    // branches. A single-value sibling renders exactly as before.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "gfx",
+        .forms = &.{.{
+            .name = "prim",
+            .keys = &.{.{ .name = "topology", .value_type = .{ .named = .{ .name = "topo" } }, .optional = false }},
+            .discriminant_idx = 0,
+            .variants = &.{
+                .{ .when = &.{ "tri-strip", "line-strip" }, .keys = &.{
+                    .{ .name = "strip-index-format", .value_type = .symbol, .optional = true },
+                } },
+                .{ .when = &.{"line-list"}, .keys = &.{
+                    .{ .name = "line-width", .value_type = .number, .optional = false },
+                } },
+            },
+        }},
+        .value_kinds = &.{
+            .{ .name = "topo", .underlying = .symbol, .members = .{ .members = &.{ .{ .name = "tri-list" }, .{ .name = "tri-strip" }, .{ .name = "line-list" }, .{ .name = "line-strip" } } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    try testing.expect(std.mem.indexOf(u8, bytes, "topology: Symbol_<\"tri-strip\" | \"line-strip\">") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "topology: Symbol_<\"line-list\">") != null);
+    // `tri-list` is a member no variant selects: it validates with common
+    // keys only, so it gets the residual branch — three branches, not two
+    // (and not four: the second strip does not multiply the first branch).
+    try testing.expect(std.mem.indexOf(u8, bytes, "topology: Symbol_<\"tri-list\">") != null);
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, bytes, "topology: Symbol_<"));
+    // The residual branch carries no variant key.
+    const residual_idx = std.mem.indexOf(u8, bytes, "topology: Symbol_<\"tri-list\">").?;
+    const residual_end = std.mem.indexOfPos(u8, bytes, residual_idx, "}").?;
+    try testing.expect(std.mem.indexOf(u8, bytes[residual_idx..residual_end], "strip-index-format") == null);
+    try testing.expect(std.mem.indexOf(u8, bytes[residual_idx..residual_end], "line-width") == null);
+}
+
+test "emit: a discriminated form whose variants cover every member emits no residual branch" {
+    // The kit shape — every member has a variant — is byte-for-byte what it
+    // was: no fourth branch appears when there is nothing left over.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "kit",
+        .forms = &.{.{
+            .name = "track",
+            .keys = &.{.{ .name = "kind", .value_type = .{ .named = .{ .name = "k" } }, .optional = false }},
+            .discriminant_idx = 0,
+            .variants = &.{
+                .{ .when = &.{"kick"}, .keys = &.{.{ .name = "step", .value_type = .number, .optional = false }} },
+                .{ .when = &.{"bass"}, .keys = &.{.{ .name = "sequence", .value_type = .vector, .optional = false }} },
+            },
+        }},
+        .value_kinds = &.{
+            .{ .name = "k", .underlying = .symbol, .members = .{ .members = &.{ .{ .name = "kick" }, .{ .name = "bass" } } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, result.ts_types_bytes.?, "kind: Symbol_<"));
 }
 
 test "emit: positional local forms render as inline $children union" {

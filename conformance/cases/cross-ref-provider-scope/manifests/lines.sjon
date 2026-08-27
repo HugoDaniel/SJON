@@ -2,7 +2,7 @@
 ; pass` is the same key the identity route takes (`cross-ref-lexical-
 ; scope-piece` pins that side); what this case checks is that it composes
 ; with the provider route rather than being an alternative to it.
-(plugin :name lines :version "1.0.0" :sjon "1.2"
+(plugin :name lines :version "1.0.0"
   (cross-ref-provider :name lines
     :description "One name per non-empty line."
     :impl "wasm:extract_lines")

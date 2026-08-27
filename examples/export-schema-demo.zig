@@ -59,7 +59,7 @@ pub fn main(init: std.process.Init) !u8 {
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/kit-xor/plugin.sjon", "examples/plugins/kit-xor/kit-xor", &any_diff, .{});
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/audio/plugin.sjon", "examples/plugins/audio/audio", &any_diff, .{});
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/enum-rich/plugin.sjon", "examples/plugins/enum-rich/enum-rich", &any_diff, .{});
-    // Digit-leading member spellings (`1d`, `2d`) — the one member shape
+    // Digit-leading member spellings (`1d`, `2d`): the one member shape
     // whose wire encoding is `$num` rather than `$sym`, so the JSON-Schema
     // and `.d.ts` goldens are where that is visible.
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/dimensions/plugin.sjon", "examples/plugins/dimensions/dimensions", &any_diff, .{ .markdown = true });
@@ -69,13 +69,19 @@ pub fn main(init: std.process.Init) !u8 {
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/units/plugin.sjon", "examples/plugins/units/units", &any_diff, .{});
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/xref/plugin.sjon", "examples/plugins/xref/xref", &any_diff, .{ .markdown = true });
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/xkey/plugin.sjon", "examples/plugins/xkey/xkey", &any_diff, .{});
-    // Slot-local forms — inline anonymous union (form_locals) on canvas.:shape.
+    // Slot-local forms: an inline anonymous union (form_locals) on canvas.:shape.
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/local-forms/plugin.sjon", "examples/plugins/local-forms/local-forms", &any_diff, .{});
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/head-counts/plugin.sjon", "examples/plugins/head-counts/head-counts", &any_diff, .{ .markdown = true });
+    // Markdown on: a closed head-set slot is the one place the page has to
+    // render *positional* local bodies, which it silently never did.
+    try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/headset-locals/plugin.sjon", "examples/plugins/headset-locals/headset-locals", &any_diff, .{ .markdown = true });
     // --- Value-kind refinements: GPU repr + variable-arity vectors + unit
     //     reject (gpu), and the scalar-or-ref shorthand. ---
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/gpu/plugin.sjon", "examples/plugins/gpu/gpu", &any_diff, .{});
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/scalar-or-ref/plugin.sjon", "examples/plugins/scalar-or-ref/scalar-or-ref", &any_diff, .{});
+    // --- S14: a variant selected by several discriminant values. Markdown
+    //     too, since the heading spells the set. ---
+    try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/variant-set/plugin.sjon", "examples/plugins/variant-set/variant-set", &any_diff, .{ .markdown = true });
     // --- M3 multi-plugin per-plugin layout (pair-a/pair-b) ---
     try exportPerPluginPair(gpa, io, regen, stderr, &any_diff);
 
@@ -87,7 +93,7 @@ pub fn main(init: std.process.Init) !u8 {
 }
 
 /// Extra golden targets a manifest fixture can opt into. Markdown is
-/// off by default because it is off by default in the tool too — it is
+/// off by default because it is off by default in the tool too, since it is
 /// reachable only through `sjon export-schema --target=markdown`, and is
 /// a parity boundary (CLI-only prose, never carried by the envelope).
 const FixtureTargets = struct { markdown: bool = false };
@@ -95,7 +101,7 @@ const FixtureTargets = struct { markdown: bool = false };
 /// Parse `manifest_path`, run schema-export against the loaded plugin,
 /// then compare (or regenerate) the three golden files at
 /// `<base>.schema.json.golden`, `<base>.d.ts.golden`, and
-/// `<base>.export.json.golden` — plus `<base>.md.golden` when
+/// `<base>.export.json.golden`, plus `<base>.md.golden` when
 /// `targets.markdown`. Reused by every manifest-sourced fixture
 /// (double + the M2 set).
 fn exportManifestFixture(

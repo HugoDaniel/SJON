@@ -1,0 +1,33 @@
+/* The brand accent.
+ *
+ * Only `--sl-color-accent{,-low,-high}` is overridden, and deliberately not
+ * `--sl-hue-*`. The hue variables feed the whole semantic palette — the
+ * orange, green, blue, purple and red that Expressive Code and the banners
+ * paint with — so moving one to make the brand colour come out right would
+ * drag the code-syntax palette along with it.
+ *
+ * The ramp keeps Starlight's own lightness and saturation structure at the
+ * coral's hue (10deg), rather than being eyeballed, so the derived tokens stay
+ * where Starlight expects them: in dark mode `--sl-color-text-accent` is
+ * `-high` and `--sl-color-text-invert` is `-low` (the label on an
+ * accent-filled button), and in light mode `--sl-color-text-accent` is the
+ * base. Both text uses clear 5:1 against their background.
+ */
+
+:root {
+  /* Dark, which is the theme with no `data-theme` attribute. */
+  --sl-color-accent-low: hsl(10, 54%, 20%);
+  --sl-color-accent: hsl(10, 85%, 60%);
+  --sl-color-accent-high: hsl(10, 90%, 85%);
+
+  /* Quiz verdicts. Named rather than used directly so the two states read as
+     semantics in `mastery-quiz.css` rather than as two arbitrary colours. */
+  --sjon-correct: var(--sl-color-green-high);
+  --sjon-wrong: var(--sl-color-red-high);
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-high: hsl(10, 80%, 28%);
+  --sl-color-accent: hsl(10, 78%, 44%);
+  --sl-color-accent-low: hsl(10, 88%, 91%);
+}

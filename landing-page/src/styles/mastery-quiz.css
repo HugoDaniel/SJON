@@ -1,0 +1,222 @@
+/* The mastery quiz at the foot of each lesson.
+ *
+ * Global rather than scoped: the markup is emitted as raw HTML by
+ * `src/lib/quiz-html.ts` into the lesson body, so there is no component for
+ * Astro to attach a scoping attribute to. The class names here, the ones
+ * `quiz-html.ts` writes, and the ones `public/mastery-quiz.js` queries are one
+ * contract — change a name and all three move together.
+ *
+ * Inside `.sl-markdown-content`, so Starlight's prose rules already handle
+ * spacing and type; what is left is the parts prose has no opinion about —
+ * the radio rows, the verdict colours, and the controls. */
+
+.mastery-quiz {
+  margin: 2rem 0;
+  border-top: 1px solid var(--sl-color-hairline-light);
+  border-bottom: 1px solid var(--sl-color-hairline-light);
+  padding: 1.5rem 0;
+}
+
+.mastery-quiz > h2 {
+  margin-top: 0;
+}
+
+.mastery-quiz .mc-list {
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: mc;
+}
+
+.mastery-quiz .mc-item {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--sl-color-hairline-light);
+  counter-increment: mc;
+}
+
+.mastery-quiz .mc-item:first-child {
+  border-top: 0;
+  padding-top: 0;
+  margin-top: 0;
+}
+
+.mastery-quiz .mc-q {
+  margin: 0 0 0.75rem;
+  font-weight: 600;
+  color: var(--sl-color-white);
+}
+
+.mastery-quiz .mc-q::before {
+  content: counter(mc) '. ';
+  color: var(--sl-color-gray-3);
+  font-family: var(--__sl-font-mono);
+  font-weight: 400;
+  margin-right: 4px;
+}
+
+.mastery-quiz .mc-options {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mastery-quiz .mc-options li {
+  padding: 3px 0;
+}
+
+.mastery-quiz .mc-options label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+  line-height: 1.5;
+}
+
+/* Starlight's reset flattens form controls; the radios have to look like
+   radios or there is nothing to click. */
+.mastery-quiz .mc-options input[type='radio'] {
+  appearance: auto;
+  -webkit-appearance: auto;
+  flex: 0 0 auto;
+  width: auto;
+  height: auto;
+  margin-top: 6px;
+  accent-color: var(--sl-color-text-accent);
+  cursor: pointer;
+}
+
+.mastery-quiz .mc-feedback {
+  margin: 0.75rem 0 0;
+  font-size: var(--sl-text-sm);
+  font-style: italic;
+  color: var(--sl-color-gray-3);
+}
+
+.mastery-quiz .mc-item.is-correct .mc-feedback {
+  color: var(--sjon-correct);
+}
+
+.mastery-quiz .mc-item.is-wrong .mc-feedback {
+  color: var(--sjon-wrong);
+}
+
+.mastery-quiz .mc-item.is-correct .mc-feedback::before {
+  content: '✓ ';
+  font-style: normal;
+}
+
+.mastery-quiz .mc-item.is-wrong .mc-feedback::before {
+  content: '✗ ';
+  font-style: normal;
+}
+
+.mastery-quiz .mc-options li.is-answer label {
+  font-weight: 600;
+  color: var(--sjon-correct);
+}
+
+.mastery-quiz .mc-options li.is-answer input[type='radio'] {
+  accent-color: var(--sjon-correct);
+}
+
+.mastery-quiz .mc-options li.is-answer label::after {
+  content: ' (correct answer)';
+  color: var(--sjon-correct);
+  font-weight: 400;
+  font-style: italic;
+  font-size: 0.88em;
+}
+
+/* The option the reader picked, when it was not the correct one. */
+.mastery-quiz .mc-options li.is-picked:not(.is-answer) label {
+  color: var(--sjon-wrong);
+}
+
+.mastery-quiz .mc-options li.is-picked:not(.is-answer) input[type='radio'] {
+  accent-color: var(--sjon-wrong);
+}
+
+.mastery-quiz .mc-options li.is-picked:not(.is-answer) label::after {
+  content: ' (your answer)';
+  color: var(--sjon-wrong);
+  font-weight: 400;
+  font-style: italic;
+  font-size: 0.88em;
+}
+
+.mastery-quiz .mc-explanation {
+  margin: 4px 0 0 1.6em;
+  font-size: var(--sl-text-sm);
+  color: var(--sl-color-gray-3);
+  line-height: 1.5;
+  border-left: 2px solid var(--sl-color-hairline-light);
+  padding-left: 0.75rem;
+}
+
+.mastery-quiz .mc-options li.is-answer .mc-explanation {
+  border-left-color: var(--sjon-correct);
+  color: var(--sl-color-text);
+}
+
+.mastery-quiz .mc-controls {
+  margin-top: 1.5rem;
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.mastery-quiz button {
+  font-size: var(--sl-text-sm);
+  font-weight: 600;
+  background: var(--sl-color-text-accent);
+  color: var(--sl-color-text-invert);
+  border: 1px solid var(--sl-color-text-accent);
+  border-radius: 999px;
+  padding: 0.5rem 1.25rem;
+  cursor: pointer;
+}
+
+.mastery-quiz button.mc-reset {
+  background: transparent;
+  color: var(--sl-color-white);
+  border-color: var(--sl-color-gray-5);
+}
+
+.mastery-quiz button:hover {
+  opacity: 0.85;
+}
+
+.mastery-quiz .mc-score {
+  margin: 0;
+  font-family: var(--__sl-font-mono);
+  font-size: var(--sl-text-sm);
+  color: var(--sl-color-white);
+}
+
+/* The diagnostics lesson wraps its codes table so it stays in view while the
+   reader works through the repair examples below it (`wrapCodesTable` in
+   `src/lib/lesson-transforms.ts`). */
+.codes-sticky {
+  position: sticky;
+  top: calc(var(--sl-nav-height) + 0.5rem);
+  /* A reference strip, not the page. Starlight's content column is narrower
+     than the one this table was written for, so it wraps to nearly a full
+     viewport — pinned at that height it hides the worked examples it is
+     supposed to be read alongside. */
+  max-height: min(45vh, 26rem);
+  overflow-y: auto;
+  background: var(--sl-color-bg);
+  border: 1px solid var(--sl-color-hairline-light);
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+  margin: 1.5rem 0 2rem;
+  z-index: 1;
+  font-size: var(--sl-text-sm);
+}
+
+.codes-sticky table {
+  width: 100%;
+  margin: 0;
+}

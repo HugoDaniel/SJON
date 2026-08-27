@@ -3,11 +3,11 @@
 ; is present. The JSON Schema side emits `{required: [<bundle-keys>]}`
 ; per bundle inside `oneOf` (or pairwise `not:{allOf}` for at_most_one).
 ;
-;   * `(route …)` — `exactly_one [(from + to), at]`
-;   * `(tag …)`   — `at_most_one [(prefix + suffix), literal]`
+;   * `(route …)`:  `exactly_one [(from + to), at]`
+;   * `(tag …)`:    `at_most_one [(prefix + suffix), literal]`
 ;
 ; Bundle atomicity (partial bundles fail) requires SJON-aware runtime
-; validation — the JSON Schema constraint sees a partial bundle as "no
+; validation: the JSON Schema constraint sees a partial bundle as "no
 ; alternative present" (failing `exactly_one` via `oneOf` mismatch).
 
 (plugin :name xkey :version "1.0.0"
@@ -22,7 +22,7 @@
       (alt :keys [at])))
 
   (form :name tag
-    :description "A tag decoration. Use `(prefix + suffix)` to flank, or `literal` alone — but never both."
+    :description "A tag decoration. Use `(prefix + suffix)` to flank, or `literal` alone, but never both."
     (key :name name :type symbol)
     (key :name prefix :type string :optional true)
     (key :name suffix :type string :optional true)

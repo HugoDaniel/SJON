@@ -564,9 +564,13 @@ pub const Diagnostic = struct {
         //     canonical SPDX identifier.
         //   * `too_many_keywords` (advisory) — `:keywords` exceeds 16
         //     entries.
-        //   * `sjon_format_unsupported` — manifest declares a `:sjon`
-        //     version newer than this host implements. Errors loudly
-        //     rather than silently falling back to v1.0 semantics.
+        //   * `sjon_format_unsupported` — RETIRED, never emitted. Manifests
+        //     once declared a format version (`:sjon "1.x"`) that a host
+        //     compared against its own ceiling; the key enabled nothing
+        //     and was removed. A manifest newer than its host now fails
+        //     meta-validation (`unknown_key` / `unknown_form`) instead.
+        //     Kept because the enum is append-only; a tombstone test in
+        //     `ManifestLoader_tests.zig` asserts it stays silent.
         plugin_wasm_resolved_outside_package,
         plugin_wasm_self_hash_malformed,
         plugin_wasm_self_hash_mismatch,

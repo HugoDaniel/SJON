@@ -22,7 +22,7 @@ export type F16 = number & { readonly __sjonRepr?: "f16" };
 // ----- plugin: kit-xor -----
 
 /**
- * A single phrase rendered either as notes or as events — never both, never neither.
+ * A single phrase rendered either as notes or as events, never both and never neither.
  *
  * @sjon-exclusive-group exactly-one [notes, events]
  */

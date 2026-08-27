@@ -9,12 +9,7 @@
 ; `conformance/fixtures/lines_plugin.zig` wires the same extractor as a
 ; native `impl`, and its tests drive these same documents — so the two
 ; routes are compared, not merely both present.
-;
-; `:sjon "1.2"` is the manifest format that introduced
-; `(cross-ref-provider …)` and `(cross-ref :provider/:source-key …)`.
-; A host that predates it refuses the whole manifest with
-; `sjon_format_unsupported` rather than silently ignoring the vocabulary.
-(plugin :name lines :version "1.0.0" :sjon "1.2"
+(plugin :name lines :version "1.0.0"
   (cross-ref-provider :name lines
     :description "One name per non-empty line."
     :impl "wasm:extract_lines")

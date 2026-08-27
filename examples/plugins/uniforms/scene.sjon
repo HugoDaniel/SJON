@@ -1,5 +1,5 @@
 ; The happy path: every `(bind :uniform …)` below resolves against a
-; name the `uniforms` provider extracted from the shader's WGSL — none
+; name the `uniforms` provider extracted from the shader's WGSL. None
 ; of `u_time`, `u_resolution`, `u_tint` appears anywhere in the
 ; document's own syntax. The commented-out `u_debug` declaration is the
 ; scanner earning its keep: a line-splitter would have registered it.
@@ -14,7 +14,7 @@
 @group(0) @binding(0) var<uniform> u_time: f32;
 @group(0) @binding(1) var<uniform> u_resolution: vec2f;
 @group(0) @binding(2) var<uniform> u_tint: vec4f;
-// @group(0) @binding(3) var<uniform> u_debug: f32;  // disabled — not a member
+// @group(0) @binding(3) var<uniform> u_debug: f32;  // disabled, not a member
 @group(1) @binding(0) var<storage, read> particles: array<vec2f>;  // storage, not a member
 
 @fragment

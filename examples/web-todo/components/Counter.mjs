@@ -8,7 +8,7 @@ const html = htm.bind(createElement);
 // current `:items` vector into `(count-done …)` / `(count-active …)`
 // expressions that dispatch through the sidecar `todo-plugin.wasm`.
 // `counts.done` / `counts.active` are `null` only if the call failed
-// (rare — usually means the wasm sidecar is misbehaving); the UI
+// (rare, and usually means the wasm sidecar is misbehaving); the UI
 // falls back to a dash in that case so it never lies.
 export function Counter({ counts }) {
     const done = counts?.done ?? null;
@@ -17,8 +17,8 @@ export function Counter({ counts }) {
         <p class="counter">
             ${fmt(done)} done · ${fmt(active)} active
             <span class="counter-source"
-                title="Computed by (count-done items) and (count-active items) — plugin expr-funcs bodied by todo-plugin.wasm"
-                >— via SJON Expr</span
+                title="Computed by (count-done items) and (count-active items): plugin expr-funcs bodied by todo-plugin.wasm"
+                >via SJON Expr</span
             >
         </p>
     `;

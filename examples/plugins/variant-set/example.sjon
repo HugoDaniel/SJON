@@ -1,0 +1,16 @@
+; Example usage of the `variant-set` plugin. One variant, two selecting
+; values: `:strip-index-format` is accepted under BOTH strip topologies,
+; and under neither list.
+
+(primitive :topology triangle-strip :strip-index-format uint16)
+(primitive :topology line-strip :strip-index-format uint32 :cull back)
+(primitive :topology triangle-list :cull back)
+(primitive)                                        ; defaults to triangle-list
+
+; The lines NOT written here:
+;
+;   (primitive :topology triangle-list :strip-index-format uint16)   ; unknown_key
+;   (primitive :strip-index-format uint16)                           ; unknown_key: the default is a list
+;
+; The strip-only key has no home under a list topology, whether the list
+; was written or defaulted. That is the whole rule, declared once.

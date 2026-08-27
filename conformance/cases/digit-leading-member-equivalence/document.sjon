@@ -11,7 +11,7 @@
 ;              `wrong_underlying`, exactly as before this feature existed.
 ;   * `2.5d` — does NOT match: a fractional magnitude is not an integer
 ;              key, so it cannot round into `2d`.
-(plugin :name gpu :version "1.0.0" :sjon "1.3"
+(plugin :name gpu :version "1.0.0"
   (value-kind :name texture-dimension :underlying symbol
     :members (member-set :values [1d 2d 3d]))
   (form :name texture (key :name dimension :type texture-dimension)))

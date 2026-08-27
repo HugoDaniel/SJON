@@ -3775,7 +3775,7 @@ fn completionsForKeywordKey(
         if (findKvpairSymbolValue(tree, enclosing, disc_name)) |value| {
             if (hit.form.variants) |variants| {
                 for (variants) |*v| {
-                    if (std.mem.eql(u8, v.when, value)) {
+                    if (v.selects(value)) {
                         active_variant = v;
                         break;
                     }
@@ -6231,15 +6231,24 @@ fn appendCrossRefFix(
     const kind = slot.kind;
 
     // Either the kvpair's value IS a cross-ref symbol, or it's a vector
-    // whose element kind is. Anything else and the diagnostic shouldn't
-    // have fired against this slot.
+    // whose element kind is, or either of those is a union whose determined
+    // arm is — that slot reports the arm's own `not_cross_ref` (15), so the
+    // fix reaches through to the arm. Anything else and the diagnostic
+    // shouldn't have fired against this slot.
+    const slot_kind = self.unionArmKind(kind, shapeAtSpan(&doc.tree, d.span));
     const xref: sjon.Plugin.ValueKind.CrossRef = blk: {
-        if (kind.cross_ref) |x| break :blk x;
-        if (kind.vector) |vs| {
+        if (slot_kind.cross_ref) |x| break :blk x;
+        if (slot_kind.vector) |vs| {
             const elem_kind = switch (self.schema.lookupValueKind(vs.element.name, vs.element.namespace)) {
                 .found => |k| k,
                 else => return,
             };
+            // The validator wraps a leaf failure in `element_at` and emits at
+            // the enclosing vector, so a union element kind is decided per
+            // element, not from the vector's own shape.
+            if (self.vectorElementArmKind(doc, d.span, elem_kind, .cross_ref)) |ek| {
+                if (ek.cross_ref) |x| break :blk x;
+            }
             if (elem_kind.cross_ref) |x| break :blk x;
         }
         return;
@@ -6340,14 +6349,19 @@ fn appendNotMemberFix(
     const kind = slot.kind;
 
     // The kvpair value either IS the member-checked value, or a vector
-    // whose element kind carries the member set.
+    // whose element kind carries the member set — or either of those is a
+    // union whose determined arm does (15).
+    const slot_kind = self.unionArmKind(kind, shapeAtSpan(&doc.tree, d.span));
     const member_set: sjon.Plugin.ValueKind.MemberSet = blk: {
-        if (kind.members) |m| break :blk m;
-        if (kind.vector) |vs| {
+        if (slot_kind.members) |m| break :blk m;
+        if (slot_kind.vector) |vs| {
             const elem_kind = switch (self.schema.lookupValueKind(vs.element.name, vs.element.namespace)) {
                 .found => |k| k,
                 else => return,
             };
+            if (self.vectorElementArmKind(doc, d.span, elem_kind, .members)) |ek| {
+                if (ek.members) |m| break :blk m;
+            }
             if (elem_kind.members) |m| break :blk m;
         }
         return;
@@ -6935,6 +6949,71 @@ fn findCrossRefAlt(
         }
     }
     return null;
+}
+
+/// The kind a quick-fix should read its candidate set from, for a slot whose
+/// declared kind may be a union. A union whose alternatives are disjoint by
+/// node shape reports the determined arm's own diagnostic (15), so the fix
+/// has to reach the same arm to find the `cross_ref` / `members` behind it.
+/// Non-unions, and unions with no determined arm, come back unchanged — the
+/// caller then finds nothing and declines to offer a fix, which is right:
+/// the diagnostic in that case is `union_no_branch_matched`, not a leaf code.
+///
+/// `shape` is the node shape at the diagnostic span (or, inside a vector, the
+/// element's), asked of `Validator.determinedArm` — the validator's own rule,
+/// so the fix cannot blame a different arm than the message did.
+fn unionArmKind(
+    self: *const Self,
+    kind: *const sjon.Plugin.ValueKind,
+    shape: sjon.Validator.NodeShape,
+) *const sjon.Plugin.ValueKind {
+    const us = kind.union_of orelse return kind;
+    const ai = sjon.Validator.determinedArm(self.schema, kind, shape) orelse return kind;
+    const alt = us.alternatives[ai];
+    return switch (self.schema.lookupValueKind(alt.name, alt.namespace)) {
+        .found => |k| k,
+        else => kind,
+    };
+}
+
+/// The refinement a quick-fix is hunting for inside a vector's element kind.
+const ArmWant = enum { cross_ref, members };
+
+/// The determined-arm kind of a union *element* kind, decided per element.
+///
+/// The validator wraps a leaf failure in `MatchFail.element_at` and emits at
+/// the enclosing vector, so `span` is the vector and its own shape says
+/// nothing about which arm was blamed. Walk the elements instead and take
+/// the first whose determined arm carries `want`; every element that could
+/// have produced this diagnostic has the same shape, so the first is the
+/// arm. Null when `span` is not a vector or no element determines an arm
+/// with `want` — the caller then falls back to the element kind itself.
+fn vectorElementArmKind(
+    self: *const Self,
+    doc: *const Document,
+    span: Ast.Span,
+    elem_kind: *const sjon.Plugin.ValueKind,
+    want: ArmWant,
+) ?*const sjon.Plugin.ValueKind {
+    if (elem_kind.union_of == null) return null;
+    const vec_idx = findNodeBySpan(&doc.tree, span) orelse return null;
+    if (doc.tree.tagOf(vec_idx) != .vector) return null;
+    for (doc.tree.vectorElements(vec_idx)) |el| {
+        const arm = self.unionArmKind(elem_kind, sjon.Validator.shapeOfTag(doc.tree.tagOf(el)));
+        const has = switch (want) {
+            .cross_ref => arm.cross_ref != null,
+            .members => arm.members != null,
+        };
+        if (has) return arm;
+    }
+    return null;
+}
+
+/// The node shape at `span`, for `unionArmKind`. `.other` when no node has
+/// exactly that span — which selects no arm, so the fix declines.
+fn shapeAtSpan(tree: *const Ast.Tree, span: Ast.Span) sjon.Validator.NodeShape {
+    const idx = findNodeBySpan(tree, span) orelse return .other;
+    return sjon.Validator.shapeOfTag(tree.tagOf(idx));
 }
 
 /// The `union{…}` ValueKind of the slot declared by `declaring`'s key

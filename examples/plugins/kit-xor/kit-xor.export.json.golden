@@ -7,7 +7,7 @@
       "forms": [
         {
           "name": "phrase",
-          "description": "A single phrase rendered either as notes or as events — never both, never neither.",
+          "description": "A single phrase rendered either as notes or as events, never both and never neither.",
           "open": false,
           "positional": "none",
           "keys": [

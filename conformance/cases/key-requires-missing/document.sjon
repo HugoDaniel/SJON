@@ -8,7 +8,7 @@
 ; requirements are absent: `(span)` requires three keys and names all three
 ; in a single message rather than complaining three times. A key with three
 ; unmet dependencies has one problem, not three.
-(plugin :name gfx :version "1.0.0" :sjon "1.3"
+(plugin :name gfx :version "1.0.0"
   (value-kind :name byte-count :underlying number
     :numeric (numeric-bounds :min 0 :integer true))
 

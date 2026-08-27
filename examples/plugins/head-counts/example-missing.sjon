@@ -1,7 +1,7 @@
 ; Under a floor. No `(vertex …)` against `:min 1`.
 ;
 ; You cannot know a head is absent until the children run out, so this one
-; has no child to point at and lands on the form's own head — the same
+; has no child to point at and lands on the form's own head, the same
 ; place a missing required key lands.
 ;
 ;   positional_missing at [render-pipeline]
@@ -9,7 +9,7 @@
 ;
 ; The `(constant …)` below helps not at all: a child counts towards a head
 ; only if its own head matches byte-for-byte, so nothing can stand in for a
-; missing `vertex`. Nor would an out-of-set head — that one fails
+; missing `vertex`. Nor would an out-of-set head; that one fails
 ; `not_head_member` and still satisfies nobody's floor.
 ;
 ;   sjon validate examples/plugins/head-counts/{plugin,example-missing}.sjon

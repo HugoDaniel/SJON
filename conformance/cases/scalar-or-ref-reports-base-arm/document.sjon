@@ -1,0 +1,32 @@
+; A `(scalar-or-ref-shape …)` slot reports the ARM the node's shape selected,
+; not the union it desugars to. The shorthand stores an ordinary
+; `union [<base> <ref>]` and matches as one — try each, first accept wins —
+; but its two arms are disjoint by node shape: a number can only have meant
+; the base, a symbol only the ref. So when nothing matches there is still a
+; determined arm, and the diagnostic is that arm's own. Here the base is a
+; bounded integer, and each rejected literal names the bound that refused
+; it — the reason the bounds were declared — where the union's collapsed
+; `union_no_branch_matched` only named two kinds.
+;
+; Matching is untouched: `:q 8` and a resolved `:q TILE` are clean exactly
+; as before, and no document changes verdict, only the code it fails with.
+(plugin :name p :version "1.0.0"
+  (value-kind :name qty-value :underlying number
+    :numeric (numeric-bounds :min 0 :max 16 :integer true))
+  (value-kind :name thing-ref :underlying symbol
+    :cross-ref (cross-ref :target thing))
+  (value-kind :name qty
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base qty-value :ref thing-ref))
+  (form :name thing
+    (key :name name :type symbol :optional false))
+  (form :name use
+    (key :name q :type qty :optional false)))
+
+(thing :name TILE)
+
+(use :q 8)      ; the base arm, in range — clean
+(use :q TILE)   ; the ref arm, resolved — clean
+(use :q 32)     ; the base arm refused: above :max
+(use :q -1)     ; the base arm refused: below :min
+(use :q 1.5)    ; the base arm refused: not an integer

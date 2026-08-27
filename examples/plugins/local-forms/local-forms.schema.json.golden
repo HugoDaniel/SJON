@@ -35,7 +35,7 @@
           "anyOf": [
             {
               "type": "object",
-              "description": "Slot-local circle — shadows the global circle.",
+              "description": "Slot-local circle; shadows the global circle.",
               "properties": {
                 "$form": {
                   "const": "circle"
@@ -55,7 +55,7 @@
             },
             {
               "type": "object",
-              "description": "Slot-local rectangle (local-only — invisible globally).",
+              "description": "Slot-local rectangle (local only, invisible globally).",
               "properties": {
                 "$form": {
                   "const": "rect"
@@ -170,7 +170,7 @@
     },
     "form.local-forms.circle": {
       "type": "object",
-      "description": "Global circle — shadowed by the local circle inside canvas.:shape.",
+      "description": "Global circle, shadowed by the local circle inside canvas.:shape.",
       "properties": {
         "$form": {
           "const": "circle"

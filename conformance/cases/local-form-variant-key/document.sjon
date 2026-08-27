@@ -1,0 +1,20 @@
+; A local form declared on a VARIANT key is in scope exactly when the key
+; itself is accepted: while that variant is active, and after the
+; discriminant (the position rule). Outside that window the key is
+; `unknown_key` and puts nothing in scope — its value form resolves globally,
+; here to nothing. Both Zig walkers and every host answer alike; the tree
+; walker used to attach any variant's key locals regardless, and this case
+; is what pins the rule.
+(plugin :name vk :version "1.0.0"
+  (value-kind :name k :underlying symbol :members (member-set :values [a b]))
+  (form :name thing :discriminant kind
+    (key :name kind :type k :optional false)
+    (variant :when a
+      (key :name extra :type form :optional true
+        (form :name loc)))
+    (variant :when b)))
+
+(thing :kind a :extra (loc))     ; active — the local resolves, clean
+(thing :kind a :extra (nope))    ; active — a miss is the slot's unknown_local_form
+(thing :kind b :extra (loc))     ; inactive — unknown_key, and (loc) resolves globally
+(thing :extra (loc) :kind a)     ; ahead of the discriminant — the same

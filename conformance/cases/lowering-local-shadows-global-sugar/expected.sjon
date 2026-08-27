@@ -1,0 +1,3 @@
+; The local `entry` shadows the global sugar: no hook fires, no
+; `entry-normal` is emitted, and the authored document validates clean.
+(diagnostics)

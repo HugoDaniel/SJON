@@ -1,0 +1,5 @@
+; One aggregate diagnostic at the sugar form's `:lowering` path — reachability
+; is through the list, and this list has no root that declares `leaf`. The
+; authored `(wrap (leaf))` validates clean.
+(diagnostics
+  (diagnostic :code unknown_form :path [p seed lowering]))

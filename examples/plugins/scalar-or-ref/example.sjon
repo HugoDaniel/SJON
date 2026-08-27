@@ -2,10 +2,10 @@
 ; mix of literals and a symbolic reference, exercising both alternatives of
 ; the desugared `union [dim-value symbol]`:
 ;
-;   * :x — 64, a literal count (the scalar / `dim-value` alternative).
-;   * :y — WORKGROUP_SIZE, a bare symbol (the `symbol` / reference
+;   * :x:  64, a literal count (the scalar / `dim-value` alternative).
+;   * :y:  WORKGROUP_SIZE, a bare symbol (the `symbol` / reference
 ;     alternative; it resolves downstream, e.g. to a host-supplied constant).
-;   * :z — 1, another literal.
+;   * :z:  1, another literal.
 
 (dispatch :x 64 :y WORKGROUP_SIZE :z 1)
 
@@ -19,10 +19,15 @@
 
 ; The whole point of naming a `:ref` is the line NOT written here:
 ;
-;   (checked-dispatch :x 64 :y TIL)     ; union_no_branch_matched
+;   (checked-dispatch :x 64 :y TIL)     ; not_cross_ref
 ;
-; Under the default reference half (`dim`, above), the same typo is clean —
+; Under the default reference half (`dim`, above), the same typo is clean:
 ; `TIL` is a well-formed symbol and nothing checks that it names anything.
-; Note the diagnostic is the union's, naming both alternatives, rather than
-; the reference branch's own `not_cross_ref`: the shorthand stores an
-; ordinary union, and a union does not forward one branch's private reason.
+; Note the diagnostic is the reference arm's own `not_cross_ref`, naming
+; the `(define :name …)` form the symbol had to be declared by, rather
+; than the union's `union_no_branch_matched` listing two kinds: a symbol
+; can only have meant the reference arm, so the validator reports that
+; arm. A number would report the base arm the same way, so `dim-value`
+; declares no bounds here, but had it a `:max`, `:x 640000` would say
+; `number_above_max` and name it. Only a shape neither arm reaches (a
+; string, a vector) gets the union's own report.

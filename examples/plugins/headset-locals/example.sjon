@@ -1,0 +1,18 @@
+; Every branch of the closed positional set, once.
+;
+;   * `entry` resolves to a slot-local of `bind-group-layout`, and there
+;     is no global `entry` to fall back to: the head-set member is
+;     usable with no "dummy" form.
+;   * `buffer` / `storage-texture` resolve to slot-locals of `entry`.
+;   * `head` resolves GLOBALLY from the same slot, so this one document
+;     exercises the inline-body branch and the `$ref` branch side by side.
+;   * `buffer :max 1` and `entry :min 1` are both satisfied exactly at
+;     their bounds, which is what the exported `contains` /
+;     `minContains` / `maxContains` check.
+(bind-group-layout :name bgl0
+  (entry :binding 0
+    (buffer :kind uniform)
+    (head :text "the camera UBO"))
+  (entry :binding 1
+    (storage-texture :format rgba8unorm)
+    (storage-texture :format r32float)))

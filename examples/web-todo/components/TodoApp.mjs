@@ -21,13 +21,13 @@ export function TodoApp({ store }) {
     const counts = state.__counts ?? null;
 
     return html`
-        <h1>SJON TODO <span class="sub">— state lives in an SJON document</span></h1>
+        <h1>SJON TODO <span class="sub">state lives in an SJON document</span></h1>
         <${NewTodo} store=${store} nextId=${state["next-id"] ?? 1} />
         <${Filter} store=${store} active=${filter} />
         <${TodoList} store=${store} items=${items} filter=${filter} />
         <${Counter} counts=${counts} />
         ${error
-            ? html`<div class="error-pill">Rejected by validator — ${error.message}</div>`
+            ? html`<div class="error-pill">Rejected by validator: ${error.message}</div>`
             : null}
     `;
 }

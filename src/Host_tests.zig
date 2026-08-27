@@ -494,6 +494,59 @@ test "D3: mismatched (use-plugin … :version) pin surfaces plugin_version_misma
     try std.testing.expect(saw);
 }
 
+test "D3: a (use-plugin … :version) pin against an unversioned manifest is plugin_version_mismatch" {
+    // `:version` is optional on the manifest. A pin is a claim about a
+    // version the manifest declares, so pinning an unversioned plugin
+    // fails the same way a wrong pin does — and the message says the
+    // manifest declares none rather than quoting an empty string.
+    const a = std.testing.allocator;
+    const unversioned =
+        \\(plugin :name shapes
+        \\  (form :name circle
+        \\    (key :name r :type number :optional false)))
+        \\
+    ;
+    var mock = MockResolver{ .response = .{ .manifest = .{ .source = unversioned } } };
+
+    const src: [:0]const u8 = "(use-plugin \"shapes\" :version \"1.0.0\")\n";
+    var r = try Host.validateDocument(a, src, .{ .resolver = mock.handle() });
+    defer r.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), r.plugins.len);
+    try std.testing.expect(r.hasErrors());
+
+    var saw = false;
+    for (r.diagnostics) |d| if (d.code == .plugin_version_mismatch) {
+        try std.testing.expectEqual(Host.Phase.manifest, d.phase);
+        try std.testing.expect(std.mem.indexOf(u8, d.message, "declares no :version") != null);
+        saw = true;
+    };
+    try std.testing.expect(saw);
+}
+
+test "D3: an unversioned manifest resolves cleanly when nothing pins it" {
+    const a = std.testing.allocator;
+    const unversioned =
+        \\(plugin :name shapes
+        \\  (form :name circle
+        \\    (key :name r :type number :optional false)))
+        \\
+    ;
+    var mock = MockResolver{ .response = .{ .manifest = .{ .source = unversioned } } };
+
+    const src: [:0]const u8 =
+        \\(use-plugin "shapes")
+        \\(circle :r 4)
+        \\
+    ;
+    var r = try Host.validateDocument(a, src, .{ .resolver = mock.handle() });
+    defer r.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), r.plugins.len);
+    try std.testing.expect(!r.hasErrors());
+    try std.testing.expectEqualStrings("", r.plugins[0].version);
+}
+
 test "D3: matching (use-plugin … :hash) pin resolves cleanly" {
     // Test premise: the hash-pin path verifies bytes BEFORE any
     // runtime instantiation. Under `-Dplugin-exec=true` the same path
@@ -2724,7 +2777,7 @@ test "lowering staging: a terminal-form diagnostic's span points at the original
 /// A declaration-only provider: legal, and unrunnable on every host, so
 /// this needs neither a wasm sidecar nor a plugin runtime.
 const provider_doc: [:0]const u8 =
-    \\(plugin :name probe :version "1.0.0" :sjon "1.2"
+    \\(plugin :name probe :version "1.0.0"
     \\  (cross-ref-provider :name lines :description "One name per line.")
     \\  (form :name shader
     \\    (key :name name :type symbol :optional false)

@@ -1,4 +1,4 @@
-//! `uniforms` — a *real* cross-ref extractor, the kind the conformance
+//! `uniforms`: a *real* cross-ref extractor, the kind the conformance
 //! fixture (`conformance/fixtures/lines_extract.zig`) deliberately is
 //! not. The corpus's `lines` provider splits on newlines because what
 //! the corpus pins is the seam; this example is the downstream half its
@@ -15,7 +15,7 @@
 //! whitespace between tokens are skipped, so a commented-out declaration
 //! is not a name. A `var<uniform>` with no identifier after it makes the
 //! whole extraction refuse (reported by the validator as
-//! `cross_ref_extraction_failed`) — refusal over silence, because a
+//! `cross_ref_extraction_failed`): refusal over silence, because a
 //! truncated member set would mis-blame every reference that follows.
 //!
 //! Duplicates are kept: collapsing them is the host's extraction-table
@@ -29,7 +29,7 @@
 const std = @import("std");
 
 /// Walks a WGSL source and yields uniform names. `next()` returns null
-/// both at end of source *and* at a malformed declaration — check
+/// both at end of source *and* at a malformed declaration, so check
 /// `refused` afterwards to tell the two apart.
 pub const Scan = struct {
     src: []const u8,

@@ -23,7 +23,7 @@
       "hints": [
         {
           "kind": "help",
-          "text": "Function arity declarations come in three shapes — `(fixed N)`, `(at-least N)`, and `(range :min M :max N)`. See `sjon explain arity_mismatch`."
+          "text": "Function arity declarations come in three shapes: `(fixed N)`, `(at-least N)`, and `(range :min M :max N)`. See `sjon explain arity_mismatch`."
         }
       ]
     }

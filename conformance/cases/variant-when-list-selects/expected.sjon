@@ -1,0 +1,6 @@
+; One `unknown_key` under `tri-list`, and the single-value variant's
+; `missing_required_key`. The two strip lines are clean: both values
+; select the one variant.
+(diagnostics
+  (diagnostic :code unknown_key :path [prim strip-format])
+  (diagnostic :code missing_required_key :path [prim]))

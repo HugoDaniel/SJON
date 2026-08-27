@@ -10,7 +10,7 @@
 ; depending on a host-local build flag — the same profile as
 ; `default-materialize-expression-failure`, which declares an
 ; `:impl`-less expr-func and replays everywhere.
-(plugin :name lines :version "1.0.0" :sjon "1.2"
+(plugin :name lines :version "1.0.0"
   (cross-ref-provider :name lines
     :description "One name per non-empty line.")
 

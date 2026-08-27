@@ -9,7 +9,7 @@
 ; `duplicate_cross_ref_target` is the existing code, whose explanation
 ; already says "within one cross-ref's target scope" — a group is one
 ; such scope, so the sentence stays true with no new code.
-(plugin :name gpu :version "1.0.0" :sjon "1.3"
+(plugin :name gpu :version "1.0.0"
   (value-kind :name pipeline-ref :underlying symbol
     :cross-ref (cross-ref :target [render-pipeline compute-pipeline]))
 

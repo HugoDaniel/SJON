@@ -77,8 +77,14 @@ export interface ModelDiscriminator {
   readonly variants: readonly ModelVariant[];
 }
 
+/** One variant gate. `when` lists the discriminant values that select it
+ *  (`Variant.when`, never empty): a one-value variant emits exactly as it did
+ *  when `:when` took one symbol (`const` / `Symbol_<"a">` / `"when": "a"`), a
+ *  multi-value one guards the same single branch with an enum (`enum` /
+ *  `Symbol_<"a" | "b">` / `"when": ["a", "b"]`) — the shape does not multiply
+ *  the output. Mirrors `Model.Variant`. */
 export interface ModelVariant {
-  readonly when: string;
+  readonly when: readonly string[];
   readonly keys: readonly ModelKey[];
 }
 
@@ -120,7 +126,17 @@ export type ModelValueShape =
   | { readonly kind: 'keyword' }
   | { readonly kind: 'vector'; readonly vector: ModelVectorShape }
   | { readonly kind: 'form_any' }
-  | { readonly kind: 'form_heads'; readonly heads: readonly ModelFormRef[] }
+  // A head-set slot. `heads` are the resolved members; `minChildren` /
+  // `maxChildren` are the count over the *whole* set, which per-head
+  // bounds structurally cannot express. Both levels are meaningful only
+  // at a form's `:positional` slot. Mirrors `Model.HeadSetShape` in
+  // `src/SchemaExport/Model.zig`.
+  | {
+      readonly kind: 'form_heads';
+      readonly heads: readonly ModelFormRef[];
+      readonly minChildren?: number;
+      readonly maxChildren?: number;
+    }
   // Slot-local forms (`KeySpec.localForms`): fully-lowered `ModelForm`s the
   // slot resolves local-first, then falls back additively to the global
   // catalog. Backends emit an inline anonymous union — one object schema per
@@ -227,8 +243,37 @@ export interface ModelCrossRef {
   readonly sourceKey: string | null;
 }
 
+/**
+ * What a head-set member resolves to, at the slot the head-set was
+ * lowered for — the order `Validator.validateFormHead` step 0 tries.
+ * Mirrors `Model.FormRef.Body` in `src/SchemaExport/Model.zig`.
+ *
+ * A head-set kind is plugin-wide and reusable, so which of these applies
+ * is a property of the *slot*, not of the kind: the same kind can be
+ * `local` on a slot that declares the body inline and `unresolved` on
+ * one that does not.
+ */
+export type ModelFormRefBody =
+  /** A unique global form — `$ref` into `#/$defs/form.<plugin>.<name>`. */
+  | { readonly kind: 'global' }
+  /**
+   * A slot-local form. Locals have no global `$def`, so the body is
+   * emitted in place, the same way `form_locals` emits its arms.
+   */
+  | { readonly kind: 'local'; readonly form: ModelForm }
+  /**
+   * Nothing in scope resolves this head. Backends emit a head-pinned
+   * open object and **never** a `$ref`: an unresolvable `$ref` makes a
+   * 2020-12 validator reject the whole document at compile time.
+   */
+  | { readonly kind: 'unresolved' };
+
 export interface ModelFormRef {
-  /** Owning plugin name. Empty string when the lowering pass couldn't resolve. */
+  /**
+   * Owning plugin. Meaningful for `global` (it selects the `$defs`
+   * table) and for `local` (the plugin the enclosing form belongs to);
+   * empty only for `unresolved`.
+   */
   readonly plugin: string;
   readonly name: string;
   /**
@@ -242,11 +287,46 @@ export interface ModelFormRef {
    */
   readonly min?: number;
   readonly max?: number;
+  /**
+   * Absent means `global` — the shape every head-set carried before
+   * slot-aware resolution, so a global-only head-set is unchanged.
+   */
+  readonly body?: ModelFormRefBody;
+}
+
+/** The resolution route of a ref, defaulting an absent `body` to global. */
+export function refBody(ref: ModelFormRef): ModelFormRefBody {
+  return ref.body ?? { kind: 'global' };
 }
 
 /** True when a ref declares a count worth emitting. */
 export function isBoundedRef(ref: ModelFormRef): boolean {
   return (ref.min ?? 0) !== 0 || ref.max !== undefined;
+}
+
+/** One head-set shape, narrowed out of `ModelValueShape`. */
+export type ModelHeadSetShape = Extract<ModelValueShape, { kind: 'form_heads' }>;
+
+/** True when the *set* declares a count. `isBoundedRef`'s counterpart,
+ *  one level up. Mirrors `Model.HeadSetShape.isBounded`. */
+export function isBoundedSet(hs: ModelHeadSetShape): boolean {
+  return (hs.minChildren ?? 0) !== 0 || hs.maxChildren !== undefined;
+}
+
+/** True when anything here declares a count — some head, or the set. The
+ *  `$children` backends gate on this, so an all-unbounded head-set emits
+ *  no bounds block at all. Mirrors `Model.HeadSetShape.anyBounded`. */
+export function anyBoundedInSet(hs: ModelHeadSetShape): boolean {
+  return isBoundedSet(hs) || hs.heads.some(isBoundedRef);
+}
+
+/** True when the slot demands at least one positional child — some
+ *  head's `:min`, or the set's `:min-children`. Distinct from
+ *  `anyBoundedInSet` because a ceiling-only slot is bounded and demands
+ *  nothing, and the difference decides whether `$children` is `required`.
+ *  Mirrors `Model.HeadSetShape.hasFloor`. */
+export function headSetHasFloor(hs: ModelHeadSetShape): boolean {
+  return (hs.minChildren ?? 0) > 0 || hs.heads.some((h) => (h.min ?? 0) > 0);
 }
 
 export interface ModelUnionAlternative {

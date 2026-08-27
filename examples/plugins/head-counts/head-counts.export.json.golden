@@ -23,7 +23,7 @@
         },
         {
           "name": "fragment",
-          "description": "The fragment stage. Optional — a depth-only pass has none.",
+          "description": "The fragment stage. Optional, because a depth-only pass has none.",
           "open": false,
           "positional": "none",
           "keys": [
@@ -100,7 +100,7 @@
         },
         {
           "name": "section-holder",
-          "description": "Same kind, keyed slot — the counts ride along inertly here.",
+          "description": "Same kind, keyed slot: the counts ride along inertly here.",
           "open": false,
           "positional": "none",
           "keys": [
@@ -158,6 +158,156 @@
             }
           },
           "keys": []
+        },
+        {
+          "name": "buffer",
+          "description": "A buffer binding.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "type",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            }
+          ]
+        },
+        {
+          "name": "sampler",
+          "description": "A sampler binding.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "type",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            }
+          ]
+        },
+        {
+          "name": "texture",
+          "description": "A texture binding.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "sample-type",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            }
+          ]
+        },
+        {
+          "name": "bgl-entry",
+          "description": "Exactly one resource: the claim per-head bounds cannot make.",
+          "open": false,
+          "positional": {
+            "kind": {
+              "kind": "form_heads",
+              "refs": [
+                {
+                  "plugin": "head-counts",
+                  "name": "buffer",
+                  "max": 1
+                },
+                {
+                  "plugin": "head-counts",
+                  "name": "sampler",
+                  "max": 1
+                },
+                {
+                  "plugin": "head-counts",
+                  "name": "texture",
+                  "max": 1
+                }
+              ],
+              "min-children": 1,
+              "max-children": 1
+            }
+          },
+          "keys": [
+            {
+              "name": "binding",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "number"
+              }
+            }
+          ]
+        },
+        {
+          "name": "cube",
+          "description": "",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "size",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "number"
+              }
+            }
+          ]
+        },
+        {
+          "name": "sphere",
+          "description": "",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "radius",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "number"
+              }
+            }
+          ]
+        },
+        {
+          "name": "data",
+          "description": "At most one generator: a ceiling-only set bound.",
+          "open": false,
+          "positional": {
+            "kind": {
+              "kind": "form_heads",
+              "refs": [
+                {
+                  "plugin": "head-counts",
+                  "name": "cube"
+                },
+                {
+                  "plugin": "head-counts",
+                  "name": "sphere"
+                }
+              ],
+              "max-children": 1
+            }
+          },
+          "keys": [
+            {
+              "name": "name",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            }
+          ]
         }
       ],
       "value_kinds": [
@@ -184,6 +334,50 @@
               }
             ]
           }
+        },
+        {
+          "name": "bgl-resource",
+          "description": "The one resource a bind-group-layout entry binds.",
+          "shape": {
+            "kind": "form_heads",
+            "refs": [
+              {
+                "plugin": "head-counts",
+                "name": "buffer",
+                "max": 1
+              },
+              {
+                "plugin": "head-counts",
+                "name": "sampler",
+                "max": 1
+              },
+              {
+                "plugin": "head-counts",
+                "name": "texture",
+                "max": 1
+              }
+            ],
+            "min-children": 1,
+            "max-children": 1
+          }
+        },
+        {
+          "name": "data-shape-section",
+          "description": "The one generator a (data …) may carry, if any.",
+          "shape": {
+            "kind": "form_heads",
+            "refs": [
+              {
+                "plugin": "head-counts",
+                "name": "cube"
+              },
+              {
+                "plugin": "head-counts",
+                "name": "sphere"
+              }
+            ],
+            "max-children": 1
+          }
         }
       ]
     }
@@ -195,6 +389,20 @@
       "message": "value-kind `pipeline-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
       "plugin_name": "head-counts",
       "kind_name": "pipeline-section"
+    },
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `bgl-resource` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin_name": "head-counts",
+      "kind_name": "bgl-resource"
+    },
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `data-shape-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin_name": "head-counts",
+      "kind_name": "data-shape-section"
     }
   ]
 }

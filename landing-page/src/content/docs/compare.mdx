@@ -1,0 +1,154 @@
+---
+title: SJON next to JSON and EDN
+description: The same document written three ways, what each spelling keeps, and an honest account of what SJON gives up in exchange.
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+The three formats overlap enough that "which one" is a fair question, and a
+feature table on its own is a bad answer to it. So let me start with one
+document, write it three ways, and point at what each spelling can and cannot
+carry.
+
+This is the camera from the [home page](/), at the size it reaches by
+[the end of the tutorial](/schemas/repair/style-portability-capstone):
+
+```sjon title="camera.sjon"
+;; The wide shot. 2 keeps the whole 1920 plate on screen.
+(camera :name wide :projection ortho
+  :zoom 2
+  :delay 4b
+  :alpha (smoothstep 0 1 t))
+```
+
+## The same thing in JSON
+
+```json title="camera.json"
+{
+  "camera": {
+    "name": "wide",
+    "projection": "ortho",
+    "zoom": 2,
+    "delay": 4,
+    "alpha": 0.5
+  }
+}
+```
+
+Four things went missing on the way, and none of them is a matter of taste.
+The comment is gone, because RFC 8259 has nowhere to put it. `4b` became `4`,
+so the unit now lives in a convention somebody has to remember. `"wide"` and
+`"ortho"` became the same kind of thing, both strings, and nothing in the file
+says otherwise. And `alpha` had to be evaluated before serialisation, so the
+file records an answer where it used to hold the question.
+
+Cover the SJON block for a moment and try to reconstruct it from the JSON
+alone. The numbers come back without much trouble. What does not come back is
+which of `wide` and `ortho` is a name this file invented and which one the
+schema is going to check, and that is the distinction the rest of this page is
+about.
+
+None of that makes JSON worse at its job. Its job is being the thing you send
+between two programs, and it is the best format there is for that. It is a poor
+place to keep a file a person edits, which is a different job.
+
+## The same thing in EDN
+
+```clojure title="camera.edn"
+{:camera {:name wide
+          ; this comment does survive
+          :projection ortho
+          :zoom 2
+          :delay #duration [4 "b"]
+          :alpha 0.5}}
+```
+
+EDN gets much closer. It keeps comments, it keeps the difference between the
+symbol `wide` and a string, and its tagged literals can carry the unit. That
+`#duration` line is where the two designs part company: a tag means the
+*reader* has to be configured before this document can be read at all. Hand the
+file to a program that has not registered that tag and it fails at read time,
+for a reason that has nothing to do with that program's own rules.
+
+SJON's reader is closed on purpose. There are no tags and no syntax extensions,
+so every document parses with the same parser, and everything domain-specific
+lives one layer up in the schema. The cost is real: you cannot invent new
+syntax, and if your domain genuinely needs a new literal shape, SJON will make
+you express it as a form instead. What you buy is that a document is always
+readable, a diagnostic can always be produced, and the parser is the same bytes
+in every host.
+
+## SJON next to JSON, in detail
+
+| Area | JSON | SJON |
+| --- | --- | --- |
+| Surface | Objects, arrays, strings, numbers, booleans, and null. | Forms, vectors, symbols, keywords, strings, booleans, nil, dates, times, and unit-bearing numbers. |
+| Comments | None in standard RFC 8259 JSON. | Captured as AST trivia. Preserved in the lossless binary and printer paths, dropped in canonical JSON and text. |
+| Commas | Required separators. Trailing commas are rejected. | Collections are whitespace-separated. A comma is an illegal character and raises a syntax error. |
+| Keys | Object keys are strings. Duplicate-key behaviour depends on the parser and is often lossy or undefined. | Keys are `:keyword` / value pairs kept in source order. A repeated key survives into the AST and is flagged by schema validation. |
+| Numbers | Double-precision throughout, losing precision for integers above 2^53 - 1. | Integer literals stay exact to 64-bit limits in the AST. Expression evaluation and some codecs cast them to `f64`. |
+| Schema | No built-in layer; you reach for JSON Schema or an equivalent. | Validation is a core pass over the AST, with plugin-defined forms, slots, value kinds, and diagnostic spans. |
+| Interop | The native serialization standard. | A semantic JSON bridge in both directions. Canonical JSON normalises form fields and drops source order and trivia. |
+
+## SJON next to EDN, in detail
+
+| Area | EDN | SJON |
+| --- | --- | --- |
+| Data model | Lists, vectors, maps, sets, symbols, keywords, and tagged literals. | Forms and vectors only. No maps, sets, or lists; a form uses greedy `:keyword` pairing to carry key/value fields structurally. |
+| Reader tags | Extensible through custom tags (`#my/tag value`), which the reader has to be configured for. | Syntax-closed. No tags, no extensions. Domain semantics resolve entirely at the schema layer. |
+| Computation | Pure data. No built-in evaluation. | A sandboxed, pure, bounded interpreter over a fixed function set the host opts into. |
+| Strings | Double-quoted with standard backslash escapes. | Double-quoted, plus raw triple-quoted strings for literal payloads. |
+| Numbers | Arbitrary precision, depending on reader and host support. | Integer literals bounded to exact `i64` / `u64`; every other numeric path is `f64`. |
+| Schema | An external framework such as Clojure Spec. | Integrated, and a first-class layer separate from bare parsing. |
+| Host support | Mature and deeply integrated in Clojure; uneven elsewhere. | A Zig core with hosts for Node, the browser, Rust, and TypeScript, all replaying one conformance corpus. |
+
+## Where exactness stops
+
+The numbers row above is the one place a table cell is too short to be honest,
+so here is the whole rule. Integer literals stay exact 64-bit values through
+the parser and the AST. Everything else is an IEEE-754 double:
+
+- Integer literals, meaning no decimal point and no exponent, are stored as
+  exact `i64` / `u64` when they fit.
+- Float-shaped literals and unit-bearing numbers such as `4b` or `90deg` are
+  `f64`.
+- Inline expressions such as `(* 2 x)`, and the plugin value codec, cast exact
+  integers to `f64` while evaluating. `(* 2 9007199254740993)` will not hand
+  you back the integer you were hoping for.
+
+In the camera at the top of this page that split is already visible. `:zoom 2`
+is an exact integer the whole way through, and `:delay 4b` is a double from the
+moment it is parsed, because a number carrying a unit always is.
+
+So if your documents carry identifiers that have to survive as exact 64-bit
+integers, keep them out of expressions. Stored and printed they are safe;
+computed on, they are doubles like everything else.
+
+## Which one to pick
+
+They diverge in intent more than in surface, so the choice follows the job in
+front of you rather than the feature count.
+
+<CardGrid>
+<Card title="Reach for JSON when">
+
+Two programs need to agree and every language on the planet already has a
+parser. You need no comments, no custom validation, and no distinction between
+a name and a string.
+
+</Card>
+<Card title="Reach for EDN when">
+
+You are inside a Clojure or Lisp ecosystem, the native data structures matter
+to you, and configuring a reader is a normal thing to do rather than a
+deployment hazard.
+
+</Card>
+<Card title="Reach for SJON when">
+
+People write the files by hand and you want the schema to catch them: exact
+spans, safe inline expressions, comments that survive a round-trip, and one
+checker that behaves the same in the editor and on the server.
+
+</Card>
+</CardGrid>

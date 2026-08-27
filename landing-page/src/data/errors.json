@@ -7,7 +7,7 @@
   {
     "code": "unknown_form",
     "short": "A form's head name is not declared by any loaded plugin.",
-    "long": "Forms must be declared by some plugin reachable from the document\n(either inlined as a `(plugin …)` declaration, or imported via\n`(use-plugin …)`). Qualified spellings (`<plugin>/<form>`) bypass\nambiguity when two plugins declare the same name.\n\nIf the head is a typo, the rich format suggests the nearest\nspelling under the loaded vocabulary. If the head exists in a\nplugin you forgot to import, the suggestion includes the import\npath."
+    "long": "Forms must be declared by some plugin reachable from the document\n(either inlined as a `(plugin …)` declaration, or imported via\n`(use-plugin …)`). Qualified spellings (`<plugin>/<form>`) bypass\nambiguity when two plugins declare the same name.\n\nIf the head is a typo, the rich format suggests the nearest\nspelling under the loaded vocabulary. If the head exists in a\nplugin you forgot to import, the suggestion includes the import\npath.\n\nThe same code is raised at schema load for a `:lowering :produces`\nentry that names no declared form. A bare entry resolves\nlocal-first, like a form head at validation: it may name a\nslot-local form reachable through the list (declared inside a\nform the same list resolves) or a global form. A local listed\nwithout its declaring form is this diagnostic, and the message\nnames the form the list is missing; a qualified entry\n(`<plugin>/<form>`) bypasses locals and resolves global-only."
   },
   {
     "code": "unknown_key",
@@ -16,12 +16,12 @@
   },
   {
     "code": "ambiguous_form",
-    "short": "Two plugins declare a form with the same bare head — qualify the spelling.",
+    "short": "Two plugins declare a form with the same bare head; qualify the spelling.",
     "long": ""
   },
   {
     "code": "ambiguous_expr",
-    "short": "Two plugins declare an expression with the same name — qualify the spelling.",
+    "short": "Two plugins declare an expression with the same name; qualify the spelling.",
     "long": ""
   },
   {
@@ -36,12 +36,12 @@
   },
   {
     "code": "recursion_depth",
-    "short": "Validator's depth ceiling exceeded — the input is pathologically nested.",
+    "short": "Validator's depth ceiling exceeded; the input is pathologically nested.",
     "long": ""
   },
   {
     "code": "not_cross_ref",
-    "short": "Symbol is not a registered name for the cross-ref's target — no target instance declares (or provides) it.",
+    "short": "Symbol is not a registered name for the cross-ref's target: no target instance declares (or provides) it.",
     "long": ""
   },
   {
@@ -56,7 +56,7 @@
   },
   {
     "code": "ambiguous_cross_ref_target",
-    "short": "Cross-ref symbol matches multiple targets — typically a name collision under scopes.",
+    "short": "Cross-ref symbol matches multiple targets, typically a name collision under scopes.",
     "long": ""
   },
   {
@@ -71,7 +71,7 @@
   },
   {
     "code": "cyclic_cross_ref",
-    "short": "Acyclic cross-ref forms a cycle — at least one edge must be removed.",
+    "short": "Acyclic cross-ref forms a cycle; at least one edge must be removed.",
     "long": ""
   },
   {
@@ -181,7 +181,7 @@
   },
   {
     "code": "deprecated_member",
-    "short": "Member is declared `:deprecated true` — accepted, but the LSP marks it deprecated.",
+    "short": "Member is declared `:deprecated true`: accepted, but the LSP marks it deprecated.",
     "long": ""
   },
   {
@@ -192,11 +192,11 @@
   {
     "code": "union_no_branch_matched",
     "short": "No alternative in a `(union-shape …)` accepted the value.",
-    "long": ""
+    "long": "Alternatives are tried in declaration order and the first full\nmatch wins; this fires when none does.\n\nWhich message you get depends on the value's shape. SJON asks\nwhat the value is (a number, a string, a symbol, a vector, a\nform) and which alternatives a value of that shape could reach\nat all, before any bound, member set, head set or reference\ncheck runs. When exactly one could, nothing else was meant, so\nthe slot reports *that* alternative's own code instead:\n`number_above_max` naming the bound it broke, `not_member`\nlisting the members, `not_head_member` listing the heads,\n`not_cross_ref` naming the form the symbol had to be declared\nby.\n\nSo this code means one of two things. Either the value's shape\nreaches no alternative at all (a string in a `number | symbol`\nslot), or it reaches two or more, which means those alternatives\noverlap and only declaration order separates them. Blaming one\nwould be a guess, so the message names them all. Rewrite the\nvalue to fit one of the shapes listed.\n\nReachability stops at the shape and does not look further. Two\n`:underlying form` alternatives with different head sets both\nreach a form, so a form outside both lands here rather than on\neither one."
   },
   {
     "code": "nested_union",
-    "short": "Union alternative resolves to another union — flatten the alternatives.",
+    "short": "Union alternative resolves to another union; flatten the alternatives.",
     "long": ""
   },
   {
@@ -207,7 +207,7 @@
   {
     "code": "expr_type_mismatch",
     "short": "Expression argument's type does not satisfy the function's `:params` declaration.",
-    "long": "Two failures share this code, and the message tells them apart.\n\nThe static one is the declared-type check: an argument whose\ntype does not satisfy the head's `:params` / `:rest`. It is\nanchored at the offending argument and names it by path\n(`sqrt/0`).\n\nThe runtime one fires when the types are fine but an evaluated\n*value* falls outside the function's domain — `(clamp 5 10 0)`\nwith lo above hi, `(nth [1 2 3] 9)` past the end,\n`(normalize [0 0])` with no direction, `(/ 1 0)`. The validator\ncannot reach these: it knows what a slot declares, not what an\nexpression computes. They are anchored at the form's head with\nno path, and the form yields no value while its neighbours keep\nevaluating."
+    "long": "Two failures share this code, and the message tells them apart.\n\nThe static one is the declared-type check: an argument whose\ntype does not satisfy the head's `:params` / `:rest`. It is\nanchored at the offending argument and names it by path\n(`sqrt/0`).\n\nThe runtime one fires when the types are fine but an evaluated\n*value* falls outside the function's domain: `(clamp 5 10 0)`\nwith lo above hi, `(nth [1 2 3] 9)` past the end,\n`(normalize [0 0])` with no direction, `(/ 1 0)`. The validator\ncannot reach these: it knows what a slot declares, not what an\nexpression computes. They are anchored at the form's head with\nno path, and the form yields no value while its neighbours keep\nevaluating."
   },
   {
     "code": "expr_unknown_label",
@@ -226,7 +226,7 @@
   },
   {
     "code": "expr_mixed_args",
-    "short": "Call mixes positional and labeled arguments — pick one form.",
+    "short": "Call mixes positional and labeled arguments; pick one form.",
     "long": ""
   },
   {
@@ -237,7 +237,7 @@
   {
     "code": "unresolved_plugin",
     "short": "A `(use-plugin …)` reference's name is not in the project file.",
-    "long": "The host walks references in document order. For each, it asks\nthe resolver to produce manifest bytes. The default\n`FilesystemResolver` consults the project file's `:plugins`\nindex — if the bare name is missing, this code fires.\n\nTwo ways out: add the manifest to `sjon-project.sjon`'s\n`:plugins` (preferred for reusable plugins), or use the\n`(use-plugin \"name\" :path \"…\")` shape to point the resolver at\nan explicit file (preferred for one-off includes)."
+    "long": "The host walks references in document order. For each, it asks\nthe resolver to produce manifest bytes. The default\n`FilesystemResolver` consults the project file's `:plugins`\nindex. If the bare name is missing, this code fires.\n\nTwo ways out: add the manifest to `sjon-project.sjon`'s\n`:plugins` (preferred for reusable plugins), or use the\n`(use-plugin \"name\" :path \"…\")` shape to point the resolver at\nan explicit file (preferred for one-off includes)."
   },
   {
     "code": "plugin_version_mismatch",
@@ -276,7 +276,7 @@
   },
   {
     "code": "plugin_import_forbidden",
-    "short": "Plugin wasm imports a forbidden host symbol — ABI v2 plugins are pure.",
+    "short": "Plugin wasm imports a forbidden host symbol; ABI v2 plugins are pure.",
     "long": ""
   },
   {
@@ -301,7 +301,7 @@
   },
   {
     "code": "plugin_func_failed",
-    "short": "Plugin export returned an error status — runtime semantic failure.",
+    "short": "Plugin export returned an error status: a runtime semantic failure.",
     "long": ""
   },
   {
@@ -331,7 +331,7 @@
   },
   {
     "code": "lowering_produced_lowerable_head",
-    "short": "Lowering output's form head is itself a surface — lowering must terminate.",
+    "short": "Lowering output's form head is itself a surface; lowering must terminate.",
     "long": ""
   },
   {
@@ -341,7 +341,7 @@
   },
   {
     "code": "number_overflow_exact_integer",
-    "short": "Integer literal exceeds u64 — falls back to f64 with precision loss.",
+    "short": "Integer literal exceeds u64; falls back to f64 with precision loss.",
     "long": ""
   },
   {
@@ -452,7 +452,7 @@
   {
     "code": "plugin_wasm_resolved_outside_package",
     "short": "Manifest's `:wasm-file` resolves outside its own directory.",
-    "long": "The override is checked lexically against the manifest's\ndirectory — any `..` segments that walk above the directory\nboundary are rejected, as are absolute paths. The check uses\nlexical normalization (no realpath) so symlink hops are not\ncaught; the goal is honest path-traversal blocking, not full\nfilesystem containment."
+    "long": "The override is checked lexically against the manifest's\ndirectory: any `..` segments that walk above the directory\nboundary are rejected, as are absolute paths. The check uses\nlexical normalization (no realpath) so symlink hops are not\ncaught; the goal is honest path-traversal blocking, not full\nfilesystem containment."
   },
   {
     "code": "plugin_wasm_self_hash_malformed",
@@ -476,8 +476,8 @@
   },
   {
     "code": "sjon_format_unsupported",
-    "short": "Manifest declares a `:sjon` version newer than this host implements.",
-    "long": ""
+    "short": "Retired: manifests no longer declare a format version; this code is never emitted.",
+    "long": "Manifests once carried `(plugin … :sjon \"1.x\")`, a declared\nformat version the host compared against its own ceiling and\nrefused when the manifest's was higher. The key never enabled\nanything on the host reading it. Every feature the host had was\non regardless, so it was removed. SJON has one version, the\nrelease, and the CHANGELOG says which release a manifest keyword\narrived in.\n\nA manifest newer than the host reading it still fails loudly:\nevery meta-schema form is closed, so an unknown keyword or\ndeclaration head is `unknown_key` / `unknown_form` at\nmeta-validation and the plugin is dropped. A leftover `:sjon`\nkey reports the same way. The code stays in the wire-stable enum\nand is asserted silent by a tombstone test."
   },
   {
     "code": "unknown_project_key",
@@ -531,12 +531,12 @@
   },
   {
     "code": "lowering_cycle",
-    "short": "A `:lowering :produces` graph cycles — following produces-edges leads back to a lowering form.",
+    "short": "A `:lowering :produces` graph cycles: following produces-edges leads back to a lowering form.",
     "long": "Staged lowering follows `:produces` edges: a form's lowering hook\nemits forms whose heads are listed in `:produces`, and those forms\nmay themselves be lowerable. The aggregate schema check builds this\ngraph (nodes = lowering forms, edges = their `:produces` heads) and\nrejects any cycle, so staging is guaranteed to terminate before a\nsingle hook runs.\n\nBreak the cycle: a chain like `a -> b -> a` means following the\nproduces declarations loops forever. Re-point one `:produces` edge\nat a terminal (non-lowering) form, or drop the `:lowering` on one of\nthe forms in the loop."
   },
   {
     "code": "lowering_target_plugin_absent",
-    "short": "A `:lowering :produces` head names a plugin that isn't loaded — a dangling cross-plugin edge.",
+    "short": "A `:lowering :produces` head names a plugin that isn't loaded: a dangling cross-plugin edge.",
     "long": "A `:produces` entry spelled `<plugin>/<form>` resolves against the\nloaded aggregate. When the named plugin is present but lacks the\nform you get `unknown_form`; when the plugin itself was never\nloaded, the edge dangles on load order rather than on a typo, and\nthat is reported separately as `lowering_target_plugin_absent`.\n\nFix it by loading the target plugin (add the missing `(use-plugin\n…)` / dependency) or by re-pointing the `:produces` entry at a form\nthat the current plugin set actually declares."
   },
   {
@@ -546,8 +546,8 @@
   },
   {
     "code": "lowering_nested_lowerable",
-    "short": "A `:lowering` form is a positional child of another `:lowering` form — container and child can't both lower.",
-    "long": "Container lowering puts `:lowering` on a container and leaves its\nchildren plain data: the one hook invocation consumes every child at\nonce. If a child *also* declares `:lowering`, both hooks fire in the\nsame layer — the container consumes the child while the child lowers\nitself — and their output overlaps or orphans (often surfacing later\nas a confusing `duplicate_cross_ref_target`).\n\nFix it by declaring `:lowering` on the container OR the child, never\nboth. In container lowering the children stay data; only the\ncontainer lowers. The check is emit-only, so lowering still runs — the\ndiagnostic just names the contradiction at the child."
+    "short": "A `:lowering` form is a positional child of another `:lowering` form; container and child can't both lower.",
+    "long": "Container lowering puts `:lowering` on a container and leaves its\nchildren plain data: the one hook invocation consumes every child at\nonce. If a child *also* declares `:lowering`, both hooks fire in the\nsame layer (the container consumes the child while the child lowers\nitself) and their output overlaps or orphans (often surfacing later\nas a confusing `duplicate_cross_ref_target`).\n\nFix it by declaring `:lowering` on the container OR the child, never\nboth. In container lowering the children stay data; only the\ncontainer lowers. The check is emit-only, so lowering still runs; the\ndiagnostic just names the contradiction at the child."
   },
   {
     "code": "unit_forbidden",
@@ -577,7 +577,7 @@
   {
     "code": "unknown_local_form",
     "short": "Form head in a slot-local slot matches neither a local form nor any global form.",
-    "long": "A slot may carry inline slot-local form definitions on either a\nkeyword (`(key :name shape :type form (form …) (form …))`) or a\nform's positional slot (inline `(form …)` children directly under\nthe parent `(form …)`). A form value in that slot resolves\nlocal-first: the local forms shadow same-named globals, and a head\nthat isn't local still falls back to the global catalog (additive).\nOnly when the head matches *neither* a local form *nor* any global\nform is this emitted — at the slot path: the key path for a keyword\nslot (e.g. `[canvas shape]`) or the parent form's path for a\npositional slot (e.g. `[canvas]`), listing the allowed local heads.\nThe generic `unknown_form` is suppressed for that node so you get one\nprecise diagnostic, not two.\n\nA *qualified* head (`<plugin>/<form>`) bypasses the locals entirely\nand resolves against the global catalog only — so a typo'd\nqualified head yields `unknown_form`, not this."
+    "long": "A slot may carry inline slot-local form definitions on either a\nkeyword (`(key :name shape :type form (form …) (form …))`) or a\nform's positional slot (inline `(form …)` children directly under\nthe parent `(form …)`). A form value in that slot resolves\nlocal-first: the local forms shadow same-named globals, and a head\nthat isn't local still falls back to the global catalog (additive).\nOnly when the head matches *neither* a local form *nor* any global\nform is this emitted, at the slot path: the key path for a keyword\nslot (e.g. `[canvas shape]`) or the parent form's path for a\npositional slot (e.g. `[canvas]`), listing the allowed local heads.\nThe generic `unknown_form` is suppressed for that node so you get one\nprecise diagnostic, not two.\n\nA *qualified* head (`<plugin>/<form>`) bypasses the locals entirely\nand resolves against the global catalog only, so a typo'd\nqualified head yields `unknown_form`, not this."
   },
   {
     "code": "pattern_tick_overflow",
@@ -587,12 +587,12 @@
   {
     "code": "pattern_value_eval_failed",
     "short": "A `(pure …)` expression leaf failed to evaluate at the cycle-0 dry-run.",
-    "long": "A form in `(pure …)` value position is an expression of time —\n`(pure (* 0.5 (+ 1 (sin (* (tau) cycle)))))` — evaluated per hap\nwith `cycle` / `tick` / `seed` bound. At compile time the engine\ndry-runs it once at cycle 0 / seed 0; static validity is\nseed-independent, so cycle 0 catches the whole document-defect class\n— an unbound name, division by zero, an arity error, a resource\nbudget. The leaf then degrades to `silence` and this code is\ncollected. A failure that only appears at a *later* cycle (e.g.\n`(/ 1 (- cycle 2))` at cycle 2) is NOT this code: it is a domain\nhole, so that one hap is silently dropped and the rest of the\npattern queries normally."
+    "long": "A form in `(pure …)` value position is an expression of time:\n`(pure (* 0.5 (+ 1 (sin (* (tau) cycle)))))`, evaluated per hap\nwith `cycle` / `tick` / `seed` bound. At compile time the engine\ndry-runs it once at cycle 0 / seed 0; static validity is\nseed-independent, so cycle 0 catches the whole document-defect class\nan unbound name, division by zero, an arity error, a resource\nbudget. The leaf then degrades to `silence` and this code is\ncollected. A failure that only appears at a *later* cycle (e.g.\n`(/ 1 (- cycle 2))` at cycle 2) is NOT this code: it is a domain\nhole, so that one hap is silently dropped and the rest of the\npattern queries normally."
   },
   {
     "code": "pattern_value_result_invalid",
     "short": "A `(pure …)` expression evaluated but produced a value no hap can carry.",
-    "long": "The cycle-0 dry-run of a `(pure …)` expression leaf succeeded, but\nits result is a form, a vector, a date, or a time — none of which a\nhap value can be (a hap carries a symbol / string / keyword /\nnumber / boolean / nil). The most common cause is a misspelled\nfunction name: an unresolved head does not error, it evaluates to a\nform *literal* (SJON's form-construction semantics), which then\nfails this shape check. The leaf degrades to `silence`. Fix the\nname, or have the expression reduce to a scalar."
+    "long": "The cycle-0 dry-run of a `(pure …)` expression leaf succeeded, but\nits result is a form, a vector, a date, or a time, none of which a\nhap value can be (a hap carries a symbol / string / keyword /\nnumber / boolean / nil). The most common cause is a misspelled\nfunction name: an unresolved head does not error, it evaluates to a\nform *literal* (SJON's form-construction semantics), which then\nfails this shape check. The leaf degrades to `silence`. Fix the\nname, or have the expression reduce to a scalar."
   },
   {
     "code": "unknown_cross_ref_provider",
@@ -601,18 +601,18 @@
   },
   {
     "code": "ambiguous_cross_ref_provider",
-    "short": "Bare cross-ref `:provider` name is declared by two or more plugins — qualify the spelling.",
-    "long": "Two loaded plugins declare a provider with the same bare name,\nso `:provider uniforms` cannot pick one. Qualify it with the\nowning plugin: `:provider glsl/uniforms`.\n\nSame rule the other bare-or-qualified vocabularies follow —\nforms, expression functions, and value kinds all resolve bare\nnames only when exactly one plugin claims them."
+    "short": "Bare cross-ref `:provider` name is declared by two or more plugins; qualify the spelling.",
+    "long": "Two loaded plugins declare a provider with the same bare name,\nso `:provider uniforms` cannot pick one. Qualify it with the\nowning plugin: `:provider glsl/uniforms`.\n\nSame rule the other bare-or-qualified vocabularies follow:\nforms, expression functions, and value kinds all resolve bare\nnames only when exactly one plugin claims them."
   },
   {
     "code": "cross_ref_source_key_unknown",
     "short": "The `:source-key` declared on a provider-route `(cross-ref …)` is not a string-typed key on the target form.",
-    "long": "A provider-route cross-ref reads the string under `:source-key`\nfrom each `:target` instance and hands it to the provider. This\nfires when the target form declares no such key, or declares it\nwith a type that is not string-shaped — either way no instance\ncould ever supply the provider with anything, so the member set\nwould silently be empty.\n\n`:source-key` defaults to `src`; declare the key on the target\nform, or point `:source-key` at the key that actually holds the\ncontent."
+    "long": "A provider-route cross-ref reads the string under `:source-key`\nfrom each `:target` instance and hands it to the provider. This\nfires when the target form declares no such key, or declares it\nwith a type that is not string-shaped. Either way no instance\ncould ever supply the provider with anything, so the member set\nwould silently be empty.\n\n`:source-key` defaults to `src`; declare the key on the target\nform, or point `:source-key` at the key that actually holds the\ncontent."
   },
   {
     "code": "cross_ref_extraction_failed",
     "short": "A cross-ref provider ran against this source and rejected it, so the set of valid names here is unknown.",
-    "long": "The names this cross-ref accepts are extracted from the string\nunder `:source-key` by the declared provider. The provider ran\nand reported a failure — usually the content itself doesn't\nparse, and the message carries the provider's own explanation.\n\nBecause no member set could be computed, references into this\ntarget are *not* checked: fixing the source restores checking.\nThat is why one broken source produces one diagnostic here\nrather than an \"unknown name\" error at every reference site."
+    "long": "The names this cross-ref accepts are extracted from the string\nunder `:source-key` by the declared provider. The provider ran\nand reported a failure, usually because the content itself doesn't\nparse, and the message carries the provider's own explanation.\n\nBecause no member set could be computed, references into this\ntarget are *not* checked: fixing the source restores checking.\nThat is why one broken source produces one diagnostic here\nrather than an \"unknown name\" error at every reference site."
   },
   {
     "code": "cross_ref_provider_unavailable",
@@ -621,32 +621,32 @@
   },
   {
     "code": "cross_ref_target_collapse",
-    "short": "Two value-kinds cross-reference the same form but disagree on how its member set is built — the first one declared wins.",
-    "long": "A target form's member set is collected once, not once per\nreferring value-kind. When two `(cross-ref …)` declarations name\nthe same target and differ — one reads a `:name-key`, the other\nruns a `:provider`; or they name different keys, providers, or\n`:scope` forms — the first in plugin × value-kind order builds\nthe set and the second's declaration has no effect. References\nthrough the losing kind are still checked, but against the\nwinner's names.\n\nTwo kinds that declare the *same* spec on one target are fine and\nstay silent: that is ordinary aliasing, and both agree on what\nthe members are. To fix a real disagreement, give the kinds\ndistinct `:target` forms, or make the two declarations match."
+    "short": "Two value-kinds cross-reference the same form but disagree on how its member set is built; the first one declared wins.",
+    "long": "A target form's member set is collected once, not once per\nreferring value-kind. When two `(cross-ref …)` declarations name\nthe same target and differ: one reads a `:name-key`, the other\nruns a `:provider`; or they name different keys, providers, or\n`:scope` forms, and the first in plugin × value-kind order builds\nthe set and the second's declaration has no effect. References\nthrough the losing kind are still checked, but against the\nwinner's names.\n\nTwo kinds that declare the *same* spec on one target are fine and\nstay silent: that is ordinary aliasing, and both agree on what\nthe members are. To fix a real disagreement, give the kinds\ndistinct `:target` forms, or make the two declarations match."
   },
   {
     "code": "number_not_multiple",
     "short": "Value is not an exact multiple of `:multiple-of`.",
-    "long": "`:multiple-of N` in a `(numeric-bounds …)` block says the value must\ndivide evenly by `N`. It is the alignment constraint a range and an\nintegrality flag cannot express between them: a byte offset that must\nland on a 256-byte boundary is not \"between 0 and X\" and not merely\n\"an integer\", it is a multiple of 256.\n\nThree checks run in order, and only the first failure is reported. So\n`250.5` under `:integer true :multiple-of 4` is `number_not_integer`,\n`-256` under `:min 0 :multiple-of 256` is `number_below_min`, and you\nsee this code only once the value is otherwise acceptable. Fix the\nreported problem and re-run; a second one may be waiting.\n\nDivisibility is decided in exact integer space whenever the value and\nthe divisor are both whole numbers, so a value above 2^53 answers\ncorrectly rather than being rounded first. A *fractional* divisor\n(`:multiple-of 0.25`) is compared with a small tolerance instead —\nbinary floating point has no exact answer there — and the schema\nauthor is warned about it at the declaration. Alignment rules use\nwhole divisors, so this caveat rarely applies in practice.\n\nNegative values are fine: `-512` is a multiple of `256`. If the\ndivisor carries a unit, the value must carry a byte-equal one, the\nsame rule `:min` and `:max` follow."
+    "long": "`:multiple-of N` in a `(numeric-bounds …)` block says the value must\ndivide evenly by `N`. It is the alignment constraint a range and an\nintegrality flag cannot express between them: a byte offset that must\nland on a 256-byte boundary is not \"between 0 and X\" and not merely\n\"an integer\", it is a multiple of 256.\n\nThree checks run in order, and only the first failure is reported. So\n`250.5` under `:integer true :multiple-of 4` is `number_not_integer`,\n`-256` under `:min 0 :multiple-of 256` is `number_below_min`, and you\nsee this code only once the value is otherwise acceptable. Fix the\nreported problem and re-run; a second one may be waiting.\n\nDivisibility is decided in exact integer space whenever the value and\nthe divisor are both whole numbers, so a value above 2^53 answers\ncorrectly rather than being rounded first. A *fractional* divisor\n(`:multiple-of 0.25`) is compared with a small tolerance instead,\nbecause binary floating point has no exact answer there, and the schema\nauthor is warned about it at the declaration. Alignment rules use\nwhole divisors, so this caveat rarely applies in practice.\n\nNegative values are fine: `-512` is a multiple of `256`. If the\ndivisor carries a unit, the value must carry a byte-equal one, the\nsame rule `:min` and `:max` follow."
   },
   {
     "code": "dependent_key_missing",
     "short": "A key that is present requires sibling keys that are absent.",
-    "long": "A key declared as `(key :name offset … :requires [buffer])` may only\nappear alongside the keys it names. Writing `:offset` without\n`:buffer` fires this; writing neither is fine, because the rule only\napplies once the dependent key is present.\n\nThe message lists every absent requirement at once, so a key with\nthree unmet dependencies produces one diagnostic naming three, not\nthree separate complaints.\n\nTwo repairs. Supply the keys it names — usually right, since the\ndependent key is typically meaningless without them (a `:offset`\ninto no buffer describes nothing). Or drop the dependent key, if it\nwas written by mistake.\n\n**Which of the three mechanisms is this?** A form has three ways to\nrelate keys, and picking the wrong one is the common mistake:\n\n  * `:requires` — presence implies presence. \"If `:offset` is here,\n    `:buffer` must be too.\" One-directional; the reverse is fine.\n  * `(exclusive-group …)` — bounds *how many* of a set may appear.\n    \"At most one of `:color` / `:gradient`.\" Symmetric.\n  * `(variant …)` — gates keys on another key's **value**, not its\n    presence. \"`:strip-index-format` applies only when `:topology`\n    is `triangle-strip`.\"\n\nIf your rule mentions a specific value, you want a variant. If it\ncounts, you want a group. If it says \"then also\", you want this."
+    "long": "A key declared as `(key :name offset … :requires [buffer])` may only\nappear alongside the keys it names. Writing `:offset` without\n`:buffer` fires this; writing neither is fine, because the rule only\napplies once the dependent key is present.\n\nThe message lists every absent requirement at once, so a key with\nthree unmet dependencies produces one diagnostic naming three, not\nthree separate complaints.\n\nTwo repairs. Supply the keys it names, usually right, since the\ndependent key is typically meaningless without them (a `:offset`\ninto no buffer describes nothing). Or drop the dependent key, if it\nwas written by mistake.\n\n**Which of the three mechanisms is this?** A form has three ways to\nrelate keys, and picking the wrong one is the common mistake:\n\n  * `:requires`: presence implies presence. \"If `:offset` is here,\n    `:buffer` must be too.\" One-directional; the reverse is fine.\n  * `(exclusive-group …)`: bounds *how many* of a set may appear.\n    \"At most one of `:color` / `:gradient`.\" Symmetric.\n  * `(variant …)`: gates keys on another key's **value**, not its\n    presence. \"`:strip-index-format` applies only when `:topology`\n    is `triangle-strip`.\"\n\nIf your rule mentions a specific value, you want a variant. If it\ncounts, you want a group. If it says \"then also\", you want this."
   },
   {
     "code": "union_ambiguous",
     "short": "A name is registered by two cross-ref alternatives of one union, so declaration order decides which.",
-    "long": "A warning, not an error. The document validates and the union's\nrule is unchanged: alternatives are tried in declaration order and\nthe first one that accepts wins. What this reports is that a\n*second* reading exists.\n\nGiven a union of two reference kinds:\n\n```\n(value-kind :name pipeline-ref :underlying union\n  :union (union-shape :alternatives [render-pipeline-ref compute-pipeline-ref]))\n```\n\na document that names both a `(render-pipeline :name same)` and a\n`(compute-pipeline :name same)` makes `(dispatch :pipeline same)`\nresolvable two ways. Neither declaration is a duplicate —\nduplicate detection is per-target, and these are different targets\n— so nothing else complains.\n\nWhy that is worth a warning: SJON picks by alternative order, and\na consumer that resolves the same reference through its own table\nmay well pick by something else. Two mechanisms, two answers, and\nthe disagreement is silent. Order is doing work the author never\nchose.\n\nTwo repairs. Rename one of the declarations, which is right when\nthe collision was an accident. Or split the slot into two keys\nwith one reference kind each, which is right when both entities\nlegitimately keep the name and the *slot* was overloaded.\n\nIt stays quiet in the cases where order is the design. A union\nlike `[byte-count symbol]` overlaps on purpose and names no\nentity, so nothing warns. Nor does a union whose winning\nalternative is a plain member set — the slot then denotes a\nmember, not a reference. Only two *references* to differently-named\nentities trip it."
+    "long": "A warning, not an error. The document validates and the union's\nrule is unchanged: alternatives are tried in declaration order and\nthe first one that accepts wins. What this reports is that a\n*second* reading exists.\n\nGiven a union of two reference kinds:\n\n```sjon\n(value-kind :name pipeline-ref :underlying union\n  :union (union-shape :alternatives [render-pipeline-ref compute-pipeline-ref]))\n```\n\na document that names both a `(render-pipeline :name same)` and a\n`(compute-pipeline :name same)` makes `(dispatch :pipeline same)`\nresolvable two ways. Neither declaration is a duplicate,\nduplicate detection is per-target, and these are different targets\nso nothing else complains.\n\nWhy that is worth a warning: SJON picks by alternative order, and\na consumer that resolves the same reference through its own table\nmay well pick by something else. Two mechanisms, two answers, and\nthe disagreement is silent. Order is doing work the author never\nchose.\n\nTwo repairs. Rename one of the declarations, which is right when\nthe collision was an accident. Or split the slot into two keys\nwith one reference kind each, which is right when both entities\nlegitimately keep the name and the *slot* was overloaded.\n\nIt stays quiet in the cases where order is the design. A union\nlike `[byte-count symbol]` overlaps on purpose and names no\nentity, so nothing warns. Nor does a union whose winning\nalternative is a plain member set, the slot then denotes a\nmember, not a reference. Only two *references* to differently-named\nentities trip it."
   },
   {
     "code": "positional_too_many",
-    "short": "More positional children carry this head than the `(head-set …)` entry's `:max` allows.",
-    "long": "A `(head-set …)` says which heads a positional slot accepts. A\n`(head …)` entry inside one can also say **how many**:\n\n```\n(value-kind :name pipeline-section :underlying form\n  :heads (head-set\n    (head :name vertex   :min 1 :max 1)\n    (head :name fragment :max 1)\n    (head :name constant)))\n```\n\n`vertex` exactly once, `fragment` at most once, `constant` any\nnumber of times. A second `(fragment …)` under a form whose\n`:positional` is that kind reports here.\n\nThe diagnostic lands on the child that crosses the ceiling, not\non the parent, so the squiggle is on the line to delete. You get\none per form regardless of how far over you went — the crossing\nchild names the real count, so the message stays honest without\nrepeating itself down the rest of the list.\n\nTwo ways to fix it, and which one is right depends on what you\nmeant. Delete or merge the extra child, if the duplicate was a\nmistake. Or raise the bound in the manifest, if the schema was\nstricter than the domain.\n\n`:open true` does not silence this. Openness widens which\n*keywords* a form accepts; it says nothing about its positional\nchildren, and the neighbouring positional rules\n(`not_head_member`, `duplicate_positional_flag`) fire on open\nforms too.\n\nBounds count only at a form's `:positional` slot. The same kind\nreused on a `(key …)` slot or as a `vector-shape :element` carries\nthem inertly — a keyed slot holds one value, and a vector element\nis a value rather than a child list."
+    "short": "More positional children than a `(head-set …)` ceiling allows: the head's `:max`, or the set's `:max-children`.",
+    "long": "A `(head-set …)` says which heads a positional slot accepts. A\n`(head …)` entry inside one can also say **how many**:\n\n```sjon\n(value-kind :name pipeline-section :underlying form\n  :heads (head-set\n    (head :name vertex   :min 1 :max 1)\n    (head :name fragment :max 1)\n    (head :name constant)))\n```\n\n`vertex` exactly once, `fragment` at most once, `constant` any\nnumber of times. A second `(fragment …)` under a form whose\n`:positional` is that kind reports here.\n\nThe diagnostic lands on the child that crosses the ceiling, not\non the parent, so the squiggle is on the line to delete. You get\none per form regardless of how far over you went, since the crossing\nchild names the real count, so the message stays honest without\nrepeating itself down the rest of the list.\n\nTwo ways to fix it, and which one is right depends on what you\nmeant. Delete or merge the extra child, if the duplicate was a\nmistake. Or raise the bound in the manifest, if the schema was\nstricter than the domain.\n\n`:open true` does not silence this. Openness widens which\n*keywords* a form accepts; it says nothing about its positional\nchildren, and the neighbouring positional rules\n(`not_head_member`, `duplicate_positional_flag`) fire on open\nforms too.\n\nBounds count only at a form's `:positional` slot. The same kind\nreused on a `(key …)` slot or as a `vector-shape :element` carries\nthem inertly: a keyed slot holds one value, and a vector element\nis a value rather than a child list.\n\n**The set has a ceiling too.** `:max-children` on the\n`(head-set …)` itself counts children of *any* head in the set:\n\n```sjon\n(value-kind :name bgl-resource :underlying form\n  :heads (head-set :min-children 1 :max-children 1\n    (head :name buffer  :max 1)\n    (head :name sampler :max 1)\n    (head :name texture :max 1)))\n```\n\n\"exactly one resource, and not two of the same\". The per-head\n`:max 1`s cannot say the first part: one buffer *and* one sampler\nsatisfies all three of them. If the message names a bracketed set\n(`at most 1 positional child from [buffer | sampler | texture]`)\nrather than one head, this is the level that fired.\n\nWhen both levels would fire on one child (a second `(buffer …)`\nunder the kind above crosses `buffer`'s ceiling and the set's)\n**only the per-head one is reported**. It names the line to\ndelete, and the set's claim follows from it. So a set-level\nmessage means the children are individually fine and there are\nsimply too many of them together, which is a different repair:\npick one, rather than de-duplicate."
   },
   {
     "code": "positional_missing",
-    "short": "Fewer positional children carry this head than the `(head-set …)` entry's `:min` requires.",
-    "long": "The floor half of a `(head …)` count bound. Given\n`(head :name vertex :min 1)` on the kind a form's `:positional`\nnames, a form with no `(vertex …)` child reports here.\n\nIt is an end-of-children fact — you cannot know a head is absent\nuntil the children run out — so it lands at the parent form's\nhead with the parent's path, exactly where `missing_required_key`\nlands and for the same reason: there is no child to point at. One\ndiagnostic per unsatisfied head, each naming the head, the floor,\nand what was actually found.\n\nThe repair is to add the missing child, or to lower `:min` if the\nschema was stricter than the domain. `:min 0` (the default) means\nthe head is allowed but not required.\n\n`:open true` does not silence this either, which makes it the one\nend-of-form sweep openness leaves alone. Every other one —\nrequired keys, the discriminant gate, exclusive groups, key\ndependencies — is about *keywords*, and that is the surface\n`:open` widens. Positional children are a different surface, and\ndeclaring `:positional <bounded-kind>` opts into their count."
+    "short": "Fewer positional children than a `(head-set …)` floor requires: the head's `:min`, or the set's `:min-children`.",
+    "long": "The floor half of a `(head …)` count bound. Given\n`(head :name vertex :min 1)` on the kind a form's `:positional`\nnames, a form with no `(vertex …)` child reports here.\n\nIt is an end-of-children fact (you cannot know a head is absent\nuntil the children run out) so it lands at the parent form's\nhead with the parent's path, exactly where `missing_required_key`\nlands and for the same reason: there is no child to point at. One\ndiagnostic per unsatisfied head, each naming the head, the floor,\nand what was actually found.\n\nThe repair is to add the missing child, or to lower `:min` if the\nschema was stricter than the domain. `:min 0` (the default) means\nthe head is allowed but not required.\n\n`:open true` does not silence this either, which makes it the one\nend-of-form sweep openness leaves alone. Every other one,\nrequired keys, the discriminant gate, exclusive groups, key\ndependencies, is about *keywords*, and that is the surface\n`:open` widens. Positional children are a different surface, and\ndeclaring `:positional <bounded-kind>` opts into their count.\n\n**The set has a floor too.** `:min-children` on the\n`(head-set …)` itself requires that many children of *any* head\nin the set: \"at least one of these, whichever\". No per-head\n`:min` can express it: `(head :name buffer :min 1)` demands a\n*buffer* specifically, which is a stricter and different claim.\nA message naming a bracketed set\n(`at least 1 positional child from [buffer | sampler | texture]`)\nis this level, and the repair is to add any one of them.\n\nWhen a head's own `:min` is also unmet, only the per-head report\nfires, since it is the more actionable of the two, and the set's floor\nis reported on the next run if it is still short. So a set-level\nmessage means every head that *had* to appear did, and the slot\nis simply not full enough."
   }
 ]

@@ -100,7 +100,7 @@ Forms and expression functions can be referenced two ways in source:
 | `(shapes/circle …)`    | Qualified. Searches only inside the named plugin.      |
 
 When two plugins both claim the same bare name, lookup returns
-`.ambiguous` with the list of claimants — `Validator` turns that into
+`.ambiguous` with the list of claimants, and `Validator` turns that into
 a diagnostic suggesting the qualified form. The tests in `shapes.zig`
 exercise both paths; see `"schema: ambiguous bare name when two plugins
 claim it"`.
@@ -159,7 +159,7 @@ const schema = sjon.Schema.Schema.init(&.{
 ## Source-syntax gotcha: `:kw :other-kw` doesn't pair
 
 When a `:keyword`'s value is itself a `:keyword` token, the parser
-does **not** pair them — the first becomes a positional "flag" and the
+does **not** pair them: the first becomes a positional "flag" and the
 second becomes a separate positional value. Two consequences:
 
 1. Forms with `.positional = .none` reject the flag, producing one

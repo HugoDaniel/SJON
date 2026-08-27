@@ -1,14 +1,14 @@
 ; `:open true` does not silence the counts.
 ;
-; `:whatever` is accepted — that is what openness buys — while both counts
+; `:whatever` is accepted (that is what openness buys) while both counts
 ; still report. Openness widens the *keyword* surface; a form that declares
 ; `:positional <bounded-kind>` opted into its children's count, and its
 ; neighbouring positional rules (`not_head_member`,
 ; `duplicate_positional_flag`) already behave the same way.
 ;
 ; This makes `positional_missing` the one end-of-form sweep openness leaves
-; alone. Every other one — required keys, the discriminant gate, exclusive
-; groups, key dependencies — is about keywords, which is exactly the
+; alone. Every other one (required keys, the discriminant gate, exclusive
+; groups, key dependencies) is about keywords, which is exactly the
 ; surface `:open` widens.
 ;
 ;   positional_missing  at [scratch-pipeline]

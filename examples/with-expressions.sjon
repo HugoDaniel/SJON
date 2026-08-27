@@ -1,4 +1,4 @@
-; SJON — every safe-expression operation, exercised once.
+; SJON: every safe-expression operation, exercised once.
 ;
 ; Each top-level item is a bare safe expression. The file parses and
 ; validates cleanly under the built-in `core` schema, and every form
@@ -23,8 +23,8 @@
 
 ; -- Logical (short-circuit) ------------------------------------------------
 
-(and true true 1)      ; 1   — and returns the last truthy value
-(or false 0 nil 42)    ; 42  — or returns the first truthy value
+(and true true 1)      ; 1, the last truthy value
+(or false 0 nil 42)    ; 42, the first truthy value
 (not false)            ; true
 
 ; -- Binding and control ----------------------------------------------------
@@ -47,10 +47,10 @@
 ; -- Math -------------------------------------------------------------------
 
 (lerp 0 10 0.25)                   ; 2.5
-(lerp :from 0 :to 10 :t 0.25)      ; 2.5  — labeled call, same result
-(lerp :t 0.25 :from 0 :to 10)      ; 2.5  — labels work in any order
+(lerp :from 0 :to 10 :t 0.25)      ; 2.5, labeled call, same result
+(lerp :t 0.25 :from 0 :to 10)      ; 2.5, labels work in any order
 (clamp 1.5 0 1)                    ; 1
-(clamp :x 1.5 :lo 0 :hi 1)         ; 1    — labeled call
+(clamp :x 1.5 :lo 0 :hi 1)         ; 1, labeled call
 (min 3 1 4 1 5 9 2)    ; 1
 (max 3 1 4 1 5 9 2)    ; 9
 (dot (vec3 1 2 3) (vec3 4 5 6))         ; 32
@@ -63,7 +63,7 @@
 (sign -2)              ; -1
 (floor 1.7)            ; 1
 (ceil 1.2)             ; 2
-(round 0.5)            ; 1   — half away from zero
+(round 0.5)            ; 1, half away from zero
 (fract 1.25)           ; 0.25
 (sqrt 9)               ; 3
 (pow 2 8)              ; 256
@@ -73,9 +73,9 @@
 (asin 0)               ; 0
 (acos 1)               ; 0
 (atan 0)               ; 0
-(atan2 1 0)            ; π/2 — positional `(y x)` order
-(atan2 :y 1 :x 0)      ; π/2 — labeled, the y/x confusion goes away
-(atan2 :x 0 :y 1)      ; π/2 — labels in any order
+(atan2 1 0)            ; π/2, positional `(y x)` order
+(atan2 :y 1 :x 0)      ; π/2, labeled: the y/x confusion goes away
+(atan2 :x 0 :y 1)      ; π/2, labels in any order
 (radians 180)          ; π
 (degrees (pi))         ; 180
 

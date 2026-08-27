@@ -29,7 +29,7 @@ export interface EnumRich_Log {
    * @member info — Info: Routine status; safe to ignore in production.
    * @member warn — Warning: Caution-worthy; investigate when the budget allows.
    * @member error — Error: Failure path; the host couldn't complete the request.
-   * @member fatal — Fatal: Unrecoverable; the host is about to halt. @deprecated Use `error` instead — fatality is signalled out-of-band by the exit code.
+   * @member fatal — Fatal: Unrecoverable; the host is about to halt. @deprecated Use `error` instead; fatality is signalled out-of-band by the exit code.
    */
   level: Symbol_<"info"> | Symbol_<"warn"> | Symbol_<"error"> | Symbol_<"fatal">;
   message: string;

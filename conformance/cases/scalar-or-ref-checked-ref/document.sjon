@@ -7,13 +7,18 @@
 ; reference half checked, and a misspelling is caught.
 ;
 ; The desugar is pure load-time: the stored kind is an ordinary
-; `union [bone-count define-ref]`, so the diagnostic is the union's
-; `union_no_branch_matched` naming both alternatives — NOT the `not_cross_ref`
-; the cross-ref half would have raised on its own. That is the union
-; machinery's standing behaviour (per-branch causes are swallowed in favour
-; of naming the alternatives) and applies here for the same reason it applies
-; to a hand-written union.
-(plugin :name gfx :version "1.0.0" :sjon "1.3"
+; `union [bone-count define-ref]`, and MATCHING is the union's — try each,
+; first accept wins. So is the failure REPORT. The two arms are disjoint by
+; node shape (a symbol can only be the ref, a number only the base), so
+; when nothing matches there is still one arm the value could have meant,
+; and the diagnostic is that arm's own — here the reference half's
+; `not_cross_ref`, naming the `(define :name …)` form the symbol had to
+; name — rather than the union's `union_no_branch_matched` naming two
+; kinds. That is the general union rule, not a rule for the shorthand: the
+; same two kinds spelled out by hand report the same thing. See
+; `union-disjoint-reports-arm`, and `union-overlap-keeps-union` for the
+; unions that keep the collapse.
+(plugin :name gfx :version "1.0.0"
   (value-kind :name bone-count :underlying number)
   (value-kind :name define-ref :underlying symbol
     :cross-ref (cross-ref :target define :name-key name))

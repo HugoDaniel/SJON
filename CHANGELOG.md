@@ -4,7 +4,279 @@ All notable, breaking, or contract-affecting changes land here, documented
 plainly. The stable surfaces — the binary wire format and the diagnostic-code
 enum — are versioned and corpus-gated; nothing changes them silently.
 
-## Unreleased
+## 1.3.0 — 2026-08-27
+
+The contract at a glance: no wire-format change (still v5), **no** new
+diagnostic codes, the manifest format version **retired** (see Removed),
+and the conformance corpus at 374 cases. Follow-up asks from PNGine (S10,
+S12, S13, S14) and the first ask from a *second* host — pacer's 15, which
+made the arm-accurate failure report the rule for every union rather than
+one shorthand's privilege — plus their long tail;
+`docs/plans/asks/README.md` carries the ledger. Off the language surface,
+the documentation site was rebuilt on Starlight and the prose rewritten in
+one voice.
+
+### Added
+
+- **`(variant :when [a b] …)` — one key set for several discriminant
+  values.** `:when` takes one symbol or a vector of symbols, and selection
+  is membership: every listed value activates the variant's keys, any
+  other value does not. This is WebGPU's own rule for `stripIndexFormat`
+  — read for `triangle-strip` *and* `line-strip`, for neither list — which
+  could not be declared before: one variant named one value, and two
+  identical single-value variants collided on the key. The collision check
+  is exactly as strict as it was; one declaration reaching several values
+  is what makes the question it guards against never arise. In Zig
+  `Plugin.Variant.when` is now `[]const []const u8` (never empty), with
+  `selects(value)` and `whenText(a)` — the second renders one value bare
+  and several bracketed, so every message that names a variant reads as
+  before for a single-value one. Three load-time refusals, all
+  `invalid_manifest`: an empty `:when []`, a value listed twice in one
+  `:when`, and a value two variants both list (which also closes a
+  pre-existing gap — two variants with the same single `:when` used to load
+  clean, with the second dead). The aggregate pass checks each listed value
+  against the discriminant's member set once per value. Exporters do not
+  multiply the branch: JSON Schema guards the one `if/then` with `enum`
+  (`const` for a single value) and lists the values under
+  `x-sjon-discriminant` (`"when": ["a", "b"]`; a bare string for one),
+  TypeScript narrows the discriminant brand to `Symbol_<"a" | "b">`,
+  Markdown heads the variant `:disc [a b]`. Meta-schema: `:when` is typed
+  `variant-when` (`symbol | symbol-list`). Corpus cases
+  `variant-when-list-selects`, `variant-when-list-invalid-manifest`,
+  `variant-when-list-unknown-value`, and
+  `effective-axis-d-default-selects-no-variant`; the TS-parity port
+  mirrors loader, aggregate checks, both walkers and both exporters;
+  `examples/plugins/variant-set/` is the fixture. Filed by PNGine as S14
+  (`docs/plans/asks/14-…`).
+
+- **A count over the whole head-set — `(head-set :min-children N
+  :max-children N)`.** Bounds how many positional children carry *any* head
+  in the set, which per-head `:min` / `:max` structurally cannot say:
+  "exactly one of buffer / sampler / texture" is satisfied, under every
+  per-head spelling, both by a form carrying one of each and by a form
+  carrying none. Legal beside either heads spelling, including compact
+  `:names`, so "exactly one of these four" needs no per-head metadata.
+
+  Both levels report through the existing `positional_too_many` /
+  `positional_missing`, with the set named in the message (`at most 1
+  positional child from [buffer | sampler | texture]`). They overlap by
+  construction, so **the set yields to the head**: a child that already
+  reported for its own head does not report again for the set, and a head
+  whose `:min` went unmet suppresses the set's floor report. No consumer can
+  therefore observe two same-code diagnostics on one span, which is what
+  makes reusing the pair equivalent to appending two variants.
+
+  Three new `invalid_manifest` refusals, two of them **sums** rather than
+  per-head comparisons: `Σ head.min > :max-children` (two heads at `:min 1`
+  under `:max-children 1` is unsatisfiable while neither head alone looks
+  wrong) and `:min-children > Σ head.max` (only when every head is bounded).
+
+  JSON Schema exports the set bound as one more `contains` in the same
+  `allOf`, over the `anyOf` of the members'; Markdown gets an
+  `*any of these*` row, TypeScript an `any of the set:` clause, and
+  `--target=intermediate` the two numbers.
+
+### Fixed
+
+- **The lowering worklist resolved every form head through the global
+  catalog, ignoring slot-locals.** The validator resolves a head
+  local-first (a local shadows a same-named global — LANGUAGE.md §6.3.1),
+  but `Lowering.runLoweringPass` looked every head up globally, so an
+  authored or emitted `(bind-group (entry …))` whose `entry` is
+  `bind-group`'s local fired the hook of a global *lowerable* `entry` it
+  never meant. Each worklist frame now carries the registry its enclosing
+  slot puts in scope (positional locals for a form child, the matched
+  key's locals — base then variant keys — for a kvpair-value form) and a
+  bare head matching a local resolves to it; a local never lowers, so only
+  a global hit fires a hook, and a qualified head bypasses locals as at
+  the site. The nested-lowerable lint follows the same resolution.
+  Corpus: `lowering-local-shadows-global-sugar` and its control
+  `lowering-global-sugar-at-root-lowers`.
+
+- **`:lowering` on a slot-local form loaded clean and did nothing.**
+  `Schema.validateLowering` and the produces graph walk top-level forms
+  only, and the worklist resolves a local head to its local body, so a
+  local's `:lowering` could never fire — a declaration the schema carried
+  as a lie. The loader now rejects it as `invalid_manifest` at
+  `[<local> lowering]` on both carriers, keeping the local's `lowering`
+  null in the partial spec; `Schema.init` asserts the same for static
+  plugin literals. Corpus: `lowering-local-form-declares-lowering`.
+
+- **A defaulted discriminant that selects no variant reported the
+  discriminant missing.** Under effective axis D the overlay pre-resolution
+  marked the discriminant satisfied only when its default also selected a
+  variant, so `(prim :strip-format uint16)` with `:topology` defaulting to
+  `tri-list` beside strip-only variants emitted `missing_discriminant_key`
+  on a form that had a discriminant. The default now satisfies the
+  discriminant regardless; the strip-only key is `unknown_key`, exactly as
+  it would be had the author written `:topology tri-list`. Pinned by
+  `effective-axis-d-default-selects-no-variant`. Surfaced by S14's gate.
+
+- **The TypeScript export of a discriminated form had no branch for members
+  no variant selects.** `export type X = | {…variant a…} | {…variant b…}`
+  left a document whose discriminant took any other member — valid to the
+  validator, common keys only — with no type at all. Both emitters (the
+  top-level union and the inline slot-local one) now add one residual
+  branch, discriminant narrowed to exactly the uncovered members
+  (`topology: Symbol_<"point-list" | "line-list" | "triangle-list">`),
+  and none when the variants cover the set — so `kit`'s golden is
+  byte-identical. Zig and the TS-parity port alike. Surfaced by the
+  `variant-set` example, the first fixture with uncovered members.
+
+- **A positional floor never bit on the document that breaches it hardest.**
+  S1's `:min` exports as `minContains` inside the `$children` subschema, and
+  the JSON bridge omits `$children` entirely for a childless form — so
+  `{"$form": "render-pipeline"}` compiled clean through ajv while
+  `{"$children": []}`, which no bridge emits, was correctly rejected. A floor
+  at either level now puts `$children` in the form's `required` array. This
+  makes previously-accepted documents fail against an exported schema; the
+  SJON validator's verdict is unchanged, and was always the stricter of the
+  two.
+
+- **A head `:max` of 65535 panicked on its first matching child.** The
+  ceiling test was `counts[i] == max + 1` in `u16`, so evaluating `max + 1`
+  overflowed for the largest bound the loader accepts. Reachable from a valid
+  manifest and a one-child document.
+
+- **An empty head-set narrowed to nothing.** `HeadSet` and `MemberSet` carry
+  the same documented promise — an empty list is "no narrowing" — and only
+  `MemberSet` kept it; an empty head-set rejected every head with a
+  `not_head_member` whose allowed list rendered as nothing at all. Not
+  reachable from a manifest (`(head-set)` is `invalid_manifest`), so no
+  document changes verdict.
+
+### Changed
+
+- **The documentation site is a Starlight site.** Same URLs, same content,
+  and the hand-rolled routing, sidebar, theme toggle, search and sitemap
+  are Starlight's now. One `docs` collection takes four sources through
+  `landing-page/src/lib/docs-loader.ts`: the hand-written MDX pages, the
+  fifteen tutorial lessons read **straight out of `docs/tutorial/NN-*.md`**
+  (the generated `content.md` tree and its migrator are gone, so a lesson
+  has one copy again), the 130 diagnostic explanations, and an index over
+  them. The playground is a Starlight page rather than a page beside the
+  site, and keeps its own chrome. Alongside it every user-facing sentence
+  went through a voice pass: one running `(camera …)` example across the
+  whole site, every snippet real CLI output, and the tutorial in a
+  first-person teaching voice.
+
+- **A `:lowering :produces` entry may name a slot-local form.** Two checks
+  read `:produces` and disagreed about what a head is: the contract walk
+  checks every emitted head at every depth by string equality, while the
+  aggregate check resolved each listed head through the global catalog
+  only. A hook emitting `(bind-group (entry …))` with `entry` slot-local
+  to `bind-group` was therefore stuck — `entry` absent from the list is
+  `lowering_produced_invalid_head`, present it was `unknown_form` at
+  schema load — and the only way out was a dead global `entry` declared
+  purely so the name resolved. A bare entry now resolves **local-first**,
+  the order a form head takes at validation: it may name a slot-local form
+  **reachable through the list** — declared, at any depth and through
+  either carrier (variant keys included), inside a form the same list
+  resolves — or a global form as before; a qualified entry bypasses
+  locals, as at the site. Reachable-through-the-list rather than
+  any-local-anywhere because an emitted local can only sit under its
+  declaring form and the all-depths contract puts that form in the same
+  list, so the reachable set is exactly what a hook can legally place; a
+  local listed without its declaring form is still `unknown_form`, and the
+  message now names the form the list is missing. The graph the cycle
+  check and `export-lowering-graph` consume is unchanged (a local never
+  lowers, so it adds no edge). No new code, no wire change; message-only
+  on `unknown_form`. Corpus: `lowering-produces-slot-local-head`,
+  `lowering-produces-slot-local-head-unlisted`. Spec: manifest §5.4 (new),
+  `docs/plugin-model-v1.md` "What `:produces` may name". Filed by PNGine
+  as S12 (`docs/plans/asks/12-…`).
+
+- **A `(scalar-or-ref-shape …)` slot reports the arm the value's shape
+  selected.** The shorthand still desugars to an ordinary union and
+  *matches* as one — try each, first accept wins — but its two arms are
+  disjoint by node shape (a number can only have meant the base, a symbol
+  only the ref), so when nothing matches there is still a determined arm,
+  and the diagnostic is now **that arm's own**: `number_above_max` naming
+  the bound, `number_not_integer`, `unit_forbidden`, `repr_out_of_range`,
+  `not_cross_ref` naming the target form — where before every rejection
+  collapsed to `union_no_branch_matched` naming two kinds. The arm is
+  determined by resolving each alternative's underlying and asking whether
+  the value's shape reaches it; exactly one reachable arm selects, and the
+  union code stays for a shape neither reaches (a string or a vector in a
+  `number | symbol` slot) or both reach (a symbol against a base that is
+  itself a symbol kind). Matching is untouched — no document changes
+  verdict, only the code it fails with — and both walkers ask one
+  function (`Validator.determinedArm`). Corpus case
+  `scalar-or-ref-checked-ref` moves from `union_no_branch_matched` to
+  `not_cross_ref`; `scalar-or-ref-reports-base-arm` and
+  `scalar-or-ref-no-arm-keeps-union` pin the two halves of the rule on
+  all four hosts. Filed by PNGine as S13 (`docs/plans/asks/13-…`), whose
+  numeric kinds — `pool-size` 1..255, `anisotropy-value` 1..16, `:repr
+  u32` on nearly everything — could not take a `(define …)` reference
+  arm without retiring every bound diagnostic in the schema.
+
+- **Every union reports the arm, not just the shorthand.** The rule above
+  is now the rule for `(union-shape …)` generally: count the alternatives
+  the value's node shape can reach; when exactly one can, nothing else
+  could have been meant, so that alternative's own diagnostic is what the
+  slot reports. A hand-written `union [count-value define-ref]` says what
+  the `(scalar-or-ref-shape …)` spelling of the same two kinds says, and
+  `union [ease-name ease-form]` now answers a misspelled `:ease
+  smoothstepp` with `not_member` and its allowed list instead of naming
+  two kinds. Overlap is what keeps `union_no_branch_matched`, and it is
+  decided per value: zero reachable alternatives (a string against
+  `number | symbol`), or two or more (a symbol against
+  `member-set | cross-ref`, a number against two bounded number kinds).
+  Reachability stops at the node shape, so two `:underlying form` kinds
+  with disjoint head-sets both reach a form and keep the collapse.
+  Matching is untouched — declaration order, first accept wins, no
+  document changes verdict — and the tree walker, the binary walker and
+  the binary form funnel ask one function (`Validator.determinedArm`), as
+  do the LSP quick-fixes, which reach a union arm's `cross_ref` /
+  `members` rather than declining. `Plugin.ValueKind.scalar_or_ref` and
+  its TS-parity twin `ValueKind.scalarOrRef` are **retired**: with the
+  gate gone nothing read the bit, and the desugar is pure again.
+  `(scalar-or-ref-shape …)` itself is unchanged. Corpus:
+  `union-disjoint-reports-arm`, `union-overlap-keeps-union`, with
+  `union-form-reject` moving from `union_no_branch_matched` to
+  `not_head_member`. A determined vector arm is now framed like a direct
+  vector slot on both walkers, which turns one leg of the `[union-div 2]`
+  parity residual into a full assertion. Spec: manifest §4.9 owns the
+  rule, §4.8 points at it. Filed by pacer as 15
+  (`docs/plans/asks/15-…`), whose score language has two shape-disjoint
+  unions that a better error message must not force it to split apart.
+
+- **`(plugin … :version …)` is optional.** `(plugin :name x)` is a complete
+  manifest. The key does two things — it is the `(use-plugin … :version "x")`
+  pin target and the lockfile row — and neither needs a value the author had
+  to invent, which is what every scratch manifest was doing (`"1.0.0"`
+  everywhere). Absent = unversioned: the manifest loads and validates like
+  any other, `sjon plugin info` prints `?`, the lockfile records an empty
+  row. A pin is a claim about a version the manifest declares, so pinning an
+  unversioned plugin is still `plugin_version_mismatch`; its message now
+  says "the manifest declares no :version" rather than quoting an empty
+  string, on the Zig host and the TS-parity port alike. Corpus case
+  `inline-manifest-unversioned` pins the loosening on all four hosts.
+
+### Removed
+
+- **The manifest format version.** `(plugin … :sjon "1.x")`,
+  `Plugin.SUPPORTED_SJON_FORMAT` and the loader's "declared > supported"
+  check are gone, in Zig and in the TS-parity port. The key was the only
+  version a user could write in the language and it gated nothing: a
+  manifest that omitted it loaded every feature the host had, while every
+  grammar addition still cost a bump (1.1 → 1.2 → 1.3 → 1.4 across the last
+  three releases) and a sentence telling authors to write a new number.
+  What it bought — an older host refusing a newer manifest by name rather
+  than with `unknown_key` — was already loud without it: every meta-schema
+  form is `:open false`, so meta-validation drops the plugin either way.
+  The vocabulary now has one version, the SJON release, and this file says
+  which release a keyword arrived in.
+
+  **Breaking for manifests that write `:sjon`:** it is now an unknown key
+  on `(plugin …)` — `unknown_key` at meta-validation on the Zig reference
+  and both wasm hosts (the TS-parity port, whose meta-validation is minimal
+  by design, ignores it). Delete the token. `sjon_format_unsupported` stays
+  in the wire-stable enum, is never emitted, and is asserted silent by a
+  tombstone test; `sjon explain sjon_format_unsupported` says so. The
+  `(project :sjon …)` no-op key in `sjon-project.sjon` goes with it (now
+  `unknown_project_key`, advisory), and so does the one corpus case that
+  exercised the check.
 
 ## 1.2.0 — 2026-08-17
 

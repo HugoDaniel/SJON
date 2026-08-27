@@ -2,37 +2,51 @@
 
 ## Goal
 
-This is part 2 of value kinds, covering string bounds, member sets,
-head sets, unions, and slot-local forms, plus the diagnostic cheat
-sheet for every value-kind diagnostic. Read these refinements and write values that
-satisfy them; when a value is rejected, work back from the diagnostic
-code to the layer of the contract you missed.
+Read the five remaining value-kind refinements and write values that
+satisfy them, and when a value is rejected, work back from the
+diagnostic code to the exact line of the contract you missed.
 
-## Mental Model
+## Five More Ways to Narrow a Slot
 
-Part 1 introduced the named-kind pattern and worked through underlying
-shapes, vector shapes, unit shapes, numeric bounds, and representation
-tags. The five refinements in this chapter are the remaining axes a
-plugin can use to narrow what a slot accepts: codepoint-length and
-format constraints on strings, closed lists of symbol or string values,
-closed lists of allowed form heads, unions that combine several
-alternatives behind one slot, and slot-local forms that a slot defines
-inline. The reading habit stays the same — underlying shape first, then
-refinement, then surface value — but each axis has its own diagnostic
-code, so the cheat sheet at the end of the chapter is the fastest path
-back to the right line in the plugin docs.
+[Value kinds: shapes](11-value-kinds-shapes.md) gave you the named-kind pattern
+and the refinements that work on shape: underlying kind, vector length,
+unit rule, numeric bound, representation tag. Those all constrain what a
+value *is*. The five in this lesson constrain what it is *allowed to
+say*:
+
+```
+string bounds     how long the text may be, and what shape it must have
+member sets       a closed list of legal names
+head sets         a closed list of legal form heads (and how many of each)
+unions            several alternatives behind one slot
+slot-local forms  forms a slot declares inline, for its own use
+```
+
+The reading habit does not change. Underlying shape first, then
+refinement, then surface value. What does change is that each axis has
+its own diagnostic code, so the cheat sheet at the end of this lesson
+is the fastest route from an error message back to the right line in the
+plugin docs. If you only remember one thing from here, remember that the
+code names the layer.
 
 ## String Bounds
 
-A string bound refinement applies to a string-underlying kind and
-constrains the value's length, pattern, or format. Each field is
+[Atoms and intent](03-atoms-and-intent.md) said a string carries opaque text
+and nobody validates it. That was true of the language and it is not
+true of a schema. An id that must not be empty, an address that has to
+look like an address, a version that has to be a version: these are
+string slots where "any text" is the wrong contract, and a **string
+bound** is how a plugin says so.
+
+A string bound applies to a string-underlying kind and constrains the
+value's length, pattern, or format. Each field is
 optional; the validator applies them cheapest-first (length, then
 format, then pattern).
 
 Example contracts:
 
-```text
-slug:           string, length 1–64, format path
+```text title="plugin summary"
+slug:           string, length 1-64, format path
 email-address:  string, format email
 semver-string:  string, format semver
 ```
@@ -53,32 +67,34 @@ Rejected because below `:min-len`:
 Likely diagnostic: `string_too_short`. Other diagnostics in this
 family:
 
-- `string_too_long`            — codepoint count above `:max-len`.
-- `string_format_mismatch`     — value fails the declared `:format` (one of email / uri / path / uuid / semver).
-- `string_pattern_unsupported` — `:pattern` is declared but this build has no regex engine; warning, validation still succeeds.
-- `string_pattern_mismatch`    — reserved for the engine milestone; v1 builds never emit it.
-- `string_bounds_invalid`      — loader-emitted: empty range, negative bound, empty pattern, wrong underlying, or a member literal that itself fails the declared length / format.
+- `string_too_long`: codepoint count above `:max-len`.
+- `string_format_mismatch`: the value fails the declared `:format`, one of email / uri / path / uuid / semver.
+- `string_pattern_unsupported`: `:pattern` is declared but this build has no regex engine. It is a warning, and validation still succeeds.
+- `string_pattern_mismatch`: reserved for the engine milestone. v1 builds never emit it.
+- `string_bounds_invalid`: emitted by the loader for an empty range, a negative bound, an empty pattern, a wrong underlying kind, or a member literal that itself fails the declared length or format.
 
 Length is measured in UTF-8 codepoints, so `"héllo"` (5 cp / 6 bytes)
 passes `:max-len 5`. The parser guarantees well-formed UTF-8, so
-the count is total. No normalisation is applied — precomposed `"é"`
+the count is total. No normalisation is applied, so precomposed `"é"`
 (1 cp) and decomposed `"é"` (2 cp) count differently.
 
 `:pattern` is accept-but-warn in v1: declaring it does not yet
 enforce a regex (the engine lands later), but the loader stores the
 source and the validator fires `string_pattern_unsupported` at every
 matched value site so authors know the constraint is informational.
-The wire shape is stable — once the engine lands, the same manifest
+The wire shape is stable, so once the engine lands the same manifest
 starts enforcing the regex without a spec change.
 
 ## Member Sets
 
-A member set is a closed list of accepted values for a symbol-underlying
-or string-underlying kind.
+A member set is the payoff for [Atoms and intent](03-atoms-and-intent.md)'s
+advice to write named choices as symbols. It is a closed list of
+accepted values for a symbol-underlying or string-underlying kind, and
+it is what turns "write `ortho` here" from a convention into a check.
 
 For the shapes plugin:
 
-```text
+```text title="plugin summary"
 fill-rule: symbol, members evenodd | nonzero
 ```
 
@@ -91,14 +107,14 @@ Accepted:
 
 Rejected:
 
-```sjon
+```sjon del={1}
 (circle :center [0 0] :radius 1 :fill diagonal)
 ```
 
 Likely diagnostic: `not_member`. Repair with one of the documented
 symbols:
 
-```sjon
+```sjon ins={1}
 (circle :center [0 0] :radius 1 :fill evenodd)
 ```
 
@@ -108,9 +124,10 @@ Do not repair symbol member sets with keywords:
 (circle :center [0 0] :radius 1 :fill :evenodd)
 ```
 
-That runs into the keyword-pairing rule from chapter 5. `:fill` no
-longer receives a value; both `:fill` and `:evenodd` are read as
-positional flags. Closed enum-like values are usually symbols:
+That runs into the keyword-pairing rule from
+[Forms and keyword pairing](05-forms-and-keyword-pairing.md). `:fill` no longer receives
+a value; both `:fill` and `:evenodd` are read as positional flags.
+Closed enum-like values are usually symbols:
 
 ```sjon
 :fill evenodd
@@ -119,7 +136,7 @@ positional flags. Closed enum-like values are usually symbols:
 If a plugin documents a string-underlying member set, then use quoted
 strings instead:
 
-```text
+```text title="plugin summary"
 blend-mode: string, members "normal" | "multiply"
 ```
 
@@ -129,9 +146,10 @@ blend-mode: string, members "normal" | "multiply"
 
 The contract decides whether the closed values are symbols or strings.
 
-A member set is closed *and* written in the plugin. Chapter 13 covers
-the other way a symbol slot gets a fixed list of legal values: read out
-of the document being validated, or extracted from a string inside it.
+A member set is closed *and* written in the plugin.
+[Cross-references](13-cross-references.md) covers the other way a symbol slot
+gets a fixed list of legal values: read out of the document being
+validated, or extracted from a string inside it.
 
 ### Enums whose names start with a digit
 
@@ -139,7 +157,7 @@ Some enums name their members with a digit first. WebGPU's texture
 dimensions are `"1d"`, `"2d"`, `"3d"`; its view dimensions add `2d-array`,
 `cube`, and `cube-array`. A plugin may declare those directly:
 
-```text
+```text title="plugin summary"
 texture-dimension: symbol, members 1d | 2d | 3d
 view-dimension:    symbol, members 1d | 2d | 2d-array | cube | cube-array | 3d
 ```
@@ -150,36 +168,38 @@ Accepted:
 (texture :name albedo :dimension 2d :view 2d-array)
 ```
 
-`2d-array` works for the reason chapter 4 gives: inside a unit, a hyphen
-joins two letter runs when a letter follows it, so the unit here is
-`d-array` and the whole thing is one value. Without that rule this was
-`2d` plus a stray symbol `-array` — one intended value, two diagnostics.
+`2d-array` works for the reason [Numbers, units, vectors](04-numbers-units-vectors.md)
+gives: inside a unit, a hyphen joins two letter runs when a letter
+follows it, so the unit here is `d-array` and the whole thing is one
+value. Without that rule this was `2d` plus a stray symbol `-array`: one
+intended value, two diagnostics.
 
 You write the spelling the spec uses. There is no quoting and no numeric
-lookup table to memorise — this is what schemas used to force, with
+lookup table to memorise, which is what schemas used to force, with
 `:view-dimension 3 ; cube` and a comment carrying the meaning.
 
-Why this needs its own section: `2d` is not a symbol. Chapter 4 showed
-that a digit-leading token lexes as a **number with a unit** — value `2`,
-unit `d`. So the schema matches on that pair rather than on the text, and
-three consequences follow:
+Why this needs its own heading: `2d` is not a symbol.
+[Numbers, units, vectors](04-numbers-units-vectors.md) showed that a digit-leading
+token lexes as a **number with a unit**: value `2`, unit `d`. So the
+schema matches on that pair rather than on the text, and three
+consequences follow:
 
 ```sjon
 (texture :dimension 2.0d)   ; ✓ same magnitude, same unit
 (texture :dimension 02d)    ; ✓ the leading zero is not part of the name
-(texture :dimension 2.5d)   ; ✗ fractional — matches no member
+(texture :dimension 2.5d)   ; ✗ fractional, so it matches no member
 (texture :dimension 2b)     ; ✗ the unit is part of the name
 (texture :dimension 2)      ; ✗ no unit, so not a spelling at all
 ```
 
 The last two fail differently, and the difference is informative.
-`2b` is `not_member` — a unit-bearing number *is* the right shape here, it
-is simply not one of the three. `2` is `wrong_underlying` — a bare number
-is not a name in the first place.
+`2b` is `not_member`, because a unit-bearing number *is* the right shape
+here and it is simply not one of the three. `2` is `wrong_underlying`,
+because a bare number is not a name in the first place.
 
 Repair drill:
 
-```sjon
+```sjon del={1}
 (texture :name albedo :dimension 4d)
 ```
 
@@ -191,18 +211,23 @@ got `4d` (allowed: `1d`, `2d`, `3d`)
 
 so pick one of the three:
 
-```sjon
+```sjon ins={1}
 (texture :name albedo :dimension 3d)
 ```
 
 ## Head Sets
 
-A head set applies to a form-underlying kind. It says "the slot value
-must be a nested form, and the nested form's head must be one of these."
+A member set closes the list of legal *names*. A **head set** closes the
+list of legal *forms*: the slot value must be a nested form, and that
+form's head must be one of the listed ones.
+[Forms and keyword pairing](05-forms-and-keyword-pairing.md)'s repair for
+`(badge :label "ok" :shape :circle)` was to write a form in the slot,
+and this is the schema half of that story, the part that says which
+forms.
 
 For the shapes plugin:
 
-```text
+```text title="plugin summary"
 shape-form: form, heads circle | rect
 ```
 
@@ -218,7 +243,7 @@ Accepted:
 
 Rejected:
 
-```sjon
+```sjon del={1}
 (badge :label "bad" :shape (group :name "not-a-shape"))
 ```
 
@@ -226,7 +251,7 @@ Rejected:
 Likely diagnostic: `not_head_member`. Repair with one of the allowed
 heads:
 
-```sjon
+```sjon ins={1}
 (badge :label "ok" :shape (rect :origin [0 0] :size [10 10]))
 ```
 
@@ -239,8 +264,8 @@ A head set is different from a symbol member set:
 
 ## How Many?
 
-On a form's `:positional` slot — where the head set governs a *list* of
-children rather than one value — it can bound the count as well as the
+On a form's `:positional` slot, where the head set governs a *list* of
+children rather than one value, it can bound the count as well as the
 vocabulary. Spell the heads out as `(head …)` children and each one may
 carry `:min` / `:max`:
 
@@ -248,7 +273,7 @@ carry `:min` / `:max`:
 (value-kind :name pipeline-section :underlying form
   :heads (head-set
     (head :name vertex   :min 1 :max 1)   ; exactly one
-    (head :name fragment :max 1)          ; at most one — none is fine
+    (head :name fragment :max 1)          ; at most one, none is fine
     (head :name constant)))               ; any number
 
 (form :name render-pipeline :positional pipeline-section
@@ -257,9 +282,9 @@ carry `:min` / `:max`:
 
 Read the three spellings carefully, because the floor defaults to 0:
 
-- `:min 1 :max 1` — exactly one.
-- `:max 1` alone — at most one. Zero is fine.
-- no bound — any number, including zero.
+- `:min 1 :max 1`: exactly one.
+- `:max 1` alone: at most one. Zero is fine.
+- no bound: any number, including zero.
 
 Accepted:
 
@@ -280,8 +305,8 @@ Too many:
   (fragment :entry fs_alt))
 ```
 
-`positional_too_many`, reported **on the second `(fragment …)`** — the
-line to delete. Not on the parent, and not once per extra child: a form
+`positional_too_many`, reported **on the second `(fragment …)`**, which
+is the line to delete. Not on the parent, and not once per extra child: a form
 four `(fragment …)` children over its ceiling still gets one diagnostic,
 naming the real count.
 
@@ -294,7 +319,7 @@ Too few:
 
 `positional_missing`, reported **on `(render-pipeline …)` itself**. You
 cannot know a head is absent until the children run out, so there is no
-child to point at — the same reason a missing required key lands on the
+child to point at, which is the same reason a missing required key lands on the
 form's head rather than anywhere in particular.
 
 Three things that will save you a debugging session:
@@ -305,25 +330,108 @@ Three things that will save you a debugging session:
   *keywords* a form accepts. A positional count is a different surface,
   and declaring `:positional <bounded-kind>` opts into it.
 - **The counts only bite on `:positional`.** Reuse the same kind on a
-  `(key :type pipeline-section)` slot and the bounds ride along inertly —
+  `(key :type pipeline-section)` slot and the bounds ride along inertly:
   a keyed slot holds one value, so `:max 1` is trivially true and `:min 1`
-  has no set to be missing from. Deliberate: it keeps a bounded kind
-  shareable between a slot that has a population and one that doesn't.
+  has no set to be missing from. That is deliberate, and it keeps a
+  bounded kind shareable between a slot that has a population and one
+  that does not.
+
+## How Many Altogether?
+
+Every bound above counts *one* head. Some rules count the set.
+
+A WebGPU bind-group-layout entry binds exactly one resource: a buffer, a
+sampler, or a texture. Try to say that with per-head bounds and watch it
+fail. Give each head `:max 1` and an entry with a buffer *and* a sampler
+is accepted, because each head is within its ceiling. Give one head `:min 1` and
+you have demanded a buffer specifically, which is a different rule.
+
+The claim is about the set, so it is spelled on the set:
+
+```sjon
+(value-kind :name bgl-resource :underlying form
+  :heads (head-set :min-children 1 :max-children 1   ; exactly one, whichever
+    (head :name buffer  :max 1)                      ; …and not two of the same
+    (head :name sampler :max 1)
+    (head :name texture :max 1)))
+
+(form :name entry :positional bgl-resource
+  (key :name binding :type number))
+```
+
+`:min-children` and `:max-children` count children of *any* head in the
+set. Read the four cases:
+
+```sjon
+(entry :binding 0 (buffer :type uniform))
+```
+
+Accepted: one resource.
+
+```sjon
+(entry :binding 1
+  (buffer  :type uniform)
+  (sampler :type filtering))
+```
+
+`positional_too_many`, on the `(sampler …)`. Both per-head ceilings are
+satisfied; only `:max-children 1` refuses this.
+
+```sjon
+(entry :binding 2)
+```
+
+`positional_missing`, on `(entry …)`. Every per-head bound here is a
+ceiling, so an empty child list satisfies all of them.
+
+```sjon
+(entry :binding 3
+  (buffer :type uniform)
+  (buffer :type storage))
+```
+
+`positional_too_many` again, but read the message. It says **`at most 1
+buffer positional child`**, not `at most 1 positional child from [buffer
+| sampler | texture]`. This document breaks both rules at once, and you
+get one diagnostic: the per-head one, because it points at the line to
+delete. The set's complaint follows from it.
+
+That is the habit to build: **the message tells you which level fired.**
+A bracketed set means the children are individually fine and there are
+simply too many of them together, so the repair is to pick one, not to
+de-duplicate.
+
+Two more things:
+
+- **The compact spelling works here.** `(head-set :names [cube sphere]
+  :max-children 1)`, meaning "at most one generator", is legal, because the
+  aggregate needs no per-head metadata. Only *per-head* counts force the
+  `(head …)` spelling.
+- **The loader refuses an impossible set.** Two heads at `:min 1` under
+  `:max-children 1` is `invalid_manifest`: satisfying both needs two
+  children and the set allows one. Note that neither head *alone* looks
+  wrong on its own; the check has to add them up.
 
 ## Unions
 
-A union says "this value may satisfy any one of these alternatives."
-Each alternative is another named kind or a primitive shortcut like
-`number`, `symbol`, or `form`.
+Every refinement so far narrows a slot to one shape. Sometimes a slot
+genuinely takes two: a note is a pitch *or* an event, a dimension is a
+literal *or* the name of a constant. A **union** says "this value may
+satisfy any one of these alternatives", where each alternative is
+another named kind or a primitive shortcut such as `number`, `symbol`,
+or `form`.
 
 The validator tries alternatives in the order the plugin declared them.
-As an author, the main thing to notice is the failure case: if no
-alternative accepts the value, the diagnostic lists the alternatives as
-a menu of legal shapes.
+As an author, the main thing to notice is the failure case, and it has
+two answers. If the value's *shape* (number, string, symbol, vector,
+form) could only ever have matched one alternative, the diagnostic is
+that alternative's own, exactly as if the slot had been declared with
+it alone. If the shape reaches several alternatives, or none, the
+diagnostic lists the alternatives as a menu of legal shapes.
 
 Example music contract:
 
-```text
+```text title="plugin summary"
 pitch: symbol, members E4 | G4 | A4 | B4 | _
 event: form, heads n | rest
 note-or-event: union pitch | event
@@ -351,42 +459,51 @@ This fails:
 (phrase :notes [E4 X4 (n G4 0.5b)])
 ```
 
-`X4` is not in the pitch member set, and it is not a form, so no
-alternative accepts it. Likely diagnostic: `union_no_branch_matched`.
-Repair with a value that fits one branch:
+`X4` is a symbol, and only one of the two alternatives takes symbols, so
+`X4` could only ever have meant `pitch`. Likely diagnostic:
+`not_member`, listing the pitches. Repair with a value that fits one
+branch:
 
 ```sjon
 (phrase :notes [E4 G4 (n G4 0.5b)])
 ```
 
-The diagnostic lists the alternatives the plugin declared. Use that
-list as a menu of legal shapes.
+Try `(chord G4)` in the same slot, where `chord` is a form the plugin
+declares and the head set leaves out, and the mirror happens: a form
+could only have meant `event`, so you get `not_head_member` listing `n`
+and `rest`. An *undeclared* head is a different story, and the next
+section tells it. Neither message mentions the union, because the union
+added nothing to the question. Write a number there instead, `[E4 42]`,
+and you get `union_no_branch_matched` with both alternatives named,
+because a number is neither a pitch nor an event and there is nothing
+more specific to say.
 
 ### Order Is Part Of The Contract
 
 Alternatives are tried in declaration order and the first one that
 accepts wins. No alternative is "more specific" than another, and none
-is preferred by shape — order is the whole rule.
+is preferred by shape. Order is the whole rule.
 
 Most of the time this is invisible, because alternatives do not overlap:
 a symbol cannot satisfy `vec4`, a vector cannot satisfy `pitch`. But
 when two alternatives *can* both accept the same value, order decides
 which one, and that is usually deliberate:
 
-```text
+```text title="plugin summary"
 byte-count: number
 size: union byte-count | symbol
 ```
 
 `1024` matches `byte-count`. A bare name matches the `symbol` half. Had
 the plugin listed `symbol` first, it would still only claim symbols, so
-nothing changes here — but a union of two *symbol* kinds is a different
-story, and lesson 13 shows the case where order quietly decides which
-entity a name refers to.
+nothing changes here. A union of two *symbol* kinds is a different
+story, and [Cross-references](13-cross-references.md#two-targets-one-name)
+shows the case where order quietly decides which entity a name refers
+to.
 
 The practical rule for reading a schema: when two alternatives overlap,
 the earlier one is what you get. When you cannot tell which one accepted
-your value, ask the tooling — go-to-definition on the value will land in
+your value, ask the tooling: go-to-definition on the value lands in
 whichever declaration actually claimed it.
 
 ### Form Alternative Pitfall
@@ -396,7 +513,7 @@ parenthesized syntax.
 
 Assume this contract:
 
-```text
+```text title="plugin summary"
 vec4: vector, length 4, element number
 value: union number | vec4 | form
 ```
@@ -404,7 +521,7 @@ value: union number | vec4 | form
 Assume `(set ...)` itself is a known form. This still fails if `foo`
 is not declared by any loaded plugin:
 
-```sjon
+```sjon del={1}
 (set :value (foo 1 2))
 ```
 
@@ -412,7 +529,7 @@ Likely diagnostic: `unknown_form`, not `union_no_branch_matched`. The
 slot accepts form-shaped values, but form heads still resolve against
 the schema. Repair by using a form whose head the schema knows:
 
-```sjon
+```sjon ins={1}
 (set :value (+ 1 2))
 ```
 
@@ -427,7 +544,7 @@ value, or a symbol that names a constant defined elsewhere." A plugin
 writes it as a `scalar-or-ref` kind over a base kind, and the loader
 expands it to `union base | symbol`.
 
-```text
+```text title="plugin summary"
 dim-value: number
 dim: scalar-or-ref, base dim-value
 ```
@@ -440,8 +557,8 @@ So `dim` accepts either a number or a bare symbol:
 
 `64` and `1` take the scalar branch; `WORKGROUP_SIZE` is a bare symbol,
 so it takes the reference branch, naming a constant the host resolves
-later (the same `#define`-style pattern as a cross-reference, the
-subject of the next chapter).
+later (the same `#define`-style pattern as a cross-reference, which is
+the subject of [the next lesson](13-cross-references.md)).
 
 A quoted string is neither a number nor a symbol:
 
@@ -450,9 +567,9 @@ A quoted string is neither a number nor a symbol:
 ```
 
 Likely diagnostic: `union_no_branch_matched`. The shorthand is a union
-underneath, so a value that fits no branch fails exactly as a
-hand-written union would. Repair by dropping the quotes for a reference,
-or writing a number for a literal:
+underneath, and a string is a shape *neither* half could take, so there
+is no half to blame and the message names both. Repair by dropping the
+quotes for a reference, or writing a number for a literal:
 
 ```sjon
 (dispatch :x 64 :y WORKGROUP_SIZE)
@@ -463,9 +580,9 @@ or writing a number for a literal:
 Read the plugin line carefully, because two `scalar-or-ref` kinds that
 look alike behave very differently on a typo. The reference half is
 whatever the plugin named as its `ref`, and if it named nothing, the
-answer is the plain `symbol` type — which accepts *any* spelling.
+answer is the plain `symbol` type, which accepts *any* spelling.
 
-```text
+```text title="plugin summary"
 dim:     scalar-or-ref, base dim-value                   ; ref defaults to symbol
 bones:   scalar-or-ref, base bone-count, ref define-ref  ; ref is a cross-ref kind
 ```
@@ -473,32 +590,44 @@ bones:   scalar-or-ref, base bone-count, ref define-ref  ; ref is a cross-ref ki
 Now misspell a constant in each:
 
 ```sjon
-(dispatch :y WORKGROUP_SIZ)     ; A — validates clean
-(mesh :bones MAX_BONE)          ; B — union_no_branch_matched
+(dispatch :y WORKGROUP_SIZ)     ; A: validates clean
+(mesh :bones MAX_BONE)          ; B: not_cross_ref
 ```
 
 Line A passes. `WORKGROUP_SIZ` is a perfectly good symbol, and the
-reference half only asked for a symbol — nothing checked that a constant
+reference half only asked for a symbol, and nothing checked that a constant
 by that name exists. The mistake surfaces later, at whatever point the
 host tries to resolve it.
 
 Line B fails at validate time, because `define-ref` is a cross-reference
 kind and the document contains no matching `(define …)`.
 
-Note the diagnostic on line B: `union_no_branch_matched`, not
-`not_cross_ref`. The kind is a union underneath, and a union reports
-that no alternative matched rather than forwarding one branch's private
-reason. So read the message's alternative list — it tells you which two
-shapes were tried, and the second one is where a name was expected.
+Note the diagnostic on line B: `not_cross_ref`, not
+`union_no_branch_matched`. This is the union rule from earlier in the
+lesson, and the shorthand is just a union that always meets its
+condition: the two halves are disjoint by shape, so a symbol can only
+have meant the reference half and a number only the literal half. A
+symbol gets `not_cross_ref` naming the form it had to be declared by; a
+number outside the base's bounds gets `number_above_max` (or
+`number_below_min`, `unit_forbidden`, `repr_out_of_range` …) naming the
+bound. Only a shape neither half takes (the quoted string above, or a
+vector) gets the union's own `union_no_branch_matched` with its list of
+alternatives.
+
+Nothing here is special to the shorthand. Write the same two kinds out
+as a `(union-shape …)` by hand and you get the same two messages.
 
 ## Slot-Local Forms
 
-A head set restricts a form slot to a closed list of allowed form
-*heads*. A slot-local form set goes one step further: the slot defines
-its own forms inline, right where it is declared. Those local forms are
+A head set picks from forms that already exist somewhere. Sometimes the
+form you want exists nowhere else and should not: a `(dot)` that only
+means anything inside one slot does not belong in the global vocabulary,
+where it would pollute completion lists and collide with other plugins.
+
+So a slot may declare its own forms inline, right where it is declared. Those local forms are
 part of the slot's contract, not the global vocabulary.
 
-```text
+```text title="plugin summary"
 (canvas ...)
   :shape form, local circle | rect | group
     circle: (r number required)
@@ -517,7 +646,7 @@ form:
 ```
 
 This local `circle` takes `:r`. If a global `circle` also exists, the
-local one shadows it inside this slot - so a global `circle` that took
+local one shadows it inside this slot, so a global `circle` that took
 `:radius` is not what is checked here.
 
 **Additive fallback.** A head that is not local still resolves against
@@ -548,8 +677,8 @@ case:
 
 Likely diagnostic: `unknown_local_form`. This is more specific than the
 plain `unknown_form` you would get at the top level, because the slot
-narrowed the choices. Repair with a head the slot accepts - a local
-form, or a known global one:
+narrowed the choices. Repair with a head the slot accepts, either a
+local form or a known global one:
 
 ```sjon
 (canvas :shape (circle :r 12))
@@ -563,7 +692,7 @@ straight to the global vocabulary.
 
 ## Head Sets and Slot-Local Forms
 
-These two features look like they compete. They do not — they run in
+These two features look like they compete. They do not: they run in
 sequence, and reading a diagnostic correctly depends on knowing which
 step produced it.
 
@@ -587,8 +716,8 @@ ghost]`, and there is a local form for `buffer` and `storage-texture` but
 none anywhere for `ghost`:
 
 ```sjon
-(entry :binding 0 (sampler :type filtering))     ; A — head not in the set
-(entry :binding 0 (ghost :x 1))                  ; B — head in the set, no form
+(entry :binding 0 (sampler :type filtering))     ; A: head not in the set
+(entry :binding 0 (ghost :x 1))                  ; B: head in the set, no form
 ```
 
 Line A produces **two** diagnostics: `not_head_member` from step one,
@@ -596,7 +725,7 @@ and `unknown_local_form` from step two. Both steps failed, so both
 report.
 
 Line B produces **one**: just `unknown_local_form`. This is the case
-worth remembering — the head set *admitted* `ghost`, because `ghost` is
+worth remembering, because the head set *admitted* `ghost`: `ghost` is
 on its list, and the complaint came entirely from step two having
 nothing to descend into. A head set will never tell you a name is
 undeclared; that is not its job.
@@ -617,10 +746,10 @@ of the contract you violated:
 | `unit_forbidden` | The kind rejects every unit; drop the suffix. |
 | `not_member` | The closed symbol or string member list. On a digit-leading set, also check the magnitude *and* the unit. |
 | `not_head_member` | The closed form head list. |
-| `positional_too_many` | That head's `:max`. Reported on the child that crossed it. |
-| `positional_missing` | That head's `:min`. Reported on the parent form's head. |
+| `positional_too_many` | A ceiling: the head's `:max`, or the set's `:max-children` if the message names a bracketed set. Reported on the child that crossed it. |
+| `positional_missing` | A floor: the head's `:min`, or the set's `:min-children` if the message names a bracketed set. Reported on the parent form's head. |
 | `unknown_local_form` | The slot's own local form set, plus the global vocabulary. |
-| `union_no_branch_matched` | The union alternatives. |
+| `union_no_branch_matched` | The union alternatives. This code means the value's shape reaches none of them, or reaches two or more; when it reaches exactly one you get that alternative's own code instead. |
 | `string_too_short` / `string_too_long` | The `:min-len` / `:max-len` codepoint bound. |
 | `string_format_mismatch` | The named format checker (email / uri / path / uuid / semver). |
 | `string_pattern_unsupported` | The `:pattern` constraint is informational in this build (no regex engine). |
@@ -641,19 +770,19 @@ For each exercise, read the contract first, then repair the source.
 
 Contract:
 
-```text
+```text title="plugin summary"
 fill-rule: symbol, members evenodd | nonzero
 (circle ...)
   :fill fill-rule optional
 ```
 
-```sjon
+```sjon del={1}
 (circle :center [0 0] :radius 1 :fill diagonal)
 ```
 
 Repair:
 
-```sjon
+```sjon ins={1}
 (circle :center [0 0] :radius 1 :fill evenodd)
 ```
 
@@ -663,13 +792,14 @@ Do not repair it with a keyword:
 (circle :center [0 0] :radius 1 :fill :evenodd)
 ```
 
-That triggers the keyword-pairing problem from chapter 5.
+That triggers the keyword-pairing problem from
+[Forms and keyword pairing](05-forms-and-keyword-pairing.md).
 
 ### Digit-Leading Member Set
 
 Contract:
 
-```text
+```text title="plugin summary"
 texture-dimension: symbol, members 1d | 2d | 3d
 (texture ...)
   :dimension texture-dimension optional
@@ -684,7 +814,7 @@ Predict the diagnostic for each, then repair:
 (texture :name d :dimension 2.5d)
 ```
 
-The first, second, and fourth are `not_member` — each is a unit-bearing
+The first, second, and fourth are `not_member`, because each is a unit-bearing
 number, which this slot accepts as a shape; they are just not in the set.
 The third is `wrong_underlying`: a bare number is not a spelling at all,
 so it fails one layer earlier.
@@ -702,19 +832,19 @@ Repair:
 
 Contract:
 
-```text
+```text title="plugin summary"
 shape-form: form, heads circle | rect
 (badge ...)
   :shape shape-form optional
 ```
 
-```sjon
+```sjon del={1}
 (badge :label "bad" :shape (group :name "not-a-shape"))
 ```
 
 Repair with an allowed head:
 
-```sjon
+```sjon ins={1}
 (badge :label "ok" :shape (rect :origin [0 0] :size [10 10]))
 ```
 
@@ -722,14 +852,14 @@ Repair with an allowed head:
 
 Contract:
 
-```text
+```text title="plugin summary"
 pipeline-section: form, heads vertex (exactly 1) | fragment (at most 1) | constant (any)
 (render-pipeline ...)
   :name symbol required
   positional pipeline-section
 ```
 
-```sjon
+```sjon del={3-4}
 (render-pipeline :name main
   (vertex :entry vs_main)
   (fragment :entry fs_main)
@@ -737,10 +867,10 @@ pipeline-section: form, heads vertex (exactly 1) | fragment (at most 1) | consta
 ```
 
 Two `(fragment …)` children against `:max 1`. Likely diagnostic:
-`positional_too_many`, on the *second* fragment — the extra one, not the
+`positional_too_many`, on the *second* fragment, which is the extra one, not the
 form. Repair by removing it:
 
-```sjon
+```sjon ins={3}
 (render-pipeline :name main
   (vertex :entry vs_main)
   (fragment :entry fs_main))
@@ -754,14 +884,14 @@ Now predict this one before reading on:
   (constant :name gamma :value 2.2))
 ```
 
-`positional_missing` — `vertex` is `:min 1` and there is none. It is
+`positional_missing`, because `vertex` is `:min 1` and there is none. It is
 reported on `(render-pipeline …)` itself, because the fact "no vertex
 anywhere in this list" belongs to the list, not to any child in it. Note
 that `constant` being present helps not at all: a child counts towards a
 head only if its own head matches, so nothing else can stand in for a
 missing `vertex`. Repair by adding one:
 
-```sjon
+```sjon ins={2}
 (render-pipeline :name main
   (vertex :entry vs_main)
   (fragment :entry fs_main)
@@ -772,7 +902,7 @@ missing `vertex`. Repair by adding one:
 
 Contract:
 
-```text
+```text title="plugin summary"
 pitch: symbol, members E4 | G4 | A4 | B4 | _
 event: form, heads n | rest
 note-or-event: union pitch | event
@@ -780,16 +910,16 @@ note-or-event: union pitch | event
   :notes vector<note-or-event> optional
 ```
 
-```sjon
+```sjon del={1}
 (phrase :notes [E4 X4 (n G4 0.5b)])
 ```
 
-`X4` is not in the pitch member set, and it is not a form, so neither
-alternative accepts it. Likely diagnostic: `union_no_branch_matched`
-naming `pitch` and `event`. Repair with a value that fits one of the
-alternatives:
+`X4` is not in the pitch member set, and a symbol could only have meant
+`pitch`, so that is the alternative blamed. Likely diagnostic:
+`not_member` listing the pitches. Repair with a value that fits one of
+the alternatives:
 
-```sjon
+```sjon ins={1}
 (phrase :notes [E4 G4 (n G4 0.5b)])
 ```
 
@@ -797,7 +927,7 @@ alternatives:
 
 Contract:
 
-```text
+```text title="plugin summary"
 vec4: vector, length 4, element number
 value: union number | vec4 | form
 (set ...)
@@ -806,7 +936,7 @@ value: union number | vec4 | form
 
 Assume `(set ...)` itself is a known form.
 
-```sjon
+```sjon del={1}
 (set :value (foo 1 2))
 ```
 
@@ -815,32 +945,32 @@ If `foo` isn't a head in any loaded plugin, this fails with
 "any parenthesized construct accepted." Repair by using a form whose
 head the schema knows about:
 
-```sjon
+```sjon ins={1}
 (set :value (+ 1 2))
 ```
 
-If you genuinely need to put a domain-specific construct here, check
-the plugin's loaded form vocabulary first - or look for whether the
-plugin has a separate slot documented as `any`.
+If you genuinely need a domain-specific construct here, check the
+plugin's loaded form vocabulary first, or look for a separate slot the
+plugin documents as `any`.
 
 ### scalar-or-ref
 
 Contract:
 
-```text
+```text title="plugin summary"
 dim-value: number
 dim: scalar-or-ref, base dim-value
 (dispatch ...)
   :x dim required
 ```
 
-```sjon
+```sjon del={1}
 (dispatch :x "64")
 ```
 
 Repair with a literal, or a bare symbol that names a constant:
 
-```sjon
+```sjon ins={1}
 (dispatch :x 64)
 ```
 
@@ -848,19 +978,19 @@ Repair with a literal, or a bare symbol that names a constant:
 
 Contract:
 
-```text
+```text title="plugin summary"
 (canvas ...)
   :shape form, local circle | rect | group
     circle: (r number required)
 ```
 
-```sjon
+```sjon del={1}
 (canvas :shape (triangle))
 ```
 
 Repair with a head the slot accepts:
 
-```sjon
+```sjon ins={1}
 (canvas :shape (circle :r 12))
 ```
 
@@ -878,9 +1008,18 @@ Repair with a head the slot accepts:
 - The same bounded head-set kind sits on a `:positional` slot and on a
   `(key …)` slot. Where do its counts apply, and why is the other one
   inert rather than an error?
-- What does `union_no_branch_matched` tell you to reread?
+- Why can no arrangement of per-head `:min` / `:max` express "exactly one
+  of buffer / sampler / texture"?
+- Two `(buffer …)` children under a set that is `:min-children 1
+  :max-children 1` over heads each `:max 1` breaks both rules. How many
+  diagnostics do you get, which one, and why that one?
+- A `positional_too_many` message names `[buffer | sampler | texture]`
+  rather than a single head. What does that tell you about the document,
+  and how does the repair differ?
+- What does `union_no_branch_matched` tell you about the value's shape,
+  and why does a union slot often report something else entirely?
 - When two union alternatives can both accept the same value, which one
-  wins - and what would change that?
+  wins, and what would change that?
 - When a union slot lists `form` as one of its alternatives, does
   that mean any parenthesized construct is accepted?
 - What does the `scalar-or-ref` shorthand expand to, and which

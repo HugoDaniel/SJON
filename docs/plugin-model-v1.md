@@ -209,6 +209,79 @@ it simply lowers in the next layer; the produces-graph cycle check
 terminates. A generic SJON validator is not required to ship domain hooks
 such as `pngine/pass-v1`.
 
+### What `:produces` may name
+
+`:produces` is the closed set of heads the hook may emit, and the contract
+checks **every** emitted form against it, at every depth — a nested form
+is checked exactly like a root, whether it hangs off a positional slot, a
+kvpair value, or a vector element. Two checks read the list, and they
+agree on what a head is:
+
+- **At schema load** (`Schema.validateLowering`), every entry must
+  resolve to a declared form. A *bare* entry resolves **local-first**,
+  the same order a form head takes at validation (LANGUAGE.md §6.3.1):
+  it may name a **slot-local form reachable through the list** — one
+  declared, at any depth and through either carrier (a `(key …)`'s inline
+  locals or a form's positional locals, variant keys included), inside a
+  form the same list resolves — or a **global form** across the loaded
+  plugins, where a bare collision is `ambiguous_form` as before. A
+  *qualified* entry (`<plugin>/<form>`) targets that plugin's global
+  catalog and bypasses locals, exactly as a qualified head does at the
+  site.
+- **At lowering time** (`Lowering.validateEmittedForm`), every emitted
+  head must be listed, by the same spelling.
+
+"Reachable through the list" rather than "any local anywhere" because an
+emitted form is either a root of a lowered layer or nested inside another
+emitted form: an emitted local can only ever sit under its declaring
+form, and the all-depths contract puts that declaring form in the same
+list. The reachable set is therefore exactly the set of local heads a hook
+can legally place. A local listed *without* its declaring form is a
+manifest that cannot be right, and the `unknown_form` says which form the
+list is missing (``leaf` is slot-local to `wrap` and resolves only through
+a `:produces` entry naming that form`).
+
+The shape this exists for — a bind group whose entries are slot-local, so
+that `entry` collides with nothing global (S7's whole point):
+
+```sjon
+(form :name init                              ; the sugar
+  :lowering (lowering :hook pngine/init-v1
+    :produces [compute-pipeline bind-group entry compute-pass]))
+
+(form :name bind-group                        ; what the hook emits
+  (key :name name :type symbol :optional false)
+  (form :name entry                           ; slot-local: no global `entry`
+    (key :name binding :type number :optional false)
+    (key :name buffer  :type symbol :optional false)))
+```
+
+The hook emits `(bind-group :name spawn-init-bg (entry :binding 0 :buffer
+parts))`; `entry` is in the list because the walk will check it, and it
+resolves because `bind-group` is in the list too. Nothing else is
+required — no global `entry`, and no qualified spelling: `bind-group/entry`
+would read as *plugin* `bind-group` (`lowering_target_plugin_absent`).
+
+Two corollaries keep the list honest:
+
+- **A slot-local form cannot declare `:lowering`.** Nothing would honour
+  it — the aggregate check and the produces graph walk top-level forms,
+  and the lowering worklist resolves a local head to its local body,
+  never to a hook — so the loader rejects it (`invalid_manifest` at
+  `[<local> lowering]`) rather than carry a declaration that is silently
+  dead. Declare the sugar as a top-level `(form …)`, or leave the local as
+  plain data. Because a local never lowers, a local head in `:produces`
+  adds **no edge** to the graph the cycle check and `export-lowering-graph`
+  consume; the graph resolves globally, and only a global lowerable form
+  is an edge.
+- **The lowering worklist resolves heads local-first, like the
+  validator.** An authored or emitted `(bind-group (entry …))` resolves
+  `entry` to `bind-group`'s local — even when a *global* lowerable
+  `entry` exists — so the global's hook does not fire on it; a qualified
+  `(bind-group (ns/entry))` bypasses the local and lowers the global. The
+  nested-lowerable lint (`lowering_nested_lowerable`) follows the same
+  resolution.
+
 ### Group (container) lowering
 
 A hook is attached to a form, but that form can be a *container* whose
@@ -249,8 +322,9 @@ the children are data; only the container lowers.
 A hook may emit forms the author never wrote — resources *implied* by the
 surface syntax rather than spelled out (a texture per pass, a default
 sampler, an auto-blit step). A hook may only emit heads listed in
-`:produces`, and every such head must resolve to a declared form, so
-declare each synthesized resource kind once as a terminal form:
+`:produces`, and every such head must resolve to a declared form (global,
+or slot-local reachable through the list — see above), so declare each
+synthesized resource kind once as a terminal form:
 
 ```sjon
 (form :name gpu-texture

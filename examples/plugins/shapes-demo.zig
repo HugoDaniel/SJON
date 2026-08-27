@@ -116,7 +116,7 @@ fn walkView(cursor: *sjon.BinaryCursor.Cursor, view: sjon.BinaryCursor.NodeView,
 }
 
 // ---------------------------------------------------------------------------
-// Tests — same code path as `main`, runs under `zig build test`.
+// Tests: the same code path as `main`, run under `zig build test`.
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;

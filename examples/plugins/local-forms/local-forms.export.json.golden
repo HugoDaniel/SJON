@@ -20,7 +20,7 @@
                 "forms": [
                   {
                     "name": "circle",
-                    "description": "Slot-local circle — shadows the global circle.",
+                    "description": "Slot-local circle; shadows the global circle.",
                     "open": false,
                     "positional": "none",
                     "keys": [
@@ -36,7 +36,7 @@
                   },
                   {
                     "name": "rect",
-                    "description": "Slot-local rectangle (local-only — invisible globally).",
+                    "description": "Slot-local rectangle (local only, invisible globally).",
                     "open": false,
                     "positional": "none",
                     "keys": [
@@ -122,7 +122,7 @@
         },
         {
           "name": "circle",
-          "description": "Global circle — shadowed by the local circle inside canvas.:shape.",
+          "description": "Global circle, shadowed by the local circle inside canvas.:shape.",
           "open": false,
           "positional": "none",
           "keys": [

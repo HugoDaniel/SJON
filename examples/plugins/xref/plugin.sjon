@@ -1,14 +1,14 @@
 ; Cross-ref fixture. Exercises every refinement axis of `:cross-ref`:
 ;
-;   * `:cross-ref :target …`              — bare (target form only)
-;   * `:cross-ref :target … :acyclic true`— acyclic flag
-;   * `:cross-ref :target … :scope-form …`— scope-form scoped
-;   * `:cross-ref :provider … :source-key …` — provider route
-;   * `:cross-ref :target [a b]`          — target group (one namespace)
+;   * `:cross-ref :target …`:                 bare (target form only)
+;   * `:cross-ref :target … :acyclic true`:   acyclic flag
+;   * `:cross-ref :target … :scope-form …`:   scope-form scoped
+;   * `:cross-ref :provider … :source-key …`: provider route
+;   * `:cross-ref :target [a b]`:             target group (one namespace)
 ;
 ; Plus one shape that is about how cross-refs *compose*: a union over two
 ; cross-ref kinds with different targets, which is where `union_ambiguous`
-; lives. Read it beside the target group directly below it — the two are
+; lives. Read it beside the target group directly below it: the two are
 ; the same question answered two ways, and the bottom of this file is the
 ; clearest place in the repo to see the difference.
 ;
@@ -18,16 +18,16 @@
 ; info warning. TS emits `CrossRef<"target-form">` with JSDoc.
 ;
 ; The provider route needs no `:impl` here: export never executes an
-; extractor — there is no document at export time to extract from — so
+; extractor (there is no document at export time to extract from), so
 ; a declaration is all the exporter can and does render.
 
-(plugin :name xref :version "1.0.0" :sjon "1.2"
+(plugin :name xref :version "1.0.0"
   (form :name node
     :description "Named graph node. Referenced by `:edge`."
     (key :name id :type symbol :description "Stable identifier within the document.")
     (key :name label :type string :optional true)
     ; Self-edge through the acyclic cross-ref so the cycle detector has
-    ; something to follow. Optional — leaf nodes have no parent.
+    ; something to follow. Optional, since leaf nodes have no parent.
     (key :name parent :type node-acyclic :optional true))
 
   (form :name phrase
@@ -48,26 +48,26 @@
   (cross-ref-provider :name uniforms
     :description "Names the uniform declarations inside a shader source.")
 
-  ; Bare cross-ref — closed-set check only, no cycle / scope rules.
+  ; Bare cross-ref: closed-set check only, no cycle or scope rules.
   (value-kind :name node-ref
     :description "Cross-ref to a `(node …)` declared elsewhere."
     :underlying symbol
     :cross-ref (cross-ref :target node :name-key id))
 
-  ; Acyclic cross-ref — the runtime forbids cycles through this slot.
+  ; Acyclic cross-ref: the runtime forbids cycles through this slot.
   (value-kind :name node-acyclic
     :description "Acyclic cross-ref to a `(node …)`."
     :underlying symbol
     :cross-ref (cross-ref :target node :name-key id :acyclic true))
 
-  ; Scope-form-scoped cross-ref — the registry walked at validation time
+  ; Scope-form-scoped cross-ref: the registry walked at validation time
   ; is the nearest enclosing `(piece …)`'s `(phrase …)` children.
   (value-kind :name phrase-ref
     :description "Cross-ref to a `(phrase …)` declared within the enclosing `(piece …)`."
     :underlying symbol
     :cross-ref (cross-ref :target phrase :name-key name :scope piece))
 
-  ; Provider-route cross-ref — the member set is extracted from each
+  ; Provider-route cross-ref: the member set is extracted from each
   ; `(shader …)`'s `:code` string, not read off a `:name-key` symbol.
   ; `:name-key` and `:acyclic` are not available here: the loader rejects
   ; the first beside a provider, and the second needs per-name
@@ -78,18 +78,18 @@
     :cross-ref (cross-ref :target shader :provider uniforms :source-key code))
 
   ; Two targets, one slot. A union over two cross-ref kinds is how a slot
-  ; says "either kind of pipeline" — and it is the one composition where
+  ; says "either kind of pipeline", and it is the one composition where
   ; declaration order becomes semantics. Duplicate names are caught per
   ; target, so a `(render-pipeline :name p)` and a
   ; `(compute-pipeline :name p)` are each alone in their own namespace and
   ; neither is a duplicate; a reference to `p` then resolves in both, and
   ; only the order below decides which. That is `union_ambiguous`, a
-  ; warning — the document still validates and first match still wins.
+  ; warning; the document still validates and first match still wins.
   ;
   ; On the export side this is the only place two `CrossRef<…>` types meet
   ; in one union: JSON Schema renders the `anyOf` of both `{$sym: string}`
   ; branches, and TS renders `CrossRef<"render-pipeline"> |
-  ; CrossRef<"compute-pipeline">` — the two targets survive into the type.
+  ; CrossRef<"compute-pipeline">`, so both targets survive into the type.
   (form :name render-pipeline
     :description "A raster pipeline. One half of the ambiguous pair."
     (key :name name :type symbol))
@@ -109,13 +109,13 @@
     :cross-ref (cross-ref :target compute-pipeline))
 
   (value-kind :name pipeline-ref
-    :description "Either pipeline. Tried in this order — render first."
+    :description "Either pipeline, tried in this order: render first."
     :underlying union
     :union (union-shape :alternatives [render-pipeline-ref compute-pipeline-ref]))
 
   ; The same two targets, one namespace. Where the union above keeps two
   ; registries and lets declaration order pick between them, this keeps
-  ; ONE — so `(render-pipeline :name p)` beside `(compute-pipeline :name p)`
+  ; ONE, so `(render-pipeline :name p)` beside `(compute-pipeline :name p)`
   ; is `duplicate_cross_ref_target` at the declarations, and there is no
   ; ambiguity left for a reference to inherit. That is the trade: the union
   ; accepts the collision and warns per reference; the group refuses the
@@ -124,16 +124,16 @@
   ; Two things a group cannot carry, both rejected at load: `:acyclic`
   ; (cycle edges are one form's self-referential keys, and `self` is not
   ; well defined across a group) and `:provider` (an extracted member set
-  ; is collected per target form — declare one cross-ref per target).
+  ; is collected per target form, so declare one cross-ref per target).
   ;
   ; On the export side it lands as one slot, not two branches: JSON Schema
   ; emits a single `{$sym: string}` whose annotation carries `target-forms`
   ; (plural, an array) instead of `target-form`, and TS still emits
-  ; `CrossRef<"render-pipeline"> | CrossRef<"compute-pipeline">` — the
+  ; `CrossRef<"render-pipeline"> | CrossRef<"compute-pipeline">`, and the
   ; union of brands is the honest type either way, since a name really may
   ; come from either form.
   (value-kind :name pipeline-group-ref
-    :description "Either pipeline, in one namespace — a name defined by both is a duplicate."
+    :description "Either pipeline, in one namespace, so a name defined by both is a duplicate."
     :underlying symbol
     :cross-ref (cross-ref :target [render-pipeline compute-pipeline]))
 

@@ -2,7 +2,7 @@
 
 A one-way exporter that converts a fully-resolved `Schema.Schema` into JSON Schema 2020-12 and TypeScript `.d.ts` types describing the **canonical JSON shape** of `sjon to-json` output. Use it to give downstream tools (editors, codegen pipelines, language servers, validators in other ecosystems) a machine-readable view of a plugin's forms without re-implementing the SJON parser, meta-schema, or aggregate-phase resolution rules.
 
-Output format version: **`x-sjon-export-version: 1`**. The exporter covers primitives, closed/open forms, typed/untyped vectors, compact members, and literal defaults; discriminated variants, exclusive groups, head-sets, unions, slot-local forms (inline anonymous union), and rich member-sets (including digit-leading spellings, pinned to their `$num` wire shape); numeric bounds (including `:multiple-of` → `multipleOf`), key dependencies (`:requires` → `dependentRequired`), per-head positional counts (`contains` / `minContains` / `maxContains`), unit-bearing numbers (`$num` tuple via `prefixItems`), unitless numbers (`:reject`), GPU representation tags (`x-sjon-gpu-repr` + branded `F32`…`F16`), variable-arity vectors (`minItems`/`maxItems`), the `scalar-or-ref` shorthand (exported as its desugared union), string bounds (`minLength`/`maxLength`/`pattern`/`format`), cross-ref annotations (`x-sjon-cross-ref` carrying the target, one form or a group of them, plus `name-key`, `acyclic`, and `scope-form` / `provider` + `source-key` when set), the per-plugin layout (with cross-file `$ref` resolution), multi-key exclusive-group bundles, and positional flag-sets (`x-sjon-positional-flags`). Known limitations are listed under *What's not in this exporter* below.
+Output format version: **`x-sjon-export-version: 1`**. The exporter covers primitives, closed/open forms, typed/untyped vectors, compact members, and literal defaults; discriminated variants, exclusive groups, head-sets (resolved at the slot: `$ref` for a global member, inline body for a slot-local one), unions, slot-local forms (inline anonymous union — open, or closed when the slot also carries a head-set), and rich member-sets (including digit-leading spellings, pinned to their `$num` wire shape); numeric bounds (including `:multiple-of` → `multipleOf`), key dependencies (`:requires` → `dependentRequired`), positional counts both per head and over the whole head-set (`contains` / `minContains` / `maxContains`, the set's over an `anyOf` of its members, plus `$children` in `required` when either level declares a floor), unit-bearing numbers (`$num` tuple via `prefixItems`), unitless numbers (`:reject`), GPU representation tags (`x-sjon-gpu-repr` + branded `F32`…`F16`), variable-arity vectors (`minItems`/`maxItems`), the `scalar-or-ref` shorthand (exported as its desugared union), string bounds (`minLength`/`maxLength`/`pattern`/`format`), cross-ref annotations (`x-sjon-cross-ref` carrying the target, one form or a group of them, plus `name-key`, `acyclic`, and `scope-form` / `provider` + `source-key` when set), the per-plugin layout (with cross-file `$ref` resolution), multi-key exclusive-group bundles, and positional flag-sets (`x-sjon-positional-flags`). Known limitations are listed under *What's not in this exporter* below.
 
 ## Intended consumers
 
@@ -58,7 +58,8 @@ A self-describing JSON document mirroring `SchemaExport.Model` 1:1. Stable enoug
 Human-facing reference documentation rendered from the same descriptors
 that drive editor hover — forms with key tables, positional specs (plus a
 Head/Count table when the slot's head-set carries counts, written in prose:
-"exactly 1", "at most 1", "any"), variants and local forms, value kinds
+"exactly 1", "at most 1", "any" — with an `*any of these*` row last when
+the set itself is bounded), variants and local forms, value kinds
 with member tables (deprecations carry their message), and expression
 functions with signatures. Asked for by name, never part of `both`.
 `--layout=per-plugin` with `--output=DIR` writes one `<plugin>.md` per
@@ -122,7 +123,9 @@ Every construct lands in one of three buckets:
 | Positional `.none` | no `$children` property | no `$children` field | ENFORCED |
 | Positional `.any` | `properties.$children:{type:"array"}` | `$children?: unknown[]` | ENFORCED |
 | Positional `.kind(K)` | `properties.$children:{type:"array", items:<K>}` | `$children?: Array<K>` | ENFORCED |
-| Positional `.kind(K)` where `K`'s head-set carries counts | the above **plus** `$children.allOf:[{contains:<$ref>, minContains, maxContains}, …]`, one entry per bounded head | `$children?: Array<K>` with a `/** Positional counts (not expressible in TS): … */` comment | ENFORCED (schema) + DOCS-ONLY (TS) |
+| Positional `.kind(K)` where `K`'s head-set carries counts | the above **plus** `$children.allOf:[{contains:<branch>, minContains, maxContains}, …]`, one entry per bounded head. `contains` is the head's `$ref` for a global and the head-pin (`{properties:{$form:{const:…}}}`) for a slot-local, which has no `$def` to point at — the two count the same children, because `items`' `oneOf` already forces every child to satisfy its own head's branch | `$children?: Array<K>` with a `/** Positional counts (not expressible in TS): … */` comment | ENFORCED (schema) + DOCS-ONLY (TS) |
+| …where the **set** carries `:min-children` / `:max-children` | one more `allOf` entry, last, whose `contains` is `{anyOf:[<branch per member>]}` — "a child whose head is in the set", which is what the validator tallies. `minItems`/`maxItems` would say the same thing here and only here (a head-set slot is closed, so the positional population *is* the set); `contains` is right in both readings and keeps the two claims the same shape | the same doc comment, with an `any of the set: …` clause after the per-head ones | ENFORCED (schema) + DOCS-ONLY (TS) |
+| …where **either** level declares a floor | `$children` joins the form's `required` array. The JSON bridge omits `$children` entirely for a childless form, so a `minContains` living inside the `$children` subschema has nothing to be evaluated against on precisely the document that breaches the floor hardest. A ceiling-only slot adds nothing: an absent array cannot exceed a ceiling, and requiring it would make the export stricter than the validator | — | ENFORCED |
 
 ### Member sets
 
@@ -141,7 +144,8 @@ A digit-leading member is a `number_with_unit` on the wire (LANGUAGE.md §6.5), 
 
 | SJON | JSON Schema | TS | Bucket |
 |---|---|---|---|
-| Discriminated form (`:discriminant <key>` + `(variant :when … …)`) | `allOf:[{if:{properties:{<disc>:{const:{"$sym":"<when>"}}}, required:[<disc>]}, then:{properties:{…}, required:[…]}}, …]` + `unevaluatedProperties:false` + `x-sjon-discriminant:{key, variants}` | `type X = \| {… disc: Symbol_<"a"> …} \| {…}` | ENFORCED + ANNOTATED |
+| Discriminated form (`:discriminant <key>` + `(variant :when … …)`) | `allOf:[{if:{properties:{<disc>:{const:{"$sym":"<when>"}}}, required:[<disc>]}, then:{properties:{…}, required:[…]}}, …]` + `unevaluatedProperties:false` + `x-sjon-discriminant:{key, variants:[{when, keys}]}` | `type X = \| {… disc: Symbol_<"a"> …} \| {…}` — one branch per variant, plus one **residual** branch (common keys only, `disc: Symbol_<"c" \| "d">`) for the members no variant selects, so every value the validator accepts has a type | ENFORCED + ANNOTATED |
+| Multi-value variant (`(variant :when [a b] …)`) | the same single `if/then`, gated `{<disc>:{enum:[{"$sym":"a"},{"$sym":"b"}]}}` instead of `const`; the annotation spells `when` as the manifest did — `"when": "a"` for one value, `"when": ["a", "b"]` for several | `disc: Symbol_<"a" \| "b">` on the one branch — the brand's `S extends string` takes the literal union | ENFORCED + ANNOTATED; the shape does not multiply the output. Markdown heads the variant `` `:<disc> [a b]` ``. |
 | Source-order rule (variant keys must follow the discriminant) | — | — | NOT ENFORCEABLE; the warning `variants_emitted_via_if_then` records the limitation. |
 
 ### Exclusive groups
@@ -195,7 +199,8 @@ A target group is one namespace over several forms, where a union over two cross
 
 | SJON | JSON Schema | TS | Bucket |
 |---|---|---|---|
-| Head-set (`:heads [a b]`) | `{oneOf:[{$ref:"#/$defs/form.<plugin>.<head>"}, …], x-sjon-head-set:[…]}` | `{readonly $form: "a"} \| {readonly $form: "b"}` | ENFORCED + ANNOTATED |
+| Head-set (`:heads [a b]`) | `{oneOf:[<branch per head>, …], x-sjon-head-set:[…]}`, where a branch is `{$ref:"#/$defs/form.<plugin>.<head>"}` for a global, the local's body inline for a slot-local, and `{properties:{$form:{const:"<head>"}}, required:["$form"]}` for a head that resolves to neither | `{readonly $form: "a"} \| {readonly $form: "b"}`, or the inline object literal for a slot-local | ENFORCED + ANNOTATED |
+| Head-set on a slot that also declares locals | the above, **closed** — no trailing open branch — plus `x-sjon-local-forms:[…]` naming the members that resolved locally | as above | ENFORCED + ANNOTATED |
 | Union (`:union (union-shape :alternatives [a b])`) | `{anyOf:[<schema-a>, <schema-b>], x-sjon-union-alternatives:["a", "b"]}` | `<a-type> \| <b-type>` | ENFORCED (acceptance) + ANNOTATED (first-match dispatch order) |
 | `scalar-or-ref` shorthand (`:underlying scalar-or-ref` + `:scalar-or-ref (… :base B)`) | desugars to `union [B symbol]` at load, then exports as any union does: `{anyOf:[<B>, <symbol envelope>], x-sjon-union-alternatives:["B", "symbol"]}` | `<B-type> \| Symbol_` | ENFORCED (acceptance) + ANNOTATED |
 | …with `:ref R` naming the reference half | desugars to `union [B R]`, so the second alternative exports as whatever kind `R` is. With `R` a cross-ref kind: `{anyOf:[<B>, <$sym envelope + x-sjon-cross-ref>], x-sjon-union-alternatives:["B", "R"]}` | `<B-type> \| CrossRef<"<target>">`; the checked reference reaches the `.d.ts` with no export-side code | ENFORCED (acceptance) + ANNOTATED |
@@ -206,6 +211,28 @@ A target group is one namespace over several forms, where a union over two cross
 ### Slot-local forms
 
 A `:type form` slot carrying inline `local_forms` (LANGUAGE.md §6.3.1) lowers to an **inline anonymous union** — not a `$ref` set, because locals have no global `$defs` entry. Each local form's full body is emitted *in place* (so a discriminated local keeps its `if/then` chain and a nested local slot expands recursively), followed by a **trailing open generic branch** (`{type:"object", required:["$form"]}` in JSON Schema, `{ readonly $form: string }` in TS) standing in for the additive global fallback. It is `anyOf`, not `oneOf`: the open branch overlaps every specific branch, so exactly-one would always fail (the same reason the union mapping uses `anyOf`). The accepted local names ride as the `x-sjon-local-forms` annotation; the local-first/global resolution order is SJON-only. An `info` warning (`local_forms_emitted_inline`) records the lowering per slot.
+
+#### …behind a head-set: the closed shape
+
+The paragraph above is the **open** shape, and it is the only one a keyed slot can have — the loader rejects keyed locals on anything but `:type form`, so a keyed slot never carries both a head-set and locals. A **positional** slot can, and that is the closed-positional-set recipe (portable-manifest-v1 §5.2):
+
+```sjon
+(value-kind :name bg-set :underlying form :heads (head-set :names [entry buffer]))
+(form :name bind-group :positional bg-set
+  (form :name entry  (key :name binding :type number :optional false))
+  (form :name buffer (key :name slot    :type number :optional false)))
+```
+
+The validator applies **both** mechanisms, in order: narrow the slot by head text, then resolve the narrowed head local-first. So the export says both. `$children.items` is `oneOf` over exactly the head set with **no trailing open branch** — an out-of-set head is `not_head_member`, and the schema rejects it too — and each branch is the local's inline body, or a `$ref` for a member that resolved globally, or a head-pin for one that resolved to neither. Both annotations ride: `x-sjon-head-set` (every accepted head) and `x-sjon-local-forms` (the subset that resolved locally). Counts at both levels survive, since the positional slot is the positional slot whether or not it declares locals — and a set-level `contains` on such a slot is an `anyOf` of head-pins rather than of `$ref`s, for the same reason the per-head ones are: a local has no `$def` to point at.
+
+Two consequences worth stating, because they are the reverse of the open shape's:
+
+- **A local's required keys are enforced.** The open branch is what made an under-specified local validate; a closed slot has no open branch. The "Round-trip caveats" row on slot-local forms is about the open shape only.
+- **A local outside the head-set is dead.** Narrowing rejects its head before resolution consults the registry, so the local can never be reached. The exporter reports it (`local_form_outside_head_set`, warning) and emits no branch for it.
+
+A head-set member that resolves to no form at all *at a slot* is an error (`head_set_member_unresolved`); it still appears in `x-sjon-head-set`, and its branch is the head-pin — never a `$ref` into a `$defs` entry that does not exist, which a 2020-12 validator refuses to compile at all. The same head-set lowered on its own for the value-kind table is not judged, because a head-set kind is plugin-wide and reusable and only a slot knows which locals are in scope.
+
+`examples/plugins/headset-locals/` is the worked fixture, and `hosts/web` compiles its schema under ajv and drives documents past both the closure and the counts.
 
 ### Defaults
 
@@ -234,8 +261,9 @@ Constructs SJON validates but JSON Schema cannot enforce. The exporter still emi
 | Custom string formats (`path`, `semver`) | JSON Schema's `format` vocabulary doesn't list these. | `x-sjon-format: "path|semver"` |
 | Lowering hooks | Hook output validation. | `x-sjon-lowering` |
 | Positional flag-sets (`:positional (flag-set …)`) | Closed-set membership for positional keyword flags — `$children` widens to a plain array, so JSON Schema can't express "a keyword flag drawn from this closed set" (nor reject a repeat). | `x-sjon-positional-flags: [{name, description?, link?}, …]` |
-| Per-head positional counts, in TypeScript | "exactly one element of this union in an array" — no tuple or template construction reaches a per-member count over a heterogeneous array, so the `.d.ts` accepts child lists the SJON validator rejects (`positional_too_many` / `positional_missing`). JSON Schema *does* enforce it, via `contains`; this row is the TS half only. | `/** Positional counts (not expressible in TS): vertex: 1; fragment: 0..1 */` above `$children` |
-| Slot-local forms (open branch) | Local-first resolution, shadowing, and a local's required keys — the inline union's trailing open branch accepts any `{$form}` object, so an under-specified or out-of-set local still validates. | `x-sjon-local-forms: […]` |
+| Positional counts, in TypeScript — per head *and* over the set | "exactly one element of this union in an array" — no tuple or template construction reaches a per-member count over a heterogeneous array, nor a bound on how many elements match *any* of a union's arms, so the `.d.ts` accepts child lists the SJON validator rejects (`positional_too_many` / `positional_missing`). JSON Schema *does* enforce both, via `contains`; this row is the TS half only. | `/** Positional counts (not expressible in TS): vertex: 1; fragment: 0..1; any of the set: 1 */` above `$children` |
+| Slot-local forms on an **open** slot (no head-set) | Local-first resolution, shadowing, and a local's required keys — the inline union's trailing open branch accepts any `{$form}` object, so an under-specified or out-of-set local still validates. Add a head-set and the slot closes, at which point both *are* enforced; this row is the open shape only. | `x-sjon-local-forms: […]` |
+| A *qualified* head naming a slot-local | A qualified head (`ns/entry`) bypasses the locals and resolves global-only, so `(pb/loc …)` is `unknown_form` even when `loc` is a local of a `pb` form. The schema cannot say that: `$ns` is const-pinned but deliberately **not** required (a bare invocation round-trips without it), so `{$form:"loc", $ns:"pb"}` satisfies the local's branch. A qualifier naming a *different* plugin is still rejected. This is the looser direction the one-way assertion permits, and it is the one thing a closed slot does not tighten. | (none) |
 | Plugin version pinning | — | (none — out of scope) |
 | Comment / trivia preservation | — | (canonical JSON drops trivia) |
 
@@ -357,6 +385,14 @@ See `examples/plugins/kit-xor/`, `examples/plugins/audio/`, and `examples/plugin
 ### `head-counts` — per-head positional counts
 
 `examples/plugins/head-counts/` declares a head-set whose entries carry `:min` / `:max` (`vertex` exactly once, `fragment` at most once, `constant` unbounded) and puts the same kind on three slots: a positional slot, a keyed slot where the counts ride along inertly, and an open form where they still fire. The bounded slot emits one `allOf` entry per bounded head (`{contains: {$ref: …}, minContains, maxContains}`) beside the plain `items`. The unbounded head gets no entry, so a document may carry any number of `(constant …)`; `minItems`/`maxItems` would have rejected exactly that, which is why they are the wrong keyword here. `hosts/web` compiles this schema under ajv and drives it over the same documents the validator judges, so the encoding is checked rather than asserted.
+
+The same plugin's `(bgl-entry …)` carries the **set** level: `:min-children 1 :max-children 1` over three heads each `:max 1` — "exactly one resource, and not two of the same". Its fourth `allOf` entry is the set's, `{contains: {anyOf: [three $refs]}, minContains: 1, maxContains: 1}`, and its `required` array carries `$children`. Two of ajv's four assertions there are the ones no per-head encoding can make: an entry with a buffer *and* a sampler satisfies all three per-head `contains` entries, and an entry with nothing at all carries no `$children` key for `minContains` to judge. `(data …)` is the ceiling-only twin on the compact `:names` spelling — one `allOf` entry, an explicit `minContains: 0`, and `$children` deliberately *not* required.
+
+### `headset-locals` — the closed positional set
+
+`examples/plugins/headset-locals/` is the other half of `head-counts`: the same head-set machinery on a slot that also declares **local** forms. `bind-group-layout` gates its positional slot with a one-member head-set whose only `entry` is a slot-local, and `entry` gates its own with a three-member set — two slot-locals and one global (`head`), so a single slot carries an inline body and a `$ref` side by side. No global "dummy" form exists for `entry`, `buffer` or `storage-texture`, and none is required.
+
+What it pins that `head-counts` cannot: a slot with locals is **closed**, so `(ghost …)` is rejected rather than waved through by an open branch, and an under-specified local is rejected too; and the per-head counts reach a locals slot at all (`buffer` is `:max 1`, `entry` is `:min 1`). `hosts/web` compiles the schema under ajv and drives documents past both, because an absent `allOf` and an open branch are each indistinguishable from correctness on a test that only feeds valid documents. Compiling at all is a third check: an unresolved head emits a head-pin, never a `$ref` into a `$def` that does not exist.
 
 ### `dimensions` — digit-leading enum members
 
@@ -505,7 +541,9 @@ The test skips these categories (their semantics cannot be enforced by JSON Sche
 | `use-plugin` | Resolver-bound cases need project-file plumbing the test doesn't set up |
 | `pair-a` | Cross-plugin head-set; the round-trip test loads only one plugin's manifest |
 
-`local-forms` is **not** skipped — it round-trips because the inline union's trailing open branch (`{required:["$form"]}`) accepts any `{$form}` object, so every SJON-valid document passes ajv. The cost is the other direction: that open branch also accepts a *local* form that omits its required keys (`{$form:"circle"}` with no `:r`) — such an object still satisfies the open branch. So **slot-local required-key enforcement and local-first shadowing are SJON-runtime-only**: the exported schema documents the local shapes (and pins them for IntelliSense) but does not reject an under-specified local. This is consistent with the one-way assertion above.
+`local-forms` is **not** skipped — it round-trips because the inline union's trailing open branch (`{required:["$form"]}`) accepts any `{$form}` object, so every SJON-valid document passes ajv. The cost is the other direction: that open branch also accepts a *local* form that omits its required keys (`{$form:"circle"}` with no `:r`) — such an object still satisfies the open branch. So on an **open** locals slot, **required-key enforcement and local-first shadowing are SJON-runtime-only**: the exported schema documents the local shapes (and pins them for IntelliSense) but does not reject an under-specified local. This is consistent with the one-way assertion above.
+
+`headset-locals` is not skipped either, and it is the counterexample: put a head-set on the same slot and the open branch goes away, so ajv enforces the local's required keys *and* rejects an out-of-set head. That fixture drives both directions deliberately — the one-way assertion is the harness's floor, not a ceiling on what a closed slot can be checked for.
 
 ## What's not in this exporter
 

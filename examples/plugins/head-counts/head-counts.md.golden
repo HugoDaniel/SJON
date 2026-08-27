@@ -12,7 +12,7 @@ The vertex stage of a pipeline.
 
 ### `(fragment …)`
 
-The fragment stage. Optional — a depth-only pass has none.
+The fragment stage. Optional, because a depth-only pass has none.
 
 | Key | Type | Required | Default | Constraints |
 | --- | --- | --- | --- | --- |
@@ -45,7 +45,7 @@ Positional children: `form: (vertex …) | (fragment …) | (constant …)`.
 
 ### `(section-holder …)`
 
-Same kind, keyed slot — the counts ride along inertly here.
+Same kind, keyed slot: the counts ride along inertly here.
 
 | Key | Type | Required | Default | Constraints |
 | --- | --- | --- | --- | --- |
@@ -65,6 +65,75 @@ Positional children: `form: (vertex …) | (fragment …) | (constant …)`.
 
 Open form: unknown keys are accepted.
 
+### `(buffer …)`
+
+A buffer binding.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:type` | `symbol` | yes | — | — |
+
+### `(sampler …)`
+
+A sampler binding.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:type` | `symbol` | yes | — | — |
+
+### `(texture …)`
+
+A texture binding.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:sample-type` | `symbol` | yes | — | — |
+
+### `(bgl-entry …)`
+
+Exactly one resource: the claim per-head bounds cannot make.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:binding` | `number` | yes | — | — |
+
+Positional children: `form: (buffer …) | (sampler …) | (texture …)`.
+
+| Head | Count |
+| --- | --- |
+| `buffer` | at most 1 |
+| `sampler` | at most 1 |
+| `texture` | at most 1 |
+| *any of these* | exactly 1 |
+
+### `(cube …)`
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:size` | `number` | yes | — | — |
+
+### `(sphere …)`
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:radius` | `number` | yes | — | — |
+
+### `(data …)`
+
+At most one generator: a ceiling-only set bound.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:name` | `symbol` | yes | — | — |
+
+Positional children: `form: (cube …) | (sphere …)`.
+
+| Head | Count |
+| --- | --- |
+| `cube` | any |
+| `sphere` | any |
+| *any of these* | at most 1 |
+
 ## Value kinds
 
 ### pipeline-section
@@ -72,3 +141,15 @@ Open form: unknown keys are accepted.
 One section of a render pipeline, with how many of each are allowed.
 
 Type: `form: (vertex …) | (fragment …) | (constant …)`.
+
+### bgl-resource
+
+The one resource a bind-group-layout entry binds.
+
+Type: `form: (buffer …) | (sampler …) | (texture …)`.
+
+### data-shape-section
+
+The one generator a (data …) may carry, if any.
+
+Type: `form: (cube …) | (sphere …)`.

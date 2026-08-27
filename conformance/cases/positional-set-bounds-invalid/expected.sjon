@@ -1,0 +1,12 @@
+; All three are `invalid_manifest` — the manifest declares something no
+; document could satisfy, the same class of author error as the per-head
+; empty range and reported with the same code. A fourth condition, a
+; count that is negative / fractional / over `u16`, reports
+; `wrong_underlying` instead: it reuses the out-of-range check `(fixed
+; N)` and `(range :min …)` go through, and the condition is identical.
+;
+; Three reports, not one: the loader keeps going after a bad head-set.
+(diagnostics
+  (diagnostic :code invalid_manifest :severity err :path [backwards heads])
+  (diagnostic :code invalid_manifest :severity err :path [floor-sum heads])
+  (diagnostic :code invalid_manifest :severity err :path [ceil-sum heads]))

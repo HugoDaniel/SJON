@@ -1,0 +1,24 @@
+; Axis D (variant discriminant) — a default that selects NO variant.
+;
+; `prim` is discriminated on `:topology`, which defaults to `tri-list`;
+; the only variant is gated on the two strips. The author writes
+; `(prim :strip-format uint16)` — no `:topology`. With axis D on the
+; overlay yields `topology = tri-list`, which SATISFIES the discriminant
+; (the form has a value; it just gains no variant keys) — so no
+; `missing_discriminant_key` — and `:strip-format` is `unknown_key`
+; exactly as it would be had the author written `:topology tri-list`.
+;
+; This pins a fix: the overlay pre-resolution used to mark the
+; discriminant satisfied only when its default also selected a variant,
+; so a default outside every variant reported the discriminant missing on
+; a form that had one. `effective-axis-d-default-selects-variant` is the
+; sibling where the default does select.
+(plugin :name gfx :version "1.0.0"
+  (value-kind :name topo :underlying symbol
+    :members (member-set :values [tri-list tri-strip line-list line-strip]))
+  (form :name prim :discriminant topology
+    (key :name topology :type topo :optional true :default tri-list)
+    (variant :when [tri-strip line-strip]
+      (key :name strip-format :type symbol :optional true))))
+
+(prim :strip-format uint16)

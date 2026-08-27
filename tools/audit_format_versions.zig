@@ -17,10 +17,10 @@
 //! ## Truth kinds
 //!
 //!   * **compiled** — read straight off the `sjon` module: `Binary.wire_version`,
-//!     `Binary.wire_magic`, `Plugin.SUPPORTED_SJON_FORMAT`, the SchemaExport
-//!     `Model.version` field default, and the package semver (`sjon.version`,
-//!     declared once in `src/version.zig`). These can't drift; the compiler
-//!     resolves them at build time.
+//!     `Binary.wire_magic`, the SchemaExport `Model.version` field default,
+//!     and the package semver (`sjon.version`, declared once in
+//!     `src/version.zig`). These can't drift; the compiler resolves them at
+//!     build time.
 //!   * **text-anchored** — `PLUGIN_ABI_VERSION` lives in `PluginRuntime.zig`,
 //!     which comptime-asserts `-Dplugin-exec`; importing it would force that
 //!     flag onto a plain audit build, so it is read as text like any copy.
@@ -51,7 +51,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 /// A version/ABI value that copies must track. `int` covers ABI/wire versions
-/// and magic bytes; `str` covers the dotted manifest-format string.
+/// and magic bytes; `str` covers the package semver.
 const Truth = union(enum) {
     int: u64,
     str: []const u8,
@@ -157,13 +157,6 @@ pub fn main(init: std.process.Init) !u8 {
             .truth = .{ .int = sjon.Binary.wire_magic[3] },
             .copies = &.{
                 .{ .path = "hosts/web/sjon-reader.test.ts", .anchor = "assert.equal(bin[3], " },
-            },
-        },
-        .{
-            .name = "plugin manifest format",
-            .truth = .{ .str = sjon.Plugin.SUPPORTED_SJON_FORMAT },
-            .copies = &.{
-                .{ .path = "hosts/typescript-parity/src/plugin.ts", .anchor = "export const SUPPORTED_SJON_FORMAT = " },
             },
         },
         .{

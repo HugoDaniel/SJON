@@ -1,0 +1,6 @@
+; One diagnostic, from the third form only. The first two are inside the
+; ceiling and the set declares no floor, so a ceiling-only set is
+; genuinely optional — the direction a `minContains` without an explicit
+; `0` would get wrong on the export side.
+(diagnostics
+  (diagnostic :code positional_too_many :severity err :path [data sphere]))

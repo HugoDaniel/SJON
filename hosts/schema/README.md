@@ -78,7 +78,7 @@ Symbol_<"user">` as before.
 
 ## Divisibility bounds and target groups
 
-Two more knobs the manifest grammar gained at format 1.3.
+Two more knobs the manifest grammar gained in SJON 1.2.0.
 
 ```ts
 s.number().multipleOf(256)                  // (numeric-bounds :multiple-of 256)

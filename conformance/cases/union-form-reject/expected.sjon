@@ -1,5 +1,7 @@
-; `other` matches neither the `note-or-rest` symbol alternative nor the
-; `event` head-set, so the union rejects it at the `:ev` slot. Emitted
-; identically on the tree and binary validation paths.
+; `other` is a *declared* form outside the `event` head-set. A form reaches
+; only the `event` alternative of `note-or-event` — `note-or-rest` is a
+; symbol kind — so `event` is the determined arm and the slot reports its
+; own failure (15). Emitted identically on the tree and binary validation
+; paths, through the binary form funnel.
 (diagnostics
-  (diagnostic :code union_no_branch_matched :path [track ev]))
+  (diagnostic :code not_head_member :path [track ev]))

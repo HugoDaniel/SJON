@@ -227,7 +227,7 @@ contain three consecutive `"` at all. For those payloads, fall back to
 `r#"…"#` today.)
 
 Both forms produce the same `string` AST kind with byte-identical
-decoded content; equality is form-blind, so `"""hello"""` equals
+decoded content; equality is delimiter-blind, so `"""hello"""` equals
 `"hello"`. Round-trip behavior — including the one bit of string
 trivia SJON does not yet preserve — is covered in §4.2.
 
@@ -674,7 +674,7 @@ canonical print and canonical JSON.
 | Trivia | Where it lives | Survives canonical text | Survives canonical JSON | Survives lossless binary |
 | --- | --- | --- | --- | --- |
 | Leading comments | per-node | no | no | yes (with `with_node_comments`) |
-| Trailing comments | per-form | no | no | yes (with `with_node_comments`) |
+| Trailing comments | per-form, per-vector | no | no | yes (with `with_node_comments`) |
 | Tree-trailing comments | per-tree | no | no | yes (with `with_tree_trailing_comments`) |
 | Kvpair comments | per-kvpair | no | no | yes (with `with_kvpair_comments`) |
 | Spans | per-node, per-head, per-key | no | no | yes (with `with_spans` / `with_head_spans` / `with_kvpair_key_spans`) |
@@ -1080,6 +1080,66 @@ The runtime is group-aware on defaulted keys — a defaulted alt only
 participates in the presence count when no sibling is fully
 author-present (see §7.8 for the materialization boundary).
 
+#### 6.2.2 Discriminated forms — keys gated on a value
+
+A form may name one of its keys as the **discriminant** and declare
+**variants**: extra key sets that exist only while the discriminant's
+value selects them. One head, several shapes, picked by a value.
+
+```sjon
+(form :name primitive
+  :discriminant topology
+  (key :name topology :type topology-kind :optional true :default triangle-list)
+  (key :name cull     :type symbol :optional true)
+  (variant :when [triangle-strip line-strip]
+    (key :name strip-index-format :type index-format :optional true)))
+```
+
+In Zig the same shape is `discriminant_idx` / `discriminant_name` on the
+`FormSpec` plus a `variants` slice of `Plugin.Variant`, each `{ when,
+keys, exclusive_groups }`. The rules:
+
+- The discriminant key's type must resolve to a `.symbol` kind with a
+  non-empty `MemberSet` (`discriminant_not_closed_enum` otherwise);
+  variants are gated on members of that set.
+- **`when` is a list of values, and selection is membership.** The
+  manifest spells one value bare (`:when triangle-strip`) or several as a
+  vector (`:when [triangle-strip line-strip]`); both land as
+  `Variant.when: []const []const u8`, never empty, and
+  `Variant.selects(value)` is the one test both walkers ask. One
+  declaration reaching several values is how a rule like WebGPU's
+  `stripIndexFormat` — read for both strips, for neither list — is
+  declared once. Every listed value must be a member of the
+  discriminant's set (`unknown_discriminant_value`, once per offending
+  value, keeping the rest).
+- **A value selects at most one variant.** The loader rejects an empty
+  `:when []`, a value listed twice in one `:when`, and a value two
+  variants both list — including two variants with the same single
+  `:when` — all `invalid_manifest`. Otherwise "which one applies" would
+  fall to declaration order, which is exactly the question the next rule
+  exists to keep a schema from asking.
+- **A key lives in exactly one place.** A variant key may not repeat a
+  common key or another variant's key (`variant_key_collision`). Multi-
+  value `when` does not loosen this — it is what makes the rule
+  livable: the shape that used to need two identical variants (and
+  collided) is now one variant.
+- Validation resolves the variant from the discriminant kvpair's symbol
+  (author-written, or supplied by a default under axis D, §7.8); a
+  variant-only key seen before the discriminant, or under a value that
+  selects no variant, is `unknown_key`; the selected variant's required
+  keys, exclusive groups and `:requires` are swept like the form's own.
+  Every message that names a variant spells its `when` as the author
+  did — `:when line-strip` bare, `:when [triangle-strip line-strip]`
+  bracketed.
+- Export does not multiply the branch: JSON Schema guards one `if/then`
+  with `const` (one value) or `enum` (several); TypeScript narrows the
+  discriminant to `Symbol_<"triangle-strip" | "line-strip">`, plus one
+  residual branch for members no variant selects; Markdown heads the
+  variant `:topology [triangle-strip line-strip]`.
+
+The manifest-side grammar and diagnostics are in
+`docs/portable-manifest-v1.md` §5.3.
+
 ### 6.3 KeySpec and PositionalSpec
 
 A `KeySpec` declares one keyword-addressable slot:
@@ -1163,7 +1223,13 @@ A form value in such a slot resolves **local-first, then additively**:
 
 A **qualified** head (`ns/circle`) deliberately bypasses locals (which are
 bare-named) and resolves global-only, so its terminal miss is the ordinary
-`unknown_form`. Locals are honoured only on `.form` slots, validate their
+`unknown_form`. A slot's locals are in scope exactly when the slot's key
+is **accepted** — always for a common key; for a key declared on a
+`(variant …)`, only while that variant is active and after the
+discriminant (§6.2.2). Under another variant, or ahead of the discriminant,
+the key is `unknown_key` and its value form resolves against the global
+catalog like any other; the same holds for the key's `walk_opaque`.
+Locals are honoured only on `.form` slots, validate their
 contents with the full machinery (`missing_required_key`, `unknown_key`,
 discriminant/variant, exclusive groups — a local may itself be
 discriminated and nest further `local_forms`), and nest no deeper than
@@ -1196,6 +1262,15 @@ inert rather than an error. A child counts towards a head only if its own
 head matches byte-for-byte, so a child that already failed
 `not_head_member` satisfies nobody's floor.
 
+The set has a count of its own: `:min-children` / `:max-children` on the
+`(head-set …)` bound how many children carry *any* head in it. That is
+the claim per-head bounds structurally cannot make — "exactly one of
+buffer / sampler / texture" is satisfied by one of each and by none at
+all under every per-head spelling. Both levels report through the same
+two codes, and when both would fire on one child **the set yields to the
+head**: the per-head report names the line to delete, and the set's claim
+follows from it.
+
 The same local-first machinery also scopes a form's **positional** slot.
 Inline `(form …)` children placed directly under a `(form …)` — the
 positional mirror of nesting them under a `(key …)` — populate the
@@ -1221,6 +1296,20 @@ would be dead behind `positional_not_allowed`); pairing them with
 resolve their local bodies — the recipe for a **closed positional form
 set**. Both carriers share `Plugin.MAX_LOCAL_FORM_DEPTH` and compose
 freely: a positional local may itself carry key-locals, and vice-versa.
+
+**Locals and host lowering.** The same local-first order governs the two
+places lowering meets a form head. The lowering worklist resolves an
+authored or emitted head local-first before asking whether it lowers — a
+local body is never a hook, so `(bind-group (entry …))` does not fire the
+hook of a global lowerable `entry`; a qualified `(bind-group (ns/entry))`
+bypasses the local and does. And a `:lowering :produces` entry may name a
+slot-local form **reachable through the list** — declared, at any depth
+and through either carrier, inside a form the same list resolves — since
+the contract checks every emitted head at every depth and an emitted local
+can only sit under its declaring form. A slot-local form cannot itself
+declare `:lowering` (`invalid_manifest`); the resolution rules and the
+worked bind-group / entry example are in `docs/plugin-model-v1.md`, "What
+`:produces` may name".
 
 ### 6.4 ValueType — what a slot accepts
 
@@ -1563,14 +1652,31 @@ many positional children of one form may use that head, reported as
 there is a single shape to read; only the rich `(head …)` spelling can
 declare a count.
 
-Counts are enforced **at a form's `:positional` slot and are inert
-everywhere else** — a keyed slot holds one value, so `max` is trivially
-satisfied and `min` has no set to be missing from, and a
+The `HeadSet` itself carries a second pair, `min_children` /
+`max_children`, counting children of *any* head in the set. It is a
+different claim from the sum of the per-head ones and neither implies the
+other: `:max-children 2` over heads each `:max 1` is "one of each, up to
+two", which needs both. `isUnbounded` reads both levels, so the compact
+`:names [a b c]` spelling — which cannot carry a *per-head* count — is no
+longer always unbounded.
+
+Counts at both levels are enforced **at a form's `:positional` slot and
+are inert everywhere else** — a keyed slot holds one value, so `max` is
+trivially satisfied and `min` has no set to be missing from, and a
 `vector-shape :element` is a value rather than a child list. The same
 head-set kind therefore stays reusable across all three. `:open true`
 suppresses neither code: openness widens the *keyword* surface, and
-declaring `:positional <bounded-kind>` opts into the count. Wire syntax
-and the full rejection list live in `docs/portable-manifest-v1.md` §4.5.
+declaring `:positional <bounded-kind>` opts into the count.
+
+The two levels overlap by construction, so a suppression rule is part of
+the semantics rather than an implementation detail: **the set yields to
+the head.** A child that already reported `positional_too_many` for its
+own head does not report again for the set, and a head whose `min` went
+unmet suppresses the set's floor report for that form. Consequently no
+consumer ever sees two diagnostics with the same code on one span, which
+is what makes reusing the pair rather than appending two variants
+observable-equivalent. Wire syntax and the full rejection list live in
+`docs/portable-manifest-v1.md` §4.5.
 
 `VectorShape.element` is itself a kind name. Resolution shortcuts the
 primitive `ValueType` tags by reserved names (`"number"`, `"string"`,
@@ -1663,11 +1769,24 @@ Three properties hold whatever a provider does:
 `UnionShape` applies only to `.union_of` underlying. Each alternative
 is a value-kind name or the primitive shortcut `number`, `string`,
 `symbol`, `vector`, `form`, or `any`. Alternatives are tried in
-declaration order; the first full match accepts the value. If none
-matches, validation emits `union_no_branch_matched` rather than
-leaking every branch's inner diagnostics. A union alternative cannot
-resolve to another union; aggregate validation emits `nested_union`
-so dispatch stays a flat loop.
+declaration order; the first full match accepts the value. A union
+alternative cannot resolve to another union; aggregate validation emits
+`nested_union` so dispatch stays a flat loop.
+
+When none matches, validation reports the diagnostic of the one
+alternative the value's node shape could have reached, if there is
+exactly one; otherwise `union_no_branch_matched`, which names the
+alternatives and leaks no branch's inner cause. Reachability is asked
+per value and before any refinement: resolve each alternative's
+underlying and ask whether a node of this shape (number, string, symbol,
+vector, form) reaches it at all. One reachable alternative means nothing
+else could have been meant, so its own cause is the actionable one. Two
+that share a shape overlap, and overlap is where order is the rule and
+no arm is to blame; zero reachable collapses for the opposite reason.
+The rule stops at the shape, so two `form` kinds with disjoint head-sets
+both reach a form and keep the collapse. Matching is unchanged
+throughout: no document changes verdict, only the code a rejected one
+fails with.
 
 Declaration order is therefore **load-bearing whenever alternatives
 overlap**, which is usually the design: a union of `[byte-count symbol]`
@@ -1694,19 +1813,31 @@ kind is an ordinary union and the validator, exporter, and every
 downstream consumer inherit its behaviour for free. It captures the common
 "a literal value *or* a bare-symbol reference to one defined elsewhere"
 pattern: a value matching `<base>` takes the scalar alternative, a
-symbol takes the reference alternative, and anything else
-falls through to `union_no_branch_matched`. `:underlying scalar-or-ref`
+symbol takes the reference alternative, and anything else reaches
+neither and falls through to `union_no_branch_matched`.
+`:underlying scalar-or-ref`
 without the `:scalar-or-ref` slot — or a `:scalar-or-ref` slot on a
 non-`scalar-or-ref` underlying — is rejected at manifest-load time with
 `invalid_manifest`.
 
-The optional `:ref` (manifest format 1.3) names the reference
+The desugar keeps nothing beyond the union: the stored kind carries no
+mark of the shorthand, and no consumer can tell it from a union spelled
+out by hand. The arm report is the general union rule above, which this
+shape always satisfies — a scalar-or-ref's two arms are disjoint by
+*node shape*, a number can only have meant the base and a symbol only
+the ref, so a number or a symbol always has a determined arm and
+validation reports **that arm's own diagnostic**: `number_above_max`
+naming the bound, `unit_forbidden`, `repr_out_of_range`,
+`not_cross_ref` naming the target form. The union code stays for a
+shape neither arm reaches (a vector in a `number | symbol` slot) or
+both reach (a symbol against a base that is itself a symbol kind).
+
+The optional `:ref` names the reference
 alternative. It defaults to the primitive `symbol`, which accepts any
 spelling and therefore leaves a misspelled reference *unchecked* —
-naming a cross-ref kind there makes that half checked instead. Because
-the desugar stores a plain union either way, a reference that resolves
-to nothing still reports `union_no_branch_matched` (naming both
-alternatives) rather than the branch's own `not_cross_ref`. `:ref` equal
+naming a cross-ref kind there makes that half checked instead, and a
+reference that resolves to nothing then reports the reference arm's
+`not_cross_ref` (a symbol reaches only that arm). `:ref` equal
 to `:base` is `invalid_manifest` at load, on byte-equality of both
 halves; whether `:ref` names a union kind is left to the aggregate
 `nested_union` pass, since value-kinds load in declaration order and a
@@ -2306,7 +2437,7 @@ kind, or typed-vector element).
 | `not_head_member`         | a form value's head is not in the kind's `HeadSet` entries                   |
 | `positional_too_many`     | more positional children carry one head than that `HeadSet.Head`'s `max` allows; reported at the crossing child, once per crossing |
 | `positional_missing`      | fewer positional children carry one head than that `HeadSet.Head`'s `min` requires; reported at the parent form's head, once per unsatisfied head |
-| `union_no_branch_matched` | a `union_of` value kind accepts none of its alternative kinds                |
+| `union_no_branch_matched` | a `union_of` value kind accepts none of its alternative kinds, and the value's node shape reaches zero or two-plus of them; a union whose node shape determines one arm reports that arm's own code instead |
 | `nested_union`            | a `union_of` alternative resolves to another union                           |
 | `union_ambiguous`         | a symbol is a registered name in two or more of a union's cross-ref alternatives, so declaration order picks the entity (severity `warning`) |
 | `number_below_min` / `number_above_max` | a numeric value crosses an inclusive bound                  |
@@ -3421,7 +3552,7 @@ Header (16 bytes, fixed):
 | Field | Size | Value |
 | --- | --- | --- |
 | `magic` | 4 B | `"SJ1\n"` (`0x53 0x4A 0x31 0x0A`) |
-| `version` | 1 B | `0x04` |
+| `version` | 1 B | `0x05` |
 | `flags` | 1 B | see §10.2 |
 | `reserved` | 2 B | must be zero |
 | `pool_offset` | 4 B | byte offset to string pool (always `16`) |
@@ -3441,7 +3572,7 @@ against fidelity. Each bit gates an independent trivia channel:
 |  0  | `with_spans` | on | Per-`Node` `Span` (8 B inline) |
 |  1  | `with_head_spans` | on | Per-`Form` `head_span` inline |
 |  2  | `with_kvpair_key_spans` | on | Per-`KeywordPair` `key_span` inline |
-|  3  | `with_node_comments` | off | `Node.leading_comments` + `Form.trailing_comments` |
+|  3  | `with_node_comments` | off | `Node.leading_comments` + container `trailing_comments` (forms; vectors since v5) |
 |  4  | `with_kvpair_comments` | off | `KeywordPair.leading_comments` |
 |  5  | `with_tree_trailing_comments` | off | `Tree.trailing_comments` block |
 | 6–7 | reserved | | Decoder rejects buffers with these set. |
@@ -3508,10 +3639,11 @@ Inside a form's children, each child is prefixed with a `ChildTag`:
 The tag enumeration is closed and projects 1:1 onto the abstract
 `ValueKind` vocabulary (§3) via `Binary.Tag.toValueKind`. Adding a
 new tag is a substrate-level wire bump; the decoder rejects unknown
-tags with `error.InvalidTag`. The current wire version is `0x04`:
-v2 added exact integer tags, v3 added `date`, and v4 added `time`.
-Older decoders fail loud on buffers whose version or tags they do
-not know.
+tags with `error.InvalidTag`. The current wire version is `0x05`:
+v2 added exact integer tags, v3 added `date`, v4 added `time`, and v5
+gave vector payloads a trailing-comment field (symmetric with forms,
+under `with_node_comments`). Older decoders fail loud on buffers whose
+version or tags they do not know.
 
 ### 10.4 Cursor contract
 
@@ -3872,7 +4004,10 @@ binders      map filter any all fold
 }
 
 FormSpec     { name, keys, positional ∈ none|any|kind, open,
+               discriminant_idx?, variants?, exclusive_groups?,
                lowering?, description }
+Variant      { when[] (values that select it; membership), keys,
+               exclusive_groups? }
 KeySpec      { name, value_type ∈ ValueType, optional, default?,
                walk_opaque?, description }
 ExprFunc     { name, arity ∈ fixed|at_least|range, params?,
@@ -4068,10 +4203,11 @@ Each cross-version channel has its own forward-compat story:
   (`error.UnknownDiscriminator`).
 - **Tree → Binary IR.** New value kinds get new tag bytes.
   Decoders reject unknown tags loudly (`error.InvalidTag`). The
-  wire `version` byte tracks incompatible tag growth: v2 adds
-  exact integer tags, v3 adds `date`, and v4 adds `time`.
-  Older decoders correctly reject newer buffers before reading
-  nodes they do not understand.
+  wire `version` byte tracks incompatible layout growth: v2 adds
+  exact integer tags, v3 adds `date`, v4 adds `time`, and v5 a
+  trailing-comment field on vector payloads. Older decoders
+  correctly reject newer buffers before reading nodes they do not
+  understand.
 - **Tree → Tree (Edit).** New `op` values are loudly rejected
   with `error.UnknownOp`. New op-specific fields are silently
   ignored only when they begin with an underscore — an editorial
@@ -4207,5 +4343,5 @@ form / symbol / union_of). Referenced from
 vocabulary. Closed; references plugin value kinds via `.named`.
 
 **v1** — the substrate spec series this document describes. Wire
-version is currently `0x04`; closed-set additions are minor-version
+version is currently `0x05`; closed-set additions are minor-version
 bumps and may advance the binary wire version.

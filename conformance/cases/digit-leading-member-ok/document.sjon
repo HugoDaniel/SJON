@@ -10,7 +10,7 @@
 ; A mixed set is the realistic case: `GPUTextureViewDimension` has
 ; digit-leading members and plain symbol ones side by side, and neither is
 ; mistaken for the other.
-(plugin :name gpu :version "1.0.0" :sjon "1.3"
+(plugin :name gpu :version "1.0.0"
   (value-kind :name texture-dimension :underlying symbol
     :members (member-set :values [1d 2d 3d]))
 

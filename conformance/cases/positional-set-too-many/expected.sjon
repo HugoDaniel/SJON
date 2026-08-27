@@ -1,0 +1,14 @@
+; One diagnostic, on the child that crosses the set's ceiling — the line
+; to delete — with that child's own positional step as its path, exactly
+; where the per-head code lands. One report per crossing, not one per
+; child past it: the emit fires on the transition from `max-children` to
+; `max-children + 1`.
+;
+; The code is `positional_too_many`, reused rather than appended to. The
+; child that trips a ceiling is the same kind of thing at either level,
+; and the suppression rule means a host never sees both on one span — so
+; nothing has to read prose to tell the levels apart. The message carries
+; the set (`[buffer | sampler | texture]`) where the per-head one carries
+; the head.
+(diagnostics
+  (diagnostic :code positional_too_many :severity err :path [entry sampler]))

@@ -1,4 +1,4 @@
-; `zzzzzz` is nowhere near any indexed plugin name — the renderer must
+; `zzzzzz` is nowhere near any indexed plugin name, so the renderer must
 ; stay silent rather than suggest noise.
 (use-plugin "zzzzzz")
 

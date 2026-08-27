@@ -1,0 +1,13 @@
+; Inline-manifest fixture: `:version` is optional on `(plugin …)`. A
+; manifest with no version to declare declares none — it is unversioned,
+; not invalid — and its vocabulary loads and validates like any other.
+; The version is only the pin target and the lockfile row: pinning an
+; unversioned plugin is `plugin_version_mismatch` (see
+; `use-plugin-version-mismatch` for the pin path); using it unpinned is
+; clean, which is what this case asserts on every host.
+(plugin :name probe
+  (form :name widget
+    (key :name name :type symbol :optional false)
+    (key :name size :type number :optional true)))
+
+(widget :name w0 :size 4)

@@ -39,7 +39,7 @@ pub fn main() !void {
     defer arena_state.deinit();
     const gpa = arena_state.allocator();
 
-    // Case A — audio-sketch: vector slot accepting symbol | form.
+    // Case A, audio-sketch: a vector slot accepting symbol | form.
     const audio_plugin: sjon.Plugin.Plugin = .{
         .name = "audio",
         .forms = &.{
@@ -85,7 +85,7 @@ pub fn main() !void {
     try run(gpa, "A6: bad form head",  "(phrase :notes [(boom)])",                          audio_schema, false);
     try run(gpa, "A7: number element", "(phrase :notes [E4 42])",                           audio_schema, false);
 
-    // Case B — scene-sketch: bare slot accepting number | vec4 | form.
+    // Case B, scene-sketch: a bare slot accepting number | vec4 | form.
     const scene_plugin: sjon.Plugin.Plugin = .{
         .name = "scene",
         .forms = &.{
@@ -111,7 +111,7 @@ pub fn main() !void {
     std.debug.print("=== B. scene: bare slot accepting number | vec4 | form ===\n\n", .{});
     // Compose with core plugin so the `form` alternative has a real
     // form vocabulary to match against (`+`, `lerp`, etc.). A bare
-    // `form` alternative does not mean "any parens" — it still
+    // `form` alternative does not mean "any parens"; it still
     // resolves the head against the schema.
     const scene_schema = sjon.Schema.Schema.init(&.{ sjon.plugins.core.plugin, scene_plugin });
 
@@ -122,7 +122,7 @@ pub fn main() !void {
     try run(gpa, "B5: string",         "(set :value \"hi\")",                 scene_schema, false);
     try run(gpa, "B6: undeclared form","(set :value (foo 1 2))",              scene_schema, false);
 
-    // Case C — schema-aggregate validation rejects nested unions.
+    // Case C, schema-aggregate validation rejects nested unions.
     const nested_plugin: sjon.Plugin.Plugin = .{
         .name = "demo",
         .value_kinds = &.{

@@ -2626,6 +2626,213 @@ test "code action suggests closest registered name for not_cross_ref" {
     try std.testing.expectEqualStrings(expected_title, act.title);
 }
 
+/// A scalar-or-ref slot whose reference arm is a cross-ref kind — the
+/// Zig-built mirror of `(scalar-or-ref-shape :base count :ref define-ref)`
+/// after the loader's desugar: a plain `union [base, ref]`, which is all
+/// the desugar leaves behind.
+fn scalarOrRefPlugin() sjon.Plugin.Plugin {
+    return .{
+        .name = "gfx",
+        .value_kinds = &.{
+            .{ .name = "count", .underlying = .number },
+            .{ .name = "define-ref", .underlying = .symbol, .cross_ref = .{ .targets = &.{"define"} } },
+            .{
+                .name = "count-or-ref",
+                .underlying = .union_of,
+                .union_of = .{ .alternatives = &.{ .{ .name = "count" }, .{ .name = "define-ref" } } },
+            },
+        },
+        .forms = &.{
+            .{
+                .name = "define",
+                .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = false }},
+            },
+            .{
+                .name = "dispatch",
+                .keys = &.{.{ .name = "x", .value_type = .{ .named = .{ .name = "count-or-ref" } }, .optional = false }},
+            },
+        },
+    };
+}
+
+test "code action suggests the closest registered name through a scalar-or-ref slot" {
+    // S13: the slot reports the reference arm's own `not_cross_ref`, so the
+    // quick-fix must reach through the desugared union to that arm's
+    // cross-ref rather than bailing on a slot kind with no `cross_ref`.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const plugin = scalarOrRefPlugin();
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    const src = "(define :name TILE) (dispatch :x TIL)";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const bad_start: u32 = @intCast(std.mem.lastIndexOf(u8, src, "TIL").?);
+    const actions = (try h.getCodeActions(arena, "file:///a.sjon", bad_start, bad_start + 3)).?;
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    const act = actions[0];
+    try std.testing.expectEqualStrings("not_cross_ref", act.diagnostics[0].code);
+    try std.testing.expectEqualStrings("Replace with `TILE`", act.title);
+    try std.testing.expectEqualStrings("TILE", act.edits[0].new_text);
+}
+
+/// A hand-written `union [count define-ref]` — the same two kinds as
+/// `scalarOrRefPlugin`, spelled without the shorthand — plus a
+/// `union [ease-name ease-form]` for the member half, and a vector of the
+/// latter so the element carrier is covered too.
+fn handWrittenUnionPlugin() sjon.Plugin.Plugin {
+    return .{
+        .name = "hw",
+        .value_kinds = &.{
+            .{ .name = "count", .underlying = .number },
+            .{ .name = "define-ref", .underlying = .symbol, .cross_ref = .{ .targets = &.{"define"} } },
+            .{
+                .name = "count-or-ref",
+                .underlying = .union_of,
+                .union_of = .{ .alternatives = &.{ .{ .name = "count" }, .{ .name = "define-ref" } } },
+            },
+            .{
+                .name = "ease-name",
+                .underlying = .symbol,
+                .members = .{ .members = &.{ .{ .name = "linear" }, .{ .name = "smoothstep" } } },
+            },
+            .{ .name = "ease-form", .underlying = .form, .heads = .{ .heads = &.{.{ .name = "spring" }} } },
+            .{
+                .name = "ease-spec",
+                .underlying = .union_of,
+                .union_of = .{ .alternatives = &.{ .{ .name = "ease-name" }, .{ .name = "ease-form" } } },
+            },
+            .{ .name = "ease-vec", .underlying = .vector, .vector = .{ .element = .{ .name = "ease-spec" } } },
+        },
+        .forms = &.{
+            .{
+                .name = "define",
+                .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = false }},
+            },
+            .{ .name = "spring", .positional = .any },
+            .{
+                .name = "k",
+                .keys = &.{
+                    .{ .name = "x", .value_type = .{ .named = .{ .name = "count-or-ref" } } },
+                    .{ .name = "ease", .value_type = .{ .named = .{ .name = "ease-spec" } } },
+                    .{ .name = "eases", .value_type = .{ .named = .{ .name = "ease-vec" } } },
+                },
+            },
+        },
+    };
+}
+
+test "code action suggests the closest registered name through a hand-written union" {
+    // 15: the reach-through is by the validator's rule, not by the
+    // shorthand's flag. A symbol reaches only `define-ref`, so the slot
+    // reports that arm's `not_cross_ref` and the fix reads its cross-ref.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const plugin = handWrittenUnionPlugin();
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    const src = "(define :name TILE) (k :x TIL)";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const bad_start: u32 = @intCast(std.mem.lastIndexOf(u8, src, "TIL").?);
+    const actions = (try h.getCodeActions(arena, "file:///a.sjon", bad_start, bad_start + 3)).?;
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    try std.testing.expectEqualStrings("not_cross_ref", actions[0].diagnostics[0].code);
+    try std.testing.expectEqualStrings("Replace with `TILE`", actions[0].title);
+    try std.testing.expectEqualStrings("TILE", actions[0].edits[0].new_text);
+}
+
+test "code action suggests the closest member through a hand-written union" {
+    // 15, the member half: a symbol reaches only `ease-name` in
+    // `[ease-name ease-form]`, so the slot reports `not_member` and the fix
+    // reads that arm's member set. Before 15 the slot collapsed to
+    // `union_no_branch_matched` and there was nothing to fix.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const plugin = handWrittenUnionPlugin();
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    const src = "(k :ease smoothstepp)";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const bad_start: u32 = @intCast(std.mem.indexOf(u8, src, "smoothstepp").?);
+    const actions = (try h.getCodeActions(arena, "file:///a.sjon", bad_start, bad_start + 11)).?;
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    try std.testing.expectEqualStrings("not_member", actions[0].diagnostics[0].code);
+    try std.testing.expectEqualStrings("Replace with `smoothstep`", actions[0].title);
+    try std.testing.expectEqualStrings("smoothstep", actions[0].edits[0].new_text);
+}
+
+test "code action reaches a union arm through a vector element" {
+    // The other carrier `unionSlotOf` knows: the validator wraps the leaf
+    // failure in `element_at` and emits at the vector, so the arm is decided
+    // per element.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const plugin = handWrittenUnionPlugin();
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    const src = "(k :eases [linear smoothstepp])";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const vec_start: u32 = @intCast(std.mem.indexOf(u8, src, "[").?);
+    const actions = (try h.getCodeActions(arena, "file:///a.sjon", vec_start, vec_start + 1)).?;
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    try std.testing.expectEqualStrings("not_member", actions[0].diagnostics[0].code);
+    try std.testing.expectEqualStrings("Replace with `smoothstep`", actions[0].title);
+}
+
+test "code action offers nothing for a union that determines no arm" {
+    // `[ease-name define-ref]` — two symbol arms — collapses to
+    // `union_no_branch_matched`, which carries no leaf set to suggest from.
+    // `unionArmKind` returns the union unchanged and both fixes decline.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const plugin: sjon.Plugin.Plugin = .{
+        .name = "ov",
+        .value_kinds = &.{
+            .{
+                .name = "ease-name",
+                .underlying = .symbol,
+                .members = .{ .members = &.{ .{ .name = "linear" }, .{ .name = "smoothstep" } } },
+            },
+            .{ .name = "define-ref", .underlying = .symbol, .cross_ref = .{ .targets = &.{"define"} } },
+            .{
+                .name = "both",
+                .underlying = .union_of,
+                .union_of = .{ .alternatives = &.{ .{ .name = "ease-name" }, .{ .name = "define-ref" } } },
+            },
+        },
+        .forms = &.{
+            .{ .name = "define", .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = false }} },
+            .{ .name = "k", .keys = &.{.{ .name = "b", .value_type = .{ .named = .{ .name = "both" } } }} },
+        },
+    };
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    const src = "(define :name smoothstep) (k :b smoothstepp)";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const bad_start: u32 = @intCast(std.mem.lastIndexOf(u8, src, "smoothstepp").?);
+    const actions = (try h.getCodeActions(arena, "file:///a.sjon", bad_start, bad_start + 11)).?;
+    try std.testing.expectEqual(@as(usize, 0), actions.len);
+}
+
 test "code action returns no fix when cross-ref typo is too distant" {
     const a = std.testing.allocator;
     var fx = handlerFixture(a);
@@ -3968,7 +4175,7 @@ test "provider cross-ref: a provider that cannot run is loud, not silent" {
 /// the point is a session that can run providers meeting one it cannot,
 /// which no single fixture directory expresses.
 const ghost_provider_schema =
-    \\(plugin :name ghost :version "1.0.0" :sjon "1.2"
+    \\(plugin :name ghost :version "1.0.0"
     \\  (cross-ref-provider :name lines)
     \\  (form :name shader
     \\    (key :name name :type symbol :optional false)
@@ -5467,13 +5674,13 @@ fn discriminatedDrumPlugin() sjon.Plugin.Plugin {
                 },
                 .variants = &.{
                     .{
-                        .when = "kick",
+                        .when = &.{"kick"},
                         .keys = &.{
                             .{ .name = "punch", .value_type = .number, .optional = true },
                         },
                     },
                     .{
-                        .when = "snare",
+                        .when = &.{"snare"},
                         .keys = &.{
                             .{ .name = "rattle", .value_type = .number, .optional = true },
                         },

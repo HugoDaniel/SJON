@@ -232,6 +232,80 @@ test('schemaExport: an unbounded head-set adds no allOf and no doc comment', () 
   assert.ok(!exportResult.tsTypesBytes.includes('Positional counts'));
 });
 
+test('schemaExport: a set bound rides as one more contains over the anyOf of the set', () => {
+  // The bind-group-layout shape: exactly one resource over the set, and
+  // not two of the same. The set's entry is last and its `contains` is the
+  // union of the members' — "a child whose head is in the set", which is
+  // what the validator tallies. Byte-for-byte against the Zig emitter.
+  const source = `(plugin :name gpu :version "1.0.0"
+  (form :name buffer)
+  (form :name sampler)
+  (value-kind :name bgl-resource :underlying form
+    :heads (head-set :min-children 1 :max-children 1
+      (head :name buffer  :max 1)
+      (head :name sampler :max 1)))
+  (form :name entry :positional bgl-resource))`;
+  const { exportResult } = exportSchema(source, nullHostOptions(), {
+    target: { jsonSchema: true, tsTypes: true },
+  });
+  assert.ok(exportResult.jsonSchemaBytes, 'JSON Schema bytes missing');
+  const schema = JSON.parse(exportResult.jsonSchemaBytes);
+  const entry = schema.$defs['form.gpu.entry'];
+  assert.deepEqual(entry.properties.$children.allOf, [
+    { contains: { $ref: '#/$defs/form.gpu.buffer' }, minContains: 0, maxContains: 1 },
+    { contains: { $ref: '#/$defs/form.gpu.sampler' }, minContains: 0, maxContains: 1 },
+    {
+      contains: {
+        anyOf: [{ $ref: '#/$defs/form.gpu.buffer' }, { $ref: '#/$defs/form.gpu.sampler' }],
+      },
+      minContains: 1,
+      maxContains: 1,
+    },
+  ]);
+  // The set's floor makes `$children` required, for the same reason a
+  // head's `:min` does: a childless form has no `$children` at all.
+  assert.ok(entry.required.includes('$children'));
+  assert.ok(exportResult.tsTypesBytes, 'TS bytes missing');
+  assert.ok(
+    exportResult.tsTypesBytes.includes(
+      'Positional counts (not expressible in TS): buffer: 0..1; sampler: 0..1; any of the set: 1 */',
+    ),
+    'the $children doc comment must match the Zig emitter byte for byte',
+  );
+});
+
+test('schemaExport: a ceiling-only set bound emits minContains 0 and leaves $children optional', () => {
+  // No per-head bound anywhere, so the set is the only thing that emits.
+  // Without an explicit `minContains: 0`, `contains` would also demand at
+  // least one match — "at most one" would mean "exactly one".
+  const source = `(plugin :name gpu :version "1.0.0"
+  (form :name cube)
+  (form :name sphere)
+  (value-kind :name gen :underlying form
+    :heads (head-set :names [cube sphere] :max-children 1))
+  (form :name data :positional gen))`;
+  const { exportResult } = exportSchema(source, nullHostOptions(), {
+    target: { jsonSchema: true, tsTypes: true },
+  });
+  assert.ok(exportResult.jsonSchemaBytes, 'JSON Schema bytes missing');
+  const schema = JSON.parse(exportResult.jsonSchemaBytes);
+  const data = schema.$defs['form.gpu.data'];
+  assert.deepEqual(data.properties.$children.allOf, [
+    {
+      contains: { anyOf: [{ $ref: '#/$defs/form.gpu.cube' }, { $ref: '#/$defs/form.gpu.sphere' }] },
+      minContains: 0,
+      maxContains: 1,
+    },
+  ]);
+  assert.ok(!data.required.includes('$children'));
+  assert.ok(exportResult.tsTypesBytes, 'TS bytes missing');
+  assert.ok(
+    exportResult.tsTypesBytes.includes(
+      'Positional counts (not expressible in TS): any of the set: 0..1 */',
+    ),
+  );
+});
+
 test('schemaExport: empty-string flag metadata matches Zig (desc omitted, link kept)', () => {
   // Long-tail parity: the Zig emitter gates `description` on `len > 0`
   // (so `:description ""` is dropped) but emits `link` on presence alone
@@ -361,7 +435,7 @@ test('schemaExport: slot-local forms emit an inline anyOf + open branch and a TS
 });
 
 test('schemaExport: the two cross-ref routes render differently in every target', () => {
-  const src = `(plugin :name gfx :version "1.0.0" :sjon "1.2"
+  const src = `(plugin :name gfx :version "1.0.0"
   (cross-ref-provider :name uniforms)
   (form :name shader
     (key :name name :type symbol :optional false)
@@ -515,7 +589,29 @@ test('schemaExport: kit variant overlays match the Zig golden', () => {
   assert.equal(ours.unevaluatedProperties, theirs.unevaluatedProperties);
 });
 
-for (const fixture of ['kit', 'kit-xor']) {
+test('schemaExport: variant-set — a multi-value :when guards one branch, and matches the Zig golden', () => {
+  // S14. `(variant :when [triangle-strip line-strip] …)` is ONE `if/then`
+  // whose gate is an `enum` of `$sym` constants, the annotation lists the
+  // values, and the `.d.ts` narrows the discriminant brand to a literal
+  // union — plus a residual branch for the members no variant selects.
+  const result = exportOf('variant-set');
+  const golden = goldenOrSkip('variant-set/variant-set.schema.json.golden');
+  if (!result || !golden) return;
+  const ours = JSON.parse(result.jsonSchemaBytes!)['$defs']['form.variant-set.primitive'];
+  const theirs = JSON.parse(golden)['$defs']['form.variant-set.primitive'];
+  assert.deepEqual(ours['x-sjon-discriminant'], theirs['x-sjon-discriminant']);
+  assert.deepEqual(ours['x-sjon-discriminant'].variants[0].when, ['triangle-strip', 'line-strip']);
+  assert.equal(ours.allOf.length, 1);
+  assert.deepEqual(ours.allOf[0].if, theirs.allOf[0].if);
+  assert.deepEqual(ours.allOf[0].if.properties.topology, {
+    enum: [{ $sym: 'triangle-strip' }, { $sym: 'line-strip' }],
+  });
+  const dts = result.tsTypesBytes!;
+  assert.match(dts, /topology: Symbol_<"triangle-strip" \| "line-strip">;/);
+  assert.match(dts, /topology: Symbol_<"point-list" \| "line-list" \| "triangle-list">;/);
+});
+
+for (const fixture of ['kit', 'kit-xor', 'variant-set']) {
   test(`schemaExport: ${fixture} .d.ts matches the Zig golden (minus :description)`, () => {
     const result = exportOf(fixture);
     const golden = goldenOrSkip(`${fixture}/${fixture}.d.ts.golden`);
@@ -527,3 +623,124 @@ for (const fixture of ['kit', 'kit-xor']) {
     );
   });
 }
+
+// ---------------------------------------------------------------------------
+// S7b — a head-set slot resolves its members against the slot's locals.
+//
+// Mirrors `src/SchemaExport/SchemaExport.zig`'s slot-aware head-set
+// resolution. Three of these cover code paths the Zig side reaches too;
+// the fourth covers a warning this port never emitted at all, which is
+// why the divergence survived — `lower.ts` took the same `lookupForm`
+// miss and wrote `owner = ''` with nothing beside it.
+// ---------------------------------------------------------------------------
+
+test('schemaExport: a head-set slot resolves its members local-first', () => {
+  // 07's corpus case, inline: no global `(form :name buffer …)` exists
+  // anywhere and the slot still exports cleanly and closed.
+  const source = `(plugin :name p :version "1.0.0"
+  (value-kind :name res :underlying form
+    :heads (head-set :names [buffer storage-texture]))
+  (form :name root :positional res
+    (form :name buffer (key :name kind :type symbol))
+    (form :name storage-texture (key :name format :type symbol))))`;
+  const { exportResult } = exportSchema(source, nullHostOptions(), {
+    target: { jsonSchema: true, tsTypes: true },
+  });
+  assert.equal(
+    exportResult.warnings.filter((w) => w.severity === 'err').length,
+    0,
+    `no head resolves globally, and that is fine: ${JSON.stringify(exportResult.warnings)}`,
+  );
+
+  const schema = JSON.parse(exportResult.jsonSchemaBytes!);
+  const children = schema.$defs['form.p.root'].properties.$children;
+  // Closed: `oneOf` over the head set, no trailing open branch. The open
+  // branch is what made the slot accept any form at all.
+  assert.equal(children.items.anyOf, undefined);
+  assert.equal(children.items.oneOf.length, 2);
+  assert.deepEqual(children.items['x-sjon-head-set'], ['buffer', 'storage-texture']);
+  assert.deepEqual(children.items['x-sjon-local-forms'], ['buffer', 'storage-texture']);
+  // Bodies inline, and no `$ref` into a `$def` that was never emitted.
+  assert.equal(children.items.oneOf[1].properties.format.required[0], '$sym');
+  assert.ok(!exportResult.jsonSchemaBytes!.includes('#/$defs/form.p.buffer'));
+});
+
+test('schemaExport: a bounded head on a locals slot exports its counts', () => {
+  // S1's `contains` never reached a slot that declared locals, because
+  // the locals override threw the head-set away before the bounds were
+  // read. A local head's `contains` is the head-pin: there is no `$def`
+  // to point at, and it counts the same children.
+  const source = `(plugin :name p :version "1.0.0"
+  (value-kind :name sect :underlying form
+    :heads (head-set (head :name pin :min 1 :max 1) (head :name note)))
+  (form :name doc :positional sect
+    (form :name pin (key :name at :type number))
+    (form :name note (key :name text :type string))))`;
+  const { exportResult } = exportSchema(source, nullHostOptions(), {
+    target: { jsonSchema: true, tsTypes: true },
+  });
+  const schema = JSON.parse(exportResult.jsonSchemaBytes!);
+  const children = schema.$defs['form.p.doc'].properties.$children;
+  assert.deepEqual(children.allOf, [
+    {
+      contains: {
+        type: 'object',
+        properties: { $form: { const: 'pin' } },
+        required: ['$form'],
+      },
+      minContains: 1,
+      maxContains: 1,
+    },
+  ]);
+  // TS still says it in prose, locals or not.
+  assert.ok(
+    exportResult.tsTypesBytes!.includes('Positional counts (not expressible in TS): pin: 1'),
+  );
+});
+
+test('schemaExport: a positional local outside the head-set is reported as dead', () => {
+  const source = `(plugin :name p :version "1.0.0"
+  (value-kind :name only-a :underlying form :heads (head-set :names [a]))
+  (form :name root :positional only-a
+    (form :name a (key :name q :type number))
+    (form :name dead (key :name z :type number))))`;
+  const { exportResult } = exportSchema(source, nullHostOptions(), {
+    target: { jsonSchema: true, tsTypes: false },
+  });
+  const dead = exportResult.warnings.filter((w) => w.code === 'local_form_outside_head_set');
+  assert.equal(dead.length, 1);
+  assert.equal(dead[0]!.severity, 'warn');
+  assert.ok(dead[0]!.message.includes('dead'));
+  assert.equal(exportResult.warnings.filter((w) => w.severity === 'err').length, 0);
+});
+
+test('schemaExport: an unresolvable head errors at the slot and never emits a dangling $ref', () => {
+  // The warning this port did not emit at all — `lower.ts` wrote
+  // `owner = ''` on a `lookupForm` miss with nothing beside it, so the
+  // exact code path S7b is about disagreed across hosts and no fixture
+  // had an unresolvable head to notice.
+  const source = `(plugin :name g :version "1.0.0"
+  (value-kind :name items :underlying form :heads (head-set :names [real ghost]))
+  (form :name real (key :name x :type number))
+  (form :name root :positional items))`;
+  const { exportResult } = exportSchema(source, nullHostOptions(), {
+    target: { jsonSchema: true, tsTypes: false },
+  });
+  const unresolved = exportResult.warnings.filter((w) => w.code === 'head_set_member_unresolved');
+  // Exactly one: the slot judges, the standalone value-kind pass stays quiet.
+  assert.equal(unresolved.length, 1);
+  assert.equal(unresolved[0]!.severity, 'err');
+  assert.equal(unresolved[0]!.formName, 'root');
+
+  // A 2020-12 validator refuses to compile an unresolvable `$ref`, so an
+  // unresolved head is a head-pin — one typo must not take the whole
+  // document down.
+  assert.ok(!exportResult.jsonSchemaBytes!.includes('#/$defs/form..ghost'));
+  const children = JSON.parse(exportResult.jsonSchemaBytes!).$defs['form.g.root'].properties
+    .$children;
+  assert.deepEqual(children.items.oneOf[1], {
+    type: 'object',
+    properties: { $form: { const: 'ghost' } },
+    required: ['$form'],
+  });
+});

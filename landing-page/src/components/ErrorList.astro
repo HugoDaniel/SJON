@@ -1,0 +1,61 @@
+---
+// Every diagnostic code, in catalogue order, with its one-line summary.
+//
+// Catalogue order is `Ast.Diagnostic.Code`'s declaration order, which is
+// wire-stable: variants are appended, never reordered. So this list is stable
+// across releases and related codes stay adjacent.
+//
+// The summaries are markdown, same as the bodies of the pages they link to: 85
+// of the 130 wrap a `:keyword` or a form name in backticks. The individual
+// pages get a real markdown pipeline from the loader; this list does not, and
+// rendering the raw string left the backticks showing. Splitting on them is
+// enough because the only markdown any summary uses is inline code, and every
+// one of the 130 has a balanced pair. Splitting rather than interpolating HTML
+// also means the segments stay text nodes, so a summary can never inject
+// markup.
+import { ERRORS } from '../lib/errors.ts';
+
+/** Split `Form does not declare this \`:keyword\`` into alternating plain and
+ *  code segments. Even indices are prose, odd indices are code. */
+const segments = (short: string): string[] => short.split('`');
+---
+
+<ul class="error-list">
+    {ERRORS.map((entry) => (
+        <li>
+            <a href={`${import.meta.env.BASE_URL.replace(/\/+$/, '')}/errors/${entry.code}`}>
+                <code>{entry.code}</code>
+            </a>
+            <span>
+                {segments(entry.short).map((seg, i) =>
+                    i % 2 === 0 ? seg : <code>{seg}</code>
+                )}
+            </span>
+        </li>
+    ))}
+</ul>
+
+<style>
+    .error-list {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: grid;
+        gap: 0.35rem;
+    }
+    .error-list li {
+        display: grid;
+        grid-template-columns: minmax(14rem, max-content) 1fr;
+        gap: 0.25rem 1rem;
+        align-items: baseline;
+        padding-block: 0.2rem;
+        border-bottom: 1px solid var(--sl-color-hairline-light);
+    }
+    .error-list span {
+        color: var(--sl-color-gray-3);
+        font-size: var(--sl-text-sm);
+    }
+    @media (max-width: 50rem) {
+        .error-list li { grid-template-columns: 1fr; }
+    }
+</style>
