@@ -11,7 +11,8 @@
 ; extra child, if it was a mistake; or raise `:max` in the manifest, if the
 ; schema was stricter than the domain.
 ;
-;   sjon validate examples/plugins/head-counts/{plugin,example-too-many}.sjon
+;   cat examples/plugins/head-counts/plugin.sjon \
+;       examples/plugins/head-counts/example-too-many.sjon | sjon validate - --no-project
 
 (render-pipeline :name two-fragments
   (vertex   :entry vs_main)

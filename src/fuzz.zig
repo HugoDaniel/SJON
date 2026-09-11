@@ -437,6 +437,30 @@ fn fuzzBinaryCursorInit(_: void, smith: *Smith) anyerror!void {
         expectKnownBinaryError(err);
         return;
     };
+
+    // Parity leg: the opt-in offset index must return exactly what the
+    // linear walk returns, for every index in both pools. `init` has
+    // already validated the pools, so every in-range lookup must also
+    // *succeed* on both paths — an error here is the finding, not a
+    // tolerated outcome.
+    var indexed = cursor;
+    const pool_index = testing.allocator.alloc(u32, indexed.poolIndexLen()) catch |err| {
+        try testing.expectEqual(error.OutOfMemory, err);
+        return;
+    };
+    defer testing.allocator.free(pool_index);
+    indexed.indexPools(pool_index);
+
+    for (0..cursor.pool_count) |i| {
+        const idx: u32 = @intCast(i);
+        try testing.expectEqualStrings(try cursor.lookupString(idx), try indexed.lookupString(idx));
+    }
+    for (0..cursor.comment_pool_count) |i| {
+        const idx: u32 = @intCast(i);
+        try testing.expectEqualStrings(try cursor.lookupComment(idx), try indexed.lookupComment(idx));
+    }
+    try testing.expectError(error.PoolIndexOutOfRange, indexed.lookupString(cursor.pool_count));
+
     // If init succeeded, calling rootIter must also produce a known error
     // or a valid iterator.
     _ = cursor.rootIter() catch |err| {
@@ -458,6 +482,16 @@ test "fuzz BinaryCursor.init: never panics on arbitrary bytes" {
             "SJ1\n\x01",
             // Reserved flag bits set.
             "SJ1\n\x01\xC0\x00\x00\x10\x00\x00\x00\x10\x00\x00\x00",
+            // A *valid* lossless encoding of "; hi\n(cam :z 2)" — every
+            // other seed here fails `init`, which would leave the pool
+            // parity leg and `rootIter` unreached in CI, where the corpus
+            // is the only input. Both pools carry entries.
+            "\x53\x4a\x31\x0a\x05\x3f\x00\x00\x10\x00\x00\x00\x1f\x00\x00\x00" ++
+                "\x02\x06\x01\x7a\x03\x63\x61\x6d\x01\x05\x04\x3b\x20\x68\x69\x01" ++
+                "\x08\x05\x00\x00\x00\x0f\x00\x00\x00\x01\x00\x00\x00\x00\x00\x04" ++
+                "\x00\x00\x00\x00\x06\x00\x00\x00\x09\x00\x00\x00\x01\x01\x11\x0a" ++
+                "\x00\x00\x00\x0c\x00\x00\x00\x00\x00\x0b\x0d\x00\x00\x00\x0e\x00" ++
+                "\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00",
         }, .{}),
     });
 }
@@ -872,12 +906,27 @@ const edit_action_templates = [_][]const u8{
     "{\"op\":\"insert_positional\",\"path\":[],\"value\":7}",
     "{\"op\":\"insert_positional\",\"path\":[],\"value\":7,\"index\":0}",
     "{\"op\":\"remove_positional\",\"path\":[],\"index\":0}",
+    // `wrap` runs the rebuild walk over a *second* source tree (the decoded
+    // template) with the same builder, so it is the one op whose success
+    // path touches two trees at once.
+    "{\"op\":\"wrap\",\"path\":[],\"value\":{\"$form\":\"w\",\"$children\":[null]},\"hole\":[0]}",
+    // `root` reaches past the MultipleRoots refusal — random source bytes
+    // parse into a multi-root tree often enough for this to land.
+    "{\"op\":\"set_keyword\",\"path\":[],\"root\":1,\"key\":\"x\",\"value\":1}",
     // Intentionally malformed shapes — exercise the decoder rejects.
     "{\"op\":\"unknown\",\"path\":[]}",
     "{\"op\":\"replace\",\"path\":[],\"value\":1}", // empty path → InvalidPath
+    "{\"op\":\"wrap\",\"path\":[],\"value\":1,\"hole\":[]}", // empty hole → InvalidPath
     "{}",
     "[]",
     "not json",
+    // The two forest ops. Appended rather than inserted so every selector
+    // byte in the corpora below still picks the template it was written
+    // for.
+    "{\"op\":\"insert_root\",\"value\":{\"$form\":\"n\"}}",
+    "{\"op\":\"insert_root\",\"index\":1,\"value\":1}",
+    "{\"op\":\"remove_root\",\"index\":0}",
+    "{\"op\":\"insert_root\",\"path\":[],\"value\":1}", // path refused → InvalidPath
 };
 
 fn fuzzEdit(_: void, smith: *Smith) anyerror!void {
@@ -907,6 +956,8 @@ fn fuzzEdit(_: void, smith: *Smith) anyerror!void {
             error.PathTypeMismatch,
             error.EmptyTree,
             error.UnknownOp,
+            error.ParseErrors,
+            error.NoSourceSpan,
             // Json.Error variants (Edit re-exports the union).
             error.OutOfMemory,
             error.MultipleRoots,
@@ -936,7 +987,7 @@ fn fuzzEdit(_: void, smith: *Smith) anyerror!void {
 test "fuzz Edit.applyEditFromJsonString: returns Bytes or known Edit.Error" {
     try testing.fuzz({}, fuzzEdit, .{
         .corpus = seeds(&.{
-            // Single-byte selector + small source. Each byte 0x00..0x0B
+            // Single-byte selector + small source. Each byte 0x00..0x12
             // picks a different action template; the trailing source
             // covers the basic shapes (empty, single root, form, vector).
             "\x00(scene :a 1)",
@@ -946,18 +997,155 @@ test "fuzz Edit.applyEditFromJsonString: returns Bytes or known Edit.Error" {
             "\x04(scene 1 2 3)",
             "\x05(scene 1 2 3)",
             "\x06(scene 1 2 3)",
-            "\x07(scene)",
-            "\x08(scene)",
+            "\x07(warp :source title)",
+            "\x08(a 1) (b 2)",
             "\x09(scene)",
             "\x0a(scene)",
             "\x0b(scene)",
+            "\x0c(scene)",
+            "\x0d(scene)",
+            "\x0e(scene)",
+            // The forest ops, over the shapes whose root list differs:
+            // one root, several, and a source with none.
+            "\x0f(a) (b)",
+            "\x10(a) (b)",
+            "\x11(a) (b)",
+            "\x12(a) (b)",
+            "\x0f(a)",
+            "\x11(a)",
+            // Removing the only root, and inserting into what is left.
+            "\x11 1",
+            "\x0f",
             // Edge: empty source → EmptyTree.
             "\x00",
-            // Edge: multi-root source → MultipleRoots.
+            // Edge: a document the parser only recovered → ParseErrors,
+            // ahead of every other refusal. The unclosed pair recovers as
+            // one nested form, which is what used to come back edited.
+            "\x00(scene :w 800\n(camera :fov 60",
+            "\x08(scene :w 800\n(camera :fov 60",
+            // Edge: multi-root source with no `root` → MultipleRoots …
             "\x00 1 2 3",
+            // … and the same source with one, which now succeeds.
+            "\x08 1 2 3",
+            // Edge: `root` past the end of a single-root tree → PathNotFound.
+            "\x08(scene :a 1)",
             // Vector at root.
             "\x03[1 2 3]",
             "\x06[1 2 3]",
+            // wrap over a scalar root, and over a vector root — the target
+            // is cloned whatever its tag, so neither is a special case.
+            "\x072",
+            "\x07[1 2 3]",
+        }, .{}),
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 9b. Edit under `.preserve` — the splice apply never panics, and never
+//     produces bytes outside the edit it lowered.
+//
+// Same (selector byte + source) split as harness 9. The splice path has
+// coordinates the re-print path does not: node spans, a form's head span, a
+// closing delimiter, the gap between two children. Every one of them is an
+// index into the caller's source, so an off-by-one is a slice panic rather
+// than a wrong document — which is what this harness is for.
+// ---------------------------------------------------------------------------
+
+fn fuzzEditPreserve(_: void, smith: *Smith) anyerror!void {
+    var buf: [MAX_INPUT]u8 = undefined;
+    const len = smith.sliceWithHash(&buf, 0x5F_11_CE_00);
+    if (len == 0) return;
+
+    const sel = buf[0] % edit_action_templates.len;
+    const action_json = edit_action_templates[sel];
+    const src_bytes = buf[1..len];
+
+    const src = try toSentinel(testing.allocator, src_bytes);
+    defer testing.allocator.free(src);
+
+    var bytes = Edit.applyEditFromJsonString(
+        testing.allocator,
+        src,
+        action_json,
+        .{ .layout = .preserve },
+    ) catch |err| {
+        switch (err) {
+            error.InvalidAction,
+            error.InvalidPath,
+            error.PathNotFound,
+            error.PathTypeMismatch,
+            error.EmptyTree,
+            error.UnknownOp,
+            error.ParseErrors,
+            error.NoSourceSpan,
+            error.OutOfMemory,
+            error.MultipleRoots,
+            error.InvalidEncoding,
+            error.InvalidExprForm,
+            error.InvalidFormHead,
+            error.UnknownDiscriminator,
+            error.DepthExceeded,
+            => return,
+        }
+    };
+    defer bytes.deinit();
+
+    // A splice keeps everything it did not touch, so the result and the
+    // source share a prefix and a suffix that together cover all but one
+    // contiguous run of each. Cheaper to state than to re-derive the edit,
+    // and it fails on exactly the bug this harness hunts: a span that
+    // walked off the node it named.
+    const common_prefix = std.mem.indexOfDiff(u8, src, bytes.data) orelse src.len;
+    var tail: usize = 0;
+    while (tail < src.len - common_prefix and tail < bytes.data.len - common_prefix and
+        src[src.len - 1 - tail] == bytes.data[bytes.data.len - 1 - tail]) : (tail += 1)
+    {}
+    try testing.expect(common_prefix + tail <= src.len);
+
+    const printed_src = try toSentinel(testing.allocator, bytes.data);
+    defer testing.allocator.free(printed_src);
+    var reparsed = Parser.parse(testing.allocator, printed_src) catch |err| {
+        try testing.expectEqual(error.OutOfMemory, err);
+        return;
+    };
+    defer reparsed.deinit();
+}
+
+test "fuzz Edit under .preserve: returns Bytes or known Edit.Error" {
+    try testing.fuzz({}, fuzzEditPreserve, .{
+        .corpus = seeds(&.{
+            // The success path for every op, over the shapes whose
+            // coordinates differ: compact and broken forms, a form with a
+            // head and a vector without one, a first child and a last.
+            "\x00(scene :a 1)",
+            "\x01(scene :a 1 :b 2)",
+            "\x02(scene :a 1 :b 2)",
+            "\x03(scene :a 1)",
+            "\x04(scene 1 2 3)",
+            "\x05(scene 1 2 3)",
+            "\x06(scene 1 2 3)",
+            "\x07(warp :source title)",
+            "\x08(a 1) (b 2)",
+            "\x04(scene)",
+            "\x05[]",
+            "\x06[1]",
+            "\x03[1 2 3]",
+            "\x00(scene\n  :a 1\n  ; a comment\n  :b 2)",
+            "\x04(scene\n  1\n  2)",
+            // The forest ops. Their coordinates are the run between two
+            // roots and the last root's own end, which no other op reads.
+            "\x0f(a) (b)",
+            "\x0f(a)\n\n(b)",
+            "\x0f(a)\n; bye",
+            "\x10(a)\n\n(b)",
+            "\x11(a)\n\n(b)",
+            "\x11; about a\n(a)\n(b)",
+            "\x0f(a)",
+            "\x11(a)",
+            "\x12(a) (b)",
+            // A document the parser only recovered -> ParseErrors, which
+            // is a precondition here and not merely a policy.
+            "\x00(scene :w 800\n(camera :fov 60",
         }, .{}),
     });
 }
@@ -1662,6 +1850,8 @@ fn fuzzEditToTree(_: void, smith: *Smith) anyerror!void {
             error.PathTypeMismatch,
             error.EmptyTree,
             error.UnknownOp,
+            error.ParseErrors,
+            error.NoSourceSpan,
             // Json.Error variants (Edit re-exports the union).
             error.OutOfMemory,
             error.MultipleRoots,
@@ -1687,18 +1877,42 @@ test "fuzz Edit.applyEditToTree: returns Tree or known Edit.Error" {
             "\x04(scene 1 2 3)",
             "\x05(scene 1 2 3)",
             "\x06(scene 1 2 3)",
-            "\x07(scene)",
-            "\x08(scene)",
+            "\x07(warp :source title)",
+            "\x08(a 1) (b 2)",
             "\x09(scene)",
             "\x0a(scene)",
             "\x0b(scene)",
+            "\x0c(scene)",
+            "\x0d(scene)",
+            "\x0e(scene)",
+            // The forest ops, over the shapes whose root list differs:
+            // one root, several, and a source with none.
+            "\x0f(a) (b)",
+            "\x10(a) (b)",
+            "\x11(a) (b)",
+            "\x12(a) (b)",
+            "\x0f(a)",
+            "\x11(a)",
+            // Removing the only root, and inserting into what is left.
+            "\x11 1",
+            "\x0f",
             // Edge: empty source → EmptyTree.
             "\x00",
-            // Edge: multi-root source.
+            // Edge: a recovered document → ParseErrors on the tree entry
+            // too, which is where a caller-supplied tree arrives.
+            "\x00(scene :w 800\n(camera :fov 60",
+            // Edge: multi-root source, without a `root` and with one.
             "\x00 1 2 3",
+            "\x08 1 2 3",
             // Vector at root.
             "\x03[1 2 3]",
             "\x06[1 2 3]",
+            // wrap over a scalar and a vector root — the target is cloned
+            // whatever its tag. This entry also pins the *tree* path's
+            // multi-tree rebuild: the template tree is freed inside the
+            // call while its cloned nodes stay live in the result's arena.
+            "\x072",
+            "\x07[1 2 3]",
         }, .{}),
     });
 }
@@ -2159,6 +2373,126 @@ test "fuzz Lockfile.parse: arbitrary bytes → Lockfile or known error" {
             "(lockfile :version 1 :plugins [(locked :name a",
             "(lockfile :version 1 :plugins [(locked :name a :version \"1.0.0\" :path \"./a.sjon\" :manifest-hash \"sha256-",
             "<<<<<<< HEAD\n(lockfile :version 1 :plugins [])\n=======\n(lockfile :version 1 :plugins [(locked :name a)])\n>>>>>>> other\n",
+        }, .{}),
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Harness 23: Edit.nodeTable — every row addresses the node it describes
+// ---------------------------------------------------------------------------
+
+fn fuzzNodeTable(_: void, smith: *Smith) anyerror!void {
+    var buf: [MAX_INPUT]u8 = undefined;
+    const len = smith.sliceWithHash(&buf, 0x0ADD_2E55);
+
+    const src = try toSentinel(testing.allocator, buf[0..len]);
+    defer testing.allocator.free(src);
+
+    var tree = Parser.parse(testing.allocator, src) catch |err| {
+        try testing.expectEqual(error.OutOfMemory, err);
+        return;
+    };
+    defer tree.deinit();
+
+    // The table is built on recoveries too — that refusal is
+    // `applyEditToTree`'s, deliberately not this one's — so there is no
+    // `hasErrors` gate here and every parser output reaches the walk.
+    const table = Edit.nodeTable(testing.allocator, &tree) catch |err| {
+        try testing.expectEqual(error.OutOfMemory, err);
+        return;
+    };
+    defer table.deinit();
+
+    var roots_seen: u32 = 0;
+    for (table.rows, 0..) |row, i| {
+        // Pre-order: a parent is always an earlier row, and it is under the
+        // same root. A root row has neither a parent nor a step, and the
+        // roots arrive in source order.
+        if (row.parent) |p| {
+            try testing.expect(p < i);
+            try testing.expectEqual(table.rows[p].root, row.root);
+            try testing.expect(row.seg != null);
+        } else {
+            try testing.expectEqual(roots_seen, row.root);
+            try testing.expectEqual(@as(?Edit.Step, null), row.seg);
+            roots_seen += 1;
+        }
+        try testing.expect(row.root < tree.root.len);
+        // §11.2 addresses a pair's value, never the pair itself.
+        try testing.expect(row.tag != .kvpair);
+        // Only a form has a head, and a row's own span contains it.
+        try testing.expectEqual(row.tag == .form, row.head_span != null);
+        if (row.head_span) |h| {
+            try testing.expect(h.start >= row.span.start);
+            try testing.expect(h.end <= row.span.end);
+        }
+
+        // The property: the address the row's `parent`/`seg` chain spells
+        // resolves, through the same walk an edit uses, back to this row.
+        const address = table.addressOfRow(testing.allocator, @intCast(i)) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            return;
+        };
+        defer address.deinit();
+        try testing.expectEqual(row.root, address.root);
+
+        const path = address.toJsonPath(testing.allocator) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            return;
+        };
+        defer testing.allocator.free(path);
+        const got = try Edit.resolvePath(&tree, tree.root[row.root], path);
+        try testing.expectEqual(row.node, got);
+    }
+    try testing.expectEqual(@as(usize, roots_seen), tree.root.len);
+
+    // The two coordinate lookups, over every byte boundary the document
+    // has plus one past the end: neither may panic, and what
+    // `nodeContaining` finds must actually contain the offset.
+    var off: u32 = 0;
+    while (off <= len) : (off += 1) {
+        if (Edit.nodeContaining(&tree, off)) |idx| {
+            const span = tree.spanOf(idx);
+            try testing.expect(span.start <= off and off < span.end);
+            try testing.expectEqual(idx, Edit.nodeAtSpan(&tree, span).?);
+        }
+    }
+}
+
+test "fuzz Edit.nodeTable: every row's address resolves to that row" {
+    try testing.fuzz({}, fuzzNodeTable, .{
+        .corpus = seeds(&.{
+            // The ask's fixture, and the revision mid-keystroke that the
+            // parity parser throws on: the table must answer for both.
+            "; The spike's fixture: one declaration over time, one plain literal,\n; and a title in more than ASCII.\n(use-plugin \"spike\")\n\n(param :name heat :value (* 0.4 (sin (* time 0.2))))\n(param :name pace :value 0.25)\n(title :text \"olá — ☀️ 日本\")\n",
+            "(use-plugin \"spike\")\n\n(param :name heat :value (* 0.4 (sin (* time 0.2))))\n(title :text \"olá — ☀️ 日本)\n",
+            // The empty document, and the empty container.
+            "",
+            "()",
+            "[]",
+            // Every step kind, mixed: keyword values, positionals counted
+            // with the kvpairs skipped, and vector elements.
+            "(f :a 1 x :b 2 y [10 :k 20])",
+            "(a (b (c (d :e (f 1)))))",
+            "[1 [2 3] [[4]]]",
+            // A bare keyword is a positional child, not a pair.
+            "(f :a)",
+            "(f :a :b 2)",
+            // Several roots, so `root` is never a silent default.
+            "(a 1) (b 2) (c 3)",
+            // Width and depth: 500 positionals, and 500 levels of nesting.
+            "(f" ++ (" 1" ** 500) ++ ")",
+            ("(" ** 500) ++ (")" ** 500),
+            // Recoveries: unclosed at every kind of boundary.
+            "(" ** 1000,
+            "(f :a",
+            "(f [1 2",
+            "(f :a \"unterminated",
+            ")))",
+            "]",
+            // Trivia only, and trivia around a root.
+            "; just a comment\n",
+            "#| block |# (f 1) ; trailing\n",
         }, .{}),
     });
 }

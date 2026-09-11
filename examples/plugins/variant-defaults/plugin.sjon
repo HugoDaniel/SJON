@@ -1,0 +1,74 @@
+; Variant-defaults fixture: `:default` on keys declared inside a
+; `(variant …)`, and a discriminant whose own default selects a variant.
+;
+; A discriminated form has common keys, always allowed, and variant
+; keys, allowed only while the discriminant holds a value that selects
+; their variant (LANGUAGE.md §6.2.2). A default on a variant key is
+; materialized on the same terms: once the variant is active, an
+; omitted key with a default gets its effective value like any common
+; key. The discriminant is itself a common key, so a discriminant
+; supplied by its own default (`:kind` below defaults to `point`)
+; selects a variant whose defaults are then materialized in turn. Bare
+; `(light)` reads, effectively, as `(light :kind point :intensity 1
+; :range 10)`.
+;
+; Three things follow, and the three example files are one each:
+;
+;   * `example.sjon` — what an omitted variant key is worth, read off
+;     `sjon effective`;
+;   * `example-missing-anchor.sjon` — a defaulted variant key is
+;     checked, not merely filled in: `spot`'s `:aim` defaults to the
+;     symbol `origin`, which has to name an `(anchor …)`, and the
+;     diagnostic lands on the synthetic `[light aim default]` path;
+;   * a key written under the wrong variant, or ahead of the
+;     discriminant, is still `unknown_key`, default or no default,
+;     because a default is a fallback for an omitted declared key and
+;     an unaccepted key is not declared at that position.
+;
+; Each key lives in exactly one variant (LANGUAGE.md §6.2.2, "a key
+; lives in exactly one place"), which is why `point` and `spot` spell
+; their reach as `:range` and `:reach` rather than sharing a name.
+;
+; Each document beside this file is validated with the manifest
+; prepended, which is also how the schema-export round-trip test reads
+; them:
+;
+;   cat examples/plugins/variant-defaults/plugin.sjon \
+;       examples/plugins/variant-defaults/example.sjon | sjon validate - --no-project
+;
+; and `sjon effective -` on the same pipe prints the effective view.
+
+(plugin :name lights :version "1.0.0"
+  :description "Reference plugin for defaults on variant keys."
+
+  (value-kind :name light-kind
+    :description "The three light shapes."
+    :underlying symbol
+    :members (member-set :values [point spot sun]))
+
+  (value-kind :name anchor-name
+    :description "Cross-ref to an `(anchor :name …)` the document declares."
+    :underlying symbol
+    :cross-ref (cross-ref :target anchor))
+
+  (form :name anchor
+    :description "A named point a spot light can aim at."
+    (key :name name :type symbol :optional false))
+
+  (form :name light
+    :description "One light. `:kind` selects the variant, and defaults to `point`."
+    :discriminant kind
+    (key :name kind :type light-kind :optional true :default point
+      :description "Omitted, this reads as `point` and selects that variant.")
+    (key :name intensity :type number :optional true :default 1)
+    (variant :when point
+      (key :name range :type number :optional true :default 10
+        :description "Falloff radius. Materialized whenever the light is a point light, written or defaulted."))
+    (variant :when spot
+      (key :name reach :type number :optional true :default 20)
+      (key :name angle :type number :optional true :default 45)
+      (key :name aim :type anchor-name :optional true :default origin
+        :description "Where the cone points. The default is a name, and a defaulted name is checked."))
+    (variant :when sun
+      (key :name direction :type vector :optional false
+        :description "No default: a sun with no direction is `missing_required_key`."))))

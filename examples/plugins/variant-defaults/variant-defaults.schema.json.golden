@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 1,
+  "x-sjon-export-warnings": [
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `anchor-name` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin": "lights",
+      "kind": "anchor-name"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `anchor-name` cross-ref annotation surfaces target-form=`anchor` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "plugin": "lights",
+      "kind": "anchor-name"
+    },
+    {
+      "code": "variants_emitted_via_if_then",
+      "severity": "info",
+      "message": "discriminated form `light` — variants emitted as allOf+if/then; source-order (variant keys must follow the discriminant) is not enforced by JSON Schema",
+      "plugin": "lights",
+      "form": "light"
+    }
+  ],
+  "$defs": {
+    "form.lights.anchor": {
+      "type": "object",
+      "description": "A named point a spot light can aim at.",
+      "properties": {
+        "$form": {
+          "const": "anchor"
+        },
+        "$ns": {
+          "const": "lights"
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "$form",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "form.lights.light": {
+      "type": "object",
+      "description": "One light. `:kind` selects the variant, and defaults to `point`.",
+      "properties": {
+        "$form": {
+          "const": "light"
+        },
+        "$ns": {
+          "const": "lights"
+        },
+        "intensity": {
+          "type": "number",
+          "default": 1
+        },
+        "kind": {
+          "description": "Omitted, this reads as `point` and selects that variant.",
+          "enum": [
+            {
+              "$sym": "point"
+            },
+            {
+              "$sym": "spot"
+            },
+            {
+              "$sym": "sun"
+            }
+          ],
+          "default": {
+            "$sym": "point"
+          }
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": {
+                  "$sym": "point"
+                }
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "range": {
+                "description": "Falloff radius. Materialized whenever the light is a point light, written or defaulted.",
+                "type": "number",
+                "default": 10
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": {
+                  "$sym": "spot"
+                }
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "aim": {
+                "description": "Where the cone points. The default is a name, and a defaulted name is checked.",
+                "type": "object",
+                "properties": {
+                  "$sym": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "$sym"
+                ],
+                "additionalProperties": false,
+                "x-sjon-cross-ref": {
+                  "target-form": "anchor",
+                  "name-key": "name",
+                  "acyclic": false
+                },
+                "default": {
+                  "$sym": "origin"
+                }
+              },
+              "angle": {
+                "type": "number",
+                "default": 45
+              },
+              "reach": {
+                "type": "number",
+                "default": 20
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": {
+                  "$sym": "sun"
+                }
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "direction": {
+                "description": "No default: a sun with no direction is `missing_required_key`.",
+                "type": "array",
+                "items": {}
+              }
+            },
+            "required": [
+              "direction"
+            ]
+          }
+        }
+      ],
+      "unevaluatedProperties": false,
+      "x-sjon-discriminant": {
+        "key": "kind",
+        "variants": [
+          {
+            "when": "point",
+            "keys": [
+              "range"
+            ]
+          },
+          {
+            "when": "spot",
+            "keys": [
+              "reach",
+              "angle",
+              "aim"
+            ]
+          },
+          {
+            "when": "sun",
+            "keys": [
+              "direction"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.lights.anchor"
+    },
+    {
+      "$ref": "#/$defs/form.lights.light"
+    }
+  ]
+}

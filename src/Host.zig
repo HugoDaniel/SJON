@@ -164,6 +164,22 @@ pub const HostOptions = struct {
     /// alongside any new cross-set ones. Zig-API-only: no wire/ABI/diagnostic
     /// surface for it.
     preloaded: ?*const PreloadedSchema = null,
+
+    /// The symbol a *held* position is spelled with: a value the author has
+    /// deliberately not filled in yet. Forwarded verbatim to
+    /// `Validator.Options.held_symbol` and
+    /// `MaterializedDefaults.Options.held_symbol`, which is where the
+    /// semantics are documented.
+    ///
+    /// This is the surface an editing host reaches for. `null` — every
+    /// existing caller — validates exactly as it did before the field
+    /// existed. Unlike `effective_axes` and `lowering_registry` this one
+    /// **does** cross the WASM envelope (`heldSymbol` in the
+    /// `sjon_host_validate_document` options JSON), because the host that
+    /// asked for it is a web editor: the assertion "this document is being
+    /// typed" belongs to whoever invoked the validator, and that caller is
+    /// not always Zig.
+    held_symbol: ?[]const u8 = null,
 };
 
 /// Phase tag on every host diagnostic. Lets consumers (CLI, LSP, audit
@@ -226,6 +242,68 @@ pub const HostDiagnostic = struct {
 pub const EvalResult = struct {
     forest_index: usize,
     value: Expr.Value,
+};
+
+/// One staging layer's output, as `HostResult.lowering_stages` carries it.
+///
+/// Lowering is staged: a hook that emits a form which is itself lowerable
+/// produces another generation, and the host runs a pass per generation
+/// until one lowers nothing (or `Lowering.MAX_LOWERING_STAGES` stops it).
+/// One `LoweringStage` is one of those passes, and `lowering_stages` holds
+/// them in layer order.
+///
+/// The three fields are the same triple a single-layer run returns —
+/// tree, provenance, defaults overlay — which is why the terminal layer
+/// can alias into `HostResult.lowered_tree` and friends unchanged.
+pub const LoweringStage = struct {
+    /// This layer's forms. Its roots are every form every hook in the
+    /// previous layer emitted; its spans chain back to the authored
+    /// bytes through every layer between.
+    ///
+    /// Owned by `HostResult`, which frees it in `deinit`. `lowered_tree`
+    /// aliases the last stage's copy and does not own it.
+    tree: Ast.Tree,
+
+    /// Hop provenance for **this** layer: `lowered_form_idx` indexes
+    /// `tree`, and `source_form_idx` indexes
+    /// `lowering_stages[i-1].tree` — or `HostResult.tree` at `i == 0`.
+    /// Arena-owned by `tree`.
+    provenance: Lowering.LoweringProvenance,
+
+    /// This layer's materialized-defaults overlay, keyed on `tree`'s node
+    /// indices. Pair the two in an `EffectiveView` to read an
+    /// intermediate form's effective values; the source overlay and every
+    /// other layer's are keyed in a different index space and never
+    /// match. Entries are arena-owned by `HostResult.arena`. A caller that
+    /// set `HostOptions.held_symbol` pairs them through
+    /// `EffectiveView.initHeld` with that same symbol — the overlay was
+    /// materialized with it, and the two halves have to agree on which
+    /// slots are filled.
+    materialized: MaterializedDefaults.MaterializedDefaults,
+};
+
+/// One hop of a lowering chain: the hook that ran, the form it read, and
+/// the form it wrote. Returned by `HostResult.provenanceChain`.
+///
+/// Each side names its own tree, and that is the whole point. A
+/// `Lowering.LoweringProvenance.Entry` carries two `Ast.NodeIndex` values
+/// whose index spaces are two *different* trees, so a consumer holding an
+/// entry without knowing which tree each half belongs to is one step away
+/// from reading a `u32` against the wrong tree — which lands on an
+/// unrelated node rather than failing. A `Hop` carries both trees so that
+/// step does not exist.
+pub const Hop = struct {
+    /// Id of the hook that ran this hop.
+    hook_id: []const u8,
+    /// The tree the hook wrote into: layer `i`'s.
+    lowered_tree: *const Ast.Tree,
+    /// The emitted form, indexing `lowered_tree`.
+    lowered_form_idx: Ast.NodeIndex,
+    /// The tree the hook read: layer `i-1`'s, or `HostResult.tree` when
+    /// this is the first hop.
+    source_tree: *const Ast.Tree,
+    /// The form the hook lowered, indexing `source_tree`.
+    source_form_idx: Ast.NodeIndex,
 };
 
 /// Owned result of a host validate-document call.
@@ -296,7 +374,29 @@ pub const HostResult = struct {
     /// walking `tree`. Expression defaults whose evaluation fails
     /// surface a `default_eval_failed` validation-phase diagnostic and
     /// contribute no entry.
+    ///
+    /// "Omitted" reads `HostOptions.held_symbol`: with it set, a key whose
+    /// author value is that symbol counts as omitted and gets an entry, so a
+    /// held position resolves to its declared default. Pair this overlay
+    /// with `tree` through `EffectiveView.initHeld` and the same symbol.
     materialized_defaults: MaterializedDefaults.MaterializedDefaults,
+
+    /// Every staging layer the document passed through, in layer order.
+    /// `lowering_stages[0]` is the pass over `tree`, `[1]` the pass over
+    /// `[0].tree`, and so on to the terminal layer at the end. Empty when
+    /// nothing lowered (and so whenever no registry was supplied); never
+    /// longer than `Lowering.MAX_LOWERING_STAGES`.
+    ///
+    /// **This slice is the sole owner of every lowered tree.** The three
+    /// fields below alias its last element and own nothing; `deinit`
+    /// frees the stages and only the stages. The slice header itself is
+    /// `arena`-allocated.
+    ///
+    /// Layer `i`'s provenance answers "which form in layer `i-1` produced
+    /// this, and which hook did it", so the hops that a single table
+    /// cannot span are recovered by reading the tables in sequence.
+    /// `provenanceChain` is that walk.
+    lowering_stages: []const LoweringStage = &.{},
 
     /// Lowered output tree, populated when `HostOptions.lowering_registry`
     /// was non-null at validate time. Roots are the forms emitted by
@@ -304,11 +404,28 @@ pub const HostResult = struct {
     /// diagnostics surfaced via re-validation trace back to the
     /// author bytes. `tree.root.len == 0` when no hook executed (or
     /// when no registry was supplied).
+    ///
+    /// **The terminal layer's tree, and an alias.** Lowering is staged: a
+    /// form that lowers into a form that lowers again runs one pass per
+    /// generation. This is the last generation's tree, the same one
+    /// `lowering_stages[lowering_stages.len - 1].tree` holds, and the
+    /// stage list owns it. Do not free it.
     lowered_tree: ?Ast.Tree = null,
 
     /// Form-level provenance side-table mapping each lowered root form
     /// to its source form + hook id. Entries are arena-owned in the
     /// lowered tree's arena. Empty when `lowered_tree == null`.
+    ///
+    /// **The terminal layer's table, which is one hop.** A document that
+    /// lowers through `n` layers produces `n` tables and this is the
+    /// last, so it names the hook of hop `n-1` and no earlier one.
+    /// `LoweringProvenance.Entry.source_form_idx` accordingly indexes the
+    /// layer `n-2` tree — `lowering_stages[n-2].tree`, and **not**
+    /// `tree`. Since a `NodeIndex` is a `u32`, reading it against `tree`
+    /// when `n >= 2` lands on an unrelated node rather than failing. At
+    /// `n == 1` it does index `tree` and is exactly right. To walk every
+    /// hop without having to know which case you are in, call
+    /// `provenanceChain`, which pairs each index with the tree it indexes.
     lowering_provenance: Lowering.LoweringProvenance = .{},
 
     /// Materialized-defaults overlay for `lowered_tree` — the terminal
@@ -320,13 +437,109 @@ pub const HostResult = struct {
     /// vector contents of their payloads) are arena-owned by this
     /// `arena`; the `form` indices point into `lowered_tree`, kept
     /// alive alongside. Empty `.{}` whenever `lowered_tree == null`.
+    ///
+    /// An alias of the terminal `LoweringStage.materialized`, like the
+    /// two fields above; an intermediate layer's overlay is that layer's
+    /// own stage entry.
     lowered_materialized_defaults: MaterializedDefaults.MaterializedDefaults = .{},
+
+    /// Every hop that produced `terminal_form_idx`, **source-first**: hop 0
+    /// is the authored form and the hook that first rewrote it, and the
+    /// last hop's `lowered_form_idx` is the node asked about. Source-first
+    /// because the consumer this answers is an explanation ("this was
+    /// authored here, then this hook made that, then that hook made
+    /// this"); a debugger wanting the other direction reverses the slice.
+    ///
+    /// `terminal_form_idx` indexes `lowered_tree`, the terminal stage's
+    /// tree. A form that stopped lowering at an *earlier* layer is a root
+    /// of that layer's stage tree and not of this one, so ask about it
+    /// through `provenanceChainFrom` with its layer.
+    ///
+    /// Returns an empty slice when nothing lowered, and for a form no hook
+    /// produced.
+    ///
+    /// No allocation: a chain is one hop per staging layer at most, and
+    /// `Lowering.MAX_LOWERING_STAGES` caps those, so the caller supplies
+    /// the buffer. O(layers × table length) — one `LoweringProvenance`
+    /// scan per layer, over a table that holds one entry per form that
+    /// layer emitted.
+    pub fn provenanceChain(
+        self: *const HostResult,
+        terminal_form_idx: Ast.NodeIndex,
+        buf: *[Lowering.MAX_LOWERING_STAGES]Hop,
+    ) []const Hop {
+        if (self.lowering_stages.len == 0) return &.{};
+        return self.provenanceChainFrom(self.lowering_stages.len - 1, terminal_form_idx, buf);
+    }
+
+    /// `provenanceChain` from a named layer rather than the terminal one.
+    ///
+    /// The layer matters because "terminal" is per form, not per document:
+    /// a hook that emits two forms where only one lowers again leaves the
+    /// other terminal in `lowering_stages[i].tree`, which the final
+    /// validated forest includes and `lowered_tree` does not. Such a form
+    /// is unreachable from `provenanceChain` and is exactly what this
+    /// takes: `form_idx` indexes `lowering_stages[stage_index].tree`.
+    ///
+    /// Same shape as `provenanceChain` otherwise — source-first, empty for
+    /// a form that layer did not emit, no allocation. Asserts
+    /// `stage_index` is a layer.
+    pub fn provenanceChainFrom(
+        self: *const HostResult,
+        stage_index: usize,
+        form_idx: Ast.NodeIndex,
+        buf: *[Lowering.MAX_LOWERING_STAGES]Hop,
+    ) []const Hop {
+        std.debug.assert(stage_index < self.lowering_stages.len);
+        std.debug.assert(self.lowering_stages.len <= Lowering.MAX_LOWERING_STAGES);
+
+        // The tables point lowered → source, so the walk runs terminal-
+        // first and the result is reversed at the end. Layer `i`'s table
+        // is the only one whose `lowered_form_idx` values index layer
+        // `i`'s tree, which is why the walk descends one layer per hop
+        // rather than searching.
+        var n: usize = 0;
+        var idx = form_idx;
+        var i = stage_index + 1;
+        while (i > 0) {
+            i -= 1;
+            const stage = &self.lowering_stages[i];
+            const entry = stage.provenance.lookup(idx) orelse break;
+            buf[n] = .{
+                .hook_id = entry.hook_id,
+                .lowered_tree = &stage.tree,
+                .lowered_form_idx = idx,
+                .source_tree = if (i == 0) &self.tree else &self.lowering_stages[i - 1].tree,
+                .source_form_idx = entry.source_form_idx,
+            };
+            n += 1;
+            idx = entry.source_form_idx;
+        }
+
+        // One hop per layer walked, never more; a chain that reaches layer
+        // 0 has walked every one of them.
+        std.debug.assert(n <= stage_index + 1);
+        std.mem.reverse(Hop, buf[0..n]);
+        return buf[0..n];
+    }
 
     pub fn deinit(self: *HostResult) void {
         for (self.plugin_results) |*pr| pr.deinit();
         self.tree.deinit();
-        if (self.lowered_tree) |*lt| lt.deinit();
+        // The stage list is the single owner of every lowered tree, so
+        // `lowered_tree` is deliberately not freed here: it aliases the
+        // last stage and freeing both would free the same arena twice.
+        // `Ast.Tree.deinit` releases the arena the copy names, which is
+        // the stage's, so the by-value copy the loop takes is the whole
+        // of the free.
+        for (self.lowering_stages) |stage| {
+            var stage_tree = stage.tree;
+            stage_tree.deinit();
+        }
         self.arena.deinit();
+        // Same poison as `LoadedProject` / `PreloadedSchema`: a use after
+        // free trips safety checks instead of reading a freed arena.
+        self.* = undefined;
     }
 
     pub fn hasErrors(self: *const HostResult) bool {
@@ -855,6 +1068,7 @@ fn runLoweringStages(
     eval_schema: Schema.Schema,
     source_overlay: *const MaterializedDefaults.MaterializedDefaults,
     effective_axes: Validator.EffectiveAxes,
+    held_symbol: ?[]const u8,
     lowering_env: *const Expr.Env,
     registry: *const Lowering.LoweringRegistry,
     diags: *std.ArrayList(HostDiagnostic),
@@ -945,12 +1159,13 @@ fn runLoweringStages(
         };
         stage_trees.appendAssumeCapacity(lt);
         const slot = stage_trees.items.len - 1;
-        const lmat = MaterializedDefaults.materializeDefaults(
+        const lmat = MaterializedDefaults.materializeDefaultsWithOptions(
             gpa,
             a,
             &stage_trees.items[slot].tree,
             stage_trees.items[slot].tree.root,
             schema,
+            .{ .held_symbol = held_symbol },
         ) catch |err| switch (err) {
             error.OutOfMemory => return Error.OutOfMemory,
         };
@@ -1137,12 +1352,13 @@ pub fn validateDocument(
     // Diagnostic-stream ordering: validator diagnostics are emitted into
     // `diags` first, then materializer diagnostics — this matches the
     // pre-reorder order so the conformance corpus stays byte-identical.
-    var mat_result = MaterializedDefaults.materializeDefaults(
+    var mat_result = MaterializedDefaults.materializeDefaultsWithOptions(
         gpa,
         a,
         &tree,
         part.data_forest,
         schema,
+        .{ .held_symbol = options.held_symbol },
     ) catch |err| switch (err) {
         error.OutOfMemory => return Error.OutOfMemory,
     };
@@ -1163,6 +1379,10 @@ pub fn validateDocument(
     // layer. Emitted nodes inherit their source form's span, so by
     // transitivity a terminal form's span points back at the original
     // surface bytes.
+    // Every layer, in layer order, returned in
+    // `HostResult.lowering_stages` — the single owner of the lowered
+    // trees. The three fields below alias its last element.
+    var lowering_stages: []const LoweringStage = &.{};
     var lowered_tree: ?Ast.Tree = null;
     var lowering_provenance: Lowering.LoweringProvenance = .{};
     // The terminal layer's defaults overlay, returned in
@@ -1170,10 +1390,14 @@ pub fn validateDocument(
     // host arena (see the transfer below); no extra cleanup. Stays `.{}`
     // when nothing lowered.
     var lowered_materialized: MaterializedDefaults.MaterializedDefaults = .{};
-    // The terminal layer's tree is returned in `HostResult.lowered_tree`
-    // (its arena freed by `HostResult.deinit`). Guard it so an error after
-    // it is transferred frees it rather than leaking.
-    errdefer if (lowered_tree) |*t| t.deinit();
+    // Guard the transferred stages so an error after the transfer frees
+    // them rather than leaking. Aimed at `lowering_stages` and not at
+    // `lowered_tree`, which by then aliases one of them: freeing the
+    // alias too would free that arena twice.
+    errdefer for (lowering_stages) |stage| {
+        var stage_tree = stage.tree;
+        stage_tree.deinit();
+    };
 
     // Per-layer lowered trees + overlays, kept alive through the final
     // forest pass. Capacity is reserved to `MAX_LOWERING_STAGES` so
@@ -1210,6 +1434,7 @@ pub fn validateDocument(
             eval_schema,
             &mat_result.materialized,
             options.effective_axes,
+            options.held_symbol,
             options.lowering_env,
             registry,
             &diags,
@@ -1257,6 +1482,7 @@ pub fn validateDocument(
             .axes = options.effective_axes,
             .share_scope = true,
             .extractions = &extraction.map,
+            .held_symbol = options.held_symbol,
         }) catch |err| switch (err) {
             error.OutOfMemory => return Error.OutOfMemory,
         };
@@ -1267,21 +1493,37 @@ pub fn validateDocument(
             }
         }
 
-        // The terminal (last) layer's tree is returned as `lowered_tree`
-        // (its arena transfers to HostResult); the intermediate layer
-        // trees are freed now. `clearRetainingCapacity` empties the list so
-        // the `defer`/`errdefer` above don't touch the transferred tree.
-        const last = n - 1;
-        lowered_tree = stage_trees.items[last].tree;
-        lowering_provenance = stage_trees.items[last].provenance;
-        // The terminal layer's overlay entries are arena-owned (host
-        // arena `a`); `stage_mats`'s deinit frees only its gpa-owned
-        // diagnostics, so this slice header stays valid through the
-        // return (the arena moves into `HostResult`, and the entries'
-        // `form` indices point into the transferred `lowered_tree`).
-        lowered_materialized = stage_mats.items[last].materialized;
-        for (stage_trees.items[0..last]) |*lt| lt.deinit();
+        // Every layer transfers into `HostResult.lowering_stages`, which
+        // owns the trees from here on. Nothing is retained that was not
+        // already live: each stage tree was alive through the forest pass
+        // just above and used to be freed on the next statement, so this
+        // moves a `free` rather than adding an allocation. The overlay
+        // entries are arena-owned (host arena `a`) and `stage_mats`'s
+        // deinit frees only its gpa-owned diagnostics, so these slice
+        // headers stay valid through the return (the arena moves into
+        // `HostResult`, and each entry's `form` index points into its own
+        // stage's tree, kept alive alongside).
+        //
+        // `clearRetainingCapacity` empties the list so the `defer` /
+        // `errdefer` above don't touch the transferred trees; from here
+        // the `errdefer` over `lowering_stages` guards them instead.
+        const stages = try a.alloc(LoweringStage, n);
+        for (0..n) |i| {
+            stages[i] = .{
+                .tree = stage_trees.items[i].tree,
+                .provenance = stage_trees.items[i].provenance,
+                .materialized = stage_mats.items[i].materialized,
+            };
+        }
         stage_trees.clearRetainingCapacity();
+        lowering_stages = stages;
+
+        // The three single-layer fields keep their exact meaning and
+        // become non-owning aliases of the terminal stage.
+        const last = n - 1;
+        lowered_tree = stages[last].tree;
+        lowering_provenance = stages[last].provenance;
+        lowered_materialized = stages[last].materialized;
     } else {
         // No lowering: single-tree forest, byte-equivalent to the prior
         // source-tree pass.
@@ -1293,6 +1535,7 @@ pub fn validateDocument(
             .overlay = &mat_result.materialized,
             .axes = options.effective_axes,
             .extractions = &extraction.map,
+            .held_symbol = options.held_symbol,
         }) catch |err| switch (err) {
             error.OutOfMemory => return Error.OutOfMemory,
         };
@@ -1331,7 +1574,7 @@ pub fn validateDocument(
     // (e.g. computed-default evaluation per the default-materialization
     // overlay).
     var eval_results: std.ArrayList(EvalResult) = .empty;
-    try runEvalPass(a, gpa, &tree, part.data_forest, eval_schema, &diags, &eval_results, runtime_opt);
+    try runEvalPass(gpa, a, &tree, part.data_forest, eval_schema, &diags, &eval_results, runtime_opt);
 
     return .{
         .arena = arena,
@@ -1346,6 +1589,7 @@ pub fn validateDocument(
         .diagnostics = try diags.toOwnedSlice(a),
         .evaluated_results = try eval_results.toOwnedSlice(a),
         .materialized_defaults = mat_result.materialized,
+        .lowering_stages = lowering_stages,
         .lowered_tree = lowered_tree,
         .lowering_provenance = lowering_provenance,
         .lowered_materialized_defaults = lowered_materialized,
@@ -2122,8 +2366,8 @@ fn hasErrorWithin(diags: []const HostDiagnostic, extent: Ast.Span) bool {
 /// appended to `eval_results` so the host can surface them to callers
 /// (e.g. conformance value assertions on plugin-exec codec round-trips).
 fn runEvalPass(
-    a: Allocator,
     gpa: Allocator,
+    a: Allocator,
     tree: *const Ast.Tree,
     data_forest: []const Ast.NodeIndex,
     schema: Schema.Schema,
@@ -2212,18 +2456,13 @@ fn runEvalPass(
             }
             continue;
         };
-        // Deep-copy into the host arena *before* releasing the eval
-        // arena — `result.deinit()` invalidates `result.value`'s
-        // string/keyword/vector/form storage.
-        const cloned = Expr.deepCopyValue(a, result.value) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            // `result.value` is a Result value already capped to
-            // MAX_VALUE_DEPTH by eval's final deepCopyValue, so copying it
-            // again cannot exceed the ceiling.
-            error.DepthExceeded => unreachable,
-        };
+        // The eval arena is released at the end of this iteration on
+        // every path — an OOM in the copy or the append below used to
+        // leak it. Deep-copy into the host arena *first*: `result.deinit()`
+        // invalidates `result.value`'s string/keyword/vector/form storage.
+        defer result.deinit();
+        const cloned = try Expr.deepCopyValueAssumeBounded(a, result.value);
         try eval_results.append(a, .{ .forest_index = forest_idx, .value = cloned });
-        result.deinit();
     }
 }
 

@@ -10,6 +10,8 @@
 //!   * `LoweringRegistry` — id → hook map plumbed through `Host.Options`.
 //!   * `LoweringInput` — read-side view over the source form (via
 //!     `EffectiveView`) plus the schema and the form/lowering specs.
+//!   * `LayerRefs` — one staging layer's cross-reference index, built at
+//!     most once and only when a hook asks (`LoweringInput.resolveRef`).
 //!   * `LoweringOutput` — append-only emitted-form sink, bounded by
 //!     `Plugin.MAX_LOWERED_*` constants.
 //!   * `runLoweringPass` — one staging *layer*: a worklist walk (no host-
@@ -32,6 +34,18 @@
 //! the hook must be allocated from that arena. The arena outlives the
 //! lowering pass, which itself outlives downstream consumers via
 //! `HostResult.arena`.
+//!
+//! What a hook may read: its own form, always, and the form a
+//! cross-reference key on that form names, through `resolveRef`. The
+//! second is bounded by the layer: resolution searches this pass's input
+//! forest, so a name a later layer will emit answers null and the
+//! whole-document forest pass resolves it there. Everything the resolution
+//! knows (lexical scope, a shared multi-target bucket, provider-backed
+//! names, slot-local `:name`s) comes from the validator's own index, which
+//! is why a hand-rolled scan over `input.view.tree.root` is not a supported
+//! substitute: it answers the flat single-target case correctly and the
+//! other four silently wrong. `docs/plugin-model-v1.md`, "Reading a form
+//! the hook does not own", is the long version.
 //!
 //! Naming: hook ids by convention follow `<vendor>/<surface>-v<n>`
 //! (e.g. `pngine/pass-v1`). The v1 substrate does not parse the id —
@@ -75,6 +89,17 @@ pub const HookFn = *const fn (
 pub const LoweringHook = struct {
     id: []const u8,
     lower: HookFn,
+    /// Host state the hook reads back through `LoweringInput.ctx`. The
+    /// same shape as `Resolver.ctx` and `ProviderExtraction.Invoker.ctx`:
+    /// opaque on purpose, the pass copies the pointer and never reads
+    /// through it. A stateless hook leaves it null.
+    ///
+    /// Borrowed, so it must outlive every pass the registry is handed to
+    /// (for a host, the `validateDocument` call). A registry built per
+    /// call over stack-allocated state is the intended shape: it keeps a
+    /// hook's state off a module-level global, where a second concurrent
+    /// pass would share it.
+    ctx: ?*anyopaque = null,
 };
 
 /// Errors surfaced by `LoweringRegistry.register`. `DuplicateHook`
@@ -93,9 +118,10 @@ pub const Error = LoweringError || RegisterError;
 /// `null` there means "no lowering pass runs at all" — the byte-for-byte
 /// no-op default that keeps existing conformance fixtures unaffected.
 ///
-/// Memory: the registry copies neither the `id` slice nor the function
-/// pointer. Hosts construct hooks with string-literal ids (or arena-
-/// owned ids whose lifetime exceeds the registry's).
+/// Memory: the registry stores each `LoweringHook` as given and copies
+/// none of `id`, `lower`, or `ctx`. Hosts construct hooks with
+/// string-literal ids (or arena-owned ids whose lifetime exceeds the
+/// registry's) and a `ctx` that outlives every pass.
 pub const LoweringRegistry = struct {
     hooks: std.StringHashMapUnmanaged(LoweringHook) = .empty,
 
@@ -120,6 +146,67 @@ pub const LoweringRegistry = struct {
     }
 };
 
+/// One staging layer's cross-reference index, built at most once and only
+/// when a hook asks for it.
+///
+/// `runLoweringPassBudgeted` constructs one per layer and hands every
+/// `LoweringInput` the same pointer, so the hooks in a layer share one
+/// index and a document's build count is bounded by its layer count.
+///
+/// Nothing is built until the first ask. The build is a full forest DFS,
+/// and every lowering host that exists today resolves nothing, so a pass
+/// whose hooks never ask must cost nothing — a claim that is invisible
+/// from outside and therefore gets a seam: `builds` counts the builds and
+/// surfaces on `PassResult.ref_index_builds`, where a test can read it.
+///
+/// **Bound.** The index covers this layer's *input* forest and nothing
+/// else. At layer 0 that is the author's data forest; at layer N > 0 it is
+/// the forms layer N-1 emitted. A name that a later layer will define is
+/// not in here, and that is not an error — the final-document forest pass
+/// owns cross-reference reporting and resolves it there.
+pub const LayerRefs = struct {
+    /// The layer's input forest as a tree view: the same nodes, rooted at
+    /// the roots this pass was given. Deliberately not the whole
+    /// `tree.root` — a layer resolves against what it was asked to lower,
+    /// which at layer 0 excludes the manifest partition.
+    forest: Ast.Tree,
+    schema: Schema.Schema,
+    /// Overlay + axes, so a defaulted `:name` indexes exactly as it does
+    /// in the document pass (axis A).
+    options: Validator.Options,
+    built: ?Validator.LookupIndex = null,
+    builds: usize = 0,
+
+    /// The layer's index, building it on the first call. `arena` is the
+    /// pass arena, which outlives the layer; the caller is
+    /// `LoweringInput.layerIndex`, which passes the same `arena` every
+    /// hook already receives.
+    ///
+    /// The build's transient state lands on the pass arena too, not on a
+    /// GPA freed at the build's end: `buildCrossRefIndexForLookup`
+    /// allocates a throw-away `Result` arena and diagnostic list per tree
+    /// on its second allocator, and those bytes are now held until the
+    /// pass ends. Bounded, because a layer builds at most once
+    /// (`PassResult.ref_index_builds` pins it) and a document has at most
+    /// `MAX_LOWERING_STAGES` layers. The alternative — threading a GPA
+    /// down to here — has nowhere to come from: a hook receives only
+    /// `arena`, so the GPA would have to be stored on `LoweringInput`
+    /// instead, which moves the stored allocator rather than removing it.
+    fn ensure(self: *LayerRefs, arena: Allocator) Allocator.Error!*const Validator.LookupIndex {
+        if (self.built == null) {
+            self.built = try Validator.buildCrossRefIndexForLookup(
+                arena,
+                arena,
+                self.schema,
+                (&self.forest)[0..1],
+                self.options,
+            );
+            self.builds += 1;
+        }
+        return &self.built.?;
+    }
+};
+
 /// Read-side view passed to a hook. The hook reads author + default
 /// values via `view.getEffectiveValue(form_idx, "key")` and consults
 /// `schema` / `form_spec` for type metadata.
@@ -141,6 +228,11 @@ pub const LoweringInput = struct {
     schema: *const Schema.Schema,
     form_spec: *const Plugin.FormSpec,
     lowering_spec: *const Plugin.LoweringSpec,
+    /// The registered hook's own `LoweringHook.ctx`, verbatim: null when
+    /// the host set none. A hook unwraps it the way every opaque context
+    /// here is unwrapped, `@ptrCast(@alignCast(input.ctx.?))`. No default,
+    /// so a second constructor cannot forget to hand it over.
+    ctx: ?*anyopaque,
     /// Host-supplied evaluation environment. `numberEval` resolves any
     /// free variable in an author expression against it (e.g. a
     /// `workgroup-size` constant the embedder injects). Defaults empty for
@@ -148,6 +240,184 @@ pub const LoweringInput = struct {
     /// expression with a free variable then fails the hook rather than
     /// resolving — the env is the only thing that makes it load-bearing.
     env: *const Expr.Env,
+    /// This layer's shared, lazily built reference index. Held as a
+    /// mutable pointer through a `*const LoweringInput` on purpose: the
+    /// build is a side effect of asking, and the hook that asks first
+    /// pays for the hooks that ask after it.
+    refs: *LayerRefs,
+
+    /// This layer's cross-reference index, built on demand.
+    ///
+    /// Private: a hook resolves through `resolveRef`, which cannot look in
+    /// the wrong bucket. Handing out the raw index would hand out the four
+    /// rules that reader exists to apply.
+    fn layerIndex(self: *const LoweringInput) Allocator.Error!*const Validator.LookupIndex {
+        return self.refs.ensure(self.arena);
+    }
+
+    /// Resolve a cross-reference key on THIS form to the form it names, and
+    /// return that form's node index — the same index
+    /// `view.getEffectiveValue` takes, so a hook reads its neighbour
+    /// exactly as it reads itself:
+    ///
+    /// ```zig
+    /// const producer = (try input.resolveRef("from")) orelse
+    ///     return out.fail(arena, "`:from` names nothing", .{});
+    /// const count = input.view.getEffectiveValue(producer, "count");
+    /// ```
+    ///
+    /// Scoped like the five readers above: `key` is a key on
+    /// `self.form_idx`, not a free name. The key's declared value kind
+    /// supplies the cross-ref target set, so a hook cannot look in the
+    /// wrong bucket, and a multi-target `(cross-ref :target [a b])` works
+    /// without the hook knowing there is more than one. The four rules a
+    /// hand-rolled scan over `self.view.tree.root` gets wrong — scope, the
+    /// shared multi-target bucket, provider-backed names that are not in
+    /// the tree at all, and slot-local `:name`s that are scoped to their
+    /// slot — are the validator's here, because this is the validator's
+    /// index.
+    ///
+    /// **Bound.** Resolution searches this staging layer's input forest and
+    /// nothing else. At layer 0 that is the author's whole data forest,
+    /// which is what a flat sibling vocabulary needs. At layer N > 0 it is
+    /// the forms layer N-1 emitted. A name that a *later* layer will define
+    /// returns null here, and that is not an error — the final-document
+    /// forest pass owns cross-reference reporting and will resolve it
+    /// there. A hook that wants to fail on a miss has `out.fail` /
+    /// `out.failAt`; the lowering pass must not decide that an unresolved
+    /// name is wrong, because it does not have the document.
+    ///
+    /// Returns null when the key is absent, when its value is not
+    /// symbol-shaped, or when the name resolves nowhere in this layer. The
+    /// middle one is why this does not go through `symbol`: a
+    /// `(union-shape …)` slot spelled "a number or a name" legitimately
+    /// holds a number, and a hook must not have to pre-check the tag
+    /// before it may ask. `error.HookFailed` is reserved for the one thing
+    /// no document decides — the key's *declared* type carries no
+    /// cross-reference at all, including a key an `:open` form accepted
+    /// that nothing declares. That is the same class of hook bug as
+    /// calling `symbol` on a number key.
+    ///
+    /// Cost: the first call in a layer builds the index (a forest DFS);
+    /// every later call in that layer is two hash lookups. A key that is
+    /// absent, or typed without a cross-ref, is answered from the schema
+    /// and builds nothing.
+    pub fn resolveRef(self: *const LoweringInput, key: []const u8) LoweringError!?Ast.NodeIndex {
+        // Declared shape first, and from the spec rather than the value:
+        // this is the half that decides *which* bucket, and getting it
+        // from what the author happened to write is the guess the reader
+        // exists to remove.
+        const cr = self.crossRefOfKey(key) orelse return error.HookFailed;
+
+        // Then the name. An absent key is a miss, not a failure — a hook
+        // may resolve an optional reference — and so is a value that is
+        // not symbol-shaped.
+        const name = self.refNameOf(key) orelse return null;
+
+        const refs = try self.layerIndex();
+
+        // The bucket a multi-target cross-ref shares, or the sole target's
+        // canonical `<plugin>/<form>`. Null when a target does not resolve;
+        // the schema-aggregate phase already reported that, so this is a
+        // miss rather than a second complaint.
+        const bucket = (try self.schema.crossRefBucketKey(self.arena, cr)) orelse return null;
+        defer self.arena.free(bucket);
+
+        const scope: Validator.ScopeId = if (cr.scope_form) |sf| sub: {
+            const scope_canonical = (try self.schema.canonicalFormName(self.arena, sf)) orelse return null;
+            defer self.arena.free(scope_canonical);
+            // The chain the index recorded for this form while walking to
+            // it. A reference outside its scope resolves nowhere, which is
+            // what the validator says about it too.
+            const chain = refs.scopeChainAt(0, self.form_idx);
+            break :sub Validator.findNearestScope(chain, scope_canonical) orelse return null;
+        } else .tree(0);
+
+        const site = refs.index.lookup(scope, bucket, name) orelse return null;
+        // `Site.node_idx` is the *form* index at registration, not the
+        // `:name` value, so this needs no second lookup to be usable.
+        return site.node_idx;
+    }
+
+    /// The symbol text in `key`'s slot, or null when the key is absent or
+    /// its value is not symbol-shaped. Borrowed from the tree or the
+    /// overlay — it is only ever a lookup key, so nothing is duped.
+    ///
+    /// The author arm accepts `symbol` and `keyword` for the reason
+    /// `symbol` does (`Expr.Value` has no `.symbol`, so symbol defaults
+    /// land as keywords); the default arm accepts `keyword` and `string`,
+    /// which is the pair axis B indexes a defaulted `:name` from.
+    fn refNameOf(self: *const LoweringInput, key: []const u8) ?[]const u8 {
+        const ev = self.view.getEffectiveValue(self.form_idx, key) orelse return null;
+        return switch (ev) {
+            .author => |idx| switch (self.view.tree.tagOf(idx)) {
+                .symbol => self.view.tree.symbolText(idx),
+                .keyword => self.view.tree.keywordText(idx),
+                else => null,
+            },
+            .default => |entry| switch (entry.value) {
+                .keyword => |k| k,
+                .string => |str| str,
+                else => null,
+            },
+        };
+    }
+
+    /// The cross-reference declared by `key`'s type, or null when the key
+    /// is undeclared or its type carries none.
+    ///
+    /// One union hop, and only one: a `(union-shape …)` alternative may be
+    /// the cross-ref kind — which is what `(scalar-or-ref-shape :ref …)`
+    /// desugars to — so a slot spelled "a number or a name" resolves the
+    /// name. Two alternatives carrying cross-refs is null rather than a
+    /// pick: choosing between them from a symbol alone is the guess this
+    /// reader replaces.
+    fn crossRefOfKey(self: *const LoweringInput, key: []const u8) ?Plugin.ValueKind.CrossRef {
+        const spec = self.keySpecFor(key) orelse return null;
+        const kind = self.kindOfType(spec.value_type) orelse return null;
+        if (kind.cross_ref) |cr| return cr;
+
+        const u = kind.union_of orelse return null;
+        var found: ?Plugin.ValueKind.CrossRef = null;
+        for (u.alternatives) |alt| {
+            const alt_kind = self.kindOfType(.{ .named = alt }) orelse continue;
+            const alt_cr = alt_kind.cross_ref orelse continue;
+            if (found != null) return null;
+            found = alt_cr;
+        }
+        return found;
+    }
+
+    /// The value kind a declared type names, or null for a primitive /
+    /// structural type or an unresolvable name.
+    fn kindOfType(self: *const LoweringInput, vt: Plugin.ValueType) ?*const Plugin.ValueKind {
+        const named = switch (vt) {
+            .named => |n| n,
+            else => return null,
+        };
+        return switch (self.schema.lookupValueKind(named.name, named.namespace)) {
+            .found => |v| v,
+            else => null,
+        };
+    }
+
+    /// The `KeySpec` declaring `key` on this form: a base key, or a key of
+    /// any variant. Variant *activity* is not consulted — a key is
+    /// declared in exactly one variant of a form (the loader rejects a
+    /// name in two), so the type this finds is the type that key has
+    /// wherever it is legal, and a hook reading a key from an inactive
+    /// variant has already been told so by the validator.
+    fn keySpecFor(self: *const LoweringInput, key: []const u8) ?*const Plugin.KeySpec {
+        for (self.form_spec.keys) |*k| {
+            if (std.mem.eql(u8, k.name, key)) return k;
+        }
+        if (self.form_spec.variants) |vs| for (vs) |*v| {
+            for (v.keys) |*k| {
+                if (std.mem.eql(u8, k.name, key)) return k;
+            }
+        };
+        return null;
+    }
 
     /// Read a symbol-typed key. Accepts author `Tag.symbol`, author
     /// `Tag.keyword`, and defaulted `Expr.Value.keyword` (the
@@ -399,6 +669,28 @@ pub const EmittedForm = struct {
     /// level; preserved on nested children so the lowered-tree
     /// builder can stamp every emitted node with the same source span.
     source_form_idx: Ast.NodeIndex,
+    /// Span to stamp on this form and its subtree, overriding the source
+    /// form's. Null (the default) keeps the source form's span, which is
+    /// right for genuine sugar: the container authored those bytes and is
+    /// the honest place to point at.
+    ///
+    /// A *container* hook that lifts a child out of its own subtree wants
+    /// the other answer. `(space :name poster (text :name letters …))`
+    /// lowers to a flat `text` the author wrote on its own line, and
+    /// without this every diagnostic on it points at the whole enclosing
+    /// block — strictly worse than the flat spelling the nesting replaces.
+    /// Set it to the lifted child's span and the diagnostics land on the
+    /// bytes the author typed.
+    ///
+    /// Orthogonal to provenance: `source_form_idx` still names the
+    /// container, because the container's hook did author the form. The two
+    /// questions — "who emitted this" and "which bytes should a reader be
+    /// shown" — get one field each.
+    ///
+    /// A nested emitted form may narrow further: the override an
+    /// `EmittedForm` sets applies to its whole subtree until a descendant
+    /// sets its own.
+    source_span: ?Ast.Span = null,
 };
 
 pub const EmittedKvpair = struct {
@@ -430,12 +722,32 @@ pub const EmittedValue = union(enum) {
 /// node inside a lowered form inherits the source span anyway, so
 /// downstream consumers can answer "what authored this?" with one
 /// lookup per lowered form.
+///
+/// **One table is one layer, and one layer is one hop.** A table
+/// describes exactly the pass that produced it: `lowered_form_idx`
+/// indexes the tree this table came back with, `source_form_idx` indexes
+/// the tree that pass ran *over*. Staging runs one pass per lowerable
+/// generation (`Host.runLoweringStages`), so a document that lowers `n`
+/// times produces `n` tables and no single one of them reaches past its
+/// own hop. Chaining them is the caller's, not the table's, and
+/// `Host.HostResult.provenanceChain` is the caller that does it.
 pub const LoweringProvenance = struct {
     entries: []const Entry = &.{},
 
     pub const Entry = struct {
+        /// The emitted root form, indexing the tree this table came back
+        /// with.
         lowered_form_idx: Ast.NodeIndex,
+        /// The form the hook lowered, indexing the tree the pass ran
+        /// over — the source tree at layer 0, the previous layer's tree
+        /// at every layer after it. This is an `Ast.NodeIndex`, a `u32`
+        /// and not a pointer, so reading it against some *other* tree
+        /// does not fail: it lands on an unrelated node of that tree, or
+        /// on nothing at all, with no error either way. Pair it with the
+        /// tree its own layer ran over and nothing else.
         source_form_idx: Ast.NodeIndex,
+        /// Id of the hook that ran, e.g. `"test/identity-v1"`. Arena-owned
+        /// alongside the table.
         hook_id: []const u8,
     };
 
@@ -473,6 +785,13 @@ pub const Invocation = struct {
 pub const PassResult = struct {
     invocations: []const Invocation,
     diagnostics: []const Ast.Diagnostic,
+    /// How many times this layer built its cross-reference index — see
+    /// `LayerRefs`. Zero for every pass whose hooks resolved nothing,
+    /// one for every pass where at least one did, and never more: the
+    /// index is shared across the layer's hooks. It is here because that
+    /// sentence is otherwise unobservable, and an unobservable promise is
+    /// one a refactor can break in silence.
+    ref_index_builds: usize = 0,
 
     pub fn deinit(self: *PassResult, gpa: Allocator) void {
         Ast.Diagnostic.freeOwnedSlice(gpa, self.diagnostics);
@@ -582,7 +901,27 @@ pub fn runLoweringPassBudgeted(
         diags.deinit(gpa);
     }
 
+    // Held-unaware on purpose. `Host.HostOptions.held_symbol` reaches the
+    // overlay and the validator; it stops here, so a hook reads a held
+    // kvpair as the author's `_` rather than as the key's declared default.
+    // Lowering runs Zig function pointers and no host executes a hook (see
+    // CLAUDE.md), so the editing host that asked for held positions cannot
+    // reach this pass — threading it through `runLoweringPass*` would be
+    // three more parameters for a caller that does not exist. Thread it when
+    // one does.
     const view = EffectiveView.init(tree, materialized);
+
+    // The layer's reference index. Constructed unconditionally (a plain
+    // stack value that allocates nothing) and *built* only if a hook asks
+    // — see `LayerRefs`. Its forest view is the roots this pass was
+    // given, not the whole tree.
+    var forest_view: Ast.Tree = tree.*;
+    forest_view.root = data_forest;
+    var refs: LayerRefs = .{
+        .forest = forest_view,
+        .schema = schema,
+        .options = .{ .overlay = materialized, .axes = axes },
+    };
 
     // Iterative pre-order walk over the forest — replaces host recursion
     // with an explicit worklist (frame-stack discipline, matching the
@@ -629,7 +968,7 @@ pub fn runLoweringPassBudgeted(
                 spec = form_spec;
                 if (form_spec.lowering) |*low| {
                     parent_lowerable = true;
-                    try lowerOneForm(gpa, arena, tree, idx, hdr, form_spec, low, schema, view, registry, axes, env, &invocations, &diags, emitted, budget);
+                    try lowerOneForm(gpa, arena, tree, idx, hdr, form_spec, low, schema, view, registry, axes, env, &refs, &invocations, &diags, emitted, budget);
                 }
             }
         }
@@ -658,6 +997,7 @@ pub fn runLoweringPassBudgeted(
         // would emit siblings last-to-first.
         if (parent_lowerable) {
             for (hdr.children, 0..) |child, ci| {
+                if (slotIsOpaque(tree, child, matched.items[ci])) continue;
                 if (tree.childForm(child)) |cf| try checkNestedLowerable(gpa, tree, cf, childLocalRegistry(spec, tree, child, matched.items[ci]), schema, &diags);
             }
         }
@@ -670,6 +1010,7 @@ pub fn runLoweringPassBudgeted(
         while (c > 0) {
             c -= 1;
             const child = hdr.children[c];
+            if (slotIsOpaque(tree, child, matched.items[c])) continue;
             if (tree.childForm(child)) |cf| {
                 try work.append(gpa, .{ .idx = cf, .local_registry = childLocalRegistry(spec, tree, child, matched.items[c]) });
             }
@@ -679,6 +1020,7 @@ pub fn runLoweringPassBudgeted(
     return .{
         .invocations = try invocations.toOwnedSlice(arena),
         .diagnostics = try diags.toOwnedSlice(gpa),
+        .ref_index_builds = refs.builds,
     };
 }
 
@@ -692,6 +1034,25 @@ const WorkFrame = struct {
     idx: Ast.NodeIndex,
     local_registry: ?[]const Plugin.FormSpec = null,
 };
+
+/// True when the key this kvpair was accepted under declared the slot
+/// `walk_opaque`. The validator does not descend there, so neither does
+/// this pass: a hook rewriting a subtree the surrounding schema declined
+/// to read would turn the validator's deliberate blind spot into an edit,
+/// and the lowered forms it emitted would then be validated against the
+/// very schema that said it was not looking.
+///
+/// A positional child carries no `KeySpec`, so it carries no opt-in
+/// either; an unaccepted key says nothing, the same as everywhere else.
+fn slotIsOpaque(
+    tree: *const Ast.Tree,
+    child: Ast.NodeIndex,
+    matched_key: ?*const Plugin.KeySpec,
+) bool {
+    if (tree.tagOf(child) != .kvpair) return false;
+    const key = matched_key orelse return false;
+    return key.walk_opaque;
+}
 
 /// The local body a form head resolves to under `registry`, or null: a bare
 /// head with a matching local, and nothing else. A qualified head bypasses
@@ -850,6 +1211,7 @@ fn lowerOneForm(
     registry: *const LoweringRegistry,
     axes: Validator.EffectiveAxes,
     env: *const Expr.Env,
+    refs: *LayerRefs,
     invocations: *std.ArrayList(Invocation),
     diags: *std.ArrayList(Ast.Diagnostic),
     emitted: *usize,
@@ -870,24 +1232,38 @@ fn lowerOneForm(
     // suppresses the hook so a malformed sugar form doesn't reach a
     // contract that assumes well-formed input.
     //
-    // Cross-ref diagnostics are filtered out of the gate decision —
-    // the single-form sub-tree's cross-ref index sees only this form,
-    // so a `:ref` to a sibling target elsewhere in the document
-    // misses here even though it resolves cleanly in the final-document
-    // forest pass. Treating that miss as a gate failure would silently
-    // skip the hook for any sugar form that points outward. Filtered
-    // diagnostics are still discarded — surface diagnostics never reach
-    // the host stream from this pass (the final-forest pass surfaces
-    // them when the sugar form lands in `unlowered_roots`).
+    // `defer_cross_refs` is what makes that gate honest. This is the one
+    // caller that validates a form out of its document, and the *only*
+    // input that differs from the whole-document pass is which names are
+    // registered: the sub-tree's cross-ref index sees this form alone, so
+    // a reference to a sibling elsewhere misses here and resolves in the
+    // final forest. Everything else — the schema, the overlay (which is
+    // the whole document's, not a fragment of one), the axes — is the same
+    // object in both passes and decides identically.
+    //
+    // The flag replaces a hand-maintained list of cross-ref diagnostic
+    // codes. The list said the same thing by enumerating the ways that one
+    // difference surfaces, and it fell behind: a reference reached through
+    // a `(union-shape …)` fails as `union_no_branch_matched`, which is not
+    // a cross-ref code, so the gate closed and the hook was skipped with
+    // no diagnostic anywhere (`docs/plans/asks/19-*.md`). A vector
+    // alternative or a nested union would have been the next spelling.
+    // Saying "this tree is a fragment" has no next spelling.
+    //
+    // Surface diagnostics are still discarded — they never reach the host
+    // stream from this pass. The final-forest pass surfaces what survives:
+    // an unlowered form validates as authored, and a lowered one is judged
+    // through what its hook emitted.
     var sub: Ast.Tree = tree.*;
     var sub_root = [_]Ast.NodeIndex{form_idx};
     sub.root = sub_root[0..];
     var surface = try Validator.validateWithOptions(gpa, sub, schema, .{
         .overlay = view.materialized,
         .axes = axes,
+        .defer_cross_refs = true,
     });
     defer surface.deinit();
-    if (hasNonCrossRefError(surface.diagnostics)) return;
+    if (hasError(surface.diagnostics)) return;
 
     // Step 2 — find the hook.
     const hook = registry.lookup(lowering_spec.hook) orelse {
@@ -909,7 +1285,9 @@ fn lowerOneForm(
         .schema = &schema,
         .form_spec = form_spec,
         .lowering_spec = lowering_spec,
+        .ctx = hook.ctx,
         .env = env,
+        .refs = refs,
     };
     hook.lower(arena, &input, &output) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -970,33 +1348,17 @@ const Totals = struct {
     byte_estimate: usize = 0,
 };
 
-/// True iff `diags` contains an err-severity diagnostic whose code is
-/// NOT a cross-ref miss. Used by `lowerOneForm` to gate hook execution
-/// on *shape* errors (missing required key, wrong underlying, …) only —
-/// cross-ref diagnostics on the single-form sub-tree are expected
-/// whenever the sugar form references a target elsewhere in the
-/// document, and would silently skip the hook if treated as a failure.
-/// The final-document forest pass owns cross-ref reporting; this
-/// filter just prevents the gate from over-rejecting.
+/// True iff `diags` holds any err-severity diagnostic. The whole gate,
+/// now that `defer_cross_refs` keeps identity questions out of the
+/// fragment pass: what is left in `diags` are shape errors (missing
+/// required key, wrong underlying, a head outside its set, …), and every
+/// one of them means the same thing in the document as it does here.
 ///
-/// Filtered set tracks the runtime emissions of `Validator`'s
-/// cross-ref index walk: `not_cross_ref` (unresolved lookup),
-/// `cross_ref_outside_scope` (resolved but outside scope), and
-/// `duplicate_cross_ref_target` (name collision on registration).
-/// Schema-aggregate cross-ref codes (`unknown_cross_ref_target`,
-/// `ambiguous_cross_ref_target`, …) are emitted before this gate runs
-/// and never appear here.
-fn hasNonCrossRefError(diags: []const Ast.Diagnostic) bool {
-    for (diags) |d| {
-        if (d.severity != .err) continue;
-        switch (d.code) {
-            .not_cross_ref,
-            .cross_ref_outside_scope,
-            .duplicate_cross_ref_target,
-            => continue,
-            else => return true,
-        }
-    }
+/// This used to be `hasNonCrossRefError`, which excused three cross-ref
+/// codes by name. See `lowerOneForm`'s step 1 for why the exclusion moved
+/// into the validator and became one flag.
+fn hasError(diags: []const Ast.Diagnostic) bool {
+    for (diags) |d| if (d.severity == .err) return true;
     return false;
 }
 
@@ -1062,6 +1424,16 @@ fn validateEmittedForm(
 
             if (!headInProduces(ef.head, lowering_spec.produces)) {
                 try emitDiag(gpa, diags, .lowering_produced_invalid_head, source_span, &.{ ef.head, "lowering", "produces" }, "lowering produced form head `{s}` which is not in :produces", .{ef.head});
+                seen_violation.* = true;
+            }
+            // Shape of the head itself, independent of `:produces`: a
+            // head that *is* listed can still be `""`, `x/` or `/x` — the
+            // lexer accepts `/` anywhere in a symbol and a Zig-built
+            // Plugin lists whatever it likes. `emitFormIntoTree` asserts
+            // both halves are non-empty, so this is where hook output
+            // becomes a diagnostic instead of an abort.
+            if (!Plugin.headHalvesNonEmpty(ef.head)) {
+                try emitDiag(gpa, diags, .lowering_produced_invalid_head, source_span, &.{ ef.head, "lowering", "produces" }, "lowering produced form head `{s}` with an empty name or namespace half", .{ef.head});
                 seen_violation.* = true;
             }
 
@@ -1219,11 +1591,15 @@ fn emitFormIntoTree(
     src_span: Ast.Span,
 ) Allocator.Error!Ast.NodeIndex {
     // Hook contract: every emitted form carries a non-empty head.
-    // An empty head would produce a tree node the validator's
-    // `headInProduces` check can't ever match — failing here
-    // surfaces the hook bug instead of a confusing "head `` not
-    // in :produces" diagnostic later in the pipeline.
+    // `validateEmittedForm` ran first and dropped the whole invocation
+    // on an empty head or half (`Plugin.headHalvesNonEmpty`), so these asserts
+    // are on an invariant it established, not on hook output.
     std.debug.assert(ef.head.len > 0);
+
+    // A hook may name the bytes this form came from; the invocation's source
+    // span is the default and covers the subtree from here down.
+    const span = ef.source_span orelse src_span;
+    std.debug.assert(span.end >= span.start); // pre: a well-formed span
 
     // Resolve namespace splitting on the head ("pngine/shader" → ("pngine", "shader")).
     var head_ns: ?[]const u8 = null;
@@ -1232,16 +1608,15 @@ fn emitFormIntoTree(
         head_ns = ef.head[0..slash];
         head_name = ef.head[slash + 1 ..];
     }
-    // Namespace separator must not produce an empty name half ("foo/"
-    // or "/" would). The validator would emit a confusing
-    // `lookupForm` miss; assert so hook tests catch it directly.
+    // Both halves non-empty — established by `validateEmittedForm`.
     std.debug.assert(head_name.len > 0);
+    if (head_ns) |ns| std.debug.assert(ns.len > 0);
 
     var children: std.ArrayList(Ast.NodeIndex) = .empty;
 
     for (ef.kvpairs) |kv| {
-        const value_idx = try emitValueIntoTree(b, kv.value, src_span, ef);
-        const kv_idx = try b.appendKvpair(kv.key, value_idx, src_span, src_span);
+        const value_idx = try emitValueIntoTree(b, kv.value, span, ef);
+        const kv_idx = try b.appendKvpair(kv.key, value_idx, span, span);
         try children.append(b.a, kv_idx);
     }
 
@@ -1250,11 +1625,11 @@ fn emitFormIntoTree(
     // `emitValueIntoTree` already materializes every `EmittedValue` shape
     // (including `.form`), so positionals and kvpair values share one path.
     for (ef.children) |child| {
-        const cidx = try emitValueIntoTree(b, child, src_span, ef);
+        const cidx = try emitValueIntoTree(b, child, span, ef);
         try children.append(b.a, cidx);
     }
 
-    return b.appendForm(head_name, head_ns, src_span, children.items, src_span);
+    return b.appendForm(head_name, head_ns, span, children.items, span);
 }
 
 /// Materialize one emitted value. See `emitFormIntoTree` for the recursion
@@ -1370,6 +1745,20 @@ test "LoweringRegistry: multiple distinct hooks coexist" {
     try testing.expect(b.lower == dummyLowerFail);
 }
 
+test "LoweringRegistry: a hook's ctx is stored verbatim and defaults to null" {
+    var registry: LoweringRegistry = .{};
+    defer registry.deinit(testing.allocator);
+
+    var state: u32 = 0;
+    try registry.register(testing.allocator, .{ .id = "with/v1", .lower = dummyLowerOk, .ctx = &state });
+    try registry.register(testing.allocator, .{ .id = "without/v1", .lower = dummyLowerOk });
+
+    const with = registry.lookup("with/v1") orelse return error.TestUnexpectedNull;
+    try testing.expectEqual(@as(?*anyopaque, @ptrCast(&state)), with.ctx);
+    const without = registry.lookup("without/v1") orelse return error.TestUnexpectedNull;
+    try testing.expectEqual(@as(?*anyopaque, null), without.ctx);
+}
+
 test "LoweringRegistry: deinit on empty registry is safe" {
     var registry: LoweringRegistry = .{};
     registry.deinit(testing.allocator);
@@ -1474,6 +1863,19 @@ fn failingHook(
     _: *LoweringOutput,
 ) LoweringError!void {
     return LoweringError.HookFailed;
+}
+
+/// Asks the layer for its reference index twice and does nothing with it.
+/// The ask is the point: one index serves every hook in a layer, however
+/// many of them call and however often each one does.
+fn indexAskingHook(
+    arena: Allocator,
+    input: *const LoweringInput,
+    out: *LoweringOutput,
+) LoweringError!void {
+    _ = try input.layerIndex();
+    _ = try input.layerIndex();
+    try out.append(arena, .{ .head = "sugar-normal", .source_form_idx = input.form_idx });
 }
 
 /// Fails the way a hook should once it has something to say: one call, the
@@ -1751,6 +2153,50 @@ test "runLoweringPass: hook failure emits lowering_hook_failed" {
     try testing.expectEqual(tree.formHeader(tree.root[0]).head_span.start, pr.diagnostics[0].span.start);
 }
 
+/// Host state for the ctx test: the hook counts its invocations on it.
+const CtxState = struct { calls: usize = 0 };
+
+/// Reads its registered ctx, records the call, then lowers exactly as
+/// `identityRenameHook` does.
+fn ctxCountingHook(
+    arena: Allocator,
+    input: *const LoweringInput,
+    out: *LoweringOutput,
+) LoweringError!void {
+    const state: *CtxState = @ptrCast(@alignCast(input.ctx.?));
+    state.calls += 1;
+    return identityRenameHook(arena, input, out);
+}
+
+test "runLoweringPass: the hook receives its registered ctx on LoweringInput" {
+    const gpa = testing.allocator;
+    var plugin_arena = std.heap.ArenaAllocator.init(gpa);
+    defer plugin_arena.deinit();
+
+    const setup = try buildSchema(&plugin_arena, &.{}, &.{}, "ctx/v1", &.{"sugar-normal"}, true, true);
+
+    var tree = try Parser.parse(gpa, "(sugar :a 1) (sugar :a 2)");
+    defer tree.deinit();
+
+    const overlay = MaterializedDefaults.MaterializedDefaults{};
+    var state: CtxState = .{};
+    var registry: LoweringRegistry = .{};
+    defer registry.deinit(gpa);
+    try registry.register(gpa, .{ .id = "ctx/v1", .lower = ctxCountingHook, .ctx = &state });
+
+    var pass_arena = std.heap.ArenaAllocator.init(gpa);
+    defer pass_arena.deinit();
+
+    var pr = try runLoweringPass(gpa, pass_arena.allocator(), &tree, tree.root, setup.schema, &overlay, &registry, .{});
+    defer pr.deinit(gpa);
+
+    try testing.expectEqual(@as(usize, 2), pr.invocations.len);
+    try testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    // Two forms, one hook, one state: the pointer reached the hook both
+    // times, and it is the host's own, not a per-invocation copy.
+    try testing.expectEqual(@as(usize, 2), state.calls);
+}
+
 test "runLoweringPass: a hook's cause replaces the generic message" {
     const gpa = testing.allocator;
     var plugin_arena = std.heap.ArenaAllocator.init(gpa);
@@ -1816,6 +2262,50 @@ test "runLoweringPass: failAt moves the diagnostic off the form's head" {
     const kv = tree.kvpairHeader(tree.formHeader(form).children[0]);
     try testing.expectEqual(tree.spanOf(kv.value).start, pr.diagnostics[0].span.start);
     try testing.expect(pr.diagnostics[0].span.start > tree.formHeader(form).head_span.start);
+}
+
+fn emptyHalfHeadHook(
+    arena: Allocator,
+    input: *const LoweringInput,
+    out: *LoweringOutput,
+) LoweringError!void {
+    // Emits the first `:produces` entry verbatim — the test lists `x/`,
+    // a head the lexer and a Zig-built Plugin both admit.
+    try out.append(arena, .{
+        .head = input.lowering_spec.produces[0],
+        .kvpairs = &.{},
+        .children = &.{},
+        .source_form_idx = input.form_idx,
+    });
+}
+
+test "runLoweringPass: a produced head with an empty half is a diagnostic, not an assert" {
+    // `x/` is in :produces, so `headInProduces` passes; before the halves
+    // check `emitFormIntoTree` asserted `head_name.len > 0` on hook
+    // output and aborted the host.
+    const gpa = testing.allocator;
+    var plugin_arena = std.heap.ArenaAllocator.init(gpa);
+    defer plugin_arena.deinit();
+    for ([_][]const u8{ "x/", "/x", "" }) |bad| {
+        const setup = try buildSchema(&plugin_arena, &.{}, &.{}, "test/empty-half-v1", &.{bad}, true, true);
+        var tree = try Parser.parse(gpa, "(sugar :a 1)");
+        defer tree.deinit();
+        const overlay = MaterializedDefaults.MaterializedDefaults{};
+        var registry: LoweringRegistry = .{};
+        defer registry.deinit(gpa);
+        try registry.register(gpa, .{ .id = "test/empty-half-v1", .lower = emptyHalfHeadHook });
+        var pass_arena = std.heap.ArenaAllocator.init(gpa);
+        defer pass_arena.deinit();
+
+        var pr = try runLoweringPass(gpa, pass_arena.allocator(), &tree, tree.root, setup.schema, &overlay, &registry, .{});
+        defer pr.deinit(gpa);
+        try testing.expectEqual(@as(usize, 0), pr.invocations.len);
+        var saw = false;
+        for (pr.diagnostics) |d| {
+            if (d.code == .lowering_produced_invalid_head) saw = true;
+        }
+        try testing.expect(saw);
+    }
 }
 
 test "runLoweringPass: invalid produced head emits lowering_produced_invalid_head" {
@@ -2108,6 +2598,328 @@ test "runLoweringPass: empty registry — no invocations, no diagnostics" {
     try testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
 }
 
+// ---------------------------------------------------------------------------
+// `resolveRef` — a hook resolving a cross-reference key to the form it names
+// (`docs/plans/asks/18-*.md`). The fixture is the ask's own four-form
+// manifest, built as descriptors so these tests do not depend on the loader.
+// ---------------------------------------------------------------------------
+
+/// Resolve `:from` and emit `(sugar-normal :count N)`, where N is the
+/// *neighbour's* `:count` read through the same view the hook reads itself
+/// with. `-1` is "resolved nowhere in this layer", which is a miss and not a
+/// failure — the distinction the whole bound rests on.
+fn resolveCountHook(
+    arena: Allocator,
+    input: *const LoweringInput,
+    out: *LoweringOutput,
+) LoweringError!void {
+    try emitNeighbourCount(arena, input, out, try input.resolveRef("from"));
+}
+
+/// The same, through a `(union-shape …)` slot — the shape
+/// `(scalar-or-ref-shape :ref …)` desugars to.
+fn resolveUnionCountHook(
+    arena: Allocator,
+    input: *const LoweringInput,
+    out: *LoweringOutput,
+) LoweringError!void {
+    try emitNeighbourCount(arena, input, out, try input.resolveRef("either"));
+}
+
+/// Asks a number key for a cross-reference. The hook-bug arm: nothing about
+/// the document decides this, so it is a failure rather than a miss.
+fn resolveWrongKeyHook(
+    _: Allocator,
+    input: *const LoweringInput,
+    _: *LoweringOutput,
+) LoweringError!void {
+    _ = try input.resolveRef("size");
+}
+
+fn emitNeighbourCount(
+    arena: Allocator,
+    input: *const LoweringInput,
+    out: *LoweringOutput,
+    target: ?Ast.NodeIndex,
+) LoweringError!void {
+    var count: f64 = -1;
+    if (target) |idx| {
+        count = switch (input.view.getEffectiveValue(idx, "count") orelse return error.HookFailed) {
+            .author => |n| input.view.tree.numberOf(n),
+            .default => |entry| valueToF64(entry.value) orelse return error.HookFailed,
+        };
+    }
+    const kvpairs = try arena.alloc(EmittedKvpair, 1);
+    kvpairs[0] = .{ .key = "count", .value = .{ .number = count } };
+    try out.append(arena, .{
+        .head = "sugar-normal",
+        .kvpairs = kvpairs,
+        .source_form_idx = input.form_idx,
+    });
+}
+
+const RefFixture = struct {
+    const producer: Plugin.FormSpec = .{ .name = "producer", .keys = &.{
+        .{ .name = "name", .value_type = .symbol },
+        .{ .name = "count", .value_type = .number },
+    } };
+    /// Same form with `:count` declared rather than written — the row where
+    /// the neighbour's value comes off the overlay.
+    const defaulted_producer: Plugin.FormSpec = .{ .name = "producer", .keys = &.{
+        .{ .name = "name", .value_type = .symbol },
+        .{ .name = "count", .value_type = .number, .default = .{ .number = 24000 } },
+    } };
+    const other: Plugin.FormSpec = .{ .name = "other", .keys = &.{
+        .{ .name = "name", .value_type = .symbol },
+        .{ .name = "count", .value_type = .number },
+    } };
+    /// Scope opener for the `:scope` row; open so it takes the vocabulary as
+    /// positional children.
+    const piece: Plugin.FormSpec = .{ .name = "piece", .open = true };
+    const consumer: Plugin.FormSpec = .{
+        .name = "consumer",
+        .keys = &.{
+            .{ .name = "from", .value_type = .{ .named = .{ .name = "producer-ref" } } },
+            .{ .name = "either", .value_type = .{ .named = .{ .name = "count-or-ref" } } },
+            .{ .name = "size", .value_type = .number },
+        },
+        .lowering = .{ .hook = "test/resolve-v1", .produces = &.{"sugar-normal"} },
+    };
+    const sugar_normal: Plugin.FormSpec = .{ .name = "sugar-normal", .open = true };
+
+    fn schema(comptime cr: Plugin.ValueKind.CrossRef, comptime prod: Plugin.FormSpec) Schema.Schema {
+        return Schema.Schema.init(&.{.{
+            .name = "t",
+            .value_kinds = &.{
+                .{ .name = "producer-ref", .underlying = .symbol, .cross_ref = cr },
+                .{ .name = "plain-count", .underlying = .number },
+                .{ .name = "count-or-ref", .underlying = .union_of, .union_of = .{
+                    .alternatives = &.{ .{ .name = "plain-count" }, .{ .name = "producer-ref" } },
+                } },
+            },
+            .forms = &.{ prod, other, piece, consumer, sugar_normal },
+        }});
+    }
+
+    const flat: Plugin.ValueKind.CrossRef = .{ .targets = &.{"producer"} };
+    const grouped: Plugin.ValueKind.CrossRef = .{ .targets = &.{ "producer", "other" } };
+    const scoped: Plugin.ValueKind.CrossRef = .{ .targets = &.{"producer"}, .scope_form = "piece" };
+};
+
+/// Run one lowering layer over `src` with `hook` registered as
+/// `test/resolve-v1`, appending the `:count` every invocation emitted — the
+/// hook's report of what `resolveRef` handed it, in document order. Returns
+/// whether any `lowering_hook_failed` fired.
+fn runRefLayer(
+    gpa: Allocator,
+    schema: Schema.Schema,
+    src: [:0]const u8,
+    hook: HookFn,
+    counts: *std.ArrayList(f64),
+) !bool {
+    var tree = try Parser.parse(gpa, src);
+    defer tree.deinit();
+
+    var pass_arena = std.heap.ArenaAllocator.init(gpa);
+    defer pass_arena.deinit();
+    const a = pass_arena.allocator();
+
+    var mat = try MaterializedDefaults.materializeDefaults(gpa, a, &tree, tree.root, schema);
+    defer mat.deinit(gpa);
+
+    var registry: LoweringRegistry = .{};
+    defer registry.deinit(gpa);
+    try registry.register(gpa, .{ .id = "test/resolve-v1", .lower = hook });
+
+    var pr = try runLoweringPass(gpa, a, &tree, tree.root, schema, &mat.materialized, &registry, .{});
+    defer pr.deinit(gpa);
+
+    for (pr.invocations) |inv| {
+        for (inv.forms) |f| {
+            for (f.kvpairs) |kv| {
+                if (std.mem.eql(u8, kv.key, "count")) try counts.append(gpa, kv.value.number);
+            }
+        }
+    }
+    for (pr.diagnostics) |d| {
+        if (d.code == .lowering_hook_failed) return true;
+    }
+    return false;
+}
+
+test "resolveRef: a hook reads a sibling two references away" {
+    const gpa = testing.allocator;
+    var counts: std.ArrayList(f64) = .empty;
+    defer counts.deinit(gpa);
+
+    const failed = try runRefLayer(
+        gpa,
+        RefFixture.schema(RefFixture.flat, RefFixture.producer),
+        "(producer :name a :count 7)\n(consumer :from a)",
+        resolveCountHook,
+        &counts,
+    );
+    try testing.expect(!failed);
+    try testing.expectEqualSlices(f64, &.{7}, counts.items);
+}
+
+test "resolveRef: the neighbour's defaulted value arrives through the overlay" {
+    const gpa = testing.allocator;
+    var counts: std.ArrayList(f64) = .empty;
+    defer counts.deinit(gpa);
+
+    // The hook does nothing special: `getEffectiveValue` on the resolved
+    // index is the same read it makes on its own form.
+    const failed = try runRefLayer(
+        gpa,
+        RefFixture.schema(RefFixture.flat, RefFixture.defaulted_producer),
+        "(producer :name a)\n(consumer :from a)",
+        resolveCountHook,
+        &counts,
+    );
+    try testing.expect(!failed);
+    try testing.expectEqualSlices(f64, &.{24000}, counts.items);
+}
+
+test "resolveRef: a name nothing defines, and an absent key, are both misses" {
+    const gpa = testing.allocator;
+    const schema = RefFixture.schema(RefFixture.flat, RefFixture.producer);
+
+    var miss: std.ArrayList(f64) = .empty;
+    defer miss.deinit(gpa);
+    try testing.expect(!try runRefLayer(gpa, schema, "(producer :name a :count 7)\n(consumer :from nowhere)", resolveCountHook, &miss));
+    try testing.expectEqualSlices(f64, &.{-1}, miss.items);
+
+    var absent: std.ArrayList(f64) = .empty;
+    defer absent.deinit(gpa);
+    try testing.expect(!try runRefLayer(gpa, schema, "(producer :name a :count 7)\n(consumer)", resolveCountHook, &absent));
+    try testing.expectEqualSlices(f64, &.{-1}, absent.items);
+}
+
+test "resolveRef: a key whose type carries no cross-reference is a hook bug" {
+    const gpa = testing.allocator;
+    var counts: std.ArrayList(f64) = .empty;
+    defer counts.deinit(gpa);
+
+    // `:size` is a number. Nothing about the document decides this, so it
+    // fails the hook rather than reading as "resolved nowhere".
+    const failed = try runRefLayer(
+        gpa,
+        RefFixture.schema(RefFixture.flat, RefFixture.producer),
+        "(consumer :size 3)",
+        resolveWrongKeyHook,
+        &counts,
+    );
+    try testing.expect(failed);
+    try testing.expectEqual(@as(usize, 0), counts.items.len);
+}
+
+test "resolveRef: a multi-target cross-ref resolves in its shared bucket" {
+    const gpa = testing.allocator;
+    var counts: std.ArrayList(f64) = .empty;
+    defer counts.deinit(gpa);
+
+    // The hook names one key and gets either head — it never spells the
+    // target set, which is what keeps S4b's grouping out of hook code.
+    const failed = try runRefLayer(
+        gpa,
+        RefFixture.schema(RefFixture.grouped, RefFixture.producer),
+        "(producer :name a :count 7)\n(other :name b :count 9)\n(consumer :from b)",
+        resolveCountHook,
+        &counts,
+    );
+    try testing.expect(!failed);
+    try testing.expectEqualSlices(f64, &.{9}, counts.items);
+}
+
+test "resolveRef: a scoped cross-ref resolves inside its scope and nowhere else" {
+    const gpa = testing.allocator;
+    var counts: std.ArrayList(f64) = .empty;
+    defer counts.deinit(gpa);
+
+    // Same name, same schema, two positions: inside the `(piece …)` that
+    // defines it, and outside every piece. A scan over the roots would
+    // answer 7 to both.
+    const failed = try runRefLayer(
+        gpa,
+        RefFixture.schema(RefFixture.scoped, RefFixture.producer),
+        "(piece (producer :name a :count 7) (consumer :from a))\n(consumer :from a)",
+        resolveCountHook,
+        &counts,
+    );
+    try testing.expect(!failed);
+    try testing.expectEqualSlices(f64, &.{ 7, -1 }, counts.items);
+}
+
+test "resolveRef: a cross-reference reached through a union resolves" {
+    const gpa = testing.allocator;
+    const schema = RefFixture.schema(RefFixture.flat, RefFixture.producer);
+
+    // `:either` is "a number or a name". The name arm resolves; the number
+    // arm is not a symbol, so it is a miss and not a failure.
+    var named: std.ArrayList(f64) = .empty;
+    defer named.deinit(gpa);
+    try testing.expect(!try runRefLayer(gpa, schema, "(producer :name a :count 7)\n(consumer :either a)", resolveUnionCountHook, &named));
+    try testing.expectEqualSlices(f64, &.{7}, named.items);
+
+    var numeric: std.ArrayList(f64) = .empty;
+    defer numeric.deinit(gpa);
+    try testing.expect(!try runRefLayer(gpa, schema, "(producer :name a :count 7)\n(consumer :either 5)", resolveUnionCountHook, &numeric));
+    try testing.expectEqualSlices(f64, &.{-1}, numeric.items);
+}
+
+test "runLoweringPass: the layer builds one reference index for every hook that asks" {
+    const gpa = testing.allocator;
+    var plugin_arena = std.heap.ArenaAllocator.init(gpa);
+    defer plugin_arena.deinit();
+
+    const setup = try buildSchema(&plugin_arena, &.{}, &.{}, "test/asking-v1", &.{"sugar-normal"}, true, true);
+
+    // Two lowerable forms, each hook asking twice: four asks, one build.
+    var tree = try Parser.parse(gpa, "(sugar :a 1)\n(sugar :a 2)");
+    defer tree.deinit();
+
+    const overlay = MaterializedDefaults.MaterializedDefaults{};
+    var registry: LoweringRegistry = .{};
+    defer registry.deinit(gpa);
+    try registry.register(gpa, .{ .id = "test/asking-v1", .lower = indexAskingHook });
+
+    var pass_arena = std.heap.ArenaAllocator.init(gpa);
+    defer pass_arena.deinit();
+
+    var pr = try runLoweringPass(gpa, pass_arena.allocator(), &tree, tree.root, setup.schema, &overlay, &registry, .{});
+    defer pr.deinit(gpa);
+
+    try testing.expectEqual(@as(usize, 2), pr.invocations.len);
+    try testing.expectEqual(@as(usize, 1), pr.ref_index_builds);
+}
+
+test "runLoweringPass: a layer whose hooks never ask builds no reference index" {
+    const gpa = testing.allocator;
+    var plugin_arena = std.heap.ArenaAllocator.init(gpa);
+    defer plugin_arena.deinit();
+
+    const setup = try buildSchema(&plugin_arena, &.{}, &.{}, "test/identity-v1", &.{"sugar-normal"}, true, true);
+
+    var tree = try Parser.parse(gpa, "(sugar :a 1)");
+    defer tree.deinit();
+
+    const overlay = MaterializedDefaults.MaterializedDefaults{};
+    var registry: LoweringRegistry = .{};
+    defer registry.deinit(gpa);
+    try registry.register(gpa, .{ .id = "test/identity-v1", .lower = identityRenameHook });
+
+    var pass_arena = std.heap.ArenaAllocator.init(gpa);
+    defer pass_arena.deinit();
+
+    var pr = try runLoweringPass(gpa, pass_arena.allocator(), &tree, tree.root, setup.schema, &overlay, &registry, .{});
+    defer pr.deinit(gpa);
+
+    // The hook ran — this is a pass that did work and still built nothing.
+    try testing.expectEqual(@as(usize, 1), pr.invocations.len);
+    try testing.expectEqual(@as(usize, 0), pr.ref_index_builds);
+}
+
 test "runLoweringPass: happy path produces one invocation" {
     const gpa = testing.allocator;
     var plugin_arena = std.heap.ArenaAllocator.init(gpa);
@@ -2345,6 +3157,182 @@ test "revalidateLowered: standard diagnostics surface on a broken hook" {
     try testing.expect(saw_wrong_underlying);
 }
 
+// --- EmittedForm.source_span: a lifted child names its own bytes ------------
+//
+// `buildLoweredTree` reads one span per invocation and stamps it on every form
+// that invocation emits, which is right for sugar: the container authored the
+// bytes. A *container* hook that lifts a child out of its own subtree wants
+// the other answer, or the nested spelling's diagnostics collapse onto the
+// enclosing block and read worse than the flat spelling it replaces.
+
+/// `(space :name poster (text :name letters))` — the shape a container hook
+/// flattens. Returns the parsed tree; `root[0]` is the container and its last
+/// positional child is the `text` the author wrote on its own.
+fn parseContainerDoc(gpa: Allocator) !Ast.Tree {
+    return Parser.parse(gpa, "(space :name poster (text :name letters))");
+}
+
+fn lastChildOf(tree: *const Ast.Tree, form: Ast.NodeIndex) Ast.NodeIndex {
+    const hdr = tree.formHeader(form);
+    return hdr.children[hdr.children.len - 1];
+}
+
+test "buildLoweredTree: a null source_span keeps the container's span" {
+    // The default, and the byte-identical baseline every existing hook is on:
+    // the lifted `text` reports against the whole `(space …)` block.
+    const gpa = testing.allocator;
+    var src = try parseContainerDoc(gpa);
+    defer src.deinit();
+
+    const emitted = [_]EmittedForm{.{
+        .head = "text",
+        .kvpairs = &.{.{ .key = "name", .value = .{ .symbol = "letters" } }},
+        .source_form_idx = src.root[0],
+    }};
+    const invocations = [_]Invocation{.{
+        .source_form_idx = src.root[0],
+        .hook_id = "test/space-v1",
+        .forms = &emitted,
+    }};
+
+    var lowered = try buildLoweredTree(gpa, &invocations, &src);
+    defer lowered.deinit();
+
+    const container = src.spanOf(src.root[0]);
+    const hdr = lowered.tree.formHeader(lowered.tree.root[0]);
+    try testing.expectEqual(container.start, hdr.head_span.start);
+    try testing.expectEqual(container.end, hdr.head_span.end);
+}
+
+test "buildLoweredTree: an emitted form may name its own source span" {
+    // The same emission with the child's span set: the form and its kvpairs
+    // now point at `(text :name letters)`, the bytes the author typed.
+    const gpa = testing.allocator;
+    var src = try parseContainerDoc(gpa);
+    defer src.deinit();
+
+    const child = lastChildOf(&src, src.root[0]);
+    const child_span = src.spanOf(child);
+
+    const emitted = [_]EmittedForm{.{
+        .head = "text",
+        .kvpairs = &.{.{ .key = "name", .value = .{ .symbol = "letters" } }},
+        .source_form_idx = src.root[0],
+        .source_span = child_span,
+    }};
+    const invocations = [_]Invocation{.{
+        .source_form_idx = src.root[0],
+        .hook_id = "test/space-v1",
+        .forms = &emitted,
+    }};
+
+    var lowered = try buildLoweredTree(gpa, &invocations, &src);
+    defer lowered.deinit();
+
+    const root_idx = lowered.tree.root[0];
+    const hdr = lowered.tree.formHeader(root_idx);
+    try testing.expectEqual(child_span.start, hdr.head_span.start);
+    try testing.expectEqual(child_span.end, hdr.head_span.end);
+
+    // The subtree follows, not just the head: a diagnostic on the kvpair
+    // lands on the child too.
+    const kv_span = lowered.tree.spanOf(hdr.children[0]);
+    try testing.expectEqual(child_span.start, kv_span.start);
+
+    // The override is strictly narrower than the container's span — which is
+    // the whole point, and a guard against the two accidentally being equal.
+    const container = src.spanOf(src.root[0]);
+    try testing.expect(child_span.start > container.start);
+
+    // Provenance is untouched: the container's hook did author this form.
+    const prov = lowered.provenance.lookup(root_idx) orelse return error.TestUnexpectedNull;
+    try testing.expectEqual(src.root[0], prov.source_form_idx);
+    try testing.expectEqualStrings("test/space-v1", prov.hook_id);
+}
+
+test "buildLoweredTree: a nested emitted form narrows the override further" {
+    // The override covers the subtree until a descendant sets its own. Here
+    // the outer emission claims the child's span and the nested one claims the
+    // `:name` kvpair's, so the two do not have to agree.
+    const gpa = testing.allocator;
+    var src = try parseContainerDoc(gpa);
+    defer src.deinit();
+
+    const child = lastChildOf(&src, src.root[0]);
+    const child_span = src.spanOf(child);
+    const inner_span = src.spanOf(src.formHeader(child).children[0]);
+
+    const nested: EmittedForm = .{
+        .head = "glyph",
+        .source_form_idx = src.root[0],
+        .source_span = inner_span,
+    };
+    const emitted = [_]EmittedForm{.{
+        .head = "text",
+        .children = &.{.{ .form = nested }},
+        .source_form_idx = src.root[0],
+        .source_span = child_span,
+    }};
+    const invocations = [_]Invocation{.{
+        .source_form_idx = src.root[0],
+        .hook_id = "test/space-v1",
+        .forms = &emitted,
+    }};
+
+    var lowered = try buildLoweredTree(gpa, &invocations, &src);
+    defer lowered.deinit();
+
+    const hdr = lowered.tree.formHeader(lowered.tree.root[0]);
+    try testing.expectEqual(child_span.start, hdr.head_span.start);
+
+    const inner_hdr = lowered.tree.formHeader(hdr.children[0]);
+    try testing.expectEqualStrings("glyph", inner_hdr.head);
+    try testing.expectEqual(inner_span.start, inner_hdr.head_span.start);
+    try testing.expect(inner_span.start > child_span.start);
+}
+
+test "revalidateLowered: a set source_span reaches the diagnostic" {
+    // The end of the chain, and the reason the field exists: a diagnostic
+    // raised on the lowered tree points at the author's own bytes. `ghost` is
+    // in no schema, so the revalidation pass reports `unknown_form` at the
+    // emitted form's head span.
+    const gpa = testing.allocator;
+    var src = try parseContainerDoc(gpa);
+    defer src.deinit();
+
+    const child_span = src.spanOf(lastChildOf(&src, src.root[0]));
+
+    const emitted = [_]EmittedForm{.{
+        .head = "ghost",
+        .source_form_idx = src.root[0],
+        .source_span = child_span,
+    }};
+    const invocations = [_]Invocation{.{
+        .source_form_idx = src.root[0],
+        .hook_id = "test/space-v1",
+        .forms = &emitted,
+    }};
+
+    var lowered = try buildLoweredTree(gpa, &invocations, &src);
+    defer lowered.deinit();
+
+    const plugins = [_]Plugin.Plugin{.{ .name = "p", .forms = &.{.{ .name = "text" }} }};
+    const schema = Schema.Schema.init(&plugins);
+    const overlay = MaterializedDefaults.MaterializedDefaults{};
+
+    var rv = try revalidateLowered(gpa, lowered.tree, schema, &overlay, .{});
+    defer rv.deinit();
+
+    var found = false;
+    for (rv.diagnostics) |d| {
+        if (d.code != .unknown_form) continue;
+        found = true;
+        try testing.expectEqual(child_span.start, d.span.start);
+        try testing.expectEqual(child_span.end, d.span.end);
+    }
+    try testing.expect(found);
+}
+
 test "buildLoweredTree: empty invocations yields a zero-root tree" {
     const gpa = testing.allocator;
 
@@ -2534,31 +3522,18 @@ test "runLoweringPass: surface-validation failure skips hook silently" {
     try testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
 }
 
-// Surface validation gates on shape errors only,
-// not on cross-ref misses. The single-form sub-tree the surface pass
-// sees can never resolve a sibling-form cross-ref; treating that miss
-// as a gate failure would silently skip the hook for any sugar form
-// that points outward.
+// Surface validation gates on shape errors. Identity questions never
+// reach it any more — the fragment pass runs with
+// `Validator.Options.defer_cross_refs`, so a reference to a sibling the
+// sub-tree cannot see is not a failure to begin with. What is left is
+// severity, and that is all this predicate now decides.
+//
+// The code-filtering test that stood here retired with
+// `hasNonCrossRefError`; the two below outlive it because the severity
+// rule is not the thing that changed. A gate that tripped on a warning
+// would skip hooks for advisories.
 
-test "hasNonCrossRefError: cross-ref codes are filtered out" {
-    const codes = [_]Ast.Diagnostic.Code{
-        .not_cross_ref,
-        .cross_ref_outside_scope,
-        .duplicate_cross_ref_target,
-    };
-    for (codes) |c| {
-        const diags = [_]Ast.Diagnostic{.{
-            .span = .{ .start = 0, .end = 0 },
-            .message = "",
-            .severity = .err,
-            .code = c,
-            .path = &.{},
-        }};
-        try testing.expect(!hasNonCrossRefError(diags[0..]));
-    }
-}
-
-test "hasNonCrossRefError: shape errors trip the gate" {
+test "hasError: shape errors trip the gate" {
     const diags = [_]Ast.Diagnostic{.{
         .span = .{ .start = 0, .end = 0 },
         .message = "",
@@ -2566,10 +3541,10 @@ test "hasNonCrossRefError: shape errors trip the gate" {
         .code = .missing_required_key,
         .path = &.{},
     }};
-    try testing.expect(hasNonCrossRefError(diags[0..]));
+    try testing.expect(hasError(diags[0..]));
 }
 
-test "hasNonCrossRefError: warnings are ignored regardless of code" {
+test "hasError: warnings are ignored regardless of code" {
     const diags = [_]Ast.Diagnostic{.{
         .span = .{ .start = 0, .end = 0 },
         .message = "",
@@ -2577,7 +3552,7 @@ test "hasNonCrossRefError: warnings are ignored regardless of code" {
         .code = .missing_required_key,
         .path = &.{},
     }};
-    try testing.expect(!hasNonCrossRefError(diags[0..]));
+    try testing.expect(!hasError(diags[0..]));
 }
 
 test "lowerOneForm: cross-ref miss on sugar form does NOT suppress the hook" {
@@ -2670,6 +3645,142 @@ test "lowerOneForm: cross-ref miss on sugar form does NOT suppress the hook" {
     // Despite the surface pass emitting cross_ref_not_found on the
     // single-form sub-tree, the gate filters it out and the hook runs.
     try testing.expectEqual(@as(usize, 1), pr.invocations.len);
+}
+
+test "lowerOneForm: a union reaching a cross-ref does NOT suppress the hook" {
+    // The ask (`docs/plans/asks/19-*.md`), at the layer it was reported
+    // from. `box` is a container whose positional children are ordinary
+    // forms, and `child`'s `:unioned` slot is `union{member-set, ref-kind}`
+    // — the shape a colour attachment has when it may be either the canvas
+    // or a texture. The fragment cannot resolve `t0`, both alternatives
+    // fail, and the union reports `union_no_branch_matched`: a *shape* code,
+    // which the retired filter list did not excuse and could not have.
+    //
+    // Two things this pins that the plain-`:ref` twin above does not: the
+    // failure arrives through a union rather than directly, and it arrives
+    // from a node one positional level below the form being lowered.
+    const gpa = testing.allocator;
+    var plugin_arena = std.heap.ArenaAllocator.init(gpa);
+    defer plugin_arena.deinit();
+    const a = plugin_arena.allocator();
+
+    const value_kinds = try a.alloc(Plugin.ValueKind, 4);
+    value_kinds[0] = .{
+        .name = try a.dupe(u8, "target-ref"),
+        .underlying = .symbol,
+        .cross_ref = .{
+            .targets = try Plugin.ValueKind.CrossRef.dupeOne(a, "target"),
+            .name_key = try a.dupe(u8, "name"),
+        },
+    };
+    value_kinds[1] = .{
+        .name = try a.dupe(u8, "spot"),
+        .underlying = .symbol,
+        .members = .{ .members = blk: {
+            const ms = try a.alloc(Plugin.ValueKind.MemberSet.Member, 1);
+            ms[0] = .{ .name = try a.dupe(u8, "here") };
+            break :blk ms;
+        } },
+    };
+    value_kinds[2] = .{
+        .name = try a.dupe(u8, "spot-or-target"),
+        .underlying = .union_of,
+        .union_of = .{ .alternatives = blk: {
+            const alts = try a.alloc(Plugin.QualifiedRef, 2);
+            alts[0] = .{ .name = try a.dupe(u8, "spot") };
+            alts[1] = .{ .name = try a.dupe(u8, "target-ref") };
+            break :blk alts;
+        } },
+    };
+    value_kinds[3] = .{
+        .name = try a.dupe(u8, "child-item"),
+        .underlying = .form,
+        .heads = .{ .heads = blk: {
+            const hs = try a.alloc(Plugin.ValueKind.HeadSet.Head, 1);
+            hs[0] = .{ .name = try a.dupe(u8, "child") };
+            break :blk hs;
+        } },
+    };
+
+    const child_keys = try a.alloc(Plugin.KeySpec, 1);
+    child_keys[0] = .{
+        .name = try a.dupe(u8, "unioned"),
+        .value_type = .{ .named = .{ .name = try a.dupe(u8, "spot-or-target") } },
+        .optional = false,
+    };
+    const target_keys = try a.alloc(Plugin.KeySpec, 1);
+    target_keys[0] = .{
+        .name = try a.dupe(u8, "name"),
+        .value_type = .symbol,
+        .optional = false,
+    };
+
+    const forms = try a.alloc(Plugin.FormSpec, 4);
+    forms[0] = .{
+        .name = try a.dupe(u8, "box"),
+        .keys = &.{},
+        .positional = .{ .kind = .{ .name = try a.dupe(u8, "child-item") } },
+        .lowering = .{
+            .hook = try a.dupe(u8, "test/identity-v1"),
+            .produces = blk: {
+                const ps = try a.alloc([]const u8, 1);
+                ps[0] = try a.dupe(u8, "box-normal");
+                break :blk ps;
+            },
+        },
+    };
+    forms[1] = .{ .name = try a.dupe(u8, "box-normal"), .keys = &.{}, .open = true };
+    forms[2] = .{ .name = try a.dupe(u8, "child"), .keys = child_keys };
+    forms[3] = .{ .name = try a.dupe(u8, "target"), .keys = target_keys };
+
+    const plugins_slice = try a.alloc(Plugin.Plugin, 1);
+    plugins_slice[0] = .{
+        .name = try a.dupe(u8, "tp"),
+        .value_kinds = value_kinds,
+        .forms = forms,
+    };
+    const schema: Schema.Schema = .{ .plugins = plugins_slice };
+
+    const overlay = MaterializedDefaults.MaterializedDefaults{};
+    var registry: LoweringRegistry = .{};
+    defer registry.deinit(gpa);
+    try registry.register(gpa, .{ .id = "test/identity-v1", .lower = identityRenameHook });
+
+    // The ref arm: `t0` is defined in a sibling the fragment cannot see.
+    {
+        var tree = try Parser.parse(gpa, "(target :name t0) (box (child :unioned t0))");
+        defer tree.deinit();
+        var pass_arena = std.heap.ArenaAllocator.init(gpa);
+        defer pass_arena.deinit();
+        var pr = try runLoweringPass(gpa, pass_arena.allocator(), &tree, tree.root, schema, &overlay, &registry, .{});
+        defer pr.deinit(gpa);
+        try testing.expectEqual(@as(usize, 1), pr.invocations.len);
+    }
+
+    // The member arm, one alternative over: this always worked, because
+    // the member set needs no index. Pinned so the fix cannot be read as
+    // "the union now matches everything".
+    {
+        var tree = try Parser.parse(gpa, "(target :name t0) (box (child :unioned here))");
+        defer tree.deinit();
+        var pass_arena = std.heap.ArenaAllocator.init(gpa);
+        defer pass_arena.deinit();
+        var pr = try runLoweringPass(gpa, pass_arena.allocator(), &tree, tree.root, schema, &overlay, &registry, .{});
+        defer pr.deinit(gpa);
+        try testing.expectEqual(@as(usize, 1), pr.invocations.len);
+    }
+
+    // And the gate still closes on a shape the fragment *can* judge: a
+    // number reaches neither alternative, in the document or out of it.
+    {
+        var tree = try Parser.parse(gpa, "(target :name t0) (box (child :unioned 42))");
+        defer tree.deinit();
+        var pass_arena = std.heap.ArenaAllocator.init(gpa);
+        defer pass_arena.deinit();
+        var pr = try runLoweringPass(gpa, pass_arena.allocator(), &tree, tree.root, schema, &overlay, &registry, .{});
+        defer pr.deinit(gpa);
+        try testing.expectEqual(@as(usize, 0), pr.invocations.len);
+    }
 }
 
 test "runLoweringPass: lowerable child of a lowerable parent emits lowering_nested_lowerable" {
@@ -3100,6 +4211,89 @@ test "runLoweringPass: nested-lowerable lint still fires for a qualified child t
     try runShadow(testing.allocator, "(outer (p/entry))", 2, &.{"entry"});
 }
 
+// --- A container whose children share its head (ask 22) ---------------------
+//
+// The shadow family above pins a lowerable container over a local that
+// shadows a *different* global lowerable head (`(outer (entry))`). The case a
+// host actually asks for is the container shadowing **its own** head: a
+// `space` that may hold spaces, lowered by one invocation that walks the whole
+// subtree itself. That needs no `:consumes` declaration — the head is a
+// slot-local of the form that declares it, so `checkNestedLowerable` returns
+// on the local hit and the worklist resolves the child to a body that can
+// never lower.
+
+/// A lowerable `space` (identity hook → `space-normal`) that declares the
+/// positional slot-local `space`, plus the plain `text` a nested space holds.
+/// The local is its own `FormSpec`: same name, no `:lowering`, and it may
+/// legitimately differ from the global — which is the point of the spelling.
+fn containerSchema(a: Allocator) !Schema.Schema {
+    const space_produces = try a.alloc([]const u8, 1);
+    space_produces[0] = "space-normal";
+
+    // Two levels of local `space`, so `(space (space (space …)))` resolves
+    // local-first all the way down instead of falling back to the global at
+    // the third level.
+    const inner_local = try a.alloc(Plugin.FormSpec, 1);
+    inner_local[0] = .{ .name = "space", .open = true, .positional = .any };
+    const local_space = try a.alloc(Plugin.FormSpec, 1);
+    local_space[0] = .{ .name = "space", .open = true, .positional = .any, .local_forms = inner_local };
+
+    const forms = try a.alloc(Plugin.FormSpec, 3);
+    forms[0] = .{ .name = "space", .open = true, .positional = .any, .local_forms = local_space, .lowering = .{ .hook = "test/identity-v1", .produces = space_produces } };
+    forms[1] = .{ .name = "space-normal", .open = true };
+    forms[2] = .{ .name = "text", .open = true, .positional = .any };
+
+    const plugins = try a.alloc(Plugin.Plugin, 1);
+    plugins[0] = .{ .name = "p", .forms = forms };
+    return .{ .plugins = plugins };
+}
+
+fn runContainer(gpa: Allocator, src: [:0]const u8, expected_invocations: usize, expected_nested: []const []const u8) !void {
+    var schema_arena = std.heap.ArenaAllocator.init(gpa);
+    defer schema_arena.deinit();
+    const schema = try containerSchema(schema_arena.allocator());
+
+    var tree = try Parser.parse(gpa, src);
+    defer tree.deinit();
+
+    const overlay = MaterializedDefaults.MaterializedDefaults{};
+    var registry: LoweringRegistry = .{};
+    defer registry.deinit(gpa);
+    try registry.register(gpa, .{ .id = "test/identity-v1", .lower = identityRenameHook });
+
+    var pass_arena = std.heap.ArenaAllocator.init(gpa);
+    defer pass_arena.deinit();
+    var pr = try runLoweringPass(gpa, pass_arena.allocator(), &tree, tree.root, schema, &overlay, &registry, .{});
+    defer pr.deinit(gpa);
+
+    try testing.expectEqual(expected_invocations, pr.invocations.len);
+    try expectNestedHeadsInOrder(pr.diagnostics, expected_nested);
+}
+
+test "runLoweringPass: a container consumes children of its own head" {
+    // The ask's shape. `(space (space (text)))`: the outer `space` resolves
+    // globally and lowers; the inner one resolves to the container's own
+    // positional local, which never lowers, so it is data the container's hook
+    // walks. One invocation, no `lowering_nested_lowerable`. This is what
+    // `:consumes [space]` was asked for and it needs no manifest grammar.
+    try runContainer(testing.allocator, "(space (space (text)))", 1, &.{});
+}
+
+test "runLoweringPass: a container's own-head local shadows at every nesting level" {
+    // Three levels. The local `space` declares a local `space` of its own, so
+    // `childLocalRegistry` hands each level exactly its parent's locals and the
+    // shadow holds all the way down — which is why the ask's "transitive
+    // :consumes" question is moot: the hook walks its own subtree.
+    try runContainer(testing.allocator, "(space (space (space (text))))", 1, &.{});
+}
+
+test "runLoweringPass: a qualified child bypasses the container's own-head local" {
+    // The control for the two above. `(space (p/space))` spells the head
+    // qualified, which bypasses locals at the site and here too: the global
+    // lowerable `space` resolves, both hooks fire, and the child is flagged.
+    try runContainer(testing.allocator, "(space (p/space))", 2, &.{"space"});
+}
+
 // --- Variant-key locals: in scope only while the variant is active ----------
 //
 // A key declared on a `(variant …)` is accepted by the validator only under
@@ -3122,8 +4316,11 @@ fn variantShadowSchema(a: Allocator) !Schema.Schema {
     const variants = try a.alloc(Plugin.Variant, 2);
     variants[0] = .{ .when = &.{"a"}, .keys = a_keys };
     variants[1] = .{ .when = &.{"b"} };
-    const thing_keys = try a.alloc(Plugin.KeySpec, 1);
+    const thing_keys = try a.alloc(Plugin.KeySpec, 2);
     thing_keys[0] = .{ .name = "kind", .value_type = .{ .named = .{ .name = "k" } }, .optional = false, .default = .{ .symbol = "a" } };
+    // A slot the schema declines to interpret. Nothing about it is
+    // variant-scoped: opacity is the key's, not the variant's.
+    thing_keys[1] = .{ .name = "sealed", .value_type = .any, .optional = true, .walk_opaque = true };
 
     const forms = try a.alloc(Plugin.FormSpec, 3);
     forms[0] = .{ .name = "entry", .open = true, .lowering = .{ .hook = "test/identity-v1", .produces = entry_produces } };
@@ -3182,4 +4379,13 @@ test "runLoweringPass: an omitted discriminant with an overlay default selects t
     try runVariantShadow(testing.allocator, "(thing :extra (entry))", .{}, 0);
     // With axis D off the omitted discriminant selects nothing.
     try runVariantShadow(testing.allocator, "(thing :extra (entry))", .{ .variant = false }, 1);
+}
+
+test "runLoweringPass: a walk_opaque slot's contents are not lowered" {
+    // `(entry)` is a lowerable form, and in any ordinary slot its hook
+    // fires. In `:sealed` it does not: the validator will not descend
+    // there, so rewriting it would edit a subtree nothing then checks.
+    try runVariantShadow(testing.allocator, "(thing :sealed (entry))", .{}, 0);
+    // Control, one key over: the same value in a slot the schema reads.
+    try runVariantShadow(testing.allocator, "(thing :kind b :extra (entry))", .{}, 1);
 }

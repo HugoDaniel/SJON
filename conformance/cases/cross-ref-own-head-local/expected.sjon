@@ -1,0 +1,10 @@
+; Path is empty — the index pass walks outside path tracking (same as
+; `cross-ref-duplicate` and `cross-ref-multi-target-duplicate`).
+;
+; One diagnostic is the whole assertion, and the two silences beside it
+; carry as much: `:depth 1` on the nested space does not fire
+; `unknown_key` (the head resolved to the local, which declares it, not to
+; the global, which does not), and `:space title` does not fire
+; `not_cross_ref` (the nested local instance registered as a target).
+(diagnostics
+  (diagnostic :code duplicate_cross_ref_target :path []))

@@ -1,0 +1,7 @@
+; Reported, and reported once — from the lowered form, because the gate
+; no longer declines and `(box …)` lowered away. Before the fix the same
+; diagnostic arrived at [box-normal unioned] instead: the hook was skipped and
+; the source form validated as authored. Either way the author hears
+; about `t`; the path is what says which pass answered.
+(diagnostics
+  (diagnostic :code union_no_branch_matched :path [box-normal unioned]))

@@ -1484,6 +1484,41 @@ pub const Tree = struct {
         return .{ .value = @bitCast(bits), .unit = unit };
     }
 
+    /// Deepest container nesting in the tree: an atom root is 0, `[1]`
+    /// is 1, `(a [1])` is 2. Kvpairs are transparent, as they are to the
+    /// parser's frame count, so a parsed tree satisfies
+    /// `maxDepth() <= Parser.MAX_PARSE_DEPTH`. `Edit` re-establishes that
+    /// bound on every edited tree — it is the ceiling `cloneNode`, the
+    /// JSON bridge and the binary encoder all cite.
+    ///
+    /// Complexity: O(n) over the reachable nodes; the walk is iterative
+    /// (an explicit stack on `gpa`, released before returning), so it is
+    /// safe on a tree that is itself too deep.
+    pub fn maxDepth(self: *const Tree, gpa: Allocator) Allocator.Error!u32 {
+        const Item = struct { idx: NodeIndex, depth: u32 };
+        var stack: std.ArrayList(Item) = .empty;
+        defer stack.deinit(gpa);
+        for (self.root) |r| try stack.append(gpa, .{ .idx = r, .depth = 0 });
+        var deepest: u32 = 0;
+        while (stack.pop()) |item| {
+            switch (self.tagOf(item.idx)) {
+                .form => {
+                    const d = item.depth + 1;
+                    deepest = @max(deepest, d);
+                    for (self.formHeader(item.idx).children) |c| try stack.append(gpa, .{ .idx = c, .depth = d });
+                },
+                .vector => {
+                    const d = item.depth + 1;
+                    deepest = @max(deepest, d);
+                    for (self.vectorElements(item.idx)) |e| try stack.append(gpa, .{ .idx = e, .depth = d });
+                },
+                .kvpair => try stack.append(gpa, .{ .idx = self.kvpairHeader(item.idx).value, .depth = item.depth }),
+                else => {},
+            }
+        }
+        return deepest;
+    }
+
     /// Borrowed text of a `Tag.symbol` node (lifetime: `Tree`).
     pub fn symbolText(self: *const Tree, idx: NodeIndex) []const u8 {
         std.debug.assert(self.tagOf(idx) == .symbol);
@@ -2660,4 +2695,27 @@ test "Diagnostic.dupe: deep-copies message and path, survives source free" {
     try testing.expectEqual(Diagnostic.Code.unknown_form, copy.code);
     try testing.expectEqual(original.span, copy.span);
     try testing.expectEqual(Diagnostic.Severity.err, copy.severity);
+}
+
+test "Tree.maxDepth: atoms are 0, containers count, kvpairs are transparent" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var b: TreeBuilder = .{ .a = arena.allocator() };
+    const z: Span = .{ .start = 0, .end = 0 };
+    const one = try b.appendNumber(1, z);
+    const inner = try b.appendVector(&.{one}, z);
+    const outer = try b.appendVector(&.{inner}, z);
+    const kv = try b.appendKvpair("k", outer, z, z);
+    const form = try b.appendForm("a", null, z, &.{kv}, z);
+    const atom = try b.appendNumber(2, z);
+    var tree = try b.finalize(&arena, "", &.{ form, atom });
+    defer tree.deinit();
+    // (a :k [[1]]) 2  → form(1) > kvpair(transparent) > vector(2) > vector(3)
+    try std.testing.expectEqual(@as(u32, 3), try tree.maxDepth(std.testing.allocator));
+
+    var b2: TreeBuilder = .{ .a = arena.allocator() };
+    const lone = try b2.appendNumber(1, z);
+    var flat = try b2.finalize(&arena, "", &.{lone});
+    defer flat.deinit();
+    try std.testing.expectEqual(@as(u32, 0), try flat.maxDepth(std.testing.allocator));
 }

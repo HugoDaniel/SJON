@@ -8,8 +8,23 @@
 //! `hosts/web/test/conformance.test.ts`. Handles forms, kvpairs (greedy
 //! `:k v`), vectors, double-quoted strings with `\n`/`\r`/`\t` escapes,
 //! bare symbols (numbers fall under this — they're textually compared),
-//! line comments (`;`). No block comments, no raw strings, no comments
-//! inside nested structures (the project files we walk don't use them).
+//! line comments (`;`). No comments inside nested structures (the
+//! project files we walk don't use them).
+//!
+//! The contract, mirroring `hosts/web/sjonSubsetParser.ts`:
+//!
+//!   A successful parse preserves the structure and the values the
+//!   consumer relies on. Recognised syntax this parser cannot interpret
+//!   is an explicit error, never a quietly different tree.
+//!
+//! Reading a smaller language than SJON is deliberate. Reading the
+//! *same* text as something else is not, because the callers act on
+//! what comes back — which plugin files to load, what a case expected.
+//! Raw strings (`"""…"""`) and block comments (`#| … |#`) both used to
+//! do that: the first turned one string into three nodes, and the
+//! second let a commented-out kvpair through as data. Both are refused
+//! now. LANGUAGE.md §14.2 takes the same line on the wire format: a
+//! read that cannot be trusted is a loud failure, never a silent one.
 
 /// One node in the parsed AST. Matches the JS embedded parser's shape
 /// so cross-host fixtures can be diffed structurally.
@@ -49,7 +64,7 @@ pub enum Node {
 /// `(plugin …)` / `(diagnostics …)` form.
 pub fn parse_single_form(source: &str) -> Result<Option<Node>, String> {
     let mut c = Cursor::new(source);
-    c.skip_trivia();
+    c.skip_trivia()?;
     if c.eof() {
         return Ok(None);
     }
@@ -57,7 +72,7 @@ pub fn parse_single_form(source: &str) -> Result<Option<Node>, String> {
     if !matches!(node, Node::Form { .. }) {
         return Err("expected a form at top level".into());
     }
-    c.skip_trivia();
+    c.skip_trivia()?;
     if !c.eof() {
         return Err("expected a single top-level form".into());
     }
@@ -72,7 +87,7 @@ pub fn parse_top_level_forms(source: &str) -> Result<Vec<Node>, String> {
     let mut c = Cursor::new(source);
     let mut out = Vec::new();
     loop {
-        c.skip_trivia();
+        c.skip_trivia()?;
         if c.eof() {
             break;
         }
@@ -144,7 +159,23 @@ impl<'a> Cursor<'a> {
         self.src[self.i]
     }
 
-    fn skip_trivia(&mut self) {
+    /// Refuse a construct this parser recognises and cannot interpret.
+    ///
+    /// Only ever reached from a position the substrate lexer would treat
+    /// as a token start, which is what keeps it off `#` and `"` bytes
+    /// that are ordinary content: inside a string `parse_string`
+    /// consumes bytes directly, inside a line comment `skip_trivia` runs
+    /// to the newline, and mid-symbol both `#` and `|` are symbol
+    /// continuation bytes in `Lexer.zig`'s `symbol_body` — so `a#b` and
+    /// `foo#|bar` are single symbols here exactly as they are there.
+    fn refuse(what: &str, spelling: &str) -> String {
+        format!(
+            "{what} ({spelling}) are unsupported by the bootstrap parser; \
+             it reads a subset of SJON and refuses what it would otherwise misread"
+        )
+    }
+
+    fn skip_trivia(&mut self) -> Result<(), String> {
         while !self.eof() {
             match self.peek() {
                 b' ' | b'\t' | b'\n' | b'\r' => self.i += 1,
@@ -153,9 +184,18 @@ impl<'a> Cursor<'a> {
                         self.i += 1;
                     }
                 }
+                // `Lexer.zig`'s `block_hash` state: a `#` at a token
+                // start is a block comment when `|` follows, and
+                // `.invalid` when it does not. Only the first is
+                // refused — the second is already malformed SJON, and
+                // reading it as a symbol misleads nobody.
+                b'#' if self.src.get(self.i + 1) == Some(&b'|') => {
+                    return Err(Self::refuse("block comments", "`#| … |#`"));
+                }
                 _ => break,
             }
         }
+        Ok(())
     }
 
     fn parse_node(&mut self) -> Result<Node, String> {
@@ -169,7 +209,7 @@ impl<'a> Cursor<'a> {
     }
 
     fn parse_node_inner(&mut self) -> Result<Node, String> {
-        self.skip_trivia();
+        self.skip_trivia()?;
         if self.eof() {
             return Err("unexpected end of input".into());
         }
@@ -192,14 +232,14 @@ impl<'a> Cursor<'a> {
 
     fn parse_form(&mut self) -> Result<Node, String> {
         self.i += 1; // consume '('
-        self.skip_trivia();
+        self.skip_trivia()?;
         let head = self.read_symbol();
         if head.is_empty() {
             return Err("expected form head after `(`".into());
         }
         let mut children: Vec<Node> = Vec::new();
         loop {
-            self.skip_trivia();
+            self.skip_trivia()?;
             if self.eof() {
                 return Err("unterminated form".into());
             }
@@ -213,7 +253,7 @@ impl<'a> Cursor<'a> {
                 if key.is_empty() {
                     return Err("expected key after `:`".into());
                 }
-                self.skip_trivia();
+                self.skip_trivia()?;
                 let value = self.parse_node()?;
                 children.push(Node::Kvpair {
                     key,
@@ -229,7 +269,7 @@ impl<'a> Cursor<'a> {
         self.i += 1; // consume '['
         let mut elements: Vec<Node> = Vec::new();
         loop {
-            self.skip_trivia();
+            self.skip_trivia()?;
             if self.eof() {
                 return Err("unterminated vector".into());
             }
@@ -242,6 +282,14 @@ impl<'a> Cursor<'a> {
     }
 
     fn parse_string(&mut self) -> Result<Node, String> {
+        // `Lexer.zig` enters `raw_string_body` on exactly three quotes at
+        // a token start; `""` and `"foo"` fall through to the
+        // escape-aware body. So this tests the same three bytes it does,
+        // and an empty `""` still parses — including `""""""`, one empty
+        // *raw* string there, refused here rather than read as three.
+        if self.src.get(self.i + 1) == Some(&b'"') && self.src.get(self.i + 2) == Some(&b'"') {
+            return Err(Self::refuse("raw strings", "`\"\"\"…\"\"\"`"));
+        }
         self.i += 1; // consume '"'
         let mut out: Vec<u8> = Vec::new();
         while !self.eof() {
@@ -484,5 +532,105 @@ mod tests {
         };
         let label = find_kvpair(&children, "label").unwrap();
         assert!(matches!(label, Node::String(s) if s == "é→ ok"));
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    //! The refusal contract: a successful parse preserves the structure
+    //! and values the caller relies on, and recognised syntax this
+    //! parser cannot interpret is an explicit error.
+    //!
+    //! Half of these are near-misses that must still parse. A whole-file
+    //! substring search for `"""` or `#|` would reject every one of
+    //! them, which is why the checks sit only at token starts.
+
+    use super::{Node, parse_single_form, parse_top_level_forms};
+
+    fn err(src: &str) -> String {
+        parse_single_form(src).expect_err("expected a refusal")
+    }
+
+    #[test]
+    fn a_raw_string_is_refused_not_read_as_three_strings() {
+        assert!(err(r#"(plugin :name """shapes""")"#).contains("raw strings"));
+        // `""""""` is one empty raw string to the substrate lexer.
+        assert!(err(r#"(a """""")"#).contains("raw strings"));
+    }
+
+    #[test]
+    fn a_block_comment_is_refused_not_parsed_as_data() {
+        let src = "(project\n  #| :plugins [\"disabled.sjon\"] |#\n  :plugins [\"active.sjon\"])";
+        assert!(err(src).contains("block comments"));
+        // Also in the head position, which `read_symbol` reaches without
+        // ever passing through `parse_node`.
+        assert!(err("(#| c |# a)").contains("block comments"));
+        // And at top level, before any form starts.
+        assert!(
+            parse_top_level_forms("#| c |# (a)")
+                .expect_err("expected a refusal")
+                .contains("block comments")
+        );
+    }
+
+    #[test]
+    fn the_refusal_names_the_parser() {
+        assert!(err(r#"(a """x""")"#).contains("bootstrap parser"));
+    }
+
+    #[test]
+    fn an_empty_string_still_parses() {
+        let got = parse_single_form(r#"(a "" "b")"#).unwrap().unwrap();
+        assert_eq!(
+            got,
+            Node::Form {
+                head: "a".to_owned(),
+                children: vec![Node::String(String::new()), Node::String("b".to_owned())],
+            }
+        );
+    }
+
+    #[test]
+    fn hash_and_pipe_inside_a_symbol_are_symbol_bytes() {
+        // `Lexer.zig`'s `symbol_body` accepts both, so `a#b` and
+        // `foo#|bar` are single symbols there and must be here.
+        let got = parse_single_form("(a b#c foo#|bar)").unwrap().unwrap();
+        assert_eq!(
+            got,
+            Node::Form {
+                head: "a".to_owned(),
+                children: vec![
+                    Node::Symbol("b#c".to_owned()),
+                    Node::Symbol("foo#|bar".to_owned()),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn openers_inside_a_string_or_line_comment_are_content() {
+        let got = parse_single_form("(a \"#| not a comment |#\")")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            got,
+            Node::Form {
+                head: "a".to_owned(),
+                children: vec![Node::String("#| not a comment |#".to_owned())],
+            }
+        );
+
+        let got = parse_single_form("(a ; #| not a comment \"\"\" either\n  1)")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            got,
+            Node::Form {
+                head: "a".to_owned(),
+                children: vec![Node::Symbol("1".to_owned())],
+            }
+        );
     }
 }

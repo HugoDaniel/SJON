@@ -16,10 +16,10 @@ pub(crate) mod sjon_subset;
 mod wasm;
 
 pub use diagnostic::{
-    AggregatedArtifacts, DefaultOrigin, EvalResultEntry, ExportLayout, ExportLayoutOption,
+    Address, AggregatedArtifacts, DefaultOrigin, EvalResultEntry, ExportLayout, ExportLayoutOption,
     ExportSchemaOptions, ExportSchemaResult, ExportTarget, ExportWarning, FailurePolicy,
-    HostDiagnostic, HostEvalResult, HostOptions, HostResult, MaterializedDefault,
-    PerPluginArtifact, Phase, PluginSummary, Severity, Span,
+    HostDiagnostic, HostEvalResult, HostOptions, HostResult, MaterializedDefault, NodeRow,
+    NodeTable, ParseDiagnostic, PathStep, PerPluginArtifact, Phase, PluginSummary, Severity, Span,
 };
 pub use error::SjonHostError;
 pub use filesystem_resolver::FilesystemResolver;

@@ -1,0 +1,6 @@
+; Three axes, three codes — the transcript the ask filed, and what every
+; run that has not opted in still gets.
+(diagnostics
+  (diagnostic :code not_cross_ref :path [warp by])
+  (diagnostic :code wrong_underlying :path [warp amount])
+  (diagnostic :code not_member :path [warp blend]))

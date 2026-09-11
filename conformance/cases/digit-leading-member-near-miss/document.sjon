@@ -1,0 +1,23 @@
+; The near-misses an editor has to be able to talk about. `not_member` is
+; already pinned for a wrong magnitude and a wrong single-letter unit
+; (`digit-leading-member-not-member`); these are the three shapes a typo
+; actually takes when the member spelling is longer than one letter.
+;
+;   * `2dd` — a doubled letter. The unit is `dd`, one edit from `d`.
+;   * `2d-arry` — a hyphenated unit one edit from `d-array`. It is one
+;     token only because a `-` may join two letter runs inside a unit, so
+;     a typo inside the second run stays one token too.
+;   * `2.5d` — a fractional magnitude, which no spelling can be at all:
+;     `2d`, `2.0d` and `02d` are one member and `2.5d` is none of them.
+;
+; All three report `not_member` rather than `wrong_underlying`: once the
+; kind declares a digit-leading member the slot genuinely accepts
+; unit-bearing numbers, so "which ones are allowed" is the useful report.
+(plugin :name gpu :version "1.0.0"
+  (value-kind :name view-dimension :underlying symbol
+    :members (member-set :values [1d 2d 2d-array cube 3d]))
+  (form :name texture (key :name view :type view-dimension)))
+
+(texture :view 2dd)
+(texture :view 2d-arry)
+(texture :view 2.5d)

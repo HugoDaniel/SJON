@@ -11,6 +11,33 @@
 // shapes each consumer inspects. The full validating parser lives in
 // sjon.wasm; this is only the pre-WASM / test-side substrate.
 //
+// The contract, and the reason `refuseUnsupported` exists:
+//
+//   A successful parse preserves the structure and the values the
+//   consumer relies on. Recognised syntax this parser cannot interpret
+//   is an explicit error, never a quietly different tree.
+//
+// Reading a smaller language than SJON is fine and deliberate. Reading
+// the *same* text as something else is not, because both consumers act
+// on what comes back: the resolver decides which plugin files to load,
+// and the conformance reader decides what a case expected. Two
+// constructs used to do exactly that.
+//
+//   `"""raw"""`  lexed as `""` + `"raw"` + `""`, so one string became
+//                three nodes: `(plugin :name """shapes""")` gave `:name`
+//                the empty string and two stray positionals beside it.
+//                A manifest key silently changed value.
+//   `#| … |#`    was not trivia here, so its *contents* were parsed as
+//                data. A commented-out `:plugins ["disabled.sjon"]`
+//                came back as a real kvpair beside the live one, and
+//                the resolver indexes every `:plugins` it finds — so
+//                text the author disabled became configuration.
+//
+// Both are lexical features that would fit this node model; supporting
+// them is a separate decision. Refusing them is the minimum guarantee.
+// LANGUAGE.md §14.2 takes the same line on the wire format: a read that
+// cannot be trusted is a loud failure, never a silent one.
+//
 // The two consumers differ in exactly two leaf-lexing choices, captured
 // by `Dialect` so each keeps its precise behaviour:
 //   - `bareColon` — how a `:` that is NOT a `:k v` separator tokenises.
@@ -42,12 +69,35 @@ export interface Dialect {
   timeLiterals: boolean;
 }
 
+/**
+ * Refuse a construct this parser recognises and cannot interpret. Called
+ * only from positions the substrate lexer would treat as a token start,
+ * which is what keeps the check off `#` and `"` bytes that are ordinary
+ * content: inside a string `parseString` consumes bytes directly, inside
+ * a line comment `skipTrivia` runs to the newline, and mid-symbol both
+ * `#` and `|` are symbol continuation bytes in `Lexer.zig`'s
+ * `symbol_body` — so `a#b` and `foo#|bar` are single symbols here
+ * exactly as they are there.
+ */
+function refuseUnsupported(what: string, spelling: string): never {
+  throw new Error(
+    `${what} (${spelling}) are unsupported by the bootstrap parser; ` +
+      'it reads a subset of SJON and refuses what it would otherwise misread',
+  );
+}
+
 export function skipTrivia(c: Cursor): void {
   while (c.i < c.src.length) {
     const ch = c.src[c.i];
     if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') c.i++;
     else if (ch === ';') {
       while (c.i < c.src.length && c.src[c.i] !== '\n') c.i++;
+    } else if (ch === '#' && c.src[c.i + 1] === '|') {
+      // `Lexer.zig`'s `block_hash` state: a `#` at a token start is a
+      // block comment when `|` follows and `.invalid` when it does not.
+      // Only the first is refused — the second is already malformed
+      // SJON, and reading it as a symbol misleads nobody.
+      refuseUnsupported('block comments', '`#| … |#`');
     } else break;
   }
 }
@@ -76,6 +126,14 @@ function readSymbol(c: Cursor): string {
 }
 
 function parseString(c: Cursor): ParsedNode {
+  // `Lexer.zig` enters `raw_string_body` on exactly three quotes at a
+  // token start; `""` and `"foo"` fall through to the escape-aware body.
+  // So this tests the same three bytes it does, and an empty `""` still
+  // parses — including `""""""`, which is one empty *raw* string there
+  // and is refused here rather than read as three empty ones.
+  if (c.src[c.i + 1] === '"' && c.src[c.i + 2] === '"') {
+    refuseUnsupported('raw strings', '`"""…"""`');
+  }
   c.i++; // consume '"'
   let out = '';
   while (c.i < c.src.length) {

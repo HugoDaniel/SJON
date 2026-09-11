@@ -1,0 +1,46 @@
+; Every value-level diagnostic a variant key can carry, beside the common
+; key that carries the same one. `:c-fmt` and `:v-fmt` have identical
+; types; so do `:c-ref` and `:v-ref`. The only difference is that one
+; pair is declared on the form and the other inside
+; `(variant :when fancy …)`.
+;
+; The validator has always read both pairs alike, which is what makes
+; this case worth pinning: the LSP resolved a key with
+; `FormSpec.keyByName`, which searches `keys` and never
+; `variants[].keys`, so hover, completion, semantic tokens and the quick
+; fixes answered for `:c-fmt` and went silent on `:v-fmt`. The four hosts
+; replay the validator side of that table here.
+;
+; The last two lines are the boundary the fix had to respect. A variant
+; key under a value that selects no variant, and a variant key written
+; ahead of the discriminant, are both `unknown_key` — so an editor that
+; described them would be confidently wrong rather than merely quiet.
+; (The position rule's own case is `local-form-variant-key`.)
+(plugin :name m :version "1.0.0"
+  (value-kind :name mode :underlying symbol
+    :members (member-set :values [plain fancy]))
+  (value-kind :name fmt :underlying symbol
+    :members (member-set :values [uint16 uint32]))
+  (value-kind :name anchor-ref :underlying symbol
+    :cross-ref (cross-ref :target anchor))
+
+  (form :name anchor
+    (key :name name :type symbol))
+
+  (form :name w
+    :discriminant mode
+    (key :name mode  :type mode       :optional true :default plain)
+    (key :name c-fmt :type fmt        :optional true)
+    (key :name c-ref :type anchor-ref :optional true)
+    (variant :when fancy
+      (key :name v-fmt :type fmt        :optional true)
+      (key :name v-ref :type anchor-ref :optional true))))
+
+(anchor :name alpha)
+
+(w :mode fancy :v-fmt uint16 :v-ref alpha)  ; the variant is active — clean
+(w :mode fancy :v-fmt uint166)              ; not_member, on a variant key
+(w :mode fancy :v-ref alpa)                 ; not_cross_ref, likewise
+(w :mode fancy :c-fmt uint166)              ; the common twin, same diagnostic
+(w :mode plain :v-fmt uint16)               ; selects no variant — unknown_key
+(w :v-fmt uint16 :mode fancy)               ; ahead of the discriminant — same

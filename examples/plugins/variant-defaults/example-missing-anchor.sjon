@@ -1,0 +1,21 @@
+; A defaulted variant key is checked, not only filled in.
+;
+; No `(anchor :name origin)` here. `(light :kind spot)` selects the
+; `spot` variant, `:aim` is omitted, its default `origin` is
+; materialized, and the cross-ref lookup over it misses:
+;
+;   not_cross_ref at [light aim default]
+;   form `light` keyword `:aim` default `origin` does not name a
+;   `(lights/anchor …)` instance
+;
+; The path ends in `default`: the value that failed is one the author
+; never wrote. The repair is either to declare the anchor the schema
+; assumes, or to write an `:aim` that names one that exists. Before
+; variant-key defaults reached the overlay this document was silent,
+; and the omission was accepted on the strength of a value nothing had
+; supplied.
+;
+;   cat examples/plugins/variant-defaults/plugin.sjon \
+;       examples/plugins/variant-defaults/example-missing-anchor.sjon | sjon validate - --no-project
+
+(light :kind spot)

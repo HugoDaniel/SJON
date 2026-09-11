@@ -201,6 +201,39 @@ validates the source and every lowered layer as one final-document
 forest, so cross-references resolve across the split. Lowered nodes keep
 provenance back to the source form.
 
+### The layers are part of the result
+
+`HostResult.lowering_stages` holds one entry per layer, in layer order:
+that layer's tree, that layer's provenance table, and that layer's
+defaults overlay. `lowered_tree`, `lowering_provenance` and
+`lowered_materialized_defaults` are the terminal layer, and are aliases
+into the last stage rather than a fourth thing to free.
+
+A provenance table is **one hop**. Layer `i`'s table says which form in
+layer `i-1` produced each of layer `i`'s forms and which hook did it, and
+that is all it says. Both halves of an entry are `Ast.NodeIndex` values,
+a `u32` each, but they index two *different* trees, so an entry read
+against the wrong one lands on an unrelated node rather than failing.
+`HostResult.provenanceChain` is the walk that composes the tables and
+hands back hops that carry their own trees, source-first: hop 0 is the
+authored form and the hook that first rewrote it. It allocates nothing —
+a chain is at most one hop per layer, and the layer count is capped — so
+the caller passes a buffer.
+
+"Terminal" is per form, not per document. A hook that emits one form
+which lowers again and one which does not leaves the second terminal in
+an intermediate layer's tree; the final validated forest includes it and
+`lowered_tree` does not. `provenanceChainFrom` takes the layer for
+exactly that case.
+
+Two things this makes answerable that a single hop cannot. An
+explanation of "why does this look like this" can name every form and
+hook that stood between the authored bytes and the final one, where a
+span alone gives only the two ends. And **eject** — replacing a verb's
+authored span with the text of what the verb wrote — reads layer 0, so a
+verb that emits sugar ejects to that sugar rather than to the core the
+sugar eventually becomes.
+
 If a required hook is missing, fails, emits a head outside `:produces`,
 or exceeds the output / staging limits, the host reports lowering
 diagnostics. Emitting a form that is itself lowerable is *not* an error —
@@ -316,6 +349,211 @@ document roots in their own right) go with it. Marking *both* a container
 and its children `:lowering` is the one self-contradictory setup to
 avoid: both would fire and emit overlapping output. In container lowering
 the children are data; only the container lowers.
+
+#### What the container's children may use
+
+A container's children may use **any** value kind the language has,
+including ones that name something the container does not contain. There
+is no rule that a child must validate in isolation, and a container built
+out of the ordinary forms of the language — the same `(color-attachment
+…)` a hand-written pass carries, rather than a private sugar vocabulary —
+is the shape this is written for.
+
+The reason it needs saying is that the host does surface-validate the
+container's sub-tree before invoking the hook, and gates on any error: a
+malformed container should not reach a contract that assumes well-formed
+input. That pass sees the form and its descendants and nothing else. It
+would therefore be within its rights to reject a perfectly good document,
+because a child naming a sibling elsewhere cannot resolve against a
+sub-tree that does not contain the sibling.
+
+It does not, and the rule is exact. The **only** thing that differs
+between validating a form alone and validating it inside its document is
+which names are registered. The schema is the same object, the defaults
+overlay is the whole document's rather than a fragment of one, and the
+effective axes are the same axes, so every other check decides
+identically in both passes: underlying, member sets, numeric and string
+bounds, `:requires`, exclusive groups, variants, head sets, positional
+cardinality, repr ranges. So the sub-tree pass declines to adjudicate
+cross-reference identity at all. A cross-reference matches whatever it
+names, wherever the name is reached from — directly, through a
+`(union-shape …)` alternative, through a vector element, or as a key's
+default — and two same-named forms inside the container are not a
+duplicate. Nothing is lost by the deferral: the whole-document pass that
+follows owns cross-reference reporting, and it runs over whatever
+survives lowering.
+
+Which is the one thing to design around. A container that lowers is
+*replaced* by what its hook emitted, and its children go with it, so a
+child value nobody carried forward is a child value nobody validates
+either. If a hook rejects one of its children, `out.fail`/`failAt` is how
+it says so, and a span makes the message land on the child rather than on
+the container head.
+
+#### A container whose children share its head
+
+Sometimes the thing a container holds is another container of the same
+kind. A coordinate frame that may hold coordinate frames, a group that may
+hold groups: nesting states one fact, the parent of what is inside, and the
+nested spelling and the flat one are the same program.
+
+That looks like the self-contradictory setup above — a `:lowering` form as
+a positional child of a `:lowering` form, which fires both hooks in one
+layer and gets `lowering_nested_lowerable` for it. It is not, because the
+inner head does not have to resolve to the lowering form. Declare it as a
+**slot-local form of the container**:
+
+```sjon
+(form :name space :open true
+  (key :name name :type symbol)
+  :lowering (lowering :hook anm/space-v1 :produces [coords text])
+
+  ;; The same head, declared as this form's own positional local: plain
+  ;; data, no :lowering, and free to differ from the global.
+  (form :name space
+    (key :name name :type symbol)
+    (key :name parent :type space-ref)))
+```
+
+A head resolves local-first, at validation and in the lowering worklist
+alike, so the nested `(space …)` takes the local body. A slot-local form
+can never lower — `:lowering` on one is `invalid_manifest` at load — so
+there is no second hook, no lint, and one invocation over the whole
+subtree. The container's hook walks the nesting itself and emits the flat
+result.
+
+Three things to know before writing it:
+
+- **It is spelled once per level.** A local that may hold a local declares
+  one of its own, and nesting is capped at `MAX_LOCAL_FORM_DEPTH` (8).
+  Nine levels is `invalid_manifest` at load.
+- **The local is its own `FormSpec`, which is the point.** A nested `space`
+  may want fewer keys than a root one, a required `:parent` where the root
+  has none, a different default. Saying "the same form, but inert" is not
+  available and is usually not what was wanted.
+- **A qualified head bypasses the local**, at the site and in the
+  worklist. `(space (anm/space …))` resolves the global, so both hooks
+  fire and the lint says so. That is the escape hatch and the control
+  case, in one.
+
+A nested local instance is still a cross-reference target under its head.
+The index canonicalises the *head*, not the slot it was written in, so
+`(space :name poster (space :name title))` registers both names and a form
+elsewhere in the document may name `title`.
+
+#### Referencing a container that lowered
+
+A container that lowers is replaced by its output, so a name declared on
+the container is not in the final forest under the container's head. A
+reference to it has to reach whatever the hook emitted in its place.
+
+The convention is a **second head**, and a cross-reference kind that
+targets both:
+
+```sjon
+(value-kind :name space-ref :underlying symbol
+  :cross-ref (cross-ref :target [space coords]))
+```
+
+The hook emits a childless `(coords :name title …)` carrying the name, and
+`:space title` resolves whether it lands on the author's `space` or the
+emitted `coords`. Authors write `space`; only the lowered forest shows
+`coords`.
+
+Two heads rather than one because the same schema has to hold when nothing
+lowers. Only a host with a registry runs a lowering pass — the CLI does
+not, and neither do the JavaScript, Rust and TypeScript hosts — and in
+those worlds `space` is in the forest and `coords` never appears. A
+single-head target is right in one world and wrong in the other.
+
+**The target list is the bucket key.** `:target space` and `:target [space
+coords]` are two different namespaces, not a widening of one. So adding a
+head is all-or-nothing across every value kind that named the old one: a
+kind left on the short list keeps its own separate namespace, and nothing
+reports it, because the two buckets genuinely differ.
+
+#### Spans on a lifted child
+
+Every form an invocation emits inherits the source form's span, which is
+right for sugar: the container authored those bytes. A container that
+lifts a child out of its own subtree is the case where it is not. The
+author wrote `(text :name letters …)` on its own line, and a diagnostic
+raised on the lowered `text` would point at the whole enclosing block —
+worse than the flat spelling the nesting replaces.
+
+`EmittedForm.source_span` is the override. Set it to the lifted child's
+span and the child's diagnostics land on the child's bytes; leave it null
+(the default) and the source form's span is used, unchanged. It covers the
+form and its subtree, and a nested emitted form may narrow it further.
+
+Provenance is a separate question and keeps its separate answer:
+`source_form_idx` still names the container, because the container's hook
+is what authored the form. "Who emitted this" and "which bytes should a
+reader be shown" get one field each.
+
+### Reading a form the hook does not own
+
+A hook resolves a cross-reference key on its own form to the form that key
+names, and then reads that form the way it reads itself:
+
+```zig
+const producer = (try input.resolveRef("from")) orelse
+    return out.fail(arena, "`:from` names nothing this layer defines", .{});
+const count = input.view.getEffectiveValue(producer, "count");
+```
+
+`resolveRef` takes a key **on the hook's own form**, not a free name. The
+key's declared value kind supplies the cross-reference target set, so a hook
+cannot look in the wrong bucket, and a multi-target `(cross-ref :target
+[a b])` resolves without the hook spelling either target. What comes back is
+the named form's node index, which is what `getEffectiveValue` already
+takes, so a defaulted value on the neighbour arrives through the overlay
+with no special casing in the hook.
+
+This is what a *flat* vocabulary needs. Container lowering (above) puts
+every form a hook reasons about inside its own subtree, which is available
+whenever the grammar nests. A grammar whose forms sit at top level and name
+each other by `:name` has no such subtree, and restating a neighbour's facts
+on every form that needs them is duplication nothing checks.
+
+**The bound: resolution sees this staging layer's input forest.** At layer 0
+that is the author's data forest; at layer N it is what layer N-1 emitted. A
+name that a later layer will define resolves to null, which is not an error.
+The hook never adjudicates identity, and the whole-document forest pass that
+follows resolves the reference there. A hook that does want to insist says
+so with `out.fail` / `failAt`.
+
+Null also covers an absent key and a value that is not symbol-shaped, which
+is what lets a `(scalar-or-ref-shape …)` slot be asked without the hook
+inspecting the tag first. `HookFailed` is reserved for the one thing no
+document decides: a key whose declared type carries no cross-reference at
+all, a hook bug of the same class as reading a number slot with `symbol`.
+
+**A hand-rolled scan is not a supported substitute.** `input.view` spans the
+whole document tree, so a hook can walk `view.tree.root` for a form whose
+`:name` matches, and for a flat single-target vocabulary it will get the
+right answer. It gets four things wrong as soon as the schema uses more of
+the language, and gets them wrong silently:
+
+- **Scope.** A `(cross-ref … :scope <form>)` resolves only inside the
+  nearest enclosing instance of that form, so a scan over roots matches
+  names the validator reports as `cross_ref_outside_scope`.
+- **The shared bucket.** `(cross-ref :target [a b])` puts several heads in
+  one namespace, and a scan hard-codes one head.
+- **Provider-backed names.** Names produced by a `(cross-ref-provider …)`
+  extraction are not in the tree to be scanned at all. `resolveRef` answers
+  null for them, because provider extraction runs after the staging loop and
+  no extracted name is resolvable from a hook.
+- **Slot-local forms.** A local body's `:name` is scoped to its slot rather
+  than to the document, so a document-wide scan can match a name the
+  validator would not.
+
+The index a hook asks is the validator's own, so those four rules stay in
+step with the language for free.
+
+Building that index costs one forest walk, paid at most once per staging
+layer and only when a hook asks. A layer whose hooks resolve nothing builds
+nothing.
 
 ### Emitting synthesized terminal forms
 

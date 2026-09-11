@@ -196,9 +196,11 @@ pub const Value = union(enum) {
     /// *mid-eval* value, use `equalsBounded`, which returns
     /// `error.DepthExceeded` rather than risking a host-stack overflow.
     pub fn equals(a: Value, b: Value) bool {
-        // Inputs are contract-bounded to MAX_VALUE_DEPTH, so the depth cap
-        // is never reached here; a violation is a caller bug, surfaced
-        // loudly rather than as a silent stack smash.
+        // SAFETY: inputs are contract-bounded to MAX_VALUE_DEPTH (every
+        // `Value` a caller can hold came out of eval's final deepCopyValue
+        // or `MaterializedDefaults.literalToValue`, both capped there), so
+        // the depth cap is never reached; a violation is a caller bug,
+        // surfaced loudly rather than as a silent stack smash.
         return equalsDepth(a, b, 0) catch unreachable;
     }
 
@@ -1878,6 +1880,14 @@ pub fn evalBinaryWithRuntimeBudget(
     const a = arena.allocator();
 
     var cursor = try BinaryCursor.Cursor.init(bytes);
+    // Pool index for the eval walk, on the result arena: every symbol and
+    // form head below resolves through the cursor, which is O(pool
+    // entries) per lookup without one. The arena owns it, so there is no
+    // free to pair — it dies with the `Result`. It is charged to
+    // `budget.bytes` like everything else on this arena, which is the
+    // honest accounting: 4 bytes per pool entry against a 64 MiB ceiling.
+    const pool_index = try a.alloc(u32, cursor.poolIndexLen());
+    cursor.indexPools(pool_index);
     var root_iter = try cursor.rootIter();
     if (root_iter.remaining != 1) return error.MultipleRoots; // != 1 also catches zero roots (name is a slight misnomer for the empty case)
     const root_view = (try root_iter.next()) orelse unreachable;

@@ -287,12 +287,17 @@ export class SjonHost {
     projectRoot: string | null;
     projectFile: string | null;
     failurePolicy: 'strict' | 'lenient';
+    heldSymbol: string | null;
     hasResolver: boolean;
   } {
     return {
       projectRoot: options.projectRoot ?? null,
       projectFile: options.projectFile ?? null,
       failurePolicy: options.failurePolicy ?? 'lenient',
+      // Only `sjon_host_validate_document` reads this; the export entries
+      // parse the same options shape and ignore it, exactly as they do with
+      // `projectRoot` when nothing resolves.
+      heldSymbol: options.heldSymbol ?? null,
       hasResolver: this._resolver !== null,
     };
   }

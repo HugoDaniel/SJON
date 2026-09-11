@@ -146,6 +146,8 @@ pub(crate) struct SjonWasm {
     host_eval_expr: TypedFunc<(u32, u32, u32, u32), u32>,
     export_schema: TypedFunc<(u32, u32, u32, u32), u32>,
     query_pattern: TypedFunc<(u32, u32, i64, i64, i64), u32>,
+    address_of_span: TypedFunc<(u32, u32, u32, u32), u32>,
+    node_table: TypedFunc<(u32, u32), u32>,
 }
 
 impl SjonWasm {
@@ -206,6 +208,14 @@ impl SjonWasm {
             .get_typed_func::<(u32, u32, i64, i64, i64), u32>(&mut store, "sjon_query_pattern")
             .context("getting sjon_query_pattern export")
             .map_err(LoadError::Instantiate)?;
+        let address_of_span = instance
+            .get_typed_func::<(u32, u32, u32, u32), u32>(&mut store, "sjon_address_of_span")
+            .context("getting sjon_address_of_span export")
+            .map_err(LoadError::Instantiate)?;
+        let node_table = instance
+            .get_typed_func::<(u32, u32), u32>(&mut store, "sjon_node_table")
+            .context("getting sjon_node_table export")
+            .map_err(LoadError::Instantiate)?;
 
         Ok(Self {
             store,
@@ -216,6 +226,8 @@ impl SjonWasm {
             host_eval_expr,
             export_schema,
             query_pattern,
+            address_of_span,
+            node_table,
         })
     }
 
@@ -249,6 +261,32 @@ impl SjonWasm {
     /// framed JSON envelope `{layout, hostDiagnostics, loadedPlugins,
     /// warnings, aggregated, perPlugin}` produced by
     /// `wasm_common.writeExportSchemaResult`.
+    /// Run `sjon_node_table(source)`. Returns the raw framed JSON
+    /// `{"nodes":[…],"diagnostics":[…]}`.
+    pub(crate) fn call_node_table(&mut self, source: &[u8]) -> wasmtime::Result<Vec<u8>> {
+        let fn_handle = self.node_table.clone();
+        self.call_one_buffer_export(fn_handle, "sjon_node_table", source)
+    }
+
+    /// Run `sjon_address_of_span(source, start, end)`. Returns the raw
+    /// framed JSON — an address object, or the literal `null` when the
+    /// span is inside no root.
+    pub(crate) fn call_address_of_span(
+        &mut self,
+        source: &[u8],
+        start: u32,
+        end: u32,
+    ) -> wasmtime::Result<Vec<u8>> {
+        let fn_handle = self.address_of_span.clone();
+        self.call_one_buffer_two_scalar_export(
+            fn_handle,
+            "sjon_address_of_span",
+            source,
+            start,
+            end,
+        )
+    }
+
     pub(crate) fn call_export_schema(
         &mut self,
         source: &[u8],
@@ -293,6 +331,86 @@ impl SjonWasm {
                     (src_ptr, u32_len(source.len()), begin, end, seed),
                 )
                 .map_err(|e| e.context("sjon_query_pattern"))?;
+            self.read_framed(result_ptr)
+        })();
+        let free_src = self.free.call(&mut self.store, (src_ptr, src_alloc_len));
+        let payload = result?;
+        free_src.map_err(|e| e.context("sjon_free(source)"))?;
+        Ok(payload)
+    }
+
+    /// Marshalling skeleton for a `(src_ptr, src_len) -> ptr` export:
+    /// one buffer in, nothing else. Allocates the source in wasm memory,
+    /// invokes the export, copies the framed payload out, and releases
+    /// the input even when the call fails.
+    fn call_one_buffer_export(
+        &mut self,
+        fn_handle: TypedFunc<(u32, u32), u32>,
+        export_name: &'static str,
+        source: &[u8],
+    ) -> wasmtime::Result<Vec<u8>> {
+        let src_alloc_len = u32_len(source.len().max(1));
+        let src_ptr = self
+            .alloc
+            .call(&mut self.store, src_alloc_len)
+            .map_err(|e| e.context("sjon_alloc(source)"))?;
+        if src_ptr == 0 {
+            return Err(wasmtime::Error::msg(
+                "sjon_alloc returned null for source buffer (OOM in WASM)",
+            ));
+        }
+        let result = (|| -> wasmtime::Result<Vec<u8>> {
+            if !source.is_empty() {
+                self.memory
+                    .write(&mut self.store, src_ptr as usize, source)
+                    .map_err(|e| {
+                        wasmtime::Error::from(e).context("writing source bytes into wasm memory")
+                    })?;
+            }
+            let result_ptr = fn_handle
+                .call(&mut self.store, (src_ptr, u32_len(source.len())))
+                .map_err(|e| e.context(export_name))?;
+            self.read_framed(result_ptr)
+        })();
+        let free_src = self.free.call(&mut self.store, (src_ptr, src_alloc_len));
+        let payload = result?;
+        free_src.map_err(|e| e.context("sjon_free(source)"))?;
+        Ok(payload)
+    }
+
+    /// Marshalling skeleton for a `(src_ptr, src_len, a, b) -> ptr`
+    /// export: one buffer in, two scalars alongside it. Allocates the
+    /// source in wasm memory, invokes the export, copies the framed
+    /// payload out, and releases the input even when the call fails.
+    fn call_one_buffer_two_scalar_export(
+        &mut self,
+        fn_handle: TypedFunc<(u32, u32, u32, u32), u32>,
+        export_name: &'static str,
+        source: &[u8],
+        a: u32,
+        b: u32,
+    ) -> wasmtime::Result<Vec<u8>> {
+        let src_alloc_len = u32_len(source.len().max(1));
+        let src_ptr = self
+            .alloc
+            .call(&mut self.store, src_alloc_len)
+            .map_err(|e| e.context("sjon_alloc(source)"))?;
+        if src_ptr == 0 {
+            return Err(wasmtime::Error::msg(
+                "sjon_alloc returned null for source buffer (OOM in WASM)",
+            ));
+        }
+        let result = (|| -> wasmtime::Result<Vec<u8>> {
+            if !source.is_empty() {
+                self.memory
+                    .write(&mut self.store, src_ptr as usize, source)
+                    .map_err(|e| {
+                        wasmtime::Error::from(e).context("writing source bytes into wasm memory")
+                    })?;
+            }
+            let result_ptr = fn_handle
+                .call(&mut self.store, (src_ptr, u32_len(source.len()), a, b))
+                .map_err(|e| e.context(export_name))?;
             self.read_framed(result_ptr)
         })();
         let free_src = self.free.call(&mut self.store, (src_ptr, src_alloc_len));

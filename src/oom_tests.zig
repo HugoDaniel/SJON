@@ -467,6 +467,81 @@ test "OOM: applyEdit converges over a structural edit action" {
     return error.OomLoopDidNotConverge;
 }
 
+test "OOM: applyEdit converges under the layout-preserving text fold" {
+    // `.preserve` is the text->text fold: lower the action to one
+    // `TextEdit`, splice, re-parse. Between hops the intermediate text is
+    // gpa-owned rather than arena-owned, so this is the one edit path
+    // where a missed `errdefer` leaks instead of dying with a result arena.
+    const action_json =
+        \\{"op":"set_keyword","path":[],"key":"title","value":"new"}
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, action_json, .{});
+    defer parsed.deinit();
+
+    const edit_source: [:0]const u8 = "(scene   :title \"old\"  ) ; kept verbatim";
+
+    var fail_index: usize = 0;
+    while (fail_index < MAX_FAIL_INDEX) : (fail_index += 1) {
+        var failing = makeFailing(fail_index);
+        const a = failing.allocator();
+
+        const result = sjon.applyEdit(a, edit_source, parsed.value, .{ .layout = .preserve });
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            const out = try result;
+            out.deinit();
+            return;
+        }
+    }
+    return error.OomLoopDidNotConverge;
+}
+
+test "OOM: applyEdits converges folding insert_root then remove_root, both layouts" {
+    // The two forest operations rebuild the root list rather than a
+    // subtree, and neither takes a path. Batched so the fold frees each
+    // intermediate, and so the second action runs against a forest the
+    // first one already changed. Both layouts, because they are two
+    // different folds (tree->tree and text->text) over the same actions.
+    const actions_json =
+        \\[{"op":"insert_root","index":0,"value":{"$form":"c"}},
+        \\ {"op":"remove_root","index":2}]
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, actions_json, .{});
+    defer parsed.deinit();
+    const actions = parsed.value.array.items;
+
+    const edit_source: [:0]const u8 = "(a) (b)";
+
+    for ([_]sjon.Edit.Options{ .{}, .{ .layout = .preserve } }) |opts| {
+        var converged = false;
+        var fail_index: usize = 0;
+        while (fail_index < MAX_FAIL_INDEX) : (fail_index += 1) {
+            var failing = makeFailing(fail_index);
+            const a = failing.allocator();
+
+            const result = sjon.Edit.applyEdits(a, edit_source, actions, opts);
+            if (failing.has_induced_failure) {
+                try testing.expectError(error.OutOfMemory, result);
+            } else {
+                const out = try result;
+                defer out.deinit();
+                // Two roots survive: `c` in front, `b` removed. The exact
+                // bytes are `Edit`'s own tests' business; convergence is this
+                // one's.
+                const src_z = try testing.allocator.dupeZ(u8, out.data);
+                defer testing.allocator.free(src_z);
+                var tree = try sjon.parse(testing.allocator, src_z);
+                defer tree.deinit();
+                try testing.expectEqual(@as(usize, 2), tree.root.len);
+                converged = true;
+                break;
+            }
+        }
+        if (!converged) return error.OomLoopDidNotConverge;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 14. Unit-suffixed numbers — every public entrypoint that touches the
 // new `Tag.number_with_unit` / `$num` paths must converge under OOM
@@ -1132,6 +1207,30 @@ test "OOM: Host.validateDocument converges over an inline-plugin document" {
     return error.OomLoopDidNotConverge;
 }
 
+// A document whose top-level form is a core special form: `runEvalPass`
+// evaluates it and copies the value into the host arena. The inline-plugin
+// document above never reaches that copy (no top-level expr-func), which
+// is how the eval arena leaking on an OOM between evaluation and
+// `result.deinit()` went unseen.
+test "OOM: Host.validateDocument converges over a document with a top-level expr-func result" {
+    var fail_index: usize = 0;
+    while (fail_index < MAX_FAIL_INDEX) : (fail_index += 1) {
+        var failing = makeFailing(fail_index);
+        const a = failing.allocator();
+
+        const result = sjon.Host.validateDocument(a, "(map [x] [1 2 3] (* x 2))", .{});
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var hr = try result;
+            defer hr.deinit();
+            try testing.expectEqual(@as(usize, 1), hr.evaluated_results.len);
+            return;
+        }
+    }
+    return error.OomLoopDidNotConverge;
+}
+
 // ---------------------------------------------------------------------------
 // 26. PatternQuery.queryTree / queryBinary — compile a parsed (or encoded)
 //     pattern and query a fixed window. The tree / binary buffer are pre-built
@@ -1680,7 +1779,6 @@ test "OOM: EffectiveDocument.render converges splicing defaults into source" {
             effective_oom_source,
             &doc,
             &mat.materialized,
-            &schema,
         );
         if (failing.has_induced_failure) {
             try testing.expectError(error.OutOfMemory, result);
@@ -1871,6 +1969,66 @@ test "OOM: validateForest converges over the asks series' validate paths" {
         }
     }
     return error.OomLoopDidNotConverge;
+}
+
+// Two schema-derived gpa temporaries the validator builds per call:
+// `Schema.collectAcyclicSpecs` for an `:acyclic true` cross-ref and the
+// scope-head set for a `:scope` cross-ref. Each used to leak an owned
+// string or slice on an OOM between the allocation and the append that
+// would have owned it — visible only with a schema that has both.
+const acyclic_scoped_plugin: sjon.Plugin.Plugin = .{
+    .name = "demo",
+    .value_kinds = &.{
+        .{
+            .name = "phrase-name",
+            .underlying = .symbol,
+            .cross_ref = .{ .targets = &.{"phrase"}, .acyclic = true, .scope_form = "piece" },
+        },
+    },
+    .forms = &.{
+        .{ .name = "phrase", .keys = &.{
+            .{ .name = "name", .value_type = .{ .named = .{ .name = "phrase-name" } }, .optional = false },
+            .{ .name = "parent", .value_type = .{ .named = .{ .name = "phrase-name" } }, .optional = true },
+        } },
+        .{ .name = "piece", .keys = &.{} },
+    },
+};
+
+test "OOM: validate and validateForest converge over an :acyclic + :scope schema without leaking" {
+    const a0 = testing.allocator;
+    const schema = Schema.Schema.init(&.{acyclic_scoped_plugin});
+    var doc = try Parser.parse(a0, "(piece (phrase :name a :parent b) (phrase :name b))");
+    defer doc.deinit();
+    const trees = [_]Ast.Tree{doc};
+
+    var fail_index: usize = 0;
+    var converged: u8 = 0;
+    while (fail_index < MAX_FAIL_INDEX and converged < 2) : (fail_index += 1) {
+        var failing = makeFailing(fail_index);
+        const a = failing.allocator();
+
+        if (converged == 0) {
+            const result = Validator.validate(a, doc, schema);
+            if (failing.has_induced_failure) {
+                try testing.expectError(error.OutOfMemory, result);
+            } else {
+                var r = try result;
+                r.deinit();
+                converged = 1;
+                fail_index = 0;
+            }
+            continue;
+        }
+        const result = Validator.validateForest(a, &trees, schema);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var r = try result;
+            r.deinit(a);
+            converged = 2;
+        }
+    }
+    if (converged < 2) return error.OomLoopDidNotConverge;
 }
 
 test "OOM: validateBinary converges over the asks series' validate paths" {

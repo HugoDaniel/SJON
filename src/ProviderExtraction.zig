@@ -148,7 +148,7 @@ fn callThroughPluginInvoker(
 
 fn describeInvokeFailure(
     a: Allocator,
-    err: anyerror,
+    err: Expr.Error,
     code: []const u8,
     detail: []const u8,
 ) Allocator.Error![]const u8 {

@@ -114,8 +114,11 @@ pub fn load(gpa: Allocator, tree: Ast.Tree) Error!Result {
 /// the way `buildPlugin` always has, and it continues to emit the
 /// loader's own structural diagnostics (`wrong_underlying`,
 /// `exclusive_group_invalid`, …). Callers gate on `result.hasErrors()`
-/// before using `result.plugin`. On untrusted input the result is
-/// not-validated-against-meta-shape, not unsafe — prefer `load` there.
+/// before using `result.plugin`. **Trusted input only**: the walk
+/// reads slots by the tag the meta-schema guarantees (`symbolText`,
+/// `numberOf` and the `loadBound` arms assert or `unreachable` on any
+/// other), so an ill-typed slot such as `(numeric-bounds :min "x")` is an
+/// abort here, not a diagnostic. Untrusted manifests go through `load`.
 pub fn loadUnchecked(gpa: Allocator, tree: Ast.Tree) Error!Result {
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
@@ -1666,15 +1669,16 @@ fn parseDefault(
             const single_root = [_]Ast.NodeIndex{idx};
             var view: Ast.Tree = tree.*;
             view.root = &single_root;
-            // Binary.toBinary returns an error set wider than the loader's
-            // (NodeCountExceeded, StringTooLong, etc.). Those are encoder-
-            // budget failures that cannot fire on a parsed default subtree
-            // — the parser's own limits keep us inside the encoder's. Map
-            // OOM straight through and treat the rest as unreachable; a
-            // future slice can introduce a real diagnostic if needed.
+            // Binary.toBinary returns an error set wider than the loader's.
+            // The parser bounds depth but not width, so an encoder budget
+            // (a default with more than MAX_NODES children, an over-long
+            // string) *can* fire on a parsed subtree; it makes this form
+            // not a usable default, which is what `null` means to the
+            // caller (the same verdict as a form nested in a vector).
+            // Only OOM propagates.
             const program = Binary.toBinary(a, view, Binary.ToBinaryOptions.forMode(.compact)) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                else => return error.OutOfMemory,
+                else => break :blk null,
             };
             std.debug.assert(hdr.children.len <= std.math.maxInt(u32)); // arg_count is u32
             break :blk Plugin.KeySpec.Default{ .expression = .{
@@ -2940,6 +2944,14 @@ fn buildLoweringSpec(
     if (spec.produces.len == 0) {
         try emitDiag(a, diags, .wrong_underlying, produces_span, &.{ form_name, "lowering", "produces" }, "form `{s}` `:lowering` requires at least one produced head, got 0", .{form_name});
     }
+    // A produced head must have a non-empty name and, if qualified, a
+    // non-empty namespace: `x/` and `/x` lex as symbols but no form can
+    // ever match them, and the emit step asserts both halves.
+    for (spec.produces) |name| {
+        if (!Plugin.headHalvesNonEmpty(name)) {
+            try emitDiag(a, diags, .wrong_underlying, produces_span, &.{ form_name, "lowering", "produces" }, "form `{s}` `:lowering` produces head `{s}` with an empty name or namespace half", .{ form_name, name });
+        }
+    }
     // Duplicate-head detection. Same shape as buildUnionShape — produces
     // lists are tiny in practice, O(n²) is the right tradeoff.
     for (spec.produces, 0..) |name, i| {
@@ -2973,6 +2985,16 @@ fn parseUnderlying(tree: *const Ast.Tree, idx: Ast.NodeIndex) Error!Plugin.Value
     return underlying_by_name.get(tree.symbolText(idx)) orelse .symbol;
 }
 
+/// `:type` spellings, mapped to the `ValueType` they name.
+///
+/// `nil` is here for completeness and is **unreachable from manifest
+/// source**: it lexes as `.nil_lit`, not `.symbol`, so
+/// `(key :name x :type nil)` never reaches this table — it is
+/// `wrong_underlying: form \`key\` keyword \`:type\` expects
+/// \`type-ref\`, got nil`. `ValueType.nil` itself stays live (a
+/// `union` alternative, a plugin declared in Zig), so the consumers'
+/// `.nil` arms are not dead; widening the lexer for one spelling would
+/// be a language change made for a table entry.
 const value_type_by_name = std.StaticStringMap(Plugin.ValueType).initComptime(.{
     .{ "any", .any },
     .{ "number", .number },

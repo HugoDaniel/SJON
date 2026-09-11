@@ -254,7 +254,33 @@ const table = [_]Entry{
     .{ .code = .duplicate_key, .short = "Same `:key` appears twice on the same form." },
     .{ .code = .too_many_keys, .short = "Form has more keyword slots than `Plugin.MAX_FORM_KEYS` permits." },
     .{ .code = .missing_required_key, .short = "Form omits a `:key :optional false` slot with no default." },
-    .{ .code = .positional_not_allowed, .short = "Form's `:positional` declaration is `none` but a positional child was provided." },
+    .{
+        .code = .positional_not_allowed,
+        .short = "Form's `:positional` declaration is `none` but a positional child was provided.",
+        .long =
+        \\A form declares what may sit between its parentheses. With no
+        \\`:positional` declaration the answer is "keyword pairs only", and
+        \\anything else in there fires this.
+        \\
+        \\`(circle 42)` is the plain shape: `42` sits under no key. Wrap it
+        \\in the key it belongs to, `(circle :radius 42)`, or move it under
+        \\a parent that does take children.
+        \\
+        \\**The other shape looks like a keyword.** `(lane :name)` fires
+        \\this too, on `:name`, which reads as a key and not as a
+        \\positional at all. The parser pairs `:key value` greedily, so a
+        \\keyword with nothing left to pair (the end of the form, or
+        \\another keyword straight after it) becomes a bare keyword
+        \\*value* instead. That is the rule behind
+        \\`(camera :ortho :zoom 2)`, where `:ortho` is a flag; it is also
+        \\what a missing value turns into. The message names the keyword
+        \\when this is the shape you hit.
+        \\
+        \\So `(lane :name)` is almost always a half-written
+        \\`(lane :name "left")`. If you did mean the flag, the form has to
+        \\declare one: `:positional (flag-set (flag :name ortho))`.
+        ,
+    },
     .{ .code = .expr_kvpair_not_allowed, .short = "Expression function does not opt into labeled-call form (`:param-names`)." },
     .{ .code = .missing_discriminant_key, .short = "Discriminated form lacks the discriminant key." },
     .{ .code = .unknown_discriminant_value, .short = "Discriminant's value is not a member of its declared enum." },

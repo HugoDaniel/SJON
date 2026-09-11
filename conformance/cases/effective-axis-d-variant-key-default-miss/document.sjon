@@ -1,0 +1,27 @@
+; Axis D feeding a variant key's default — both steps in one document.
+;
+; The author writes bare `(track)`. `:kind` is omitted, so axis D reads
+; its `:default kick` out of the overlay and selects the `kick` variant;
+; that variant's `:anchor` is then materialized from *its* default, and
+; the axis-B lookup over `ghost` misses the empty `phrase` registry.
+;
+; The ordering is the point: the discriminant is a common key, so it is
+; already an overlay entry by the time the variant is resolved from it.
+(plugin :name probe :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase))
+  (value-kind :name kind-tag
+    :underlying symbol
+    :members (member-set :values [kick bass]))
+  (form :name phrase
+    (key :name name :type symbol :optional false))
+  (form :name track
+    :discriminant kind
+    (key :name kind :type kind-tag :default kick :optional true)
+    (variant :when kick
+      (key :name anchor :type phrase-name :default ghost :optional true))
+    (variant :when bass
+      (key :name sequence :type any :optional true))))
+
+(track)

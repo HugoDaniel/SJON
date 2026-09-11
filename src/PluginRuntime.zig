@@ -380,7 +380,7 @@ pub fn invoke(
 
     var call_buf: [2]wasmtime.ValRaw = .{
         .{ .i32 = @bitCast(args_ptr) },
-        .{ .i32 = @intCast(args.len) },
+        .{ .i32 = @bitCast(@as(u32, @intCast(args.len))) }, // len ≤ maxInt(u32) checked above; the i32 is the wasm ABI's view of that u32
     };
     wasmtime.callUnchecked(inst.store, export_fn, &call_buf, 2, 1) catch |err| switch (err) {
         error.Trap => {

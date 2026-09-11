@@ -67,8 +67,10 @@ pub const Error = error{TickOverflow};
 /// division: tick `-1` is in cycle `-1`, not cycle `0`. Total over `i64`.
 pub fn cycleOf(t: Tick) i64 {
     const c = @divFloor(t, PPC);
-    std.debug.assert(c * PPC <= t);
-    std.debug.assert(t - c * PPC < PPC);
+    // Post-conditions in i128: near `minInt(i64)` the i64 products
+    // themselves overflowed, so the assert contradicted "total over i64".
+    std.debug.assert(@as(i128, c) * PPC <= t);
+    std.debug.assert(@as(i128, t) - @as(i128, c) * PPC < PPC);
     return c;
 }
 

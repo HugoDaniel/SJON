@@ -109,6 +109,55 @@ pub const Options = struct {
     /// remain tree-local in v2 — only the default tree-level scope is
     /// fused.
     share_scope: bool = false,
+    /// The tree being validated is a *fragment* of a larger document, so it
+    /// cannot adjudicate cross-reference identity: a name that misses here
+    /// may be defined in a sibling the fragment does not contain, and a name
+    /// that looks duplicated here may not be. Under this flag the validator
+    /// neither resolves nor polices names — every cross-ref-underlying match
+    /// succeeds and the index reports no duplicate registration.
+    ///
+    /// Set by `Lowering.lowerOneForm`, the one caller that validates a single
+    /// form out of its document, and by nothing else. The whole-document pass
+    /// that follows owns cross-reference reporting.
+    ///
+    /// Why a flag and not a filtered code list: the *only* thing that differs
+    /// between validating a form alone and validating it in its document is
+    /// which names are registered. Schema, overlay and axes are the same
+    /// objects in both passes, so every other check decides identically. A
+    /// list of codes enumerates the ways that one difference surfaces and
+    /// falls behind the validator's vocabulary; this says the thing itself.
+    ///
+    /// Carried onto the `CrossRefIndex` at construction, so the match sites
+    /// read it from the index rather than taking another parameter.
+    defer_cross_refs: bool = false,
+    /// The symbol a *held* position is spelled with: a value the author has
+    /// deliberately not filled in yet. When non-null, a symbol whose text
+    /// matches is accepted in any typed position without narrowing on
+    /// `underlying`, `cross_ref`, `members`, `numeric`, `unit`, `repr` or a
+    /// union arm, registers no cross-ref name, and reads as absent to the
+    /// default overlay (`EffectiveView` / `MaterializedDefaults`).
+    ///
+    /// Null by default, and null is what every existing caller passes: a
+    /// schema that has not opted in validates exactly as it did before the
+    /// field existed. This is a host assertion about the *run* — "this
+    /// document is being typed" — and deliberately not a document- or
+    /// manifest-level declaration, because a document must not be able to
+    /// weaken the schema that validates it: a manifest is loaded because
+    /// the document said `(use-plugin …)`, so a declaration-level opt-in
+    /// would let a document turn off its own type checking by writing one
+    /// form.
+    ///
+    /// SJON does not police the name. A host that picks a symbol colliding
+    /// with one of its own members loses checking on that member and that
+    /// is its own call; `_` is the natural choice because it is not a
+    /// plausible member name. A string that does not lex as a symbol simply
+    /// never matches, which is harmless and needs no guard.
+    ///
+    /// Carried onto the `CrossRefIndex` at construction, like
+    /// `defer_cross_refs`, so the match and registration sites read it from
+    /// the index rather than taking another parameter — and so the union
+    /// probe's shallow index copy inherits it for free.
+    held_symbol: ?[]const u8 = null,
     axes: EffectiveAxes = .{},
     /// Results of the host's provider-extraction pre-pass, keyed by
     /// `(canonical provider, source bytes)` — see `ExtractionMap`. The
@@ -149,8 +198,12 @@ fn effectiveOverlay(options: Options, tree_idx: usize) ?*const MaterializedDefau
 /// `extractions` is forest-wide (content-addressed, not tree-keyed), so
 /// it passes through unchanged. `share_scope`'s absence is the opposite
 /// case and deliberate: the callers resolve the scope before they call
-/// in, so a per-tree view has no use for it. Anything added later has to
-/// be sorted into one of those two buckets here.
+/// in, so a per-tree view has no use for it. `defer_cross_refs` is in that
+/// second bucket for the same reason — it is read once, at index
+/// construction, and every site that honours it reads it back off
+/// `CrossRefIndex.deferred`. `held_symbol` is in that same bucket for the
+/// same reason. Anything added later has to be sorted into one of those two
+/// buckets here.
 fn perTreeOptions(options: Options, tree_idx: usize) Options {
     return .{
         .overlay = effectiveOverlay(options, tree_idx),
@@ -723,7 +776,13 @@ pub const ScopeFrame = struct {
 /// `scope_form`, walking innermost-first. Returns null when no chain
 /// entry matches — at the reference site the caller emits
 /// `cross_ref_outside_scope`.
-fn findNearestScope(chain: []const ScopeFrame, scope_form: []const u8) ?ScopeId {
+///
+/// `pub` for `Lowering.LoweringInput.resolveRef`, which asks the same
+/// question from outside the walk: it holds a chain recovered from
+/// `LookupIndex.scopeChainAt` rather than one it carried down a frame
+/// stack, and must answer it by the same rule or a hook would resolve
+/// names the validator would not.
+pub fn findNearestScope(chain: []const ScopeFrame, scope_form: []const u8) ?ScopeId {
     var i: usize = chain.len;
     while (i > 0) {
         i -= 1;
@@ -830,6 +889,26 @@ pub const CrossRefIndex = struct {
     /// reference reuses this so `appendReference` doesn't have to thread
     /// an allocator through every validation layer.
     arena: ?Allocator = null,
+    /// Set from `Options.defer_cross_refs` at construction. Generalises
+    /// `poisoned_by_scope` from one bucket to all of them: not "this
+    /// target's members are unknowable" but "every target's are". Every
+    /// site that would resolve or police a name reads it back from here,
+    /// which is also how the union probe's shallow copy inherits it.
+    deferred: bool = false,
+    /// Set from `Options.held_symbol` at construction. Read by
+    /// `registerSite` (a held name is not a name, so it registers nothing)
+    /// and by the two type-match entry points, which is why it lives here
+    /// rather than as a tenth parameter on each: the index is the one
+    /// object already threaded to every match and registration site on both
+    /// walkers, and the union probe's shallow copy inherits it.
+    held_symbol: ?[]const u8 = null,
+
+    /// True when `text` is the run's held spelling. Null `held_symbol`
+    /// (every caller that has not opted in) answers false for every input.
+    pub fn isHeldText(self: CrossRefIndex, text: []const u8) bool {
+        const held = self.held_symbol orelse return false;
+        return std.mem.eql(u8, text, held);
+    }
 
     pub const TargetMap = std.StringHashMapUnmanaged(NameMap);
     pub const NameMap = std.StringHashMapUnmanaged(Site);
@@ -1281,6 +1360,8 @@ fn schemaScopeHeads(
             const cr = kind.cross_ref orelse continue;
             const scope = cr.scope_form orelse continue;
             const canonical = (try schema.canonicalFormName(a, scope)) orelse continue;
+            // Not yet in the map, so the errdefer above cannot free it.
+            errdefer a.free(canonical);
             const gop = try heads.getOrPut(a, canonical);
             if (gop.found_existing) a.free(canonical);
         }
@@ -1441,7 +1522,7 @@ pub fn collectExtractionRequests(
 
         var seen: ExtractionKeySet = .empty;
 
-        var stack: std.ArrayList(Ast.NodeIndex) = .empty;
+        var stack: std.ArrayList(IndexItem) = .empty;
         defer stack.deinit(gpa);
         var canon_buf: std.ArrayList(u8) = .empty;
         defer canon_buf.deinit(gpa);
@@ -1449,9 +1530,10 @@ pub fn collectExtractionRequests(
         for (trees) |*tree| {
             stack.clearRetainingCapacity();
             var ri: usize = tree.root.len;
-            while (ri > 0) : (ri -= 1) try stack.append(gpa, tree.root[ri - 1]);
+            while (ri > 0) : (ri -= 1) try stack.append(gpa, .{ .idx = tree.root[ri - 1] });
 
-            while (stack.pop()) |idx| {
+            while (stack.pop()) |item| {
+                const idx = item.idx;
                 switch (tree.tagOf(idx)) {
                     .form => {
                         const hdr = tree.formHeader(idx);
@@ -1466,15 +1548,33 @@ pub fn collectExtractionRequests(
                                 try items.append(a, key);
                             };
                         }
+                        // Same slot-aware descent as the index pass this
+                        // discovery feeds — a `walk_opaque` slot's contents
+                        // are not sources.
+                        //
+                        // No overlay here, and that direction is the safe
+                        // one. Without it the axis-D leg of `childSlot` is
+                        // not taken, so a `walk_opaque` declared on a
+                        // variant key whose discriminant is itself defaulted
+                        // is not seen and this walk descends where the index
+                        // pass will not: it discovers a *superset*, and a
+                        // pair nobody asks for is wasted work, never a
+                        // poisoned bucket. Missing one would be the harmful
+                        // direction, and cannot happen.
+                        const spec = resolveFormSpec(schema, hdr, item.registry);
                         var ci: usize = hdr.children.len;
-                        while (ci > 0) : (ci -= 1) try stack.append(gpa, hdr.children[ci - 1]);
+                        while (ci > 0) : (ci -= 1) {
+                            const ch = hdr.children[ci - 1];
+                            const reg = childSlot(tree, spec, idx, hdr, null, ch) orelse continue;
+                            try stack.append(gpa, .{ .idx = ch, .registry = reg });
+                        }
                     },
                     .vector => {
                         const elements = tree.vectorElements(idx);
                         var ci: usize = elements.len;
-                        while (ci > 0) : (ci -= 1) try stack.append(gpa, elements[ci - 1]);
+                        while (ci > 0) : (ci -= 1) try stack.append(gpa, .{ .idx = elements[ci - 1], .registry = item.registry });
                     },
-                    .kvpair => try stack.append(gpa, tree.kvpairHeader(idx).value),
+                    .kvpair => try stack.append(gpa, .{ .idx = tree.kvpairHeader(idx).value, .registry = item.registry }),
                     else => {},
                 }
             }
@@ -1551,6 +1651,10 @@ const ExtractionFrame = union(enum) {
         /// True once the first `source_key`-matching kvpair is consumed;
         /// later matches are ignored, mirroring the tree walk's first-wins.
         saw_source_kvpair: bool = false,
+        /// Slot state for this form's children: which spec its head
+        /// resolved to and which variant its discriminant has selected so
+        /// far. Read to stop at a `walk_opaque` slot.
+        slot: BinarySlot = .{},
     },
     vector: BinaryCursor.VectorIter,
 };
@@ -1591,12 +1695,20 @@ pub fn collectExtractionRequestsBinary(
 
         for (binaries) |bytes| {
             var cursor = try BinaryCursor.Cursor.init(bytes);
+            // One offset index per buffer. The walk resolves a head, key,
+            // symbol or unit at nearly every node, and an unindexed cursor
+            // pays O(pool entries) of varint reads for each. The buffer is
+            // the caller's because the cursor never allocates; the `defer`
+            // is per iteration, so two buffers never hold two indexes.
+            const pool_index = try gpa.alloc(u32, cursor.poolIndexLen());
+            defer gpa.free(pool_index);
+            cursor.indexPools(pool_index);
             var root_iter = try cursor.rootIter();
 
+            var step: u32 = 0; // per call, see validateOneBinary
             while (try root_iter.next()) |root_view| {
-                try dispatchExtractionValue(gpa, &canon_buf, schema, &cursor, root_view, &targets, &frames);
+                try dispatchExtractionValue(gpa, &canon_buf, schema, &cursor, root_view, &targets, &frames, &.{});
 
-                var step: u32 = 0;
                 while (frames.items.len > 0) {
                     if (step >= budget.steps) return error.DepthExceeded;
                     if (frames.items.len > budget.frames) return error.DepthExceeded;
@@ -1639,10 +1751,27 @@ pub fn collectExtractionRequestsBinary(
                                 }
                             }
 
+                            // Slot-aware descent, matching the tree walk's:
+                            // a `walk_opaque` slot's body is drained rather
+                            // than walked, keeping the single-pass cursor in
+                            // sync while harvesting nothing out of a subtree
+                            // the schema declined to interpret.
+                            var child_reg: []const Plugin.FormSpec = fi.slot.positionalRegistry();
+                            if (entry.kind == .keyword) {
+                                child_reg = &.{};
+                                if (fi.slot.acceptKey(&cursor, entry.key.?, entry.value)) |k| {
+                                    if (k.walk_opaque) {
+                                        try BinaryCursor.skipBody(&cursor, entry.value);
+                                        continue;
+                                    }
+                                    child_reg = k.local_forms;
+                                }
+                            }
+
                             // `dispatchExtractionValue` may push and realloc
                             // `frames.items`, invalidating `fi`; every write
                             // to it is above this line.
-                            try dispatchExtractionValue(gpa, &canon_buf, schema, &cursor, entry.value, &targets, &frames);
+                            try dispatchExtractionValue(gpa, &canon_buf, schema, &cursor, entry.value, &targets, &frames, child_reg);
                         },
                         .vector => {
                             const vi = &frames.items[top].vector;
@@ -1652,7 +1781,7 @@ pub fn collectExtractionRequestsBinary(
                                 continue;
                             }
                             const ev = (try vi.next()) orelse unreachable;
-                            try dispatchExtractionValue(gpa, &canon_buf, schema, &cursor, ev, &targets, &frames);
+                            try dispatchExtractionValue(gpa, &canon_buf, schema, &cursor, ev, &targets, &frames, &.{});
                         },
                     }
                 }
@@ -1674,6 +1803,9 @@ fn dispatchExtractionValue(
     view: BinaryCursor.NodeView,
     targets: *const std.StringHashMapUnmanaged(std.ArrayListUnmanaged(CrossRefRegistration)),
     frames: *std.ArrayList(ExtractionFrame),
+    /// Slot-local registry this value's head resolves against before the
+    /// global catalog — empty for the overwhelming majority of slots.
+    registry: []const Plugin.FormSpec,
 ) Error!void {
     switch (view.kind) {
         .form => {
@@ -1701,6 +1833,7 @@ fn dispatchExtractionValue(
                 .iter = fv.children,
                 .provider = provider,
                 .source_key = source_key,
+                .slot = BinarySlot.resolve(schema, fv.head, fv.namespace, registry),
             } });
         },
         .vector => try frames.append(gpa, .{ .vector = try BinaryCursor.readVector(cursor, view) }),
@@ -1720,6 +1853,9 @@ const DiscoveryFixture = struct {
             .{ .name = "src", .value_type = .string },
         } },
         .{ .name = "group", .keys = &.{.{ .name = "items", .value_type = .any }} },
+        // Same shape as `group`, one flag apart: the schema declines to
+        // interpret what lands in `:items`.
+        .{ .name = "vault", .keys = &.{.{ .name = "items", .value_type = .any, .walk_opaque = true }} },
     };
 
     /// `cr` is `comptime` and the returned plugin is a constant: an
@@ -1939,6 +2075,7 @@ test "extraction discovery descends exactly where the index pass descends" {
         &results,
         &diags_lists,
         .{},
+        null,
     );
 
     var registered: usize = 0;
@@ -1947,6 +2084,242 @@ test "extraction discovery descends exactly where the index pass descends" {
 
     try testing.expectEqual(@as(usize, 3), registered);
     try testing.expectEqual(registered, reqs.items.len);
+}
+
+test "a walk_opaque slot is descended by neither discovery walk" {
+    const testing = std.testing;
+    const Parser = @import("Parser.zig");
+    const gpa = testing.allocator;
+
+    // The same `(shader …)` twice, once in a slot the schema reads and once
+    // in a slot it declined to. Only the first is a cross-ref target and
+    // only the first is a provider source: a subtree the surrounding schema
+    // does not interpret is not a place to harvest either from.
+    const src =
+        \\(group :items (shader :name seen :src "s1"))
+        \\(vault :items (shader :name hidden :src "s2"))
+    ;
+    var tree = try Parser.parse(gpa, src);
+    defer tree.deinit();
+    const trees = [_]Ast.Tree{tree};
+
+    const provider_schema = Schema.Schema.init(&.{DiscoveryFixture.plugin(DiscoveryFixture.provider_route)});
+    var reqs = try collectExtractionRequests(gpa, provider_schema, &trees);
+    defer reqs.deinit();
+    try testing.expectEqual(@as(usize, 1), reqs.items.len);
+    try testing.expectEqualStrings("s1", reqs.items[0].source);
+
+    const identity_schema = Schema.Schema.init(&.{DiscoveryFixture.plugin(DiscoveryFixture.identity_route)});
+    var results = [_]Result{.{ .arena = std.heap.ArenaAllocator.init(gpa), .diagnostics = &.{} }};
+    defer results[0].deinit();
+    var diags_lists = [_]std.ArrayList(Diagnostic){.empty};
+    var index_arena = std.heap.ArenaAllocator.init(gpa);
+    defer index_arena.deinit();
+    var index = try buildCrossRefIndexForest(
+        index_arena.allocator(),
+        gpa,
+        identity_schema,
+        &trees,
+        &results,
+        &diags_lists,
+        .{},
+        null,
+    );
+
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(gpa);
+    var it = index.iterateNames(.tree(0), "glsl/shader");
+    while (it.next()) |n| try names.append(gpa, n.key_ptr.*);
+    try testing.expectEqual(@as(usize, 1), names.items.len);
+    try testing.expectEqualStrings("seen", names.items[0]);
+}
+
+test "a walk_opaque slot is descended by neither binary discovery walk" {
+    const testing = std.testing;
+    const Parser = @import("Parser.zig");
+    const Binary = @import("Binary.zig");
+    const gpa = testing.allocator;
+
+    // The binary twins reach the same answer from the other direction: the
+    // cursor is single-pass, so an opaque slot is *drained* rather than
+    // skipped over, and the walk stays in sync while harvesting nothing.
+    var tree = try Parser.parse(gpa,
+        \\(group :items (shader :name seen :src "s1"))
+        \\(vault :items (shader :name hidden :src "s2"))
+    );
+    defer tree.deinit();
+    const bin = try Binary.toBinary(gpa, tree, .{});
+    defer bin.deinit();
+    const binaries = [_][]const u8{bin.data};
+
+    const provider_schema = Schema.Schema.init(&.{DiscoveryFixture.plugin(DiscoveryFixture.provider_route)});
+    var reqs = try collectExtractionRequestsBinary(gpa, provider_schema, &binaries, .{});
+    defer reqs.deinit();
+    try testing.expectEqual(@as(usize, 1), reqs.items.len);
+    try testing.expectEqualStrings("s1", reqs.items[0].source);
+
+    const identity_schema = Schema.Schema.init(&.{DiscoveryFixture.plugin(DiscoveryFixture.identity_route)});
+    var results = [_]Result{.{ .arena = std.heap.ArenaAllocator.init(gpa), .diagnostics = &.{} }};
+    defer results[0].deinit();
+    var diags_lists = [_]std.ArrayList(Diagnostic){.empty};
+    var index_arena = std.heap.ArenaAllocator.init(gpa);
+    defer index_arena.deinit();
+    var index = try buildCrossRefIndexBinary(
+        index_arena.allocator(),
+        gpa,
+        identity_schema,
+        &binaries,
+        &results,
+        &diags_lists,
+        .{},
+        null,
+        false,
+        null,
+    );
+
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(gpa);
+    var it = index.iterateNames(.tree(0), "glsl/shader");
+    while (it.next()) |n| try names.append(gpa, n.key_ptr.*);
+    try testing.expectEqual(@as(usize, 1), names.items.len);
+    try testing.expectEqualStrings("seen", names.items[0]);
+}
+
+/// Fixture for the lookup-build tests: a `:scope piece` cross-ref, so the
+/// registrations land under lexical scopes rather than the tree scope and
+/// the scope-chain half of `LookupIndex` is load-bearing.
+const LookupFixture = struct {
+    const plugin: Plugin.Plugin = .{
+        .name = "music",
+        .value_kinds = &.{.{
+            .name = "phrase-name",
+            .underlying = .symbol,
+            .cross_ref = .{ .targets = &.{"phrase"}, .scope_form = "piece" },
+        }},
+        .forms = &.{
+            .{ .name = "piece", .keys = &.{.{ .name = "body", .value_type = .any }} },
+            .{ .name = "phrase", .keys = &.{.{ .name = "name", .value_type = .symbol }} },
+            .{ .name = "play", .keys = &.{.{
+                .name = "ref",
+                .value_type = .{ .named = .{ .name = "phrase-name" } },
+            }} },
+        },
+    };
+
+    /// Two scopes, each defining `p0` and referring to it. Same name twice
+    /// with no duplicate, which is the whole point of `:scope`.
+    const src =
+        \\(piece :body [(phrase :name p0) (play :ref p0)])
+        \\(piece :body [(phrase :name p0) (play :ref p0)])
+    ;
+
+    /// The `(play …)` node inside `root[which]`, found by walking the
+    /// `:body` vector rather than by guessing a node index.
+    fn playNode(tree: *const Ast.Tree, which: usize) Ast.NodeIndex {
+        const piece = tree.root[which];
+        for (tree.formHeader(piece).children) |ch| {
+            if (tree.tagOf(ch) != .kvpair) continue;
+            for (tree.vectorElements(tree.kvpairHeader(ch).value)) |el| {
+                if (tree.tagOf(el) == .form and std.mem.eql(u8, tree.formHeader(el).head, "play")) return el;
+            }
+        }
+        unreachable;
+    }
+
+    /// Every `(scope, target, name)` triple the index registered, as one
+    /// sorted, joined string — comparable across two builds without
+    /// depending on hashmap iteration order.
+    fn registrations(gpa: Allocator, index: *const CrossRefIndex) ![]u8 {
+        var rows: std.ArrayList([]u8) = .empty;
+        defer {
+            for (rows.items) |r| gpa.free(r);
+            rows.deinit(gpa);
+        }
+        var si = index.by_scope.iterator();
+        while (si.next()) |scope_entry| {
+            var ti = scope_entry.value_ptr.iterator();
+            while (ti.next()) |target_entry| {
+                var ni = target_entry.value_ptr.iterator();
+                while (ni.next()) |name_entry| {
+                    try rows.append(gpa, try std.fmt.allocPrint(gpa, "{d}|{s}|{s}\n", .{
+                        @intFromEnum(scope_entry.key_ptr.*),
+                        target_entry.key_ptr.*,
+                        name_entry.key_ptr.*,
+                    }));
+                }
+            }
+        }
+        std.mem.sort([]u8, rows.items, {}, struct {
+            fn lt(_: void, a: []u8, b: []u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.lt);
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(gpa);
+        for (rows.items) |r| try out.appendSlice(gpa, r);
+        return out.toOwnedSlice(gpa);
+    }
+};
+
+test "cross-ref index: the lookup build registers what the reporting build registers" {
+    const testing = std.testing;
+    const Parser = @import("Parser.zig");
+    const gpa = testing.allocator;
+
+    const schema = Schema.Schema.init(&.{LookupFixture.plugin});
+    var tree = try Parser.parse(gpa, LookupFixture.src);
+    defer tree.deinit();
+    const trees = [_]Ast.Tree{tree};
+
+    var fr = try validateForestWithOptions(gpa, &trees, schema, .{});
+    defer fr.deinit(gpa);
+    const reporting = try LookupFixture.registrations(gpa, &fr.cross_ref_index);
+    defer gpa.free(reporting);
+
+    var index_arena = std.heap.ArenaAllocator.init(gpa);
+    defer index_arena.deinit();
+    var lookup = try buildCrossRefIndexForLookup(index_arena.allocator(), gpa, schema, &trees, .{});
+    const asked = try LookupFixture.registrations(gpa, &lookup.index);
+    defer gpa.free(asked);
+
+    // Four registrations would be two names collapsed into one bucket; two
+    // under distinct scope ids is what `:scope piece` means.
+    try testing.expect(std.mem.count(u8, reporting, "\n") == 2);
+    try testing.expectEqualStrings(reporting, asked);
+}
+
+test "cross-ref index: the lookup build records the chain a scoped question needs" {
+    const testing = std.testing;
+    const Parser = @import("Parser.zig");
+    const gpa = testing.allocator;
+
+    const schema = Schema.Schema.init(&.{LookupFixture.plugin});
+    var tree = try Parser.parse(gpa, LookupFixture.src);
+    defer tree.deinit();
+    const trees = [_]Ast.Tree{tree};
+
+    var index_arena = std.heap.ArenaAllocator.init(gpa);
+    defer index_arena.deinit();
+    var lookup = try buildCrossRefIndexForLookup(index_arena.allocator(), gpa, schema, &trees, .{});
+
+    // Each `(play …)` sits inside exactly its own `(piece …)`, so the same
+    // name `p0` resolves to a different `(phrase …)` from each.
+    var resolved: [2]Ast.NodeIndex = undefined;
+    for (0..2) |i| {
+        const play = LookupFixture.playNode(&tree, i);
+        const chain = lookup.scopeChainAt(0, play);
+        try testing.expectEqual(@as(usize, 1), chain.len);
+        try testing.expectEqualStrings("music/piece", chain[0].canonical);
+
+        const scope = findNearestScope(chain, "music/piece") orelse return error.TestNoScope;
+        const site = lookup.index.lookup(scope, "music/phrase", "p0") orelse return error.TestNoSite;
+        try testing.expectEqualStrings("phrase", tree.formHeader(site.node_idx).head);
+        resolved[i] = site.node_idx;
+    }
+    try testing.expect(resolved[0] != resolved[1]);
+
+    // A form outside every scope records nothing — the roots themselves.
+    try testing.expectEqual(@as(usize, 0), lookup.scopeChainAt(0, tree.root[0]).len);
 }
 
 /// Build the forest-wide cross-ref registry from `schema`'s declared
@@ -1960,6 +2333,17 @@ test "extraction discovery descends exactly where the index pass descends" {
 /// `duplicate_cross_ref_target` on the duplicate's `:name`-value span.
 /// The diagnostic is appended to the duplicate's tree's diag list so it
 /// surfaces against the correct document.
+/// One node still to visit in `buildCrossRefIndexForest`'s DFS, plus the
+/// slot-local registry its head resolves against — the same thing
+/// `validateOneTree`'s frame carries, because this pass resolves heads
+/// against the same slots.
+const IndexItem = struct {
+    idx: Ast.NodeIndex,
+    /// Empty for every node that sits in no local-forms slot, which is the
+    /// overwhelming majority, and for the scope-pop sentinel.
+    registry: []const Plugin.FormSpec = &.{},
+};
+
 /// Sentinel `NodeIndex` value used in `buildCrossRefIndexForest`'s DFS
 /// stack to mark "pop the lexical scope chain" on unwind. `NodeIndex.invalid`
 /// is the natural choice — it never appears as a real document node.
@@ -1973,6 +2357,7 @@ fn buildCrossRefIndexForest(
     results: []Result,
     diags_lists: []std.ArrayList(Diagnostic),
     options: Options,
+    scope_chains: ?*ScopeChainMap,
 ) Allocator.Error!CrossRefIndex {
     // 1. Collect canonical target → spec. The schema-aggregate phase has
     //    already vetted each cross-ref's `:target` resolves; here we
@@ -1986,7 +2371,7 @@ fn buildCrossRefIndexForest(
     var cycle_ctx = try CycleCtx.init(gpa, index_a, schema);
     defer cycle_ctx.deinit(gpa);
 
-    var index: CrossRefIndex = .{ .arena = index_a };
+    var index: CrossRefIndex = .{ .arena = index_a, .deferred = options.defer_cross_refs, .held_symbol = options.held_symbol };
     if (targets.count() == 0 and cycle_ctx.isEmpty()) return index;
 
     // 2. Pre-order DFS, tree by tree. Stack memory is transient on `gpa`.
@@ -1994,32 +2379,56 @@ fn buildCrossRefIndexForest(
     //    head; the slice it returns is valid only until the next call.
     //    `scope_stack` parallels the DFS — push on entering a scope-
     //    opening form, pop when its `SCOPE_POP_SENTINEL` is consumed.
-    var stack: std.ArrayList(Ast.NodeIndex) = .empty;
+    var stack: std.ArrayList(IndexItem) = .empty;
     defer stack.deinit(gpa);
     var canon_buf: std.ArrayList(u8) = .empty;
     defer canon_buf.deinit(gpa);
     var scope_stack: std.ArrayList(ScopeFrame) = .empty;
     defer scope_stack.deinit(gpa);
+    // The last chain duped for `scope_chains`, reused while the stack has
+    // not moved — consecutive forms under one scope share a chain, so this
+    // is one allocation per distinct scope state rather than one per node.
+    // Every push, pop and tree boundary clears it.
+    var cached_chain: ?[]const ScopeFrame = null;
 
     for (trees, 0..) |*tree, t| {
         stack.clearRetainingCapacity();
         scope_stack.clearRetainingCapacity();
+        cached_chain = null;
         const t_idx: u32 = @intCast(t);
         const tree_scope: ScopeId = if (options.share_scope) .tree(0) else .tree(t_idx);
         const tree_a = results[t].arena.allocator();
         const tree_options = perTreeOptions(options, t);
 
-        var ri: usize = tree.root.len;
-        while (ri > 0) : (ri -= 1) try stack.append(gpa, tree.root[ri - 1]);
+        // Axis D is the only reason this pass needs the overlay, and it is
+        // gated the same way `preresolveDiscriminantViaOverlay` gates it.
+        const slot_overlay: ?*const MaterializedDefaults.MaterializedDefaults =
+            if (tree_options.axes.variant) tree_options.overlay else null;
 
-        while (stack.pop()) |idx| {
+        var ri: usize = tree.root.len;
+        while (ri > 0) : (ri -= 1) try stack.append(gpa, .{ .idx = tree.root[ri - 1] });
+
+        while (stack.pop()) |item| {
+            const idx = item.idx;
             if (idx == SCOPE_POP_SENTINEL) {
                 _ = scope_stack.pop();
+                cached_chain = null;
                 continue;
             }
             switch (tree.tagOf(idx)) {
                 .form => {
                     const hdr = tree.formHeader(idx);
+                    // Record the chain of scopes *enclosing* this form,
+                    // before it opens one of its own — the chain
+                    // `registerCrossRefInstance` resolves `:scope` against
+                    // two statements below, and the one `validateOneTree`
+                    // hands a form's own keys. A form is never inside its
+                    // own scope. Nothing is recorded at depth 0, so a
+                    // schema with no `:scope` cross-ref stores nothing.
+                    if (scope_chains) |chains| if (scope_stack.items.len > 0) {
+                        if (cached_chain == null) cached_chain = try index_a.dupe(ScopeFrame, scope_stack.items);
+                        try chains.put(index_a, .{ .tree_idx = t_idx, .node = idx }, cached_chain.?);
+                    };
                     const canonical = try canonicalFormNameBuf(gpa, &canon_buf, schema, hdr.head, hdr.namespace);
                     if (canonical) |canon| {
                         // Register this form into every bucket it feeds: its
@@ -2057,21 +2466,34 @@ fn buildCrossRefIndexForest(
                                 .canonical = sh_entry.key_ptr.*,
                                 .scope_id = .lexical(t_idx, lexical_id),
                             });
+                            cached_chain = null;
                             // Sentinel pops AFTER all children are processed.
-                            try stack.append(gpa, SCOPE_POP_SENTINEL);
+                            try stack.append(gpa, .{ .idx = SCOPE_POP_SENTINEL });
                         }
                     }
+                    // Slot-aware descent. A child under a `walk_opaque` key
+                    // is not pushed at all: the schema declined to interpret
+                    // that subtree, so this pass does not harvest cross-ref
+                    // targets, scopes or cycle edges out of it either.
+                    const spec = resolveFormSpec(schema, hdr, item.registry);
                     var ci: usize = hdr.children.len;
-                    while (ci > 0) : (ci -= 1) try stack.append(gpa, hdr.children[ci - 1]);
+                    while (ci > 0) : (ci -= 1) {
+                        const ch = hdr.children[ci - 1];
+                        const reg = childSlot(tree, spec, idx, hdr, slot_overlay, ch) orelse continue;
+                        try stack.append(gpa, .{ .idx = ch, .registry = reg });
+                    }
                 },
                 .vector => {
                     const elements = tree.vectorElements(idx);
                     var ci: usize = elements.len;
-                    while (ci > 0) : (ci -= 1) try stack.append(gpa, elements[ci - 1]);
+                    while (ci > 0) : (ci -= 1) try stack.append(gpa, .{ .idx = elements[ci - 1], .registry = item.registry });
                 },
                 .kvpair => {
+                    // The opacity decision was made when this kvpair was
+                    // pushed; reaching here means the slot is walkable, and
+                    // `item.registry` is the accepted key's `local_forms`.
                     const kvh = tree.kvpairHeader(idx);
-                    try stack.append(gpa, kvh.value);
+                    try stack.append(gpa, .{ .idx = kvh.value, .registry = item.registry });
                 },
                 else => {},
             }
@@ -2083,6 +2505,97 @@ fn buildCrossRefIndexForest(
     }
 
     return index;
+}
+
+/// Which form node, in which tree of the forest, a recorded scope chain
+/// belongs to. Node indices are per-tree, so the tree is part of the key.
+pub const ScopeChainKey = struct {
+    tree_idx: u32,
+    node: Ast.NodeIndex,
+};
+
+/// Form node → the chain of lexical scopes enclosing it, recorded by the
+/// index build for callers that did not walk to the node themselves.
+/// Holds an entry only for a form that sits inside at least one open
+/// scope, so it is empty for every schema that declares no `:scope`
+/// cross-ref — which is nearly all of them.
+pub const ScopeChainMap = std.AutoHashMapUnmanaged(ScopeChainKey, []const ScopeFrame);
+
+/// A cross-ref index built to be *asked*, not to report — see
+/// `buildCrossRefIndexForLookup`. `index` answers
+/// `lookup(scope, target, name)`; `scope_chains` answers the question
+/// that comes first when the target kind declares `:scope <form>`, which
+/// a caller holding only a node index cannot otherwise reconstruct.
+///
+/// Everything is owned by the `index_a` arena the build was given; there
+/// is no `deinit`, exactly like `ForestResult.cross_ref_index`.
+pub const LookupIndex = struct {
+    index: CrossRefIndex,
+    scope_chains: ScopeChainMap = .empty,
+
+    /// The scopes enclosing `node`, outermost-first — the slice
+    /// `findNearestScope` takes. Empty when the node is in no lexical
+    /// scope, which is also what an unrecorded node returns: a form
+    /// outside every scope and a form the walk never reached are the
+    /// same answer to this question, and the distinction belongs to the
+    /// caller that knows which node it asked about.
+    pub fn scopeChainAt(self: *const LookupIndex, tree_idx: u32, node: Ast.NodeIndex) []const ScopeFrame {
+        return self.scope_chains.get(.{ .tree_idx = tree_idx, .node = node }) orelse &.{};
+    }
+};
+
+/// Build a cross-ref index over `trees` for lookup alone, discarding the
+/// registration diagnostics (`duplicate_cross_ref_target`,
+/// `cyclic_cross_ref`, `cross_ref_provider_unavailable`). The caller is
+/// not the pass that reports them, and reporting them twice is worse than
+/// not at all — the final-document forest pass owns that.
+///
+/// Same walk, same registration rules, same arena contract as the
+/// reporting build: names borrow from `trees`, everything the index owns
+/// lands on `index_a`. The two differences are that the per-tree
+/// diagnostic scaffolding is private to this call and dies with it, and
+/// that scope chains are recorded (see `LookupIndex.scope_chains`),
+/// because a caller who asks about a node it did not walk to has no
+/// chain of its own.
+///
+/// `gpa` backs transient walk state only.
+pub fn buildCrossRefIndexForLookup(
+    index_a: Allocator,
+    gpa: Allocator,
+    schema: Schema.Schema,
+    trees: []const Ast.Tree,
+    options: Options,
+) Allocator.Error!LookupIndex {
+    // The reporting build writes duplicate/provider/cycle diagnostics onto
+    // a per-tree `Result` arena and into a per-tree list. Both exist here
+    // only to be thrown away, so they are allocated, passed, and freed
+    // inside this call — the message strings and the list backings all sit
+    // on these arenas, so one `deinit` per tree releases everything.
+    const results = try gpa.alloc(Result, trees.len);
+    defer gpa.free(results);
+    var inited: usize = 0;
+    defer for (results[0..inited]) |*r| r.arena.deinit();
+    for (0..trees.len) |i| {
+        results[i] = .{ .arena = std.heap.ArenaAllocator.init(gpa), .diagnostics = &.{} };
+        inited = i + 1;
+    }
+
+    const diags_lists = try gpa.alloc(std.ArrayList(Diagnostic), trees.len);
+    defer gpa.free(diags_lists);
+    for (0..trees.len) |i| diags_lists[i] = .empty;
+
+    var scope_chains: ScopeChainMap = .empty;
+    const index = try buildCrossRefIndexForest(
+        index_a,
+        gpa,
+        schema,
+        trees,
+        results,
+        diags_lists,
+        options,
+        &scope_chains,
+    );
+    return .{ .index = index, .scope_chains = scope_chains };
 }
 
 fn registerCrossRefInstance(
@@ -2359,13 +2872,30 @@ fn registerSite(
     name_span: Ast.Span,
     diags: *std.ArrayList(Diagnostic),
 ) Allocator.Error!?*CrossRefIndex.Site {
+    // A held name is not a name. Matching is not the only thing a symbol
+    // does in a cross-ref schema — one in a `:name-key` position *registers*
+    // — so without this the cold start the feature exists to serve (two
+    // half-written forms, both holding their `:name`) gets a spurious
+    // `duplicate_cross_ref_target` on the second, from a feature whose whole
+    // purpose is to emit nothing. Registering nothing also means a held name
+    // is not a target anything else can reach, which is the other half of
+    // "not a name".
+    //
+    // Both walkers and the provider route funnel through here, so one gate
+    // covers all three. `null` is the established "registered nothing"
+    // answer; every caller already handles it with `orelse return`.
+    if (index.isHeldText(name_text)) return null;
     const scope_gop = try index.by_scope.getOrPut(index_a, scope);
     if (!scope_gop.found_existing) scope_gop.value_ptr.* = .empty;
     const target_gop = try scope_gop.value_ptr.getOrPut(index_a, canonical_target);
     if (!target_gop.found_existing) target_gop.value_ptr.* = .empty;
     const gop = try target_gop.value_ptr.getOrPut(index_a, name_text);
     if (gop.found_existing) {
-        try emitDuplicateCrossRef(tree_a, diags, name_span, canonical_target, name_text);
+        // A fragment does not adjudicate identity in either direction: two
+        // same-named forms inside it may be the only two in the document,
+        // or the document may hold a third that decides which is the
+        // duplicate. The whole-document pass owns the report.
+        if (!index.deferred) try emitDuplicateCrossRef(tree_a, diags, name_span, canonical_target, name_text);
         return null;
     }
     return gop.value_ptr;
@@ -2654,17 +3184,23 @@ fn emitCyclicCrossRef(
     }
 }
 
+/// `bucket` is the registry key, so a multi-target group arrives as the
+/// space-joined identity string and must be rendered before it reaches a
+/// human. The preposition moves with it: ``on form `a` `` is right for one
+/// form and simply wrong for a set, so the group gets its own template
+/// rather than a bent version of the singular one.
 fn emitDuplicateCrossRef(
     a: Allocator,
     diags: *std.ArrayList(Diagnostic),
     span: Ast.Span,
-    target: []const u8,
+    bucket: []const u8,
     name: []const u8,
 ) Allocator.Error!void {
+    const shown = try Schema.Schema.describeBucket(a, bucket);
     const message = try std.fmt.allocPrint(
         a,
-        "duplicate cross-ref name `{s}` on form `{s}`",
-        .{ name, target },
+        "duplicate cross-ref name `{s}` {s} `{s}`",
+        .{ name, if (shown.is_group) "across forms" else "on form", shown.text },
     );
     // Path stays empty — the index pass walks outside the path-tracking
     // machinery, so editors land on the span instead. Funnel through the
@@ -2726,6 +3262,10 @@ const FormIndexFrame = struct {
     caps: []RegCapture,
     form_span: Ast.Span,
     iter: BinaryCursor.ChildIter,
+    /// Slot state for this form's children: which spec its head resolved
+    /// to and which variant its discriminant has selected so far. Read to
+    /// stop at a `walk_opaque` slot, exactly as the tree pass does.
+    slot: BinarySlot = .{},
     /// Non-null when this form's canonical name matches a `CycleCtx` spec
     /// (i.e., is a target of an `:acyclic true` cross-ref). Symbol values
     /// on declared edge keys are appended to `captured_edges`.
@@ -2775,6 +3315,8 @@ fn buildCrossRefIndexBinary(
     diags_lists: []std.ArrayList(Diagnostic),
     budget: Budget,
     extractions: ?*const ExtractionMap,
+    defer_cross_refs: bool,
+    held_symbol: ?[]const u8,
 ) Error!CrossRefIndex {
     var targets = try collectCrossRefTargets(index_a, schema);
     defer targets.deinit(index_a);
@@ -2784,7 +3326,7 @@ fn buildCrossRefIndexBinary(
     var cycle_ctx = try CycleCtx.init(gpa, index_a, schema);
     defer cycle_ctx.deinit(gpa);
 
-    var index: CrossRefIndex = .{ .arena = index_a };
+    var index: CrossRefIndex = .{ .arena = index_a, .deferred = defer_cross_refs, .held_symbol = held_symbol };
     if (targets.count() == 0 and cycle_ctx.isEmpty()) return index;
 
     var frames: std.ArrayList(IndexFrame) = .empty;
@@ -2799,13 +3341,18 @@ fn buildCrossRefIndexBinary(
         const tree_scope: ScopeId = .tree(t_idx);
         const tree_a = results[b].arena.allocator();
         var cursor = try BinaryCursor.Cursor.init(bytes);
+        // Per-buffer pool index; see the extraction sweep for why. The
+        // `defer` is per iteration, so the forest holds one at a time.
+        const pool_index = try gpa.alloc(u32, cursor.poolIndexLen());
+        defer gpa.free(pool_index);
+        cursor.indexPools(pool_index);
         var root_iter = try cursor.rootIter();
         scope_stack.clearRetainingCapacity();
 
+        var step: u32 = 0; // per call, see validateOneBinary
         while (try root_iter.next()) |root_view| {
-            try dispatchIndexValue(gpa, index_a, &canon_buf, schema, &cursor, root_view, &targets, &scope_heads, &cycle_ctx, &frames, &scope_stack, t_idx, tree_scope);
+            try dispatchIndexValue(gpa, index_a, &canon_buf, schema, &cursor, root_view, &targets, &scope_heads, &cycle_ctx, &frames, &scope_stack, t_idx, tree_scope, &.{});
 
-            var step: u32 = 0;
             while (frames.items.len > 0) {
                 if (step >= budget.steps) return error.DepthExceeded;
                 if (frames.items.len > budget.frames) return error.DepthExceeded;
@@ -2867,6 +3414,21 @@ fn buildCrossRefIndexBinary(
                         }
 
                         const entry = (try fi.iter.next()) orelse unreachable;
+
+                        // Slot bookkeeping first, for two reasons: the
+                        // discriminant must be seen even when a capture below
+                        // consumes this entry, and `captureBinaryEdge` may
+                        // realloc `frames` and leave `fi` dangling.
+                        var child_reg: []const Plugin.FormSpec = fi.slot.positionalRegistry();
+                        var opaque_slot = false;
+                        if (entry.kind == .keyword) {
+                            child_reg = &.{};
+                            if (fi.slot.acceptKey(&cursor, entry.key.?, entry.value)) |k| {
+                                opaque_slot = k.walk_opaque;
+                                child_reg = k.local_forms;
+                            }
+                        }
+
                         // Capture for every registration this child feeds.
                         // The read happens at most once however many
                         // registrations match, because the cursor is
@@ -2929,10 +3491,20 @@ fn buildCrossRefIndexBinary(
                             }
                         }
 
+                        // A `walk_opaque` slot: drain the body instead of
+                        // walking it. The cursor stays in sync (every node is
+                        // still consumed) and nothing inside is registered —
+                        // no targets, no scopes, no cycle edges — because the
+                        // schema declined to interpret that subtree.
+                        if (opaque_slot) {
+                            try BinaryCursor.skipBody(&cursor, entry.value);
+                            continue;
+                        }
+
                         // `dispatchIndexValue` may push a new frame and
                         // realloc `frames.items`, invalidating `fi`. We've
                         // already finished mutating fi above.
-                        try dispatchIndexValue(gpa, index_a, &canon_buf, schema, &cursor, entry.value, &targets, &scope_heads, &cycle_ctx, &frames, &scope_stack, t_idx, tree_scope);
+                        try dispatchIndexValue(gpa, index_a, &canon_buf, schema, &cursor, entry.value, &targets, &scope_heads, &cycle_ctx, &frames, &scope_stack, t_idx, tree_scope, child_reg);
                     },
                     .vector_iter => {
                         const vi = &frames.items[top].vector_iter;
@@ -2956,7 +3528,7 @@ fn buildCrossRefIndexBinary(
                             // normally so nested forms still get indexed;
                             // the validator emits the type error elsewhere.
                         }
-                        try dispatchIndexValue(gpa, index_a, &canon_buf, schema, &cursor, ev, &targets, &scope_heads, &cycle_ctx, &frames, &scope_stack, t_idx, tree_scope);
+                        try dispatchIndexValue(gpa, index_a, &canon_buf, schema, &cursor, ev, &targets, &scope_heads, &cycle_ctx, &frames, &scope_stack, t_idx, tree_scope, &.{});
                     },
                 }
             }
@@ -3014,7 +3586,7 @@ test "budget: the cross-index walk trips its own step and frame ceilings" {
             var diags_lists = [_]std.ArrayList(Diagnostic){.empty};
             var index_arena = std.heap.ArenaAllocator.init(g);
             defer index_arena.deinit();
-            _ = try buildCrossRefIndexBinary(index_arena.allocator(), g, sc, bins, &results, &diags_lists, budget, null);
+            _ = try buildCrossRefIndexBinary(index_arena.allocator(), g, sc, bins, &results, &diags_lists, budget, null, false, null);
         }
     };
 
@@ -3088,6 +3660,9 @@ fn dispatchIndexValue(
     scope_stack: *std.ArrayList(ScopeFrame),
     tree_idx: u32,
     tree_scope: ScopeId,
+    /// Slot-local registry this value's head resolves against before the
+    /// global catalog — empty for the overwhelming majority of slots.
+    registry: []const Plugin.FormSpec,
 ) Error!void {
     switch (view.kind) {
         .form => {
@@ -3133,6 +3708,7 @@ fn dispatchIndexValue(
                 .iter = fv.children,
                 .acyclic_spec_idx = spec_idx,
                 .opened_scope = opened_scope,
+                .slot = BinarySlot.resolve(schema, fv.head, fv.namespace, registry),
             } });
         },
         .vector => {
@@ -3271,6 +3847,7 @@ pub fn validateForestWithOptions(
         results,
         diags_lists,
         options,
+        null,
     );
 
     // Precompute the set of canonical scope-opening form names so the
@@ -3624,14 +4201,352 @@ fn computeBinaryPathPair(
 /// `namespace == null` and a non-null registry before calling — a qualified
 /// head bypasses locals. Shared verbatim by the tree (`validateOneTree`) and
 /// binary (`scheduleFormWalkValidate`) head-resolution steps so the two can't
-/// drift on how a local head is matched — and `pub` for the lowering
-/// worklist (`Lowering.runLoweringPassBudgeted`), which resolves the same
-/// heads local-first so it never fires a global's hook on a local.
+/// drift on how a local head is matched — and `pub` for its two out-of-module
+/// callers: the lowering worklist (`Lowering.runLoweringPassBudgeted`), which
+/// resolves the same heads local-first so it never fires a global's hook on a
+/// local, and the language server (`lsp/Handler.lookupFormIn`), whose
+/// schema-aware surfaces answered a shadowed local with the *shadowed
+/// global's* card until they came through here.
+///
+/// O(registry length); registries are the handful of forms one slot declares,
+/// so the linear scan is the whole implementation. Borrows `reg` — the
+/// returned pointer is valid for the schema's lifetime, not the call's.
 pub fn matchLocalForm(reg: []const Plugin.FormSpec, head: []const u8) ?*const Plugin.FormSpec {
     for (reg) |*lf| {
         if (std.mem.eql(u8, lf.name, head)) return lf;
     }
     return null;
+}
+
+/// The first variant of `spec` whose `:when` set selects `symbol`, or null
+/// when the form declares no variants and when none matches.
+///
+/// "First" and "the" are the same answer here: the loader rejects a value
+/// listed by two variants (`invalid_manifest`), so a symbol selects at most
+/// one. O(variants × `:when` entries), both a handful.
+pub fn variantSelecting(spec: *const Plugin.FormSpec, symbol: []const u8) ?*const Plugin.Variant {
+    const vs = spec.variants orelse return null;
+    for (vs) |*v| {
+        if (v.selects(symbol)) {
+            std.debug.assert(v.when.len >= 1);
+            return v;
+        }
+    }
+    return null;
+}
+
+/// `Plugin.FormSpec.keyByName` for a variant's own key list. Borrows the
+/// plugin's storage — the returned pointer is valid for the schema's
+/// lifetime, not the call's.
+pub fn variantKeyByName(v: *const Plugin.Variant, name: []const u8) ?*const Plugin.KeySpec {
+    for (v.keys) |*k| {
+        if (std.mem.eql(u8, k.name, name)) return k;
+    }
+    return null;
+}
+
+/// The symbol-typed value text of the first kvpair under `form` whose key
+/// is `key_name` and which *starts before* `anchor`. The position bound is
+/// what keeps this the validator's rule rather than a looser one: a kvpair
+/// at or after the anchor is not yet in scope, exactly as the validator's
+/// in-order child walk sees it.
+fn findKvpairSymbolValue(
+    tree: *const Ast.Tree,
+    form: Ast.FormHeader,
+    key_name: []const u8,
+    anchor: u32,
+) ?[]const u8 {
+    const tags = tree.nodes.items(.tag);
+    for (form.children) |child| {
+        if (tree.spanOf(child).start >= anchor) continue;
+        if (tags[@intFromEnum(child)] != .kvpair) continue;
+        const kv = tree.kvpairHeader(child);
+        if (!std.mem.eql(u8, kv.key, key_name)) continue;
+        if (tags[@intFromEnum(kv.value)] != .symbol) return null;
+        return tree.symbolText(kv.value);
+    }
+    return null;
+}
+
+/// The variant `spec` selects at `anchor` — null when the form is not
+/// discriminated, when the discriminant is unset or sits at or after
+/// `anchor`, or when its value selects no variant.
+///
+/// `anchor` is a byte offset into the document: the cursor for a completion
+/// ("what may I write *here*"), the key's own span start for every other
+/// caller ("what does the key *at this position* mean"). One rule answers
+/// both, because both are asking which discriminant is already in scope —
+/// and this pass's own rule is that the discriminant must *precede* the
+/// variant-only key it unlocks (`docs/LANGUAGE.md:1126-1130`,
+/// `matchAndTypecheckVariantKey`). Searching every variant instead would
+/// make a reader confidently wrong rather than merely silent: it would
+/// describe a key this validator reports as `unknown_key`.
+///
+/// Deliberately overlay-free — a discriminant supplied by a `:default`
+/// rather than written (`preresolveDiscriminantViaOverlay`) is the caller's
+/// business, because only some callers hold an overlay.
+/// `MaterializedDefaults` layers that case on top through `overlayVariant`,
+/// and so does the language server (`Handler.activeVariantIn`), which
+/// validates with the same overlay it hands the surfaces.
+pub fn activeVariantAt(
+    tree: *const Ast.Tree,
+    form: Ast.FormHeader,
+    spec: *const Plugin.FormSpec,
+    anchor: u32,
+) ?*const Plugin.Variant {
+    const disc_name = spec.discriminant_name orelse return null;
+    std.debug.assert(disc_name.len > 0);
+    if (spec.variants == null) return null;
+    const value = findKvpairSymbolValue(tree, form, disc_name, anchor) orelse return null;
+    return variantSelecting(spec, value);
+}
+
+/// `spec.keyByName`, plus the keys of the variant active at `anchor`.
+///
+/// The one lookup every schema-aware surface makes about a *document's*
+/// key. `keyByName` alone answers a question about the *spec*, and returns
+/// null for every key declared inside a `(variant :when …)` — which is why
+/// hover, completion, semantic tokens, the quick fixes and the defaults
+/// overlay each went silent on variant keys this validator resolves
+/// happily.
+///
+/// The returned pointer borrows from the plugin's storage (`spec.keys` or
+/// the active variant's `keys`), so it is valid for the schema's lifetime.
+pub fn resolveKeyAt(
+    tree: *const Ast.Tree,
+    form: Ast.FormHeader,
+    spec: *const Plugin.FormSpec,
+    key_name: []const u8,
+    anchor: u32,
+) ?*const Plugin.KeySpec {
+    if (spec.keyByName(key_name)) |k| return k;
+    const v = activeVariantAt(tree, form, spec, anchor) orelse return null;
+    return variantKeyByName(v, key_name);
+}
+
+/// The variant selected by a discriminant the author omitted and the
+/// overlay supplied — `preresolveDiscriminantViaOverlay`, written as a
+/// function of the overlay rather than of `FormKeysState`, so the walks
+/// that run *outside* `validateFormKeys` can ask it too.
+///
+/// The `authorWroteKvpair` gate that pre-resolution needs is implied: an
+/// overlay entry exists only for a key the author left out, so a hit *is*
+/// the omission.
+pub fn overlayVariant(
+    spec: *const Plugin.FormSpec,
+    form_idx: Ast.NodeIndex,
+    overlay: *const MaterializedDefaults.MaterializedDefaults,
+) ?*const Plugin.Variant {
+    const didx = spec.discriminant_idx orelse return null;
+    std.debug.assert(didx < spec.keys.len);
+    const entry = overlay.defaultFor(form_idx, spec.keys[didx].name) orelse return null;
+    // Source-level symbol defaults reach the overlay as `.keyword`
+    // (`MaterializedDefaults.literalToValue`); strings are accepted too,
+    // for symmetry with the pre-resolution this mirrors.
+    const text: []const u8 = switch (entry.value) {
+        .keyword => |k| k,
+        .string => |t| t,
+        else => return null,
+    };
+    return variantSelecting(spec, text);
+}
+
+/// The `KeySpec` a kvpair child was accepted under, or null when this
+/// validator would call it `unknown_key` — and an unknown key puts
+/// nothing in scope, which is the rule on both walkers.
+///
+/// `resolveKeyAt` answers the declared key and the variant a *written*
+/// discriminant selects, under the position rule. `overlay` adds the
+/// axis-D leg, and is optional because a caller may hold none — the
+/// lowering worklist's fragment pass, say. The language server holds one
+/// per open document and composes the same two legs in
+/// `Handler.resolveKeyIn`.
+pub fn acceptedKey(
+    tree: *const Ast.Tree,
+    spec: *const Plugin.FormSpec,
+    form_idx: Ast.NodeIndex,
+    hdr: Ast.FormHeader,
+    overlay: ?*const MaterializedDefaults.MaterializedDefaults,
+    kvh: Ast.KvPairHeader,
+) ?*const Plugin.KeySpec {
+    if (resolveKeyAt(tree, hdr, spec, kvh.key, kvh.key_span.start)) |k| return k;
+    const v = overlayVariant(spec, form_idx, overlay orelse return null) orelse return null;
+    return variantKeyByName(v, kvh.key);
+}
+
+/// A form head's spec, resolved the way `validateFormHead` step 0
+/// resolves it: local-first against `registry` for a bare head (a
+/// qualified `ns/foo` bypasses locals), then additively against the
+/// global catalog. Null when neither answers, which is the same "no
+/// locals in scope for its children" a walk gives an unresolved parent.
+pub fn resolveFormSpec(
+    schema: Schema.Schema,
+    hdr: Ast.FormHeader,
+    registry: []const Plugin.FormSpec,
+) ?*const Plugin.FormSpec {
+    if (hdr.namespace == null and registry.len > 0) {
+        if (matchLocalForm(registry, hdr.head)) |local| return local;
+    }
+    return switch (schema.lookupForm(hdr.head, hdr.namespace)) {
+        .found => |hit| hit.form,
+        else => null,
+    };
+}
+
+/// In-order slot state for one form frame on a **binary** walk.
+///
+/// The twin of `childSlot`, and it cannot share that code: the cursor is
+/// single-pass, so a variant key is accepted on the strength of a
+/// discriminant already streamed past, where the tree walks compare spans.
+/// Same rule, different evidence — and the same rule the binary validator
+/// applies inline (`scheduleFormWalkValidate`), which this exists to keep
+/// the binary *discovery* walks in step with.
+pub const BinarySlot = struct {
+    /// The form's spec, resolved local-first against the registry it
+    /// inherited. Null for a head neither the slot nor the catalog knows,
+    /// which puts nothing in scope for its children.
+    spec: ?*const Plugin.FormSpec = null,
+    /// The variant this form's discriminant has selected so far. Null
+    /// until it streams past, which is exactly the position rule: a
+    /// variant key ahead of its discriminant is `unknown_key`.
+    variant: ?*const Plugin.Variant = null,
+
+    pub fn resolve(
+        schema: Schema.Schema,
+        head: []const u8,
+        namespace: ?[]const u8,
+        registry: []const Plugin.FormSpec,
+    ) BinarySlot {
+        if (namespace == null and registry.len > 0) {
+            if (matchLocalForm(registry, head)) |local| return .{ .spec = local };
+        }
+        return .{ .spec = switch (schema.lookupForm(head, namespace)) {
+            .found => |hit| hit.form,
+            else => null,
+        } };
+    }
+
+    /// The `KeySpec` this keyword entry is accepted under, or null when the
+    /// validator would call it `unknown_key`. Updates `variant` when the
+    /// entry is the discriminant carrying a symbol that selects one.
+    ///
+    /// The peek is non-destructive (`BinaryCursor.peekSymbol` restores the
+    /// position), so the caller's single `read*`/`skipBody` for this value
+    /// is unaffected.
+    pub fn acceptKey(
+        self: *BinarySlot,
+        cursor: *BinaryCursor.Cursor,
+        key: []const u8,
+        value: BinaryCursor.NodeView,
+    ) ?*const Plugin.KeySpec {
+        const spec = self.spec orelse return null;
+        for (spec.keys, 0..) |*k, ki| {
+            if (!std.mem.eql(u8, k.name, key)) continue;
+            if (spec.discriminant_idx) |didx| {
+                if (ki == didx and value.kind == .symbol) {
+                    if (BinaryCursor.peekSymbol(cursor, value)) |sym| {
+                        if (variantSelecting(spec, sym)) |v| self.variant = v;
+                    } else |_| {}
+                }
+            }
+            return k;
+        }
+        const v = self.variant orelse return null;
+        return variantKeyByName(v, key);
+    }
+
+    /// The registry a form-shaped **positional** child resolves against:
+    /// this form's own `local_forms`. Positional slots carry no `KeySpec`,
+    /// so they carry no `walk_opaque` either.
+    pub fn positionalRegistry(self: *const BinarySlot) []const Plugin.FormSpec {
+        const spec = self.spec orelse return &.{};
+        return spec.local_forms;
+    }
+};
+
+/// What a walk does with the form-shaped value under `child`, a child of
+/// the form at `parent_idx`: **null means do not descend** — the accepted
+/// key declared the slot `walk_opaque`, so its contents are opaque to the
+/// surrounding schema. Otherwise the registry the value's head resolves
+/// against before the global catalog: the accepted key's `local_forms`
+/// for a kvpair carrier, the holding form's own for a positional one.
+///
+/// The two pushes `validateOneTree` makes, plus the `continue :outer` it
+/// makes instead. Shared because several walks outside this pass need the
+/// same answer and every copy of it has drifted at least once: the
+/// defaults overlay (`MaterializedDefaults`), the cross-ref index pass and
+/// provider-extraction discovery (both twins), and the lowering worklist.
+/// The language server's `SlotContext` keeps its own step: it needs the
+/// declaring *plugin* alongside the registry, and passes no overlay on
+/// purpose, so that its answers match the diagnostics it prints.
+///
+/// An empty registry is the ordinary answer — descend, no locals — and is
+/// also what an unresolved parent and an unaccepted key both get.
+pub fn childSlot(
+    tree: *const Ast.Tree,
+    parent_spec: ?*const Plugin.FormSpec,
+    parent_idx: Ast.NodeIndex,
+    parent_hdr: Ast.FormHeader,
+    overlay: ?*const MaterializedDefaults.MaterializedDefaults,
+    child: Ast.NodeIndex,
+) ?[]const Plugin.FormSpec {
+    const spec = parent_spec orelse return &.{};
+    return switch (tree.tagOf(child)) {
+        .form => spec.local_forms,
+        .kvpair => blk: {
+            const kvh = tree.kvpairHeader(child);
+            const key = acceptedKey(tree, spec, parent_idx, parent_hdr, overlay, kvh) orelse break :blk &.{};
+            if (key.walk_opaque) break :blk null;
+            break :blk key.local_forms;
+        },
+        else => &.{},
+    };
+}
+
+test "resolveKeyAt: a variant key resolves only after its discriminant" {
+    const testing = std.testing;
+    const Parser = @import("Parser.zig");
+    const a = testing.allocator;
+
+    const spec: Plugin.FormSpec = .{
+        .name = "widget",
+        .keys = &.{
+            .{ .name = "kind", .value_type = .symbol },
+            .{ .name = "color", .value_type = .symbol },
+        },
+        .discriminant_name = "kind",
+        .discriminant_idx = 0,
+        .variants = &.{.{
+            .when = &.{"special"},
+            .keys = &.{.{ .name = "size", .value_type = .number }},
+        }},
+    };
+
+    {
+        const src = "(widget :kind special :size 3)";
+        var tree = try Parser.parse(a, src);
+        defer tree.deinit();
+        const hdr = tree.formHeader(tree.root[0]);
+        const at: u32 = @intCast(std.mem.indexOf(u8, src, ":size").?);
+        // The discriminant precedes `:size`, so the variant is in scope —
+        // `keyByName` alone answers null here, which is the whole reason
+        // this function exists.
+        try testing.expect(spec.keyByName("size") == null);
+        try testing.expect(resolveKeyAt(&tree, hdr, &spec, "size", at) != null);
+        // A common key answers regardless of where the anchor sits.
+        try testing.expect(resolveKeyAt(&tree, hdr, &spec, "color", 0) != null);
+    }
+    {
+        // Same keys, discriminant last. `matchAndTypecheckVariantKey` reports
+        // `:size` as `unknown_key` here, so this lookup must answer null
+        // rather than describe a key the validator rejects.
+        const src = "(widget :size 3 :kind special)";
+        var tree = try Parser.parse(a, src);
+        defer tree.deinit();
+        const hdr = tree.formHeader(tree.root[0]);
+        const at: u32 = @intCast(std.mem.indexOf(u8, src, ":size").?);
+        try testing.expect(resolveKeyAt(&tree, hdr, &spec, "size", at) == null);
+    }
 }
 
 fn validateFormHead(
@@ -4471,7 +5386,14 @@ fn validatePositionalChild(
     const pos_step = try positionalStep(st.a, st.tree, ch, positional_n);
     const pos_path = try extendPath(st.a, st.path, pos_step);
     switch (st.spec.positional) {
-        .none => if (!st.spec.open) try emit(st.a, st.diags, st.tree.spanOf(ch), pos_path, .err, .positional_not_allowed, try positionalNotAllowedMsg(st.a, st.spec.name)),
+        .none => if (!st.spec.open) {
+            // A keyword leaf here is a keyword the parser could not pair.
+            // The path step stays the positional ordinal (the binary
+            // walker's mirror below computes the same one), so only the
+            // prose changes; the corpus compares code, path and severity.
+            const bare_kw: ?[]const u8 = if (st.tree.tagOf(ch) == .keyword) st.tree.keywordText(ch) else null;
+            try emit(st.a, st.diags, st.tree.spanOf(ch), pos_path, .err, .positional_not_allowed, try positionalNotAllowedMsg(st.a, st.spec.name, bare_kw));
+        },
         .any => {},
         .kind => |kind_ref| {
             const expected: Plugin.ValueType = .{ .named = kind_ref };
@@ -4650,9 +5572,32 @@ fn unknownKeywordMsg(
     }
 }
 
-/// Prose for `positional_not_allowed`.
-fn positionalNotAllowedMsg(a: Allocator, form_name: []const u8) Allocator.Error![]const u8 {
-    return try std.fmt.allocPrint(a, "form `{s}` does not accept positional children", .{form_name});
+/// Prose for `positional_not_allowed`, both shapes.
+///
+/// `bare_keyword` is the colon-stripped text of the offending child when
+/// that child is a **keyword leaf**, and null for every other shape. The
+/// distinction is worth a sentence because the two read very differently
+/// to an author. `(lane 42)` is a positional by anyone's reading. `(lane
+/// :name)` looks like a keyword whose value is off-screen, and the code
+/// it earns names positionals — which is honest (the greedy pairing rule
+/// in `Parser.zig`'s header turns `:kw` with nothing to pair into a bare
+/// keyword value) and, on its own, baffling. The tail says why.
+///
+/// It is phrased as a statement about the node, not about a parse, so it
+/// stays true on the binary walker, where the tree it describes may never
+/// have been written down.
+fn positionalNotAllowedMsg(
+    a: Allocator,
+    form_name: []const u8,
+    bare_keyword: ?[]const u8,
+) Allocator.Error![]const u8 {
+    const kw = bare_keyword orelse
+        return try std.fmt.allocPrint(a, "form `{s}` does not accept positional children", .{form_name});
+    return try std.fmt.allocPrint(
+        a,
+        "form `{s}` does not accept positional children — `:{s}` has no value, so it is a bare keyword, not a keyword pair",
+        .{ form_name, kw },
+    );
 }
 
 /// Prose for `missing_discriminant_key`.
@@ -4943,6 +5888,9 @@ fn maybeEmitEffectiveRefMiss(
     // other place `not_cross_ref` is emitted, and an uncomputable member
     // set must silence both or the cascade comes back through Axis B.
     if (cross_index.isPoisoned(lookup_scope, canonical)) return;
+    // And the same widening, for the same reason: a default naming a
+    // sibling the fragment does not contain is not a wrong default.
+    if (cross_index.deferred) return;
 
     var step_path: std.ArrayList([]const u8) = .empty;
     try step_path.appendSlice(a, path);
@@ -5636,10 +6584,18 @@ fn matchFailToCode(fail: MatchFail) Diagnostic.Code {
 /// argument; the surrounding `SlotCtx.form_name` carries the expr name.
 /// The diagnostic prefix flips from "form" to "expression" in this case
 /// so prose reads as `expression `+` argument 2 expects number, …`.
+///
+/// `u32`, not a narrower type: an expression takes as many arguments as
+/// the author writes, so the ordinal is a document-scale quantity like
+/// every other index in this module. It is bounded above by the form's
+/// child count and so by `BinaryFormat.MAX_NODES` (1 << 20), which is why
+/// the two `@intCast`es that fill it cannot fail. It was a `u8` until
+/// 2026-08-28, which panicked the tree walker at argument 256 and made
+/// the binary walker report `argument 255` for every ordinal past it.
 const Slot = union(enum) {
     positional,
     key: []const u8,
-    expr_arg: u8,
+    expr_arg: u32,
 };
 
 /// Reason a typed-slot match failed. Returned from `matchValueAgainstType`
@@ -6069,6 +7025,21 @@ fn matchValueAgainstType(
 ) Allocator.Error!?MatchFail {
     const tag = tree.tagOf(idx);
 
+    // A *held* position — the author has deliberately not filled this in
+    // yet — matches whatever the slot declares. One gate here covers every
+    // position a value can occupy and every refinement axis, because this
+    // function is the single door to typed matching on the Tree path:
+    // kvpair values, positional children, vector elements (recursing) and
+    // union alternatives (recursing) all arrive here, and `underlying`,
+    // `cross_ref`, `members`, `numeric`, `unit` and `repr` are all
+    // downstream of it.
+    //
+    // Held-ness is a property of the *value*, not the slot: a slot never
+    // stops being typed, so the moment the author replaces `_` with a real
+    // value the full check runs again. `Options.held_symbol` is null for
+    // every caller that has not opted in, so this is a no-op there.
+    if (tag == .symbol and cross_index.isHeldText(tree.symbolText(idx))) return null;
+
     // Forms in typed slots: dispatch by what `expected` says.
     //
     // (a) `.form`-underlying ValueKind with a HeadSet: structural head
@@ -6450,20 +7421,33 @@ fn matchScalar(
                     if (cr.provider != null) .provider else .identity;
                 const decl_key = if (cr.provider != null) cr.source_key else cr.name_key;
                 const canonical = (try schema.crossRefBucketKey(a, cr)) orelse {
+                    if (cross_index.deferred) return null;
                     // Schema-aggregate phase already emitted unknown/ambiguous
                     // diagnostics for this; treat as unresolved so the symbol
                     // doesn't masquerade as a valid reference. A group with
                     // one bad entry lands here too, and names the whole list
                     // — the reference is against the group, not an entry.
+                    //
+                    // The only exit of the three that renders the
+                    // *declaration* rather than the bucket, and it has to:
+                    // `crossRefBucketKey` returned null, so there is no
+                    // bucket to hand `describeBucket`. `describeTargets`
+                    // spells the group the same way (` | `), so the reader
+                    // cannot tell which helper answered.
                     return MatchFail{ .not_cross_ref = .{ .got = got, .target = try cr.describeTargets(a), .key = decl_key, .route = route } };
                 };
                 // Resolve which scope to search: nearest enclosing instance
                 // of `:scope <form>` if specified; otherwise tree scope.
                 const lookup_scope: ScopeId = if (cr.scope_form) |sf| sub: {
                     const scope_canonical = (try schema.canonicalFormName(a, sf)) orelse {
-                        return MatchFail{ .not_cross_ref = .{ .got = got, .target = canonical, .key = decl_key, .route = route } };
+                        if (cross_index.deferred) return null;
+                        return MatchFail{ .not_cross_ref = .{ .got = got, .target = (try Schema.Schema.describeBucket(a, canonical)).text, .key = decl_key, .route = route } };
                     };
                     break :sub findNearestScope(scope_chain, scope_canonical) orelse {
+                        // A fragment does not carry the enclosing instance
+                        // either, so "outside its scope" is the same
+                        // unknowable as "not registered".
+                        if (cross_index.deferred) return null;
                         return MatchFail{ .cross_ref_outside_scope = .{ .got = got, .scope_form = scope_canonical } };
                     };
                 } else tree_scope;
@@ -6486,7 +7470,11 @@ fn matchScalar(
                 // source. Accept, after the capture above: the reference
                 // is still a site for the LSP, it just isn't checkable.
                 if (cross_index.isPoisoned(lookup_scope, canonical)) return null;
-                return MatchFail{ .not_cross_ref = .{ .got = got, .target = canonical, .key = decl_key, .route = route } };
+                // `deferred` is that same rule widened to every bucket: a
+                // fragment's index holds only the names the fragment itself
+                // contains, so a miss here says nothing about the document.
+                if (cross_index.deferred) return null;
+                return MatchFail{ .not_cross_ref = .{ .got = got, .target = (try Schema.Schema.describeBucket(a, canonical)).text, .key = decl_key, .route = route } };
             }
             if (kind.members) |m| {
                 if (m.members.len == 0) return null;
@@ -6670,7 +7658,12 @@ fn shapeOfBinaryKind(kind: Ast.ValueKind) NodeShape {
 /// refinement (bounds, members, cross-ref, head-set) is asked. `any`
 /// reaches everything; a nested union (rejected at aggregate time anyway)
 /// and an unresolvable name reach nothing.
-fn alternativeReaches(schema: Schema.Schema, alt: Plugin.QualifiedRef, shape: NodeShape) bool {
+///
+/// `pub` for the same reason `determinedArm` is: when two arms reach, there
+/// is no arm to blame and the LSP's quick fix pools the candidates of every
+/// one that does. It has to ask this question with the validator's answer,
+/// not a re-derived guess.
+pub fn alternativeReaches(schema: Schema.Schema, alt: Plugin.QualifiedRef, shape: NodeShape) bool {
     if (resolvePrimitiveShortcut(alt.name)) |vt| {
         return switch (vt) {
             .any => true,
@@ -6799,7 +7792,7 @@ fn emitTypeMismatch(
     var buf: std.ArrayList(u8) = .empty;
     try writeSlotPrefix(a, &buf, form_name, slot, expected);
     try describeFail(a, &buf, tree, value_idx, fail);
-    try emit(a, diags, tree.spanOf(value_idx), path, .err, slotMismatchCode(slot, fail), try buf.toOwnedSlice(a));
+    try emit(a, diags, tree.spanOf(failLeaf(fail, value_idx)), path, .err, slotMismatchCode(slot, fail), try buf.toOwnedSlice(a));
 }
 
 /// Render a `ValueType` as a short user-facing label. `noinline` because
@@ -6862,6 +7855,35 @@ fn describeNode(
         },
         .form => try buf.appendSlice(a, "form"),
         .kvpair => try buf.appendSlice(a, "keyword pair"),
+    }
+}
+
+/// The node a `MatchFail` should point at: the innermost `element_at` leaf,
+/// or `fallback` (the slot's value) for every non-nested arm. A typed-vector
+/// element failure is *labelled* and *pathed* at the outer slot but spans the
+/// element that is actually wrong, so the caret lands under the typo rather
+/// than under the whole vector. Container-level arms (`wrong_vector_len`,
+/// `vector_too_short`, `vector_too_long`) are not `element_at` and so keep the
+/// container's span, which is correct: the fault there is the arity.
+///
+/// Iterative on purpose. `element_at` nests one level per `.named` resolution
+/// `matchValueAgainstType` consumed, so the chain is at most
+/// `Schema.MAX_KIND_DEPTH` long — short enough for the bounded-recursion
+/// carve-out, but a `while` needs no carve-out at all and the assertion below
+/// pins the bound either way.
+fn failLeaf(fail: MatchFail, fallback: Ast.NodeIndex) Ast.NodeIndex {
+    var cur: *const MatchFail = &fail;
+    var leaf = fallback;
+    var depth: u8 = 0;
+    while (true) : (depth += 1) {
+        std.debug.assert(depth <= Schema.MAX_KIND_DEPTH);
+        switch (cur.*) {
+            .element_at => |e| {
+                leaf = e.leaf;
+                cur = e.fail;
+            },
+            else => return leaf,
+        }
     }
 }
 
@@ -7140,7 +8162,15 @@ fn emitDeprecatedMemberCore(
 /// its magnitude cannot be one. Lets the advisory emitters look a
 /// numerically-matched member up by the same `name` the loader stored,
 /// so `deprecated_member` reaches a digit-leading member too.
-fn canonicalMemberSpelling(a: Allocator, nv: Ast.NumberWithUnit) Allocator.Error!?[]const u8 {
+///
+/// `pub` for the LSP, its second caller: hover, semantic tokens and the
+/// `not_member` quick fix all key a digit-leading member off its
+/// spelling, and a second number-to-text function in `Handler.zig` would
+/// be a third copy once the TS parity host is counted. Same reasoning as
+/// `determinedArm` / `shapeOfTag`.
+///
+/// The returned slice is owned by `a`.
+pub fn canonicalMemberSpelling(a: Allocator, nv: Ast.NumberWithUnit) Allocator.Error!?[]const u8 {
     const Spelling = Plugin.ValueKind.MemberSet.NumericSpelling;
     const key = Spelling.keyOf(nv.value) orelse return null;
     return try Spelling.canonical(a, key, nv.unit);
@@ -7426,6 +8456,11 @@ fn emitValueAdvisoriesTree(
     expected: Plugin.ValueType,
     path: []const []const u8,
 ) Allocator.Error!void {
+    // A held value stands in for a value the author has not chosen, so it
+    // cannot be deprecated and cannot be ambiguous between union arms.
+    // `matchValueAgainstType` accepted it without reading the slot; the
+    // advisories must not read it either.
+    if (tree.tagOf(idx) == .symbol and cross_index.isHeldText(tree.symbolText(idx))) return;
     try emitDeprecatedMemberTree(a, diags, schema, tree, idx, expected, path);
     try emitStringPatternUnsupportedTree(a, diags, schema, tree, idx, expected, path);
     if (tree.tagOf(idx) == .symbol) {
@@ -7451,6 +8486,9 @@ fn emitValueAdvisoriesBinary(
 ) Allocator.Error!void {
     const span = view.span orelse ZERO_SPAN;
     if (extras.text) |t| {
+        // Tree twin: `matchAgainstExpected` accepted a held symbol without
+        // reading the slot, so no advisory may read it either.
+        if (view.kind == .symbol and cross_index.isHeldText(t)) return;
         try emitDeprecatedMemberCore(a, diags, schema, t, expected, span, path);
         if (view.kind == .string) {
             try emitStringPatternUnsupportedCore(a, diags, schema, expected, span, path);
@@ -7590,12 +8628,15 @@ fn writeAmbiguousElementKind(
 //
 // Because the check is per-element, a typed-vector failure is DETECTED at
 // the element rather than at the outer slot. To keep the diagnostic
-// identical to `validate`, the outer slot's framing (span, path, expected-
-// type label, form/slot identity) is threaded down through the
-// `vector_walk` frames as an `OuterVecCtx`; when an element fails, the emit
-// reconstructs the tree walker's "form X expects mat4, element [3]: got
-// vector of length 3" at the outer slot's span — same message, span, path,
-// and code on both walkers (see B.9). A `.union_of` slot that accepts a
+// identical to `validate`, the outer slot's framing (path, expected-type
+// label, form/slot identity, `element [i]:` index wrap) is threaded down
+// through the `vector_walk` frames as an `OuterVecCtx`; when an element
+// fails, the emit reconstructs the tree walker's "form X expects mat4,
+// element [3]: got vector of length 3" — same message, span, path, and code
+// on both walkers (see B.9). The span is NOT part of that framing: it comes
+// from the offending element, which is where the tree walker points too
+// (`failLeaf`). The outer slot says *what was expected*; the element says
+// *where to look*. A `.union_of` slot that accepts a
 // vector alternative is framed the same way when that alternative is the
 // *determined* arm; when it is not, the tree arm collapses to
 // `union_no_branch_matched` at the slot and the binary path keeps its
@@ -7638,6 +8679,8 @@ const SlotCtx = struct {
 /// through nested `vector_walk` frames so a type failure at any element
 /// depth reports against that slot — same span, path, expected-type label,
 /// and diagnostic code the Tree walker produces via its `element_at` wrap.
+/// It deliberately carries no span: the diagnostic points at the offending
+/// element (the current `view`), matching the Tree arm's `failLeaf`.
 ///
 /// Set when the outer slot's `expected` resolves to a direct `.vector` kind,
 /// or to a union whose *determined* arm is one — both cases the Tree arm
@@ -7649,8 +8692,6 @@ const OuterVecCtx = struct {
     /// The outermost slot's declared type (e.g. `mat4`), so the message
     /// names the container, not the element kind.
     expected: Plugin.ValueType,
-    /// The outermost vector's span — where the diagnostic points.
-    span: Ast.Span,
     /// The outermost slot's diag path (no element-index steps).
     path: []const []const u8,
     /// Form/slot identity for the message prefix.
@@ -7699,7 +8740,7 @@ const MatchResult = struct {
     /// Kind-resolution depth to propagate into element evaluation.
     element_depth: u8 = 0,
     /// True when `element_type` came from a `.vector` kind the Tree arm
-    /// would wrap in `element_at` and report against this slot: a direct
+    /// would wrap in `element_at` and label against this slot: a direct
     /// vector slot, or a union whose determined arm is one. Cleared when the
     /// type resolved via a union alternative that is *not* the determined arm
     /// — there the Tree arm emits `union_no_branch_matched` at the slot
@@ -7778,9 +8819,10 @@ const FrameValidate = union(enum) {
         /// Meaningful only when `local_form_registry != null`.
         local_form_slot_path: []const []const u8 = &.{},
         /// Set when this value is an element of a typed `.vector` slot. A
-        /// type failure here reports against the outer slot (span/path/type)
-        /// with an `element [i]: …` wrap instead of at this element — the
-        /// convergence that matches the Tree walker's `element_at` framing.
+        /// type failure here takes the outer slot's path and expected-type
+        /// label plus an `element [i]: …` wrap, while keeping this element's
+        /// own span — the convergence that matches the Tree walker's
+        /// `element_at` framing and its `failLeaf` span.
         outer_vec: ?OuterVecCtx = null,
     },
 
@@ -7817,7 +8859,10 @@ const FrameValidate = union(enum) {
         /// Running positional-argument index for `expr_func` slots —
         /// used to look up the param type via `ExprFunc.paramType(i)`.
         /// Incremented per positional entry; ignored for keyword entries.
-        pos_idx: u8 = 0,
+        /// As wide as the `argc` it runs to, and for the same reason: an
+        /// expression's argument count is bounded by the document, not by
+        /// 255. See `Slot.expr_arg`.
+        pos_idx: u32 = 0,
         /// Overload candidate mask for `spec_state == .expr_func` when
         /// the func is multi-signature. Bit `i` = signature `i` is still
         /// in the running. Initialised at form_walk schedule time from
@@ -7893,32 +8938,36 @@ const FrameValidate = union(enum) {
 /// are enforced because the index pass walks descendants of the single
 /// buffer.
 ///
-/// Defaults both explicit knobs: production `Budget`, and no extraction
+/// Defaults all three explicit knobs: production `Budget`, no extraction
 /// table — so a provider-route target validated through here reports
-/// `cross_ref_provider_unavailable` rather than resolving. Callers that
-/// have run the extraction pre-pass want `validateForestBinary`.
+/// `cross_ref_provider_unavailable` rather than resolving — and
+/// whole-document cross-ref semantics. Callers that have run the
+/// extraction pre-pass want `validateForestBinary`.
 pub fn validateBinary(
     gpa: Allocator,
     bytes: []const u8,
     schema: Schema.Schema,
 ) Error!Result {
-    return validateBinaryWithBudget(gpa, bytes, schema, .{}, null);
+    return validateBinaryWithBudget(gpa, bytes, schema, .{}, null, false, null);
 }
 
-/// `validateBinary` with both explicit knobs. Exposed so tests can drive
-/// the two `error.DepthExceeded` arms with a small cap and a small document
-/// instead of a document large enough to reach the production ceilings (see
-/// `Budget`), and so a caller that ran the provider-extraction pre-pass can
-/// hand the table in.
+/// `validateBinary` with all three explicit knobs. Exposed so tests can
+/// drive the two `error.DepthExceeded` arms with a small cap and a small
+/// document instead of a document large enough to reach the production
+/// ceilings (see `Budget`), so a caller that ran the provider-extraction
+/// pre-pass can hand the table in, and so the fragment semantics of
+/// `Options.defer_cross_refs` have a binary-path twin to test against.
 pub fn validateBinaryWithBudget(
     gpa: Allocator,
     bytes: []const u8,
     schema: Schema.Schema,
     budget: Budget,
     extractions: ?*const ExtractionMap,
+    defer_cross_refs: bool,
+    held_symbol: ?[]const u8,
 ) Error!Result {
     var bins: [1][]const u8 = .{bytes};
-    var fr = try validateForestBinaryWithBudget(gpa, &bins, schema, budget, extractions);
+    var fr = try validateForestBinaryWithBudget(gpa, &bins, schema, budget, extractions, defer_cross_refs, held_symbol);
     return fr.intoSingle(gpa);
 }
 
@@ -7929,21 +8978,23 @@ pub fn validateBinaryWithBudget(
 /// input order plus the forest-wide `CrossRefIndex`.
 ///
 /// `extractions` is the host's provider-extraction table (null when no
-/// pre-pass ran) and is the *only* configuration this path takes. It is a
-/// plain parameter rather than a field on a binary `Options`, deliberately:
-/// this walker supports no overlays, no effective axes, and no
-/// `share_scope`, and a struct named `Options` would promise all three.
-/// The graduation criterion recorded in `conformance_tests.zig` — widen the
-/// walker-parity replay when the binary path grows an `Options` — is
-/// therefore still unmet, which is correct: one field for one feature is
-/// not that evolution.
+/// pre-pass ran); `defer_cross_refs` and `held_symbol` are the tree path's
+/// `Options` fields of the same names, honoured here so the two walkers
+/// cannot drift on a shared seam (`matchScalar` and `registerSite` serve
+/// both). They stay plain parameters rather than fields on a binary
+/// `Options`, deliberately: this walker supports no overlays, no effective
+/// axes, and no `share_scope`, and a struct named `Options` would promise
+/// all three. The graduation criterion recorded in `conformance_tests.zig`
+/// — widen the walker-parity replay when the binary path grows an `Options`
+/// — is therefore still unmet, which is correct: three fields for three
+/// features are not that evolution.
 pub fn validateForestBinary(
     gpa: Allocator,
     binaries: []const []const u8,
     schema: Schema.Schema,
     extractions: ?*const ExtractionMap,
 ) Error!ForestResult {
-    return validateForestBinaryWithBudget(gpa, binaries, schema, .{}, extractions);
+    return validateForestBinaryWithBudget(gpa, binaries, schema, .{}, extractions, false, null);
 }
 
 /// Budget-parameterized `validateForestBinary`. See `Budget`.
@@ -7953,6 +9004,8 @@ pub fn validateForestBinaryWithBudget(
     schema: Schema.Schema,
     budget: Budget,
     extractions: ?*const ExtractionMap,
+    defer_cross_refs: bool,
+    held_symbol: ?[]const u8,
 ) Error!ForestResult {
     var index_arena = std.heap.ArenaAllocator.init(gpa);
     errdefer index_arena.deinit();
@@ -7985,6 +9038,8 @@ pub fn validateForestBinaryWithBudget(
         diags_lists,
         budget,
         extractions,
+        defer_cross_refs,
+        held_symbol,
     );
 
     // Precompute canonical scope-opening form names for the per-buffer
@@ -8034,6 +9089,13 @@ fn validateOneBinary(
     budget: Budget,
 ) Error!void {
     var cursor = try BinaryCursor.Cursor.init(bytes);
+    // Pool index for this buffer's walk: every form head, kvpair key and
+    // symbol below resolves through the cursor, which is O(pool entries)
+    // per lookup without one. Caller-owned, freed with the other
+    // per-call scratch.
+    const pool_index = try gpa.alloc(u32, cursor.poolIndexLen());
+    defer gpa.free(pool_index);
+    cursor.indexPools(pool_index);
     var root_iter = try cursor.rootIter();
 
     var frames: std.ArrayList(FrameValidate) = .empty;
@@ -8043,6 +9105,10 @@ fn validateOneBinary(
     var canon_buf: std.ArrayList(u8) = .empty;
     defer canon_buf.deinit(gpa);
 
+    // One step ceiling per *call*, not per root: `Budget.steps` is the
+    // per-call bound CLAUDE.md names, and resetting it per root gave a
+    // thousand-root buffer a thousand budgets.
+    var step: u32 = 0;
     while (try root_iter.next()) |root_view| {
         try frames.append(gpa, .{ .eval = .{
             .view = root_view,
@@ -8053,7 +9119,6 @@ fn validateOneBinary(
             .step = .root,
         } });
 
-        var step: u32 = 0;
         while (frames.items.len > 0) {
             if (step >= budget.steps) return error.DepthExceeded;
             if (frames.items.len > budget.frames) return error.DepthExceeded;
@@ -8228,7 +9293,6 @@ fn processEvalValidate(
         else if (element_wrap)
             .{
                 .expected = e.expected,
-                .span = view.span orelse ZERO_SPAN,
                 .path = paths.diag,
                 .ctx = e.slot_ctx.?,
                 .index_prefix = "",
@@ -8329,7 +9393,7 @@ fn scheduleFormWalkValidate(
     var opened_scope = false;
     const form_pos: u32 = @intCast(fv.children.cursor.pos);
     if (scope_heads.count() > 0) {
-        if (canonicalFormNameBuf(gpa, canon_buf, schema, head, fv.namespace) catch null) |canon| {
+        if (try canonicalFormNameBuf(gpa, canon_buf, schema, head, fv.namespace)) |canon| {
             if (scope_heads.getEntry(canon)) |sh_entry| {
                 try scope_stack.append(gpa, .{
                     .canonical = sh_entry.key_ptr.*,
@@ -8559,7 +9623,16 @@ fn processFormWalkValidate(
                             break :blk try indexStep(a, fw.pos_idx);
                         } else try indexStep(a, fw.pos_idx);
                         const pos_path = try extendPath(a, fw.path, step);
-                        try emit(a, diags, entry.value.span orelse ZERO_SPAN, pos_path, .err, .positional_not_allowed, try positionalNotAllowedMsg(a, spec.name));
+                        // Mirror of the tree walker's keyword tail. `peekKeyword`
+                        // rewinds c.pos, so the child eval frame's own
+                        // `readKeyword` is unaffected; the text goes straight
+                        // into `allocPrint`, which copies it, so the borrowed
+                        // pool slice needs no dupe.
+                        const bare_kw: ?[]const u8 = if (entry.value.kind == .keyword)
+                            try BinaryCursor.peekKeyword(iter.cursor, entry.value)
+                        else
+                            null;
+                        try emit(a, diags, entry.value.span orelse ZERO_SPAN, pos_path, .err, .positional_not_allowed, try positionalNotAllowedMsg(a, spec.name, bare_kw));
                     },
                     .any => {},
                     .kind => |kind_ref| {
@@ -8721,9 +9794,7 @@ fn processFormWalkValidate(
 
     // Advance the per-form positional index for the next iteration.
     var next_pos_idx = fw.pos_idx;
-    if (entry.kind == .positional and next_pos_idx != std.math.maxInt(u8)) {
-        next_pos_idx += 1;
-    }
+    if (entry.kind == .positional) next_pos_idx += 1;
 
     // Push self+1 (deeper in stack), then child eval (top of stack).
     try frames.append(gpa, .{
@@ -8943,7 +10014,6 @@ fn processVectorWalkValidate(
     // slot — one `element [i]:` segment per nesting level, outer index first.
     const elem_outer: ?OuterVecCtx = if (vw.outer_vec) |ov| .{
         .expected = ov.expected,
-        .span = ov.span,
         .path = ov.path,
         .ctx = ov.ctx,
         .index_prefix = try appendElementPrefix(a, ov.index_prefix, vw.next_index),
@@ -9034,6 +10104,15 @@ fn matchAgainstExpected(
     depth: u8,
     extras: MatchExtras,
 ) Allocator.Error!MatchResult {
+    // Binary twin of `matchValueAgainstType`'s held gate. Mandatory, not
+    // optional: a `KeySpec` behaviour that lands in one walker and not the
+    // other is this validator's standing failure mode, and it is silent.
+    // `extras.text` carries the decoded symbol body — the caller reads it
+    // off the cursor before dispatching here, which is why the binary side
+    // does not need the node.
+    if (view.kind == .symbol) {
+        if (extras.text) |t| if (cross_index.isHeldText(t)) return .{};
+    }
     return switch (try resolveExpected(a, schema, expected, depth)) {
         .fail => |f| .{ .fail = f },
         .primitive => |p| matchPrimitiveBinary(view, p),
@@ -9311,10 +10390,10 @@ fn emitTypeMismatchBinary(
     try emit(a, diags, view.span orelse ZERO_SPAN, path, .err, slotMismatchCode(ctx.slot, fail), try buf.toOwnedSlice(a));
 }
 
-/// Emit a typed-vector element failure against its OUTER slot — the Tree
-/// walker's framing. `ov` carries the outer slot's span, path, expected-type
-/// label, and identity; `view`/`extras` describe the offending element (still
-/// the current cursor node). The message is
+/// Emit a typed-vector element failure with its OUTER slot's framing — the
+/// Tree walker's. `ov` carries the outer slot's path, expected-type label,
+/// index wrap and identity; `view`/`extras` describe the offending element
+/// (still the current cursor node) and supply the span. The message is
 /// `<slot prefix for ov.expected>` + `element [i]: …` + `<offending node>`,
 /// byte-identical to the Tree arm's `describeFail` `.element_at` output, and
 /// the code matches because `element_at` recurses to the same leaf code.
@@ -9330,7 +10409,7 @@ fn emitTypeMismatchBinaryOuter(
     try writeSlotPrefix(a, &buf, ov.ctx.form_name, ov.ctx.slot, ov.expected);
     try buf.appendSlice(a, ov.index_prefix);
     try describeFailBinary(a, &buf, view, fail, extras);
-    try emit(a, diags, ov.span, ov.path, .err, slotMismatchCode(ov.ctx.slot, fail), try buf.toOwnedSlice(a));
+    try emit(a, diags, view.span orelse ZERO_SPAN, ov.path, .err, slotMismatchCode(ov.ctx.slot, fail), try buf.toOwnedSlice(a));
 }
 
 fn describeFailBinary(

@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "lights",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "anchor",
+          "description": "A named point a spot light can aim at.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "name",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            }
+          ]
+        },
+        {
+          "name": "light",
+          "description": "One light. `:kind` selects the variant, and defaults to `point`.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "kind",
+              "optional": true,
+              "description": "Omitted, this reads as `point` and selects that variant.",
+              "value": {
+                "kind": "symbol_members",
+                "names": [
+                  "point",
+                  "spot",
+                  "sun"
+                ]
+              },
+              "default": {
+                "$sym": "point"
+              }
+            },
+            {
+              "name": "intensity",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "number"
+              },
+              "default": 1
+            }
+          ]
+        }
+      ],
+      "value_kinds": [
+        {
+          "name": "light-kind",
+          "description": "The three light shapes.",
+          "shape": {
+            "kind": "symbol_members",
+            "names": [
+              "point",
+              "spot",
+              "sun"
+            ]
+          }
+        },
+        {
+          "name": "anchor-name",
+          "description": "Cross-ref to an `(anchor :name …)` the document declares.",
+          "shape": {
+            "kind": "cross_ref",
+            "targets": [
+              "anchor"
+            ],
+            "name_key": "name",
+            "acyclic": false,
+            "scope_form": null,
+            "provider": null,
+            "source_key": null
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `anchor-name` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin_name": "lights",
+      "kind_name": "anchor-name"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `anchor-name` cross-ref annotation surfaces target-form=`anchor` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "plugin_name": "lights",
+      "kind_name": "anchor-name"
+    },
+    {
+      "code": "variants_emitted_via_if_then",
+      "severity": "info",
+      "message": "discriminated form `light` — variants emitted as allOf+if/then; source-order (variant keys must follow the discriminant) is not enforced by JSON Schema",
+      "plugin_name": "lights",
+      "form_name": "light"
+    }
+  ]
+}

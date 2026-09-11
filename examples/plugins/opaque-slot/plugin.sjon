@@ -1,0 +1,85 @@
+; Opaque slot fixture: `:walk-opaque true` on a key whose value the
+; surrounding schema types but does not read.
+;
+; `(template …)` holds a form the host expands later. Its body is
+; unfinished on purpose: `(animate :from 0 :to 1)` has no `:target`
+; because `(apply …)` supplies one at expansion time, and a body may
+; use a head this plugin never declared, because the expansion runs
+; under a different vocabulary. Neither is a mistake, and neither is
+; something this schema can judge, so the slot is declared opaque.
+;
+; What opaque buys is exact, and it cuts both ways. The slot itself is
+; still checked (`:type form`, so `:body 3` is `wrong_underlying`), and
+; below the slot every walk stops, not only the validator's:
+;
+;   * no diagnostics inside: a missing required key or an undeclared
+;     head in the body is not reported;
+;   * no defaults inside: `animate`'s `:ease` default is never
+;     materialized there, so `sjon effective` leaves the body alone;
+;   * no cross-ref targets inside: an `(anchor :name x)` written in a
+;     body registers nothing, so a reference to `x` misses;
+;   * no lowering inside: a lowerable form in a body never fires its
+;     hook.
+;
+; The third one is the reason to read `example-hidden-target.sjon`. It
+; is the one way an opaque slot can add a diagnostic rather than
+; suppress one, and it is the point of the flag: a subtree the schema
+; declined to interpret is not a place to harvest names out of.
+;
+; The meta-schema uses the same flag on exactly one slot, the `(key …)`
+; form's own `:default`, which is why a manifest can carry an
+; expression-shaped default without the expression's head being
+; reported as an unknown form.
+;
+; Schema export has nothing to say about the flag: the slot exports as
+; a form-shaped slot like any other, because the exporters describe
+; what a value may be and the flag is about what the validator reads.
+;
+; Each document beside this file is validated with the manifest
+; prepended, which is also how the schema-export round-trip test reads
+; them:
+;
+;   cat examples/plugins/opaque-slot/plugin.sjon \
+;       examples/plugins/opaque-slot/example.sjon | sjon validate - --no-project
+;
+; and `sjon effective -` on the same pipe prints the effective view.
+
+(plugin :name template :version "1.0.0"
+  :description "Reference plugin for `:walk-opaque`: a slot the schema types and does not read."
+
+  (value-kind :name ease
+    :description "The easing curve names the host knows."
+    :underlying symbol
+    :members (member-set :values [linear ease-in ease-out]))
+
+  (value-kind :name anchor-name
+    :description "Cross-ref to an `(anchor :name …)` the document declares."
+    :underlying symbol
+    :cross-ref (cross-ref :target anchor))
+
+  (value-kind :name template-name
+    :description "Cross-ref to a `(template :name …)` the document declares."
+    :underlying symbol
+    :cross-ref (cross-ref :target template))
+
+  (form :name anchor
+    :description "A named point an animation can target."
+    (key :name name :type symbol :optional false))
+
+  (form :name animate
+    :description "A finished animation. Every key is checked when this form is written at the top level."
+    (key :name target :type anchor-name :optional false)
+    (key :name from :type number :optional false)
+    (key :name to :type number :optional false)
+    (key :name ease :type ease :optional true :default linear))
+
+  (form :name template
+    :description "A named body the host expands later. `:body` is typed `form` and read by nobody here."
+    (key :name name :type symbol :optional false)
+    (key :name body :type form :optional false :walk-opaque true
+      :description "Opaque: the slot is a form, and what is inside it is the expander's business."))
+
+  (form :name apply
+    :description "Expand a template against a target."
+    (key :name template :type template-name :optional false)
+    (key :name target :type anchor-name :optional false)))

@@ -102,6 +102,45 @@ CrossRef<"compute-pipeline">`), since TypeScript has no way to say "one
 namespace". `acyclic` and `provider` are rejected on a group, matching the
 loader rather than emitting a manifest it would refuse.
 
+## Write-back: `wrap`, and which root an edit starts at
+
+The typed edit methods on a node (`Form.setKey` / `removeKey` /
+`replace`) cover a document with one root. Two things in `edit` cover
+what they cannot.
+
+```ts
+import { edit } from '@sjon/schema';
+
+// (a :x (* 2 (sin t)))  →  (a :x (+ (* 2 (sin t)) 0.1)), comments kept
+edit.wrap(['x'], { $form: '+', $children: [null, 0.1] }, [0]);
+
+// the second root of a file whose first root is (use-plugin …)
+edit.atRoot(edit.setKey([], 'bpm', 140), 1);
+```
+
+`wrap` composes the node at `path` into a new parent. `value` is the
+parent as an ordinary `SjonValue` with a placeholder where the wrapped
+node lands, and `hole` is the path to that placeholder *inside the
+decoded parent* (`[0]` is its first positional child; `$children` is
+not a step). It is the one op that keeps the wrapped subtree's
+comments: the engine clones the node instead of rebuilding it from
+JSON, which is what the other five `value`-taking ops do, and the JSON
+bridge carries no comments. Spelling the same shape as a `replace`
+whose value nests the old subtree loses them. `path` may be empty
+(wrap the whole root); `hole` may not, and the builder throws before
+the round-trip, since a wrap with no hole is a `replace` that discards
+its target. Layout is not preserved by any op: the result is re-printed
+from the tree.
+
+`atRoot` points an action at root `index`. A SJON file that declares or
+references a plugin has several roots, and every builder produces a
+root-less action, which the engine accepts only on a single-root
+document; on a multi-root one an omitted root is `MultipleRoots`, a
+refusal rather than an implicit `0`. It is a combinator rather than a
+parameter on all six builders because `root` answers "which fragment"
+and `path` answers "where inside it", and only the second is worth
+repeating six times.
+
 ## The `ValidateBackend` seam
 
 The builder is host-independent: validation, projection, and `.d.ts`

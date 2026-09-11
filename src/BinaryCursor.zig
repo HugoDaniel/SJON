@@ -1,10 +1,29 @@
 //! Zero-allocation read cursor over a Binary IR file.
 //!
 //! Walks `bytes` in a single linear pass — never allocates, never copies,
-//! always borrows. The input buffer must outlive the cursor. Pool index
-//! resolution is `O(idx + 1)` bytes via a single varint walk; consumers
-//! that need O(1) random access to a tree should decode via
+//! always borrows. The input buffer must outlive the cursor. Consumers
+//! that need O(1) random access to a *tree* should decode via
 //! `Binary.fromBinary` instead (which owns its strings).
+//!
+//! **Pool lookup, and the opt-in index.** By default resolving pool index
+//! `idx` costs `O(idx)` varint reads, because the entries are length-
+//! prefixed and the walk starts at the pool head. Every form head,
+//! keyword key, symbol, string, keyword and unit resolves through it, so
+//! a document with `N` pool entries and `M` string-bearing nodes costs
+//! `O(M x N)` — quadratic, and reachable by a legal file
+//! (`MAX_STRING_POOL_ENTRIES` is 65536).
+//!
+//! `indexPools` fixes that without breaking "never allocates": the
+//! *caller* sizes one `[]u32` (`poolIndexLen()` entries, 4 bytes each)
+//! and owns it, and the cursor borrows it for the rest of its life. With
+//! the index attached a lookup is one varint read. Opt in with:
+//!
+//! ```zig
+//! var cursor = try BinaryCursor.Cursor.init(bytes);
+//! const pool_index = try gpa.alloc(u32, cursor.poolIndexLen());
+//! defer gpa.free(pool_index);
+//! cursor.indexPools(pool_index);
+//! ```
 //!
 //! Iterator contract: when `RootIter.next` / `VectorIter.next` /
 //! `ChildIter.next` returns a non-null `NodeView` (or `ChildEntry`
@@ -126,6 +145,13 @@ pub const Cursor = struct {
     comment_pool_count: u32,
     roots_offset: u32,
     pos: u32,
+    /// Byte position of each string-pool entry's length varint, or null
+    /// for the linear walk. Borrowed from the caller by `indexPools`,
+    /// never owned and never freed by the cursor.
+    string_offsets: ?[]const u32 = null,
+    /// The same, for the comment pool. Stays null when the file carries
+    /// no comment pool.
+    comment_offsets: ?[]const u32 = null,
 
     /// Validate the header and locate the string pool, comment pool, and
     /// roots block. Does not allocate.
@@ -143,6 +169,7 @@ pub const Cursor = struct {
         const pool_byte_size = try fmt.readVarint(bytes, &p);
         if (pool_byte_size > bytes.len - p) return error.Truncated;
         const after_string_pool = p + pool_byte_size;
+        try walkPool(bytes, p, pool_count, after_string_pool, null);
 
         var comment_pool_offset: u32 = 0;
         var comment_pool_count: u32 = 0;
@@ -155,6 +182,7 @@ pub const Cursor = struct {
             const cmt_byte_size = try fmt.readVarint(bytes, &q);
             if (cmt_byte_size > bytes.len - q) return error.Truncated;
             pools_end = q + cmt_byte_size;
+            try walkPool(bytes, q, comment_pool_count, pools_end, null);
         }
 
         // Reject slack bytes between the pools and the roots block. A
@@ -194,29 +222,120 @@ pub const Cursor = struct {
 
     /// Borrow the string at pool index `idx`. The returned slice points
     /// into `c.bytes`.
+    ///
+    /// `O(1)` once `indexPools` has been called, `O(idx)` varint reads
+    /// otherwise.
     pub fn lookupString(c: *const Cursor, idx: u32) Error![]const u8 {
-        return resolvePool(c.bytes, c.pool_offset, c.pool_count, idx);
+        return resolvePool(c.bytes, c.pool_offset, c.pool_count, c.string_offsets, idx);
     }
 
     /// Borrow the comment text at comment-pool index `idx`. Returns
     /// `error.PoolIndexOutOfRange` when the file has no comment pool.
     pub fn lookupComment(c: *const Cursor, idx: u32) Error![]const u8 {
         if (!c.flags.anyComments()) return error.PoolIndexOutOfRange;
-        return resolvePool(c.bytes, c.comment_pool_offset, c.comment_pool_count, idx);
+        return resolvePool(c.bytes, c.comment_pool_offset, c.comment_pool_count, c.comment_offsets, idx);
+    }
+
+    /// How many `u32`s `indexPools` needs: one per entry across both
+    /// pools. Zero for a file with an empty string pool and no comments,
+    /// in which case `indexPools` may be handed an empty slice.
+    pub fn poolIndexLen(c: *const Cursor) usize {
+        return @as(usize, c.pool_count) + @as(usize, c.comment_pool_count);
+    }
+
+    /// Attach a caller-owned offset index, turning every subsequent
+    /// `lookupString` / `lookupComment` (and every internal head, key,
+    /// symbol and unit resolution) into a single varint read.
+    ///
+    /// `buf` must be exactly `poolIndexLen()` long and must outlive the
+    /// cursor; the cursor borrows it and never frees it. Calling this
+    /// twice is allowed and idempotent. The cursor still allocates
+    /// nothing — the buffer is the caller's.
+    ///
+    /// Complexity: `O(total pool entries)`, the same single walk `init`
+    /// already does to validate the pools.
+    pub fn indexPools(c: *Cursor, buf: []u32) void {
+        std.debug.assert(buf.len == c.poolIndexLen());
+
+        // SAFETY: `init` read these same two varints off these same bytes
+        // and then ran `walkPool` over the result, returning successfully
+        // — a cursor cannot exist otherwise. So neither the reads nor the
+        // re-walk can fail here, and the recorded offsets are the ones
+        // the validating walk visited (it is the same loop, in its second
+        // mode) rather than a second opinion that could disagree.
+        var p = c.pool_offset;
+        _ = fmt.readVarint(c.bytes, &p) catch unreachable; // entry_count
+        const byte_size = fmt.readVarint(c.bytes, &p) catch unreachable;
+        const strings = buf[0..c.pool_count];
+        walkPool(c.bytes, p, c.pool_count, p + byte_size, strings) catch unreachable;
+        c.string_offsets = strings;
+
+        if (c.flags.anyComments()) {
+            var q = c.comment_pool_offset;
+            _ = fmt.readVarint(c.bytes, &q) catch unreachable; // entry_count
+            const cmt_size = fmt.readVarint(c.bytes, &q) catch unreachable;
+            const comments = buf[c.pool_count..];
+            walkPool(c.bytes, q, c.comment_pool_count, q + cmt_size, comments) catch unreachable;
+            c.comment_offsets = comments;
+        }
+
+        std.debug.assert(c.string_offsets != null);
+        std.debug.assert(c.flags.anyComments() == (c.comment_offsets != null));
     }
 };
 
-fn resolvePool(bytes: []const u8, pool_offset: u32, pool_count: u32, idx: u32) Error![]const u8 {
-    if (idx >= pool_count) return error.PoolIndexOutOfRange;
-    var p = pool_offset;
-    _ = try fmt.readVarint(bytes, &p); // entry_count
-    _ = try fmt.readVarint(bytes, &p); // byte_size
+/// Require `count` length-prefixed entries starting at `p` to end exactly
+/// at `end` — the pool's declared byte size. `Binary.readPool` enforces
+/// the same equality, so the two decoders admit the same frames; without
+/// it the cursor took `byte_size` on trust and a short pool let a string
+/// index resolve into the roots block. O(count).
+///
+/// Two modes, one loop. With `offsets` null this is the validating walk
+/// `init` does once. With `offsets` non-null (length exactly `count`) it
+/// also records where each entry's length varint starts, which is what
+/// `indexPools` hands to `resolvePool`. Sharing the loop is the point:
+/// an index built by a second traversal could disagree with the walk
+/// that validated the pool, and this one cannot.
+fn walkPool(bytes: []const u8, start: u32, count: u32, end: u32, offsets: ?[]u32) Error!void {
+    std.debug.assert(end <= bytes.len);
+    std.debug.assert(offsets == null or offsets.?.len == count);
+    var p = start;
     var i: u32 = 0;
-    while (i < idx) : (i += 1) {
+    while (i < count) : (i += 1) {
+        if (offsets) |o| o[i] = p;
         const len = try fmt.readVarint(bytes, &p);
+        if (len > fmt.MAX_STRING_LENGTH) return error.StringTooLong;
         if (len > bytes.len - p) return error.Truncated;
         p += len;
     }
+    if (p != end) return error.Truncated;
+}
+
+/// Borrow pool entry `idx`. With `offsets` attached the entry's position
+/// is a lookup and the cost is one varint; without it the entries are
+/// walked from the pool head, `O(idx)`. The bounds check comes first
+/// either way, so an out-of-range index is `PoolIndexOutOfRange` in both
+/// modes and never an index into `offsets`.
+fn resolvePool(
+    bytes: []const u8,
+    pool_offset: u32,
+    pool_count: u32,
+    offsets: ?[]const u32,
+    idx: u32,
+) Error![]const u8 {
+    if (idx >= pool_count) return error.PoolIndexOutOfRange;
+    var p = if (offsets) |o| o[idx] else blk: {
+        var q = pool_offset;
+        _ = try fmt.readVarint(bytes, &q); // entry_count
+        _ = try fmt.readVarint(bytes, &q); // byte_size
+        var i: u32 = 0;
+        while (i < idx) : (i += 1) {
+            const len = try fmt.readVarint(bytes, &q);
+            if (len > bytes.len - q) return error.Truncated;
+            q += len;
+        }
+        break :blk q;
+    };
     const len = try fmt.readVarint(bytes, &p);
     if (len > bytes.len - p) return error.Truncated;
     return bytes[p..][0..len];
@@ -371,7 +490,7 @@ fn readChildEntry(c: *Cursor) Error!ChildEntry {
                 try skipNComments(c, n);
             }
             const key_idx = try fmt.readVarint(c.bytes, &c.pos);
-            const key = try resolvePool(c.bytes, c.pool_offset, c.pool_count, key_idx);
+            const key = try resolvePool(c.bytes, c.pool_offset, c.pool_count, c.string_offsets, key_idx);
             const view = try nextNodeView(c);
             return .{
                 .kind = .keyword,
@@ -462,13 +581,17 @@ pub fn readTime(c: *Cursor, view: NodeView) Error!Time {
 /// The returned `unit` slice borrows from `c.bytes` (the string pool).
 pub fn readNumberWithUnit(c: *Cursor, view: NodeView) Error!NumberWithUnit {
     if (view.kind != .number_with_unit) return error.InvalidTag;
+    std.debug.assert(c.pos <= c.bytes.len); // precondition of the subtraction below
     if (c.bytes.len - c.pos < 8) return error.Truncated;
-    std.debug.assert(c.pos <= c.bytes.len);
     const bits = std.mem.readInt(u64, c.bytes[c.pos..][0..8], .little);
     c.pos += 8;
     const unit_idx = try fmt.readVarint(c.bytes, &c.pos);
-    const unit = try resolvePool(c.bytes, c.pool_offset, c.pool_count, unit_idx);
-    std.debug.assert(unit.len > 0); // pool never stores empty entries
+    const unit = try resolvePool(c.bytes, c.pool_offset, c.pool_count, c.string_offsets, unit_idx);
+    // The pool may legitimately hold `""` (an empty string literal), so a
+    // crafted frame can point a unit at it. The tree decoder and the JSON
+    // bridge both refuse an empty unit; the cursor must too — `Ast`'s
+    // `numberWithUnitOf` asserts the invariant downstream.
+    if (unit.len == 0) return error.InvalidTag;
     return .{ .value = @bitCast(bits), .unit = unit };
 }
 
@@ -499,7 +622,7 @@ pub fn readNil(c: *Cursor, view: NodeView) Error!void {
 pub fn readString(c: *Cursor, view: NodeView) Error![]const u8 {
     if (view.kind != .string) return error.InvalidTag;
     const idx = try fmt.readVarint(c.bytes, &c.pos);
-    return resolvePool(c.bytes, c.pool_offset, c.pool_count, idx);
+    return resolvePool(c.bytes, c.pool_offset, c.pool_count, c.string_offsets, idx);
 }
 
 /// Read a keyword payload (varint pool index → pool entry). Returned
@@ -508,7 +631,7 @@ pub fn readString(c: *Cursor, view: NodeView) Error![]const u8 {
 pub fn readKeyword(c: *Cursor, view: NodeView) Error![]const u8 {
     if (view.kind != .keyword) return error.InvalidTag;
     const idx = try fmt.readVarint(c.bytes, &c.pos);
-    return resolvePool(c.bytes, c.pool_offset, c.pool_count, idx);
+    return resolvePool(c.bytes, c.pool_offset, c.pool_count, c.string_offsets, idx);
 }
 
 /// Read a symbol payload (varint pool index → pool entry). Returned
@@ -517,7 +640,7 @@ pub fn readKeyword(c: *Cursor, view: NodeView) Error![]const u8 {
 pub fn readSymbol(c: *Cursor, view: NodeView) Error![]const u8 {
     if (view.kind != .symbol) return error.InvalidTag;
     const idx = try fmt.readVarint(c.bytes, &c.pos);
-    return resolvePool(c.bytes, c.pool_offset, c.pool_count, idx);
+    return resolvePool(c.bytes, c.pool_offset, c.pool_count, c.string_offsets, idx);
 }
 
 /// Read a vector header and return a primed iterator over its elements.
@@ -550,12 +673,12 @@ pub fn readForm(c: *Cursor, view: NodeView) Error!FormView {
         null;
     const namespace: ?[]const u8 = if (view.tag == .form_qualified) blk: {
         const idx = try fmt.readVarint(c.bytes, &c.pos);
-        const ns = try resolvePool(c.bytes, c.pool_offset, c.pool_count, idx);
+        const ns = try resolvePool(c.bytes, c.pool_offset, c.pool_count, c.string_offsets, idx);
         if (ns.len == 0) return error.InvalidNamespace;
         break :blk ns;
     } else null;
     const head_idx = try fmt.readVarint(c.bytes, &c.pos);
-    const head = try resolvePool(c.bytes, c.pool_offset, c.pool_count, head_idx);
+    const head = try resolvePool(c.bytes, c.pool_offset, c.pool_count, c.string_offsets, head_idx);
     const child_count = try fmt.readVarint(c.bytes, &c.pos);
     if (child_count > fmt.MAX_NODES) return error.NodeCountExceeded;
     return .{
@@ -578,7 +701,7 @@ pub fn peekFormHead(c: *Cursor, view: NodeView) Error![]const u8 {
     if (c.flags.with_head_spans) _ = try readSpanRaw(c);
     if (view.tag == .form_qualified) _ = try fmt.readVarint(c.bytes, &c.pos);
     const head_idx = try fmt.readVarint(c.bytes, &c.pos);
-    const head = try resolvePool(c.bytes, c.pool_offset, c.pool_count, head_idx);
+    const head = try resolvePool(c.bytes, c.pool_offset, c.pool_count, c.string_offsets, head_idx);
     c.pos = saved_pos;
     return head;
 }
@@ -593,7 +716,7 @@ pub fn peekSymbol(c: *Cursor, view: NodeView) Error![]const u8 {
     if (view.kind != .symbol) return error.InvalidTag;
     const saved_pos = c.pos;
     const idx = try fmt.readVarint(c.bytes, &c.pos);
-    const sym = try resolvePool(c.bytes, c.pool_offset, c.pool_count, idx);
+    const sym = try resolvePool(c.bytes, c.pool_offset, c.pool_count, c.string_offsets, idx);
     c.pos = saved_pos;
     return sym;
 }
@@ -835,6 +958,26 @@ test "cursor: number_with_unit unit borrows from bin" {
     try testing.expect(u_ptr >= bin_start and u_ptr < bin_start + bin.data.len);
 }
 
+test "cursor: a unit pointing at an empty pool entry is InvalidTag, not an assert" {
+    // Same crafted frame as the tree decoder's test: `""` is pool entry 0,
+    // and the frame's last byte is `1px`'s unit varint (entry 1). Aiming it
+    // at entry 0 used to trip `assert(unit.len > 0)` on read.
+    const bin = try encodeWithStripped("\"\" 1px");
+    defer bin.deinit();
+    var poisoned = try testing.allocator.dupe(u8, bin.data);
+    defer testing.allocator.free(poisoned);
+    try testing.expectEqual(@as(u8, 1), poisoned[poisoned.len - 1]);
+    poisoned[poisoned.len - 1] = 0;
+
+    var cursor = try Cursor.init(poisoned);
+    var iter = try cursor.rootIter();
+    const first = (try iter.next()) orelse unreachable;
+    try skipBody(&cursor, first);
+    const view = (try iter.next()) orelse unreachable;
+    try testing.expectEqual(NodeKind.number_with_unit, view.kind);
+    try testing.expectError(error.InvalidTag, readNumberWithUnit(&cursor, view));
+}
+
 test "cursor: borrows string" {
     const bin = try encodeWithStripped("\"hello\"");
     defer bin.deinit();
@@ -1057,6 +1200,88 @@ fn walkCursorKinds(
             }
         },
     }
+}
+
+test "cursor: indexed and unindexed pool lookups agree, entry for entry" {
+    const Parser = @import("Parser.zig");
+    const Binary = @import("Binary.zig");
+    const a = testing.allocator;
+    // `.full` so both pools are populated: strings from the heads, keys,
+    // symbols and units, comments from the three comment positions.
+    const src =
+        \\; a leading comment
+        \\(camera :ortho true :zoom 2 ; and one on the kvpair
+        \\  (lens :focal-length 35mm :name "wide")
+        \\  ; a comment among the children
+        \\  [1 2 3])
+    ;
+    var tree = try Parser.parse(a, src);
+    defer tree.deinit();
+    const bin = try Binary.toBinary(a, tree, Binary.ToBinaryOptions.forMode(.full));
+    defer bin.deinit();
+
+    var plain = try Cursor.init(bin.data);
+    var indexed = try Cursor.init(bin.data);
+    const pool_index = try a.alloc(u32, indexed.poolIndexLen());
+    defer a.free(pool_index);
+    indexed.indexPools(pool_index);
+
+    // The document has to actually exercise both pools, or the loops
+    // below would pass vacuously.
+    try testing.expect(plain.pool_count > 1);
+    try testing.expect(plain.comment_pool_count > 1);
+    try testing.expectEqual(plain.poolIndexLen(), pool_index.len);
+
+    var i: u32 = 0;
+    while (i < plain.pool_count) : (i += 1) {
+        try testing.expectEqualStrings(try plain.lookupString(i), try indexed.lookupString(i));
+    }
+    var j: u32 = 0;
+    while (j < plain.comment_pool_count) : (j += 1) {
+        try testing.expectEqualStrings(try plain.lookupComment(j), try indexed.lookupComment(j));
+    }
+
+    // The internal resolutions take the index too, not only the two
+    // public lookups: a form head goes through `resolvePool` as well.
+    var iter = try indexed.rootIter();
+    const view = (try iter.next()) orelse unreachable;
+    var fv = try readForm(&indexed, view);
+    try testing.expectEqualStrings("camera", fv.head);
+    while (try fv.children.next()) |entry| try skipBody(&indexed, entry.value);
+}
+
+test "cursor: an out-of-range pool index stays out of range with an index attached" {
+    const a = testing.allocator;
+    const bin = try encodeWithStripped("(camera :ortho :zoom 2)");
+    defer bin.deinit();
+    var cursor = try Cursor.init(bin.data);
+    const pool_index = try a.alloc(u32, cursor.poolIndexLen());
+    defer a.free(pool_index);
+    cursor.indexPools(pool_index);
+
+    try testing.expectEqualStrings("camera", try cursor.lookupString(2));
+    // The bounds check runs before either resolution path, so the index
+    // is never itself indexed out of range.
+    try testing.expectError(error.PoolIndexOutOfRange, cursor.lookupString(cursor.pool_count));
+    try testing.expectError(error.PoolIndexOutOfRange, cursor.lookupString(99));
+    // The compact preset carries no comment pool, so the flag guard still
+    // fires ahead of the (absent) comment index.
+    try testing.expectError(error.PoolIndexOutOfRange, cursor.lookupComment(0));
+}
+
+test "cursor: poolIndexLen is zero when neither pool has an entry" {
+    const a = testing.allocator;
+    const bin = try encodeWithStripped("42 true nil");
+    defer bin.deinit();
+    var cursor = try Cursor.init(bin.data);
+    try testing.expectEqual(@as(usize, 0), cursor.poolIndexLen());
+
+    // An empty index is still an index: attaching it is legal, and every
+    // lookup is out of range with or without it.
+    const pool_index = try a.alloc(u32, 0);
+    defer a.free(pool_index);
+    cursor.indexPools(pool_index);
+    try testing.expectError(error.PoolIndexOutOfRange, cursor.lookupString(0));
 }
 
 test "cursor: lookupString resolves first / last entries" {

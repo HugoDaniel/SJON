@@ -295,6 +295,9 @@ fn emitParamName(w: *Writer, func: ExprFunc, i: usize, required: usize) Writer.E
         try w.writeByte('x');
         return;
     }
+    // One letter per unnamed parameter; past `z` the emitter would write a
+    // non-identifier byte. Generator policy is to refuse loudly.
+    if (i >= 26) @panic("gen_expr_ops: name the parameters of an expr-func with more than 26 unnamed ones");
     try w.writeByte('a' + @as(u8, @intCast(i)));
 }
 

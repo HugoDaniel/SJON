@@ -1,0 +1,30 @@
+; A held name is not a name.
+;
+; Matching is not the only thing a symbol does in a cross-ref schema: one
+; in a `:name-key` position REGISTERS. So the cold start this feature
+; exists to serve — several half-written forms, each holding its `:name` —
+; would otherwise collect a `duplicate_cross_ref_target` on every one
+; after the first, from a feature whose whole purpose is to emit nothing.
+;
+; Registering nothing is also why the reference below is held rather than
+; resolving: there is no target `_` to reach.
+(plugin :name hold3 :version "1.0.0"
+  (value-kind :name kernel-ref :underlying symbol
+    :cross-ref (cross-ref :target kernel :name-key name))
+
+  (form :name kernel
+    (key :name name :type symbol :optional false))
+
+  (form :name warp
+    (key :name by :type kernel-ref :optional true)))
+
+(kernel :name _)
+(kernel :name _)
+(kernel :name _)
+
+; A real name beside the held ones still indexes, and still resolves.
+(kernel :name flow)
+(warp :by flow)
+
+; A held reference is held in its own right, not a lookup of `_`.
+(warp :by _)

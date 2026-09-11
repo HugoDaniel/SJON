@@ -35,6 +35,16 @@ plugin contract in
 [docs/plugin-model-v1.md](plugin-model-v1.md). To export a host
 schema, see [docs/SCHEMA_EXPORT.md](SCHEMA_EXPORT.md).
 
+Host lowering is Zig-only: a `LoweringRegistry` takes a Zig function
+pointer, and no other host runs a hook. Its surface (a hook carrying
+host state through `LoweringHook.ctx` and reading it back as
+`LoweringInput.ctx`, resolving a cross-reference to the form it names
+with `LoweringInput.resolveRef`, every staging layer kept in
+`HostResult.lowering_stages`, and `provenanceChain` walking a lowered
+form back to the authored one) is run end to end by
+[`examples/lowering-stages-demo.zig`](../examples/lowering-stages-demo.zig)
+(`zig build lowering-demo`).
+
 ## Web / Node WASM
 
 `hosts/web/` is the kitchen-sink JS wrapper. Two WASM artifacts ship

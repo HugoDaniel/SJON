@@ -1761,6 +1761,72 @@ test "Cli: fmt - with parse errors exits non-zero, emits nothing on stdout" {
 }
 
 // ---------------------------------------------------------------------
+// The stdio writers are the shell's file descriptors, not ours.
+//
+// These two spawn the binary for a reason the in-process `invoke`
+// harness cannot reach: it hands `Cli.run` two in-memory writers, so
+// the choice `src/cli/main.zig` makes about *how* a real fd is written
+// is invisible to it. `File.writer` defaults to positional writes from
+// offset 0; on an inherited fd that is the shell's offset to set, and a
+// positional writer wrote over whatever was already in the file.
+//
+// A `>` redirect cannot show this, because it truncates first — the
+// pre-positioned `>>` is the whole test.
+// ---------------------------------------------------------------------
+
+/// Run the built CLI with one output channel **appended** to a file that
+/// already holds `prior`, and return that file's bytes afterwards.
+///
+/// `redirect` is the shell's spelling of the channel: `">>"` for stdout,
+/// `"2>>"` for stderr.
+fn runCliAppending(
+    a: std.mem.Allocator,
+    argv_tail: []const u8,
+    stdin_bytes: []const u8,
+    redirect: []const u8,
+    prior: []const u8,
+) ![]u8 {
+    std.Io.Dir.cwd().access(testing.io, cli_bin, .{}) catch return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "stdin", .data = stdin_bytes });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "log", .data = prior });
+
+    const cmd = try std.fmt.allocPrint(
+        a,
+        "{s} {s} < .zig-cache/tmp/{s}/stdin {s} .zig-cache/tmp/{s}/log",
+        .{ cli_bin, argv_tail, &tmp.sub_path, redirect, &tmp.sub_path },
+    );
+    defer a.free(cmd);
+
+    const out = try std.process.run(a, testing.io, .{ .argv = &.{ "/bin/sh", "-c", cmd } });
+    a.free(out.stdout);
+    a.free(out.stderr);
+
+    const log_path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/log", .{&tmp.sub_path});
+    defer a.free(log_path);
+    return readBack(a, log_path);
+}
+
+test "Cli: stdout appends to a pre-positioned file, it does not write from offset 0" {
+    const a = testing.allocator;
+    const log = try runCliAppending(a, "fmt -", "(a)\n", ">>", "PRIOR LINE\n");
+    defer a.free(log);
+    // Before the fix this read `(a)\nLINE\n`: four bytes of the document
+    // written over the first four of the line that was already there.
+    try testing.expectEqualStrings("PRIOR LINE\n(a)\n", log);
+}
+
+test "Cli: stderr appends to a pre-positioned file, it does not write from offset 0" {
+    const a = testing.allocator;
+    const log = try runCliAppending(a, "fmt -", "(a\n", "2>>", "PRIOR LINE\n");
+    defer a.free(log);
+    try testing.expect(std.mem.startsWith(u8, log, "PRIOR LINE\n"));
+    try testing.expect(std.mem.indexOf(u8, log, "unclosed delimiter") != null);
+}
+
+// ---------------------------------------------------------------------
 // `sjon eval` — devx plan 02 CP1 (A3). Prints each expression root's
 // evaluated value; stdout carries only the data product (the `fmt`
 // channel policy), diagnostics go to stderr.
@@ -2952,4 +3018,206 @@ test "Cli: repl — a line exceeding the line buffer reports on stderr, not a si
     defer a.free(out.stderr);
     try testing.expect(exitCode(out.term) != 0);
     try testing.expect(std.mem.indexOf(u8, out.stderr, "64 KiB") != null);
+}
+
+// ---------------------------------------------------------------------
+// `sjon edit`
+// ---------------------------------------------------------------------
+
+/// The aligned, commented document from the ask's transcript. Under a
+/// re-print every line of it changes and `; width` moves onto the next
+/// one; under `sjon edit` only the edited literal does.
+const edit_doc = "(scene\n  :w   800   ; width\n  :h   600)  ; height\n";
+
+test "Cli: edit changes one literal and leaves every other byte alone" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try fmtFixture(a, &tmp, "doc.sjon", edit_doc);
+    defer a.free(path);
+
+    var out = try invoke(&.{ "sjon", "edit", path, "{\"op\":\"replace\",\"path\":[\"w\"],\"value\":801}" });
+    defer out.deinit();
+    try testing.expectEqual(@as(u8, 0), out.code);
+    try testing.expectEqualStrings(
+        "(scene\n  :w   801   ; width\n  :h   600)  ; height\n",
+        out.stdout.written(),
+    );
+
+    // Nothing written: without `--in-place` the file is read-only input.
+    const after = try readBack(a, path);
+    defer a.free(after);
+    try testing.expectEqualStrings(edit_doc, after);
+}
+
+test "Cli: edit --in-place writes the file and names it on stdout" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try fmtFixture(a, &tmp, "doc.sjon", edit_doc);
+    defer a.free(path);
+
+    var out = try invoke(&.{
+        "sjon",                                                                    "edit",
+        path,                                                                      "--in-place",
+        "{\"op\":\"set_keyword\",\"path\":[],\"key\":\"bg\",\"value\":\"black\"}",
+    });
+    defer out.deinit();
+    try testing.expectEqual(@as(u8, 0), out.code);
+    try testing.expect(std.mem.startsWith(u8, out.stdout.written(), "edited "));
+
+    const after = try readBack(a, path);
+    defer a.free(after);
+    try testing.expectEqualStrings(
+        "(scene\n  :w   800   ; width\n  :h   600 :bg \"black\")  ; height\n",
+        after,
+    );
+}
+
+test "Cli: edit applies several ACTION arguments as one batch" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try fmtFixture(a, &tmp, "doc.sjon", edit_doc);
+    defer a.free(path);
+
+    // The second argument is an array, so the batch is three actions
+    // long: arrays flatten into the argument list around them. The third
+    // appends behind the spacing that precedes `:h` — its whitespace only,
+    // so `; width` is not copied along with it.
+    var out = try invoke(&.{
+        "sjon",
+        "edit",
+        path,
+        "{\"op\":\"replace\",\"path\":[\"w\"],\"value\":1}",
+        "[{\"op\":\"replace\",\"path\":[\"h\"],\"value\":2},{\"op\":\"insert_positional\",\"path\":[],\"value\":3}]",
+    });
+    defer out.deinit();
+    try testing.expectEqual(@as(u8, 0), out.code);
+    try testing.expectEqualStrings(
+        "(scene\n  :w   1   ; width\n  :h   2\n  3)  ; height\n",
+        out.stdout.written(),
+    );
+}
+
+test "Cli: edit --actions reads the batch from a file" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try fmtFixture(a, &tmp, "doc.sjon", edit_doc);
+    defer a.free(path);
+    const batch = try fmtFixture(
+        a,
+        &tmp,
+        "batch.json",
+        "[{\"op\":\"replace\",\"path\":[\"w\"],\"value\":1},{\"op\":\"replace\",\"path\":[\"h\"],\"value\":2}]",
+    );
+    defer a.free(batch);
+
+    const flag = try std.fmt.allocPrintSentinel(a, "--actions={s}", .{batch}, 0);
+    defer a.free(flag);
+
+    var out = try invoke(&.{ "sjon", "edit", path, flag });
+    defer out.deinit();
+    try testing.expectEqual(@as(u8, 0), out.code);
+    try testing.expectEqualStrings(
+        "(scene\n  :w   1   ; width\n  :h   2)  ; height\n",
+        out.stdout.written(),
+    );
+}
+
+test "Cli: edit refuses a document that does not parse and writes nothing" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const broken = "(scene :w 800\n(camera :fov 60\n";
+    const path = try fmtFixture(a, &tmp, "doc.sjon", broken);
+    defer a.free(path);
+
+    var out = try invoke(&.{
+        "sjon",                                                                        "edit",
+        path,                                                                          "--in-place",
+        "{\"op\":\"set_keyword\",\"path\":[],\"root\":0,\"key\":\"h\",\"value\":600}",
+    });
+    defer out.deinit();
+    try testing.expectEqual(@as(u8, 1), out.code);
+    // Diagnostics on stderr, keeping stdout a data channel.
+    try testing.expectEqualStrings("", out.stdout.written());
+    try testing.expect(std.mem.indexOf(u8, out.stderr.written(), "unclosed") != null);
+
+    const after = try readBack(a, path);
+    defer a.free(after);
+    try testing.expectEqualStrings(broken, after);
+}
+
+test "Cli: edit names the action that failed" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try fmtFixture(a, &tmp, "doc.sjon", edit_doc);
+    defer a.free(path);
+
+    var out = try invoke(&.{
+        "sjon",
+        "edit",
+        path,
+        "{\"op\":\"replace\",\"path\":[\"w\"],\"value\":1}",
+        "{\"op\":\"replace\",\"path\":[\"nope\"],\"value\":1}",
+    });
+    defer out.deinit();
+    try testing.expectEqual(@as(u8, 1), out.code);
+    try testing.expectEqualStrings("sjon edit: PathNotFound (action 1)\n", out.stderr.written());
+    try testing.expectEqualStrings("", out.stdout.written());
+}
+
+test "Cli: edit rejects a malformed action with a usage exit" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try fmtFixture(a, &tmp, "doc.sjon", edit_doc);
+    defer a.free(path);
+
+    // Not JSON at all …
+    var bad_json = try invoke(&.{ "sjon", "edit", path, "nope" });
+    defer bad_json.deinit();
+    try testing.expectEqual(@as(u8, 2), bad_json.code);
+
+    // … and JSON that is not an action.
+    var scalar = try invoke(&.{ "sjon", "edit", path, "42" });
+    defer scalar.deinit();
+    try testing.expectEqual(@as(u8, 2), scalar.code);
+    try testing.expect(std.mem.indexOf(u8, scalar.stderr.written(), "not an edit action") != null);
+}
+
+test "Cli: edit's usage errors are argv mistakes, not input ones" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try fmtFixture(a, &tmp, "doc.sjon", edit_doc);
+    defer a.free(path);
+
+    const cases = [_][]const []const u8{
+        // No FILE, no ACTION.
+        &.{ "sjon", "edit" },
+        // FILE but no ACTION.
+        &.{ "sjon", "edit", path },
+        // Both spellings of the batch.
+        &.{ "sjon", "edit", path, "--actions=b.json", "{\"op\":\"remove_keyword\",\"path\":[],\"key\":\"w\"}" },
+        // Two readers, one stdin.
+        &.{ "sjon", "edit", "-", "--actions=-" },
+        // Nothing to write back to.
+        &.{ "sjon", "edit", "-", "--in-place", "{\"op\":\"remove_keyword\",\"path\":[],\"key\":\"w\"}" },
+        // An unknown flag.
+        &.{ "sjon", "edit", path, "--root=0", "{\"op\":\"remove_keyword\",\"path\":[],\"key\":\"w\"}" },
+    };
+    for (cases) |argv| {
+        const args = try a.alloc([:0]const u8, argv.len);
+        defer a.free(args);
+        for (argv, args) |src, *dst| dst.* = try a.dupeZ(u8, src);
+        defer for (args) |arg| a.free(@constCast(arg[0 .. arg.len + 1]));
+
+        var out = try invoke(args);
+        defer out.deinit();
+        try testing.expectEqual(@as(u8, 2), out.code);
+    }
 }

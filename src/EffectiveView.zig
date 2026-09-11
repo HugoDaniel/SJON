@@ -53,6 +53,19 @@ pub const Error = ConvertError;
 pub const EffectiveView = struct {
     tree: *const Ast.Tree,
     materialized: *const MaterializedDefaults.MaterializedDefaults,
+    /// `Validator.Options.held_symbol` — the spelling of a position the
+    /// author has deliberately not filled in yet. Must be the same value the
+    /// overlay was materialized with, or the two halves of the fallback
+    /// chain disagree about which slots are filled.
+    ///
+    /// Held reads as *absent* here: `getAuthorValue` skips it, so a held key
+    /// falls through to the `.default` arm, and to `null` when the key
+    /// declares no default. That null is the third state a host already
+    /// reads as held, so the two spellings converge on one answer for free —
+    /// and no consumer of `EffectiveValue` grows a case for "the author has
+    /// not decided yet", which is not a value and could not be converted to
+    /// one.
+    held_symbol: ?[]const u8 = null,
 
     pub fn init(
         tree: *const Ast.Tree,
@@ -61,11 +74,36 @@ pub const EffectiveView = struct {
         return .{ .tree = tree, .materialized = materialized };
     }
 
-    /// Returns the kvpair value's `NodeIndex` if the author wrote
-    /// `:key` on `form`, else `null`. Linear scan over the form's
-    /// children — forms typically carry <10 kvpairs, so a hash
-    /// would cost more than it saves.
+    /// `init` for a run that opted into held positions. Pass the same
+    /// `held_symbol` the overlay was materialized with.
+    pub fn initHeld(
+        tree: *const Ast.Tree,
+        materialized: *const MaterializedDefaults.MaterializedDefaults,
+        held_symbol: ?[]const u8,
+    ) EffectiveView {
+        return .{ .tree = tree, .materialized = materialized, .held_symbol = held_symbol };
+    }
+
+    /// Returns the kvpair value's `NodeIndex` if the author *filled*
+    /// `:key` on `form`, else `null` — a held value is a kvpair the
+    /// author wrote to say they have not decided, so it answers `null`
+    /// too. Linear scan over the form's children — forms typically carry
+    /// <10 kvpairs, so a hash would cost more than it saves.
     pub fn getAuthorValue(
+        self: EffectiveView,
+        form: Ast.NodeIndex,
+        key: []const u8,
+    ) ?Ast.NodeIndex {
+        const idx = self.rawAuthorValue(form, key) orelse return null;
+        if (MaterializedDefaults.isHeldValue(self.tree, idx, self.held_symbol)) return null;
+        return idx;
+    }
+
+    /// The kvpair lookup without the held filter — what the author
+    /// literally wrote. Private: the two public questions are "what is the
+    /// effective value" and "is this position held", and both are answered
+    /// below.
+    fn rawAuthorValue(
         self: EffectiveView,
         form: Ast.NodeIndex,
         key: []const u8,
@@ -73,6 +111,22 @@ pub const EffectiveView = struct {
         if (self.tree.tagOf(form) != .form) return null;
         const hdr = self.tree.formHeader(form);
         return MaterializedDefaults.authorValueOnForm(self.tree, hdr, key);
+    }
+
+    /// True when `key` is present on `form` and its value is the run's
+    /// held symbol. Answers "has the author filled this position" without
+    /// a tree walk; `getEffectiveValue` deliberately cannot, because held
+    /// resolves through it to the declared default.
+    ///
+    /// Always false when `held_symbol` is null — a run that did not opt in
+    /// has no held positions.
+    pub fn isHeld(
+        self: EffectiveView,
+        form: Ast.NodeIndex,
+        key: []const u8,
+    ) bool {
+        const idx = self.rawAuthorValue(form, key) orelse return false;
+        return MaterializedDefaults.isHeldValue(self.tree, idx, self.held_symbol);
     }
 
     /// Delegate to the overlay. Returns the materialized entry for
@@ -103,7 +157,10 @@ pub const EffectiveView = struct {
 /// Convert an `EffectiveValue` to a fresh `Expr.Value` owned by
 /// `arena`. Returns `NotConvertible` when the author node is a form,
 /// expression, or carries a unit suffix. Default-arm values are
-/// deep-copied so the result outlives the overlay.
+/// deep-copied so the result outlives the overlay; the copy assumes
+/// `Expr.MAX_VALUE_DEPTH`, which holds for every overlay entry because
+/// `MaterializedDefaults.literalToValue` caps literals there and eval
+/// caps expression results there.
 ///
 /// Author `Tag.symbol` maps to `Expr.Value.keyword`, mirroring the
 /// overlay's `Default.symbol` → `keyword` normalization in
@@ -507,4 +564,132 @@ test "EffectiveView: end-to-end via Host.validateDocument" {
     const ev = view.getEffectiveValue(form, "fps") orelse return error.TestNoEffectiveValue;
     try testing.expect(ev == .default);
     try testing.expectEqual(@as(f64, 60), ev.default.value.number);
+}
+
+// ---------------------------------------------------------------------------
+// Held positions. A held value — the run's `held_symbol`, `_` by convention —
+// is a kvpair the author wrote to say they have *not* decided. It is an
+// author value structurally, so without the two gates below the author-wins
+// rule would suppress the very default a hole is supposed to resolve to.
+// ---------------------------------------------------------------------------
+
+test "EffectiveView: a held key resolves to the declared default" {
+    const a = testing.allocator;
+    var doc = try Parser.parse(a, "(circle :fill _)");
+    defer doc.deinit();
+
+    var overlay_arena = std.heap.ArenaAllocator.init(a);
+    defer overlay_arena.deinit();
+    const overlay = try buildOverlay(overlay_arena.allocator(), &.{.{
+        .form = doc.root[0],
+        .key = "fill",
+        .value = .{ .string = "red" },
+        .origin = .literal_default,
+    }});
+
+    const view = EffectiveView.initHeld(&doc, &overlay, "_");
+    const ev = view.getEffectiveValue(doc.root[0], "fill").?;
+    try testing.expect(ev == .default);
+    try testing.expectEqualStrings("red", ev.default.value.string);
+}
+
+test "EffectiveView: the same key without the option is the author's `_`" {
+    // The control. `held_symbol` null is what every existing caller passes,
+    // and there `_` is an ordinary symbol the author wrote.
+    const a = testing.allocator;
+    var doc = try Parser.parse(a, "(circle :fill _)");
+    defer doc.deinit();
+
+    var overlay_arena = std.heap.ArenaAllocator.init(a);
+    defer overlay_arena.deinit();
+    const overlay = try buildOverlay(overlay_arena.allocator(), &.{.{
+        .form = doc.root[0],
+        .key = "fill",
+        .value = .{ .string = "red" },
+        .origin = .literal_default,
+    }});
+
+    const view = EffectiveView.init(&doc, &overlay);
+    const ev = view.getEffectiveValue(doc.root[0], "fill").?;
+    try testing.expect(ev == .author);
+}
+
+test "EffectiveView: a held key with no default is null" {
+    // The third state a host already reads as held ("absent, no default"),
+    // which is why held converges on it rather than growing a union arm.
+    const a = testing.allocator;
+    var doc = try Parser.parse(a, "(circle :fill _)");
+    defer doc.deinit();
+
+    const overlay = MaterializedDefaults.MaterializedDefaults{};
+    const view = EffectiveView.initHeld(&doc, &overlay, "_");
+    try testing.expect(view.getEffectiveValue(doc.root[0], "fill") == null);
+    try testing.expect(view.getAuthorValue(doc.root[0], "fill") == null);
+}
+
+test "EffectiveView.isHeld: held, filled, and absent are three answers" {
+    const a = testing.allocator;
+    var doc = try Parser.parse(a, "(circle :fill _ :radius 7)");
+    defer doc.deinit();
+
+    const overlay = MaterializedDefaults.MaterializedDefaults{};
+    const view = EffectiveView.initHeld(&doc, &overlay, "_");
+    const form_idx = doc.root[0];
+
+    try testing.expect(view.isHeld(form_idx, "fill"));
+    // Filled: `getEffectiveValue` answers, `isHeld` does not.
+    try testing.expect(!view.isHeld(form_idx, "radius"));
+    try testing.expect(view.getEffectiveValue(form_idx, "radius") != null);
+    // Absent: both say no. `isHeld` is "present and held", not "not filled".
+    try testing.expect(!view.isHeld(form_idx, "stroke"));
+}
+
+test "EffectiveView.isHeld: false for every key when the run did not opt in" {
+    const a = testing.allocator;
+    var doc = try Parser.parse(a, "(circle :fill _)");
+    defer doc.deinit();
+
+    const overlay = MaterializedDefaults.MaterializedDefaults{};
+    const view = EffectiveView.init(&doc, &overlay);
+    try testing.expect(!view.isHeld(doc.root[0], "fill"));
+}
+
+test "EffectiveView: end-to-end, the materializer agrees a held key is absent" {
+    // The two halves of the fallback chain have to answer the same question
+    // the same way: `materializeDefaultsWithOptions` must not suppress the
+    // entry that `getAuthorValue` is about to fall through to.
+    const Schema = @import("Schema.zig");
+    const Plugin = @import("Plugin.zig");
+    const a = testing.allocator;
+
+    const plugin: Plugin.Plugin = .{
+        .name = "p",
+        .forms = &.{
+            .{ .name = "scene", .keys = &.{
+                .{ .name = "fps", .value_type = .number, .optional = true, .default = .{ .number = 60 } },
+            } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{plugin});
+
+    var doc = try Parser.parse(a, "(scene :fps _)");
+    defer doc.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var mat = try MaterializedDefaults.materializeDefaultsWithOptions(
+        a,
+        arena.allocator(),
+        &doc,
+        doc.root,
+        schema,
+        .{ .held_symbol = "_" },
+    );
+    defer mat.deinit(a);
+
+    const view = EffectiveView.initHeld(&doc, &mat.materialized, "_");
+    const ev = view.getEffectiveValue(doc.root[0], "fps").?;
+    try testing.expect(ev == .default);
+    try testing.expectEqual(@as(f64, 60), ev.default.value.number);
+    try testing.expect(view.isHeld(doc.root[0], "fps"));
 }

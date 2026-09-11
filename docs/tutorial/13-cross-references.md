@@ -644,11 +644,65 @@ source; it received a list of names. So "go to definition" on `u_time`
 takes you to the `:code` string that produced it, not to the line inside
 it. That is a limit of the route, not a bug in the editor.
 
+## Names Inside An Opaque Slot
+
+I owe you one from
+[the last lesson](12-value-kinds-refinements.md#opaque-slots), where I
+said an opaque slot is the one place a schema can *add* a diagnostic
+by declining to look. Here it is, on the phrase and track you have
+been using all lesson. The template plugin marks `:body` opaque: a
+template's body is expanded by the host later, so nothing inside it is
+the schema's to read.
+
+```sjon del={3}
+(template :name ending
+  :body (phrase :name outro))
+(track :anchor outro)
+```
+
+This is `not_cross_ref` at `[track anchor]`, and the message says no
+`(phrase :name …)` form declares this name. Read that against the
+source and it looks like a lie: the declaration is two lines up,
+spelled exactly right. It is not a lie. It is a precise statement about
+what the schema read. Every walk stops at an opaque slot, the
+cross-reference index included, so the registry built for `phrase` is
+empty and `outro` has nothing to resolve against.
+
+Registry:
+
+```text
+phrase names:     (none; the only declaration is inside an opaque body)
+track references: outro          <- not_cross_ref
+```
+
+The repair is a move, not a rename. Put the declaration where the
+schema reads, and let the body refer to it:
+
+```sjon ins={1}
+(phrase :name outro)
+(template :name ending
+  :body (fade :phrase outro))
+(track :anchor outro)
+```
+
+Two things to notice about the repaired version. `(fade …)` is not a
+form this plugin declares, and that is fine, because it sits in the
+opaque body where nothing is checked. And `:phrase outro` inside the
+body is not a reference either: the body's contents are not read, so
+they are neither declarations nor references. Only the top-level
+`:anchor outro` is checked, and now it resolves.
+
+This is the second place a repair loop can spin without converging.
+The first was the provider route above, where the name lives inside a
+string. Here the name lives inside a slot the schema does not read.
+In both cases the reference is spelled right, and in both cases the
+fix is somewhere other than the reference.
+
 ## Diagnostic Cheat Sheet
 
 | Diagnostic | What it usually means | Repair |
 | --- | --- | --- |
-| `not_cross_ref` | The symbol is not in the visible registry. | Fix the spelling, add the declaration, or move the reference into the right scope. |
+| `not_cross_ref` | The symbol is not in the visible registry. | Fix the spelling, add the declaration, move the reference into the right scope, or move a declaration out of an opaque slot. |
 | `duplicate_cross_ref_target` | Two declarations use the same name in one scope. | Rename or remove one declaration. |
 | `union_ambiguous` (warning) | A name exists in two of a union slot's reference targets, so declaration order is picking which one. | Rename one declaration, or ask for the slot to be split into two single-kind keys. |
 | `cross_ref_outside_scope` | A scoped reference appears outside its required enclosing form. | Put the declaration and reference inside that scope form. |
@@ -679,6 +733,8 @@ When a cross-reference fails, do this mechanically:
 9. If the kind names a provider, the list in step 4 is what the
    provider extracted from the source string, so read the source
    instead of looking for declarations.
+10. If the declaration sits inside an opaque slot, it is not a
+    declaration. Move it out to where the schema reads.
 
 ## Exercises
 

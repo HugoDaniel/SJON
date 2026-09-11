@@ -760,11 +760,26 @@ fn lowerKey(
 /// Where a value-kind is being lowered *from*. Carries the names that
 /// scope a warning, plus the slot-local form registry a head-set
 /// resolution needs.
+/// Ceiling on named value-kind resolution nesting. `resolveNamedShape` →
+/// `lowerValueKind` → (vector element | union alternative) →
+/// `resolveNamedShape` is host-stack recursion, and a value-kind that
+/// names itself (directly, or through a cycle of vector elements and
+/// union alternatives) has no floor: the aggregate validators flag a
+/// self-referential union as `nested_union` but do not reject a vector
+/// element cycle at all, and `exportSchemaFromSource` exports even when
+/// validation reported errors. Real schemas nest a handful of levels;
+/// past this the reference lowers to `unresolved_named` with an `.err`
+/// warning naming the chain, and the export completes.
+pub const MAX_NAMED_RESOLVE_DEPTH: u32 = 32;
+
 const Context = struct {
     plugin_name: []const u8,
     form_name: ?[]const u8 = null,
     key_name: ?[]const u8 = null,
     kind_name: ?[]const u8 = null,
+    /// How many named resolutions are on the host stack above this one;
+    /// `resolveNamedShape` refuses past `MAX_NAMED_RESOLVE_DEPTH`.
+    depth: u32 = 0,
     /// The enclosing slot's `FormSpec.local_forms`, source side, or
     /// `null` when there is **no slot** — `lowerPlugin`'s standalone pass
     /// over every value-kind, which exists for the Markdown and
@@ -848,8 +863,33 @@ fn resolveNamedShape(
     ctx: Context,
 ) Error!Model.ValueShape {
     if (primitiveShortcut(name)) |shape| return shape;
+    if (ctx.depth >= MAX_NAMED_RESOLVE_DEPTH) {
+        const display = try formatQualified(a, name, namespace);
+        try warnings.append(a, .{
+            .code = .aggregate_phase_error,
+            .severity = .err,
+            .message = try std.fmt.allocPrint(
+                a,
+                "value-type reference `{s}` nests deeper than {d} named resolutions — a value-kind that refers to itself",
+                .{ display, MAX_NAMED_RESOLVE_DEPTH },
+            ),
+            .plugin_name = try a.dupe(u8, ctx.plugin_name),
+            .form_name = if (ctx.form_name) |n| try a.dupe(u8, n) else null,
+            .key_name = if (ctx.key_name) |n| try a.dupe(u8, n) else null,
+            .kind_name = try a.dupe(u8, display),
+        });
+        return .{ .unresolved_named = .{
+            .name = try a.dupe(u8, name),
+            .namespace = if (namespace) |ns| try a.dupe(u8, ns) else null,
+        } };
+    }
+    const deeper: Context = blk: {
+        var c = ctx;
+        c.depth += 1;
+        break :blk c;
+    };
     return switch (schema.lookupValueKind(name, namespace)) {
-        .found => |kind| try lowerValueKind(a, schema, plugin, kind.*, warnings, ctx),
+        .found => |kind| try lowerValueKind(a, schema, plugin, kind.*, warnings, deeper),
         .not_found, .ambiguous => blk: {
             const display = try formatQualified(a, name, namespace);
             try warnings.append(a, .{
@@ -1023,7 +1063,7 @@ fn lowerValueKind(
         .string => lowerStringKind(a, plugin, vk, warnings),
         .symbol => lowerSymbolKind(a, plugin, vk, warnings),
         .form => lowerFormKind(a, schema, plugin, vk, warnings, ctx),
-        .vector => try lowerVectorKind(a, schema, plugin, vk, warnings),
+        .vector => try lowerVectorKind(a, schema, plugin, vk, warnings, ctx.depth),
         .union_of => unreachable, // handled above
     };
 }
@@ -1320,6 +1360,9 @@ fn lowerVectorKind(
     plugin: Plugin.Plugin,
     vk: Plugin.ValueKind,
     warnings: *std.ArrayList(Warnings.Warning),
+    /// The caller's resolution depth — the element's fresh `Context` must
+    /// inherit it or a `v → vector of v` cycle restarts the count.
+    depth: u32,
 ) Error!Model.ValueShape {
     const vs = vk.vector orelse return .{ .vector = .{
         .len = null,
@@ -1328,6 +1371,7 @@ fn lowerVectorKind(
     const elem_shape = try resolveNamedShape(a, schema, plugin, vs.element.name, vs.element.namespace, warnings, .{
         .plugin_name = plugin.name,
         .kind_name = vk.name,
+        .depth = depth,
         // A vector *element* is a value, not a form child, so no
         // slot-local registry ever reaches it (the validator attaches one
         // only to a direct `.form` child of the slot). Empty rather than
@@ -2517,6 +2561,53 @@ test "lowering: unresolved named ref upgrades to err warning" {
     try testing.expect(result.hasErrors());
     const key = result.model.plugins[0].forms[0].keys[0];
     try testing.expect(key.value == .unresolved_named);
+}
+
+test "lowering: a value-kind whose vector element names itself lowers to unresolved_named instead of overflowing the stack" {
+    // `v` is a vector of `v`. No aggregate validator rejects the cycle,
+    // and `exportSchemaFromSource` exports even when validation reported
+    // errors; `resolveNamedShape` used to recurse until the host stack
+    // ran out (segfault at ~1079 frames).
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "x",
+        .value_kinds = &.{.{
+            .name = "v",
+            .underlying = .vector,
+            .vector = .{ .element = .{ .name = "v" } },
+        }},
+        .forms = &.{.{
+            .name = "f",
+            .keys = &.{.{ .name = "k", .value_type = .{ .named = .{ .name = "v" } } }},
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{});
+    defer result.deinit();
+    try testing.expect(result.hasErrors());
+    var saw = false;
+    for (result.warnings) |w| {
+        if (std.mem.indexOf(u8, w.message, "refers to itself") != null) saw = true;
+    }
+    try testing.expect(saw);
+
+    // Same cycle through a union alternative. The aggregate pass flags
+    // this one as nested_union, but the exporter still has to survive it.
+    const q: Plugin.Plugin = .{
+        .name = "x",
+        .value_kinds = &.{.{
+            .name = "u",
+            .underlying = .union_of,
+            .union_of = .{ .alternatives = &.{ .{ .name = "u" }, .{ .name = "number" } } },
+        }},
+        .forms = &.{.{
+            .name = "f",
+            .keys = &.{.{ .name = "k", .value_type = .{ .named = .{ .name = "u" } } }},
+        }},
+    };
+    var result_u = try exportSchema(a, Schema.Schema.init(&.{q}), .{});
+    defer result_u.deinit();
+    try testing.expect(result_u.hasErrors());
 }
 
 test "lowering: deterministic plugin and form ordering matches declaration" {

@@ -60,13 +60,26 @@ export interface ValidateBackend {
   applyEdit?(source: string, action: EditAction): string;
   /**
    * Batched counterpart to {@link applyEdit}: apply `actions` left-to-right
-   * in a single engine pass and return the re-printed `.full` SJON text.
-   * WASM-only and optional — when absent, {@link applyAll} falls back to a
-   * per-action {@link applyEdit} fold, so a backend may implement just
-   * `applyEdit`. Observably identical to that fold; only the parse/print
-   * overhead collapses. Throws on a bad path / invalid action.
+   * in a single engine pass. WASM-only and optional — when absent,
+   * {@link applyAll} falls back to a per-action {@link applyEdit} fold, so
+   * a backend may implement just `applyEdit`. Observably identical to that
+   * fold; only the engine round-trips collapse. Throws on a bad path /
+   * invalid action.
+   *
+   * `options.layout` chooses what comes back, defaulting to `'reprint'`
+   * (the whole document re-printed in `.full` mode, which is what
+   * {@link applyEdit} always does). `'preserve'` replaces one span per
+   * action and leaves every other byte as the author wrote it.
    */
-  applyEdits?(source: string, actions: readonly EditAction[]): string;
+  applyEdits?(source: string, actions: readonly EditAction[], options?: EditOptions): string;
+}
+
+/** How an applied edit reaches the output. Mirrors `Edit.Layout`. */
+export type EditLayout = 'reprint' | 'preserve';
+
+/** Tunables for {@link ValidateBackend.applyEdits}. */
+export interface EditOptions {
+  readonly layout?: EditLayout;
 }
 
 /** Thrown by `.parse` / `.parseValue` when any `err`-severity diagnostic fires. */

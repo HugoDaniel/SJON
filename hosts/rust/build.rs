@@ -31,6 +31,10 @@ struct Classifier {
     /// host (both drive the kitchen-sink `sjon.wasm`); the TS-parity port's
     /// larger skip set stays host-local and is not in this file.
     wasm_host_skip_families: Vec<SkipFamily>,
+    /// Families that run with a non-default validator option. One today —
+    /// `held-*` with `heldSymbol = "_"` — and the emitted test calls the
+    /// `_with` variant of its runner helper rather than the plain one.
+    validator_option_families: Vec<OptionFamily>,
 }
 
 #[derive(Deserialize)]
@@ -46,6 +50,16 @@ struct SkipFamily {
     #[serde(rename = "match")]
     matcher: Matcher,
     reason: String,
+}
+
+#[derive(Deserialize)]
+struct OptionFamily {
+    label: String,
+    #[serde(rename = "match")]
+    matcher: Matcher,
+    /// The `sjon_host_validate_document` options-JSON key.
+    option: String,
+    value: String,
 }
 
 #[derive(Deserialize)]
@@ -72,6 +86,17 @@ impl Classifier {
             .iter()
             .find(|f| f.matcher.matches(name))
             .map(|f| f.reason.as_str())
+    }
+
+    /// The `heldSymbol` a case runs with, or `None` for the overwhelming
+    /// majority that run with the option off. Mirrors
+    /// `heldSymbolFor` in `hosts/conformance-shared/index.ts` and
+    /// `src/conformance_tests.zig`.
+    fn held_symbol(&self, name: &str) -> Option<&str> {
+        self.validator_option_families
+            .iter()
+            .find(|f| f.option == "heldSymbol" && f.matcher.matches(name))
+            .map(|f| f.value.as_str())
     }
 
     /// Does `case_dir` carry the marker file for `runner`?
@@ -121,6 +146,31 @@ fn sanitize(name: &str) -> String {
         }
     }
     out
+}
+
+/// Dead-rule detector, over both family vocabularies. A skip family
+/// matching nothing is stale (its cases were renamed or deleted) and
+/// silently narrows coverage; an option family matching nothing would
+/// silently run its cases with the option off, and the corpus would pass for
+/// the wrong reason. Both fail the build rather than the test run.
+fn check_dead_families(classifier: &Classifier, entries: &[String]) -> Result<(), Box<dyn Error>> {
+    let skips = classifier
+        .wasm_host_skip_families
+        .iter()
+        .map(|f| ("skip", &f.label, &f.matcher));
+    let options = classifier
+        .validator_option_families
+        .iter()
+        .map(|f| ("validator-option", &f.label, &f.matcher));
+    for (what, label, matcher) in skips.chain(options) {
+        if !entries.iter().any(|n| matcher.matches(n)) {
+            return Err(format!(
+                "conformance build.rs: {what} family `{label}` (in classifier.json) matches no case dir — stale, remove it or fix the matcher"
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -221,20 +271,27 @@ fn main() -> Result<(), Box<dyn Error>> {
             )
             .into());
         }
-        writeln!(body, "#[test]\nfn {fn_name}() {{ {helper}(\"{name}\"); }}")?;
-    }
-
-    // Dead-rule detector: a skip family matching nothing is stale (its
-    // cases were renamed or deleted) and silently narrows coverage.
-    for fam in &classifier.wasm_host_skip_families {
-        if !entries.iter().any(|n| fam.matcher.matches(n)) {
-            return Err(format!(
-                "conformance build.rs: skip family `{}` (in classifier.json) matches no case dir — stale, remove it or fix the matcher",
-                fam.label
-            )
-            .into());
+        match classifier.held_symbol(name) {
+            // Only the inline runner takes the option: `held-*` cases are
+            // documents being typed, and the legacy shape is frozen while
+            // the query runner drives `sjon_query_pattern`, which has no
+            // such option. A held family matching one of those is a fixture
+            // filed under the wrong prefix, not a missing feature.
+            Some(sym) if prefix == "inline" => writeln!(
+                body,
+                "#[test]\nfn {fn_name}() {{ {helper}_with(\"{name}\", Some(\"{sym}\")); }}"
+            )?,
+            Some(_) => {
+                return Err(format!(
+                    "conformance build.rs: case dir `{name}` matches a validator-option family but routes to the `{prefix}` runner, which takes no options — rename the case or move the family"
+                )
+                .into());
+            }
+            None => writeln!(body, "#[test]\nfn {fn_name}() {{ {helper}(\"{name}\"); }}")?,
         }
     }
+
+    check_dead_families(&classifier, &entries)?;
 
     // Each leg must be non-empty. `query_count` is here because it was
     // missing: losing every `query.sjon` marker would have silently dropped

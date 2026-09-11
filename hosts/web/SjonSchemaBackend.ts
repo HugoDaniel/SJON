@@ -63,9 +63,10 @@ export function createWasmBackend(
     },
     // Batched edits collapse `applyAll`'s N round-trips into one
     // `sjon_apply_edits` call. `actions` is contextually typed
-    // `readonly EditAction[]` from the `ValidateBackend` return annotation.
-    applyEdits(source, actions) {
-      return host.encoder.applyEdits(source, actions);
+    // `readonly EditAction[]` from the `ValidateBackend` return annotation,
+    // and `options` carries the layout through to `Edit.Options`.
+    applyEdits(source, actions, options) {
+      return host.encoder.applyEdits(source, actions, options);
     },
   };
 }

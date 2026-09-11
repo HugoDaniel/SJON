@@ -14,11 +14,14 @@ This is a **reference**, not a production package. It implements the
 substrate features exercised by the corpus subset it runs:
 
   * Tokenisation: parens, brackets, keywords (`:foo`), bare symbols,
-    integer/float numbers, double-quoted strings, `true` / `false` /
-    `nil`, line comments (`;`).
+    integer/float numbers with optional unit suffixes (`4b`, `2.5deg`,
+    `50%`, `250ms`), hex, digit-group underscores, double-quoted
+    strings, `true` / `false` / `nil`, line comments (`;`).
   * Parser: forms, kvpairs (greedy `:k v` pairing), vectors, atoms.
   * Validator: form-head lookup, declared-key type checks, duplicate
-    keys, missing required keys, HeadSet narrowing for form-typed
+    keys, missing required keys, unit constraints (`unit_required`,
+    `unit_not_allowed`, `unit_forbidden`,
+    `numeric_bound_unit_mismatch`), HeadSet narrowing for form-typed
     slots. Emits diagnostics with semantic paths matching
     `docs/portable-manifest-v1.md` §11.1.
   * Manifest loader: `(plugin …)` walking → `Plugin`. Multi-plugin
@@ -33,7 +36,6 @@ substrate features exercised by the corpus subset it runs:
 
 Deliberately **not** in v1 of this host:
 
-  * Number-with-unit suffixes.
   * `expr-func` validation (typed signatures, arity, kvpair-rejection).
   * Binary IR and `validateBinary`.
   * Comments inside structures (only top-level line comments

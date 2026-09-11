@@ -1,0 +1,3 @@
+; Every axis silent. One diagnostic here from any of them would mean the
+; gate sits below that axis rather than above all of them.
+(diagnostics)

@@ -1,0 +1,4 @@
+; Nothing inside an opaque slot reaches the cross-ref registry, so the
+; author's ref misses.
+(diagnostics
+  (diagnostic :code not_cross_ref :path [track anchor]))

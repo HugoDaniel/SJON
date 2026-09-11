@@ -466,6 +466,20 @@ the lossless print mode. Canonical print drops them. Block
 comments do not nest, so don't try to comment out a region that
 already contains `#| … |#`.
 
+"Ride along" has one exception worth knowing before it surprises
+you. An edit that builds a node from JSON (`replace`, `set_keyword`
+and the two `insert`s all take a `value`) gets that node through the
+JSON bridge, which has no comment encoding — so a subtree you
+re-encode loses its comments even if you were only *composing* with
+it rather than changing it. The `wrap` op exists for that case: it
+clones the node it wraps instead of rebuilding it, so the wrapped
+subtree keeps everything. What no op preserves is layout: full mode
+re-prints from the tree, so the line breaks are the printer's on
+every run. And since a file that names a plugin has more than one
+root, an edit on such a file says which root it starts at (`"root":
+N`); an edit that omits it is refused rather than applied to whichever
+form came first. `examples/edit-wrap.mjs` shows both from Node.
+
 Use them. Especially:
 
 - A `;` above a kvpair to explain a non-obvious value.
@@ -798,7 +812,7 @@ For each form a plugin owns:
 | Field | What it means to you |
 | --- | --- |
 | `name` | The head you write. `(name …)`. |
-| `keys` | The `:k` slots the form accepts. Each key has a name, a value type, an `optional` flag, and optionally a default. |
+| `keys` | The `:k` slots the form accepts. Each key has a name, a value type, an `optional` flag, and optionally a default. A key may also be declared **opaque** (`:walk-opaque true`): the slot's type is checked and its contents are not read (§12, "Opaque slots"). |
 | `positional` | Whether positional children are accepted: `none`, `any`, or a typed kind. |
 | `open` | When `true`, the form acts as an extensible bag: unknown keys are accepted and closed-shape sweeps are skipped, while declared key types and duplicate keys still matter. Rare; mostly a prototyping switch. |
 | `description` | A free-text help string editors render on hover. |
@@ -1140,6 +1154,22 @@ Expression defaults can still fail when the host materializes them. If
 you omit a key and see `default_eval_failed`, the schema's default was
 declared but could not be evaluated by the active host.
 
+Defaults reach the keys of a discriminated form's active variant too,
+and a defaulted discriminant selects a variant whose defaults then
+apply in turn. With `:kind` defaulting to `point` and the `point`
+variant's `:range` defaulting to `10`, bare `(light)` reads as
+`(light :kind point :range 10)`. A defaulted key is checked the way a
+written one is: a variant key typed as a cross-reference whose default
+names nothing draws `not_cross_ref` on the path `[light aim default]`,
+and the trailing `default` says the failing value is one you never
+wrote. Repair by declaring what the default assumes, or by writing the
+key. `examples/plugins/variant-defaults/` walks four lights through
+`sjon effective`.
+
+Defaults stop at an opaque slot (§12, "Opaque slots"): nothing inside
+one is materialized, so `sjon effective` leaves such a body exactly as
+you wrote it.
+
 ### Typed vector slot
 
 ```sjon
@@ -1378,6 +1408,51 @@ or a `:min-children` above what the heads' `:max`es allow between them.
 The middle one is why the check is a sum: two heads at `:min 1` under
 `:max-children 1` is unsatisfiable while neither head alone looks wrong.
 
+### Opaque slots
+
+A slot-local form says "this slot has its own vocabulary". Its mirror
+image says "this slot's contents are not mine to read": a key declared
+`:walk-opaque true`. The slot is still typed and the type is still
+checked; below it, every walk stops.
+
+```sjon
+; template's :body is `form`, opaque. The unfinished animate (no
+; :target) and the undeclared particles head are both fine here, and
+; both would be reported at the top level.
+(template :name fade    :body (animate :from 0 :to 1))      ; ✓
+(template :name sparkle :body (particles :count 200))       ; ✓
+(template :name broken  :body 3)                            ; ✗ wrong_underlying: the slot wants a form
+```
+
+"Every walk" is exact, and it is the part to remember:
+
+- no diagnostics inside: a missing required key or an unknown head in
+  the body is not reported;
+- no defaults inside: `sjon effective` splices nothing into the body;
+- no lowering inside: a form a host would lower at the top level does
+  nothing there;
+- no names inside: a cross-reference target declared in the body
+  registers nothing, so a reference to it misses.
+
+The last one is the only way an opaque slot adds a diagnostic, and the
+message reads like a contradiction until you know the rule:
+
+```sjon
+(template :name intro :body (anchor :name origin))
+(apply :template intro :target origin)                     ; ✗ not_cross_ref: no (anchor :name …) declares this name
+```
+
+The declaration is there and spelled right, and the schema did not read
+it. Move it out of the body; do not respell the reference.
+
+A schema author reaches for the flag when a slot holds something
+another interpreter reads: a template body, a parameter block another
+tool expands, an expression in a vocabulary this schema does not load.
+The meta-schema uses it on exactly one slot, the `(key …)` form's own
+`:default`. If you want the contents checked, you want a slot-local
+form instead. `examples/plugins/opaque-slot/` carries all three
+documents above with the CLI's own output in the comments.
+
 ### Embedding multi-line code
 
 Use `"""…"""` for shader source, regex, path strings, anything
@@ -1430,7 +1505,22 @@ For authors, this has three practical effects:
   to lowering code.
 - Diagnostics from lowered output should trace back to the source form
   through provenance, even when the final error belongs to a generated
-  form.
+  form. A form that lowers into a form that lowers again runs one
+  layer per step, and a host keeps every layer, so "which hook wrote
+  this" is answerable at every hop and not only the last.
+- A hook may read a form your form *names*. If a lowered `(bind
+  :buffer verts)` needs the size of `(buffer :name verts …)`, the hook
+  resolves `:buffer` through the same cross-reference index the
+  validator uses, scope, target groups and slot-local names included,
+  and reads the neighbour's effective values, defaults and all. What
+  it cannot see is a form a *later* lowering layer will emit; that
+  reference is left for the whole-document pass to resolve.
+- A container that lowers may hold ordinary forms of the language as
+  its children, unions over cross-references included. The check that
+  runs on the container before its hook does not judge whether a
+  cross-reference resolves, because the container alone cannot know;
+  the whole-document pass that follows does. `examples/lowering-stages-demo.zig`
+  runs all three of these end to end.
 
 ### Mixing kvpairs and positional children
 
@@ -1549,6 +1639,12 @@ see most while writing.
 
 A few more that show up around the keyword-pairing rule (§7):
 
+- `positional_not_allowed` again, this time on something that
+  looks like a key. `(lane :name)` reports it on `:name`, because
+  a keyword with nothing left to pair is a bare keyword *value*
+  (§7), and a closed form takes no values. The message names the
+  keyword when that is the shape you hit, so read it as "`:name`
+  is missing its value", not as "you wrote a stray number".
 - `expr_kvpair_not_allowed` — you wrote `:k v` inside an
   expression function that does not declare labeled parameters.
 - `expr_unknown_label` / `expr_duplicate_label` /

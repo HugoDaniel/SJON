@@ -1,0 +1,3 @@
+; Nothing is materialized inside an opaque slot, so nothing in there can
+; fail to materialize.
+(diagnostics)

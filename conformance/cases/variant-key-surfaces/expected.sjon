@@ -1,0 +1,10 @@
+; The variant key and its common twin report the same two codes, on the
+; same paths, with the same allowed sets. Then the two boundary lines:
+; `unknown_key`, whose message names the rule an editor must not suggest
+; around ("`:mode` must be set before variant-only keys").
+(diagnostics
+  (diagnostic :code not_member    :path [w v-fmt])
+  (diagnostic :code not_cross_ref :path [w v-ref])
+  (diagnostic :code not_member    :path [w c-fmt])
+  (diagnostic :code unknown_key   :path [w v-fmt])
+  (diagnostic :code unknown_key   :path [w v-fmt]))

@@ -576,6 +576,7 @@ fn makeLeaf(
                     error.InvalidFormat => unreachable,
                 };
                 try emitDateDiagnostic(diagnostics, a, frames, tok, code);
+                // SAFETY: 0001-01-01 is a valid date; `init` only rejects out-of-range fields.
                 return try b.appendDate(Date.init(1, 1, 1) catch unreachable, span);
             };
             return try b.appendDate(parsed, span);
@@ -599,6 +600,7 @@ fn makeLeaf(
                     error.InvalidMillisecond, error.InvalidFormat => unreachable,
                 };
                 try emitTimeDiagnostic(diagnostics, a, frames, tok, code);
+                // SAFETY: 00:00:00.000 is a valid time; `init` only rejects out-of-range fields.
                 return try b.appendTime(Time.init(0, 0, 0, 0) catch unreachable, span);
             };
             return try b.appendTime(parsed, span);
@@ -1122,90 +1124,6 @@ inline fn isDigit(c: u8) bool {
     return c >= '0' and c <= '9';
 }
 
-/// Parse the number node at `idx` straight into the target machine type
-/// `T` (`f32`/`f16`/`u16`/`u32`/`i32`), reading the original source lexeme
-/// rather than the tree's decoded `f64`. This is the "no double-round"
-/// read primitive behind `:repr`: a decimal like `"1.1"` is rounded once
-/// (decimal → `f32`) instead of twice (decimal → `f64` → `f32`), which can
-/// differ in the last bit. Any unit suffix is dropped — the GPU consumer
-/// wants the magnitude.
-///
-/// A hex lexeme is read in base 16 off its digit run. This is not an
-/// optimisation but a correctness requirement: the decimal walk sees `0xFF`
-/// as the numeric portion `0` plus the unit `xFF`, so before hex literals
-/// existed this function returned `0` for every mask an author wrote — the
-/// same silent zero, one layer down.
-///
-/// O(n) in the lexeme length; allocates transient scratch for the
-/// underscore strip and, on the hex path, the two re-spellings — all freed
-/// before return, no tree mutation, no retained state. `T` must be a float
-/// or integer type; anything else is a compile error.
-///
-/// Errors:
-///   * `error.Overflow` — value outside `T`'s *integer* range (`parseInt`
-///     only; `parseFloat` saturates to ±inf rather than erroring). The
-///     validator's `repr_out_of_range` is the user-facing guard; this is
-///     the low-level signal for an unguarded read.
-///   * `error.InvalidCharacter` — malformed lexeme (not expected on a
-///     parser-produced tree; the slice is re-parsed defensively).
-///   * `error.OutOfMemory` — the scratch buffer.
-///
-/// Tree-path only: the binary IR keeps just the decoded `f64`, so a
-/// binary-only consumer can't direct-parse (a documented deferred item).
-pub fn parseNumberAs(
-    comptime T: type,
-    tree: *const Ast.Tree,
-    gpa: Allocator,
-    idx: Ast.NodeIndex,
-) error{ OutOfMemory, Overflow, InvalidCharacter }!T {
-    const tag = tree.tagOf(idx);
-    std.debug.assert(tag.isNumber() or tag == .number_with_unit);
-
-    comptime switch (@typeInfo(T)) {
-        .float, .int => {},
-        else => @compileError("parseNumberAs supports float/int repr types only, got " ++ @typeName(T)),
-    };
-
-    const span = tree.spanOf(idx);
-    const slice = tree.source[span.start..span.end];
-
-    if (splitHexLexeme(slice)) |hex| {
-        // The two hex spellings need three transient allocations; an arena
-        // keeps the frees to one `deinit` instead of three `defer`s over
-        // slices whose lengths the caller GPA would have to reconstruct.
-        var arena: std.heap.ArenaAllocator = .init(gpa);
-        defer arena.deinit();
-        const spell = try renderHex(arena.allocator(), hex);
-        return switch (@typeInfo(T)) {
-            .float => std.fmt.parseFloat(T, spell.hex_float),
-            .int => std.fmt.parseInt(T, spell.signed, 16),
-            else => unreachable, // guarded by the comptime switch above
-        };
-    }
-
-    const numeric = splitNumberAndUnit(slice).numeric;
-
-    // Strip digit-group underscores into a scratch buffer (mirrors
-    // `makeLeaf`). Free the *full* allocation — not the `[0..n]` view that
-    // `stripUnderscores` would return, which a caller GPA can't free.
-    const buf = try gpa.alloc(u8, numeric.len);
-    defer gpa.free(buf);
-    var n: usize = 0;
-    for (numeric) |c| {
-        if (c == '_') continue;
-        buf[n] = c;
-        n += 1;
-    }
-    const cleaned = buf[0..n];
-    std.debug.assert(cleaned.len > 0); // a numeric lexeme always has ≥1 digit
-
-    return switch (@typeInfo(T)) {
-        .float => std.fmt.parseFloat(T, cleaned),
-        .int => std.fmt.parseInt(T, cleaned, 10),
-        else => unreachable, // guarded by the comptime switch above
-    };
-}
-
 fn decodeString(
     a: Allocator,
     inner: []const u8,
@@ -1408,84 +1326,6 @@ test "parse hex: the neighbours the bare-zero gate protects still carry units" {
     try testing.expectEqualStrings("x", tree.numberWithUnitOf(tree.root[1]).unit);
     try testing.expectEqualStrings("X", tree.numberWithUnitOf(tree.root[2]).unit);
     try testing.expectEqualStrings("x", tree.numberWithUnitOf(tree.root[3]).unit);
-}
-
-test "parseNumberAs: reads a hex lexeme in base 16, not as zero-with-unit" {
-    // The regression this guards is one layer below the parser: the decimal
-    // walk splits `0xFFFFFFFF` into the numeric portion `0` and the unit
-    // `xFFFFFFFF`, so a `:repr u32` read used to come back 0 for every mask.
-    const a = testing.allocator;
-    var tree = try parse(a, "0xFFFFFFFF 0xFF -0x10");
-    defer tree.deinit();
-    try testing.expectEqual(@as(u32, 4294967295), try parseNumberAs(u32, &tree, a, tree.root[0]));
-    try testing.expectEqual(@as(u16, 255), try parseNumberAs(u16, &tree, a, tree.root[1]));
-    try testing.expectEqual(@as(i32, -16), try parseNumberAs(i32, &tree, a, tree.root[2]));
-    // The float arm goes through hex-float syntax and must agree.
-    try testing.expectEqual(@as(f32, 255.0), try parseNumberAs(f32, &tree, a, tree.root[1]));
-    // And an over-range integer read still signals, same as decimal.
-    try testing.expectError(error.Overflow, parseNumberAs(u16, &tree, a, tree.root[0]));
-}
-
-test "parseNumberAs f32: single-rounds the slice, beating the f64 double-round" {
-    // Adversarial double-rounding literal. 16777217 is the exact f32 tie
-    // between 16777216 (even mantissa) and 16777218; a hair above it rounds
-    // UP in a single decimal→f32 step. But decimal→f64 first collapses the
-    // hair (1e-9 < half an f64-ulp ≈ 1.86e-9 here) back to the exact tie
-    // 16777217.0, then f64→f32 rounds-to-even DOWN to 16777216. So the
-    // double-round path (what `@floatCast(f32, tree.numberOf(idx))` does)
-    // and a direct slice parse give *different* f32 values — proving the
-    // primitive reads the source, not the decoded f64.
-    const a = testing.allocator;
-    var tree = try parse(a, "16777217.000000001");
-    defer tree.deinit();
-    try testing.expectEqual(.number, tree.tagOf(tree.root[0]));
-
-    const direct = try parseNumberAs(f32, &tree, a, tree.root[0]);
-    try testing.expectEqual(@as(f32, 16777218.0), direct);
-
-    const doubled: f32 = @floatCast(tree.numberOf(tree.root[0]));
-    try testing.expectEqual(@as(f32, 16777216.0), doubled);
-    try testing.expect(direct != doubled); // the whole point of the primitive
-}
-
-test "parseNumberAs: integer reprs parse exactly" {
-    const a = testing.allocator;
-    var tree = try parse(a, "65535 4294967295 -2147483648");
-    defer tree.deinit();
-    try testing.expectEqual(@as(u16, 65535), try parseNumberAs(u16, &tree, a, tree.root[0]));
-    try testing.expectEqual(@as(u32, 4294967295), try parseNumberAs(u32, &tree, a, tree.root[1]));
-    try testing.expectEqual(@as(i32, -2147483648), try parseNumberAs(i32, &tree, a, tree.root[2]));
-}
-
-test "parseNumberAs: drops a unit suffix and reads the magnitude" {
-    const a = testing.allocator;
-    var tree = try parse(a, "250ms");
-    defer tree.deinit();
-    try testing.expectEqual(.number_with_unit, tree.tagOf(tree.root[0]));
-    try testing.expectEqual(@as(u32, 250), try parseNumberAs(u32, &tree, a, tree.root[0]));
-    try testing.expectEqual(@as(f32, 250.0), try parseNumberAs(f32, &tree, a, tree.root[0]));
-}
-
-test "parseNumberAs: strips digit-group underscores before parsing" {
-    const a = testing.allocator;
-    var tree = try parse(a, "1_000_000");
-    defer tree.deinit();
-    try testing.expectEqual(@as(u32, 1000000), try parseNumberAs(u32, &tree, a, tree.root[0]));
-}
-
-test "parseNumberAs: integer overflow surfaces error.Overflow" {
-    const a = testing.allocator;
-    var tree = try parse(a, "70000");
-    defer tree.deinit();
-    try testing.expectError(error.Overflow, parseNumberAs(u16, &tree, a, tree.root[0]));
-}
-
-test "parseNumberAs f16: over-range decimal saturates to inf (no error on floats)" {
-    const a = testing.allocator;
-    var tree = try parse(a, "70000.0");
-    defer tree.deinit();
-    const v = try parseNumberAs(f16, &tree, a, tree.root[0]);
-    try testing.expect(std.math.isInf(v)); // float path saturates, validator is the guard
 }
 
 test "parse number with unit suffix" {

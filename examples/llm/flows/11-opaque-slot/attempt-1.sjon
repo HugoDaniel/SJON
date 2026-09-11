@@ -1,0 +1,15 @@
+(plugin :name refs :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase))
+  (form :name phrase
+    (key :name name :type symbol :optional false))
+  (form :name template
+    (key :name name :type symbol :optional false)
+    (key :name body :type form :optional false :walk-opaque true))
+  (form :name track
+    (key :name anchor :type phrase-name :optional true)))
+
+(template :name ending
+  :body (phrase :name outro))
+(track :anchor outro)

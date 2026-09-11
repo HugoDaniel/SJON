@@ -95,7 +95,7 @@ pub const top_level_verbs = [_][]const u8{
     "check",   "validate", "export-schema", "export-lowering-graph",
     "explain", "plugin",   "project",       "completions",
     "fmt",     "eval",     "query",         "effective",
-    "repl",    "share",
+    "repl",    "share",    "edit",
 };
 
 /// `sjon plugin <SUB>` subcommands (`parsePluginArgs`).
@@ -112,7 +112,7 @@ pub const common_flags = [_][]const u8{
     "--format=", "--color=",  "--project-root=", "--no-project",
     "--target=", "--output=", "--layout=",       "--draft=",
     "--stdout",  "--force",   "--check",         "--list",
-    "--watch",   "--help",
+    "--watch",   "--help",    "--actions=",      "--in-place",
 };
 
 /// The tables above, bundled as slices for the `Completions` renderers.
@@ -162,6 +162,13 @@ const usage_text =
     \\  sjon fmt PATH...                Reformat documents in place,
     \\                                  preserving comments.
     \\  sjon fmt -                      Format stdin to stdout.
+    \\  sjon edit FILE ACTION...        Apply structural edit actions
+    \\                                  (LANGUAGE.md 11) to FILE and print
+    \\                                  the edited document to stdout. Each
+    \\                                  ACTION is one JSON action or a JSON
+    \\                                  array; all of them form one batch.
+    \\                                  Only the edited spans change;
+    \\                                  `sjon fmt` refolds.
     \\  sjon explain CODE               Explain a diagnostic code; --list for
     \\                                  the full catalogue.
     \\  sjon plugin SUB ...             Plugin manifest tools: hash | info |
@@ -201,6 +208,19 @@ const usage_text =
     \\                                  Diagnostics go to stderr, keeping
     \\                                  stdout a clean data channel for
     \\                                  `sjon fmt -`.
+    \\
+    \\Options for edit:
+    \\  --actions=PATH                  Read the batch from PATH instead of
+    \\                                  the ACTION arguments (- for stdin,
+    \\                                  when FILE is not -).
+    \\  --in-place                      Write the result back to FILE
+    \\                                  instead of printing it.
+    \\  --format=<auto|human|rich|json> Format for parse-error output.
+    \\                                  edit never validates and never
+    \\                                  resolves a project, so only parse
+    \\                                  diagnostics ever appear. They go to
+    \\                                  stderr, keeping stdout a clean data
+    \\                                  channel for the edited document.
     \\
     \\Options for export-schema:
     \\  --target=<json-schema|typescript|both|intermediate|markdown>
@@ -276,6 +296,7 @@ const Action = union(enum) {
     explain: ExplainOpts,
     completions: CompletionsOpts,
     fmt: FmtOpts,
+    edit: EditOpts,
     eval: EvalOpts,
     query: QueryOpts,
     effective: EffectiveOpts,
@@ -294,6 +315,34 @@ pub const FmtOpts = struct {
     /// Report which files would change, write nothing, exit non-zero
     /// if any would. Mirrors `project sync --check`.
     check: bool = false,
+    format: FormatPolicy = .auto,
+};
+
+/// `sjon edit FILE ACTION...` — apply structural edit actions to one
+/// document.
+///
+/// No project-resolution knobs, for `fmt`'s reason: an edit is a syntactic
+/// act. `sjon edit ... && sjon check ...` is the pair, and nothing here
+/// resolves a `(use-plugin ...)` ref or validates a schema.
+///
+/// No `--root` either, though every action takes one (LANGUAGE.md 11.3):
+/// a flag would be a second spelling for a field the action already has,
+/// and a default for the case the library deliberately refuses to have one
+/// (`error.MultipleRoots`).
+pub const EditOpts = struct {
+    /// The document to edit. `"-"` reads stdin.
+    file: []const u8 = "-",
+    /// Each element is one JSON action or a JSON array of them; together
+    /// they are one batch, applied left to right. Empty when `--actions`
+    /// supplies the batch instead.
+    actions: []const []const u8 = &.{},
+    /// Read the batch from this path instead of the ACTION arguments.
+    /// `"-"` reads stdin, which is why it cannot be combined with a
+    /// stdin FILE.
+    actions_path: ?[]const u8 = null,
+    /// Write the result back to FILE rather than printing it. Requires a
+    /// real FILE — there is nothing to write back to for stdin.
+    in_place: bool = false,
     format: FormatPolicy = .auto,
 };
 
@@ -565,6 +614,7 @@ pub fn run(
         .explain => |opts| return runExplain(opts, stdout, stderr, env),
         .completions => |opts| return runCompletions(opts, stdout),
         .fmt => |opts| return runFmt(gpa, io, opts, stdout, stderr, env),
+        .edit => |opts| return runEdit(gpa, io, opts, stdout, stderr, env),
         .eval => |opts| return runEval(gpa, io, opts, stdout, stderr, env),
         .query => |opts| return runQuery(gpa, io, opts, stdout, stderr),
         .effective => |opts| return runEffective(gpa, io, opts, stdout, stderr, env),
@@ -772,6 +822,7 @@ fn parseArgs(allocator: Allocator, args: []const [:0]const u8) Action {
     if (std.mem.eql(u8, cmd, "explain")) return parseExplainArgs(args);
     if (std.mem.eql(u8, cmd, "completions")) return parseCompletionsArgs(args);
     if (std.mem.eql(u8, cmd, "fmt")) return parseFmtArgs(allocator, args);
+    if (std.mem.eql(u8, cmd, "edit")) return parseEditArgs(allocator, args);
     if (std.mem.eql(u8, cmd, "eval")) return parseEvalArgs(args);
     if (std.mem.eql(u8, cmd, "query")) return parseQueryArgs(args);
     if (std.mem.eql(u8, cmd, "effective")) return parseEffectiveArgs(args);
@@ -1112,6 +1163,63 @@ fn parseFmtArgs(allocator: Allocator, args: []const [:0]const u8) Action {
     }
     opts.paths = paths.items;
     return .{ .fmt = opts };
+}
+
+fn parseEditArgs(allocator: Allocator, args: []const [:0]const u8) Action {
+    var opts: EditOpts = .{};
+    var file: ?[]const u8 = null;
+    var actions: std.ArrayList([]const u8) = .empty;
+    var i: usize = 2;
+    while (i < args.len) : (i += 1) {
+        const arg: []const u8 = args[i];
+        switch (parseFormatFlag(arg, &opts.format, false)) {
+            .handled => continue,
+            .usage => |e| return e,
+            .unhandled => {},
+        }
+        if (std.mem.startsWith(u8, arg, "--actions=")) {
+            opts.actions_path = arg["--actions=".len..];
+            if (opts.actions_path.?.len == 0) return .{ .usage_error = "--actions requires a PATH" };
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--in-place")) {
+            opts.in_place = true;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--")) {
+            return .{ .usage_error = "unknown option" };
+        }
+        // The first bare argument is the document; the rest are actions.
+        // An action is JSON and JSON starts with `{` or `[`, but saying so
+        // here would reject a batch the decoder would have explained
+        // better, so position is the whole rule.
+        if (file == null) {
+            file = arg;
+        } else {
+            actions.append(allocator, arg) catch
+                return .{ .internal_error = "out of memory collecting arguments" };
+        }
+    }
+    opts.file = file orelse
+        return .{ .usage_error = "edit requires a FILE argument (use - for stdin)" };
+    opts.actions = actions.items;
+
+    if (opts.actions_path != null and opts.actions.len > 0) {
+        return .{ .usage_error = "--actions and ACTION arguments are mutually exclusive" };
+    }
+    if (opts.actions_path == null and opts.actions.len == 0) {
+        return .{ .usage_error = "edit requires at least one ACTION (or --actions=PATH)" };
+    }
+    // Both would read stdin, and only one of them can have it.
+    if (std.mem.eql(u8, opts.file, "-") and
+        opts.actions_path != null and std.mem.eql(u8, opts.actions_path.?, "-"))
+    {
+        return .{ .usage_error = "edit cannot read both FILE and --actions from stdin" };
+    }
+    if (opts.in_place and std.mem.eql(u8, opts.file, "-")) {
+        return .{ .usage_error = "--in-place needs a FILE to write back to, not -" };
+    }
+    return .{ .edit = opts };
 }
 
 fn parseProjectArgs(args: []const [:0]const u8) Action {
@@ -1458,6 +1566,7 @@ fn runEval(gpa: Allocator, io: Io, opts: EvalOpts, stdout: *Writer, stderr: *Wri
             var buf: std.ArrayList(u8) = .empty;
             try buf.appendSlice(arena, "{\n");
             for (result.evaluated_results, 0..) |ev, i| {
+                // SAFETY: a usize prints in at most 20 digits.
                 var key_buf: [24]u8 = undefined;
                 const key = std.fmt.bufPrint(&key_buf, "{d}", .{ev.forest_index}) catch unreachable;
                 try buf.appendSlice(arena, "  \"");
@@ -1537,7 +1646,6 @@ fn runEffective(gpa: Allocator, io: Io, opts: EffectiveOpts, stdout: *Writer, st
         source,
         &result.tree,
         &result.materialized_defaults,
-        &result.schema,
     );
     try stdout.writeAll(effective);
     return Exit.ok;
@@ -2126,6 +2234,170 @@ fn runFmt(gpa: Allocator, io: Io, opts: FmtOpts, stdout: *Writer, stderr: *Write
     if (failed) return Exit.errors;
     if (opts.check and dirty) return Exit.errors;
     return Exit.ok;
+}
+
+// ---------------------------------------------------------------------
+// `sjon edit` — apply structural edit actions to one document.
+//
+// `fmt`'s shape, one step further along: purely syntactic, no project, no
+// validation, a document that does not parse is refused and left alone,
+// and stdout is a data channel so diagnostics go to stderr.
+//
+// Two decisions the flags do not show:
+//
+//   * Layout is preserved, always, and there is no flag to re-print. A
+//     shell tool asked to change one literal should change one literal;
+//     `sjon edit ... | sjon fmt -` is the refold, which keeps one verb per
+//     job. The library's `.reprint` layout stays the wasm default, where
+//     it has consumers with goldens cut against it.
+//   * Actions are threaded one at a time rather than handed to
+//     `Edit.applyEdits` as a batch. Under `.preserve` the two are the same
+//     fold, and threading is what lets a failure name *which* action
+//     failed — the batched entry returns only an error. `@sjon/schema`'s
+//     `applyAll` falls back to the same fold for the same reason.
+// ---------------------------------------------------------------------
+
+fn runEdit(gpa: Allocator, io: Io, opts: EditOpts, stdout: *Writer, stderr: *Writer, env: RunEnv) !u8 {
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const format = resolveFormat(opts.format, env);
+
+    const source = loadSource(gpa, io, opts.file) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => |e| {
+            try stderr.print("sjon edit: cannot read {s}: {s}\n", .{ opts.file, @errorName(e) });
+            return Exit.usage;
+        },
+    };
+    defer gpa.free(source);
+
+    // Refuse before the first action, not after it: the parser recovers
+    // into a partial tree, and editing that edits the recovery. Same
+    // policy as `fmt`, whose reason is the same one.
+    {
+        var tree = try sjon.Parser.parse(gpa, source);
+        defer tree.deinit();
+        if (tree.hasErrors()) {
+            try reportParseErrors(arena, stderr, opts.file, source, tree.diagnostics, format);
+            return Exit.errors;
+        }
+    }
+
+    const actions = switch (try collectEditActions(gpa, io, arena, opts, stderr)) {
+        .ok => |v| v,
+        .usage => |code| return code,
+    };
+
+    var current = try gpa.dupeZ(u8, source);
+    defer gpa.free(current);
+    for (actions, 0..) |action, n| {
+        const edited = sjon.Edit.applyEdit(gpa, current, action, .{ .layout = .preserve }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => |e| {
+                try stderr.print("sjon edit: {s} (action {d})\n", .{ @errorName(e), n });
+                return Exit.errors;
+            },
+        };
+        defer edited.deinit();
+        const next = try gpa.dupeZ(u8, edited.data);
+        gpa.free(current);
+        current = next;
+    }
+
+    if (!opts.in_place) {
+        // Always emit, changed or not: a pipe consumer asked for the
+        // edited document, not for a diff. `fmt -` says the same.
+        try stdout.writeAll(current);
+        return Exit.ok;
+    }
+    // An edit that changed nothing writes nothing — an empty batch is not
+    // reachable here (`parseEditArgs` requires one), but an action whose
+    // result equals its input is.
+    if (std.mem.eql(u8, current, source)) return Exit.ok;
+
+    var cwd = Io.Dir.cwd();
+    cwd.writeFile(io, .{ .sub_path = opts.file, .data = current }) catch |err| {
+        try stderr.print("sjon edit: cannot write {s}: {s}\n", .{ opts.file, @errorName(err) });
+        return Exit.internal_error;
+    };
+    try stdout.print("edited {s}\n", .{opts.file});
+    return Exit.ok;
+}
+
+/// The batch, decoded. `usage` carries the exit code the caller returns —
+/// argv the user can fix is `Exit.usage`, an unreadable `--actions` file
+/// likewise.
+const EditActions = union(enum) {
+    ok: []const std.json.Value,
+    usage: u8,
+};
+
+/// Collect the batch from the ACTION arguments or from `--actions=PATH`.
+/// Each source is one JSON action or a JSON **array** of them, and the
+/// arrays flatten, so `edit F '[a,b]' c` is the three-action batch it
+/// reads as.
+///
+/// Everything decoded lives in `arena`, which outlives the fold; the
+/// `--actions` file's bytes are `gpa`-owned and released here, since the
+/// parse copies what it keeps.
+fn collectEditActions(
+    gpa: Allocator,
+    io: Io,
+    arena: Allocator,
+    opts: EditOpts,
+    stderr: *Writer,
+) !EditActions {
+    var out: std.ArrayList(std.json.Value) = .empty;
+
+    if (opts.actions_path) |path| {
+        const text = loadSource(gpa, io, path) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => |e| {
+                try stderr.print("sjon edit: cannot read {s}: {s}\n", .{ path, @errorName(e) });
+                return .{ .usage = Exit.usage };
+            },
+        };
+        defer gpa.free(text);
+        if (!try appendEditActions(arena, &out, text, path, stderr)) return .{ .usage = Exit.usage };
+        return .{ .ok = out.items };
+    }
+
+    for (opts.actions) |text| {
+        if (!try appendEditActions(arena, &out, text, "<argument>", stderr)) return .{ .usage = Exit.usage };
+    }
+    return .{ .ok = out.items };
+}
+
+/// Parse one action source and append what it holds. False on malformed
+/// JSON or a JSON scalar where an action or an array of them was wanted —
+/// the message names `label` so a bad `--actions` file and a bad argument
+/// read differently.
+fn appendEditActions(
+    arena: Allocator,
+    out: *std.ArrayList(std.json.Value),
+    text: []const u8,
+    label: []const u8,
+    stderr: *Writer,
+) !bool {
+    // `parseFromSliceLeaky` into the arena: the values outlive this call
+    // and every one of them is read again by the fold.
+    const value = std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{}) catch {
+        try stderr.print("sjon edit: {s} is not valid JSON\n", .{label});
+        return false;
+    };
+    switch (value) {
+        .array => |a| try out.appendSlice(arena, a.items),
+        .object => try out.append(arena, value),
+        else => {
+            try stderr.print(
+                "sjon edit: {s} is not an edit action (expected a JSON object or array)\n",
+                .{label},
+            );
+            return false;
+        },
+    }
+    return true;
 }
 
 /// Render a file's parse diagnostics through the shared formatters, so

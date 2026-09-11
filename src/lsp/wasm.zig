@@ -89,10 +89,16 @@ export fn sjon_lsp_send(ptr: [*]const u8, len: u32) callconv(.c) void {
 /// Caller frees with `sjon_lsp_dealloc(ptr, len + 4)`.
 export fn sjon_lsp_recv() callconv(.c) ?[*]u8 {
     if (outbox.items.len == 0) return null;
+    // Allocate the frame *before* popping: the JS pump reads null as
+    // "outbox empty", so an allocation failure after the pop would drop
+    // the reply on the floor and leave the client's request pending
+    // forever. Failing before the pop keeps the message queued for the
+    // next call.
+    const head = outbox.items[0];
+    const out = wasm_allocator.alloc(u8, 4 + head.len) catch return null;
     const msg = outbox.orderedRemove(0);
     defer wasm_allocator.free(msg);
 
-    const out = wasm_allocator.alloc(u8, 4 + msg.len) catch return null;
     std.mem.writeInt(u32, out[0..4], @intCast(msg.len), .little);
     @memcpy(out[4..][0..msg.len], msg);
     return out.ptr;
@@ -1688,9 +1694,14 @@ fn handleRename(id: ?std.json.Value, params: ?std.json.Value) void {
         return;
     };
     const we = switch (result) {
-        .err => {
-            // Same trade-off as the native transport: rejected renames
-            // surface as null rather than a typed ResponseError.
+        .err => |e| {
+            // The reason reaches the user as a `window/showMessage`
+            // warning, then the result is null so the client treats the
+            // rename as not performed. Same shape as the native
+            // transport, whose typed dispatcher cannot attach a message
+            // to a ResponseError; keeping one behaviour here means an
+            // editor sees the same thing whichever artifact it drives.
+            sendShowMessage(.warning, e.message);
             sendResultRawWithId(req_id, "null");
             return;
         },
@@ -1874,9 +1885,13 @@ fn parsePosition(v: ?std.json.Value) ?offsets.Position {
     const line = value.object.get("line") orelse return null;
     const ch = value.object.get("character") orelse return null;
     if (line != .integer or ch != .integer) return null;
+    // Client-supplied i64s: anything outside u32 is not a position. The
+    // old `@intCast(@max(0, …))` only removed the negative half, so a
+    // line of 4294967296 panicked here on native and truncated to line 0
+    // in the ReleaseSmall artifact.
     return .{
-        .line = @intCast(@max(0, line.integer)),
-        .character = @intCast(@max(0, ch.integer)),
+        .line = std.math.cast(u32, line.integer) orelse return null,
+        .character = std.math.cast(u32, ch.integer) orelse return null,
     };
 }
 
@@ -2095,6 +2110,7 @@ fn appendIdJson(buf: *std.ArrayList(u8), id: std.json.Value) Allocator.Error!voi
     switch (id) {
         .string => |s| try appendJsonString(buf, s),
         .integer => |n| {
+            // SAFETY: std.json's `.integer` is an i64: at most 20 characters.
             var num_buf: [24]u8 = undefined;
             const s = std.fmt.bufPrint(&num_buf, "{d}", .{n}) catch unreachable;
             try buf.appendSlice(a, s);
@@ -2138,6 +2154,24 @@ fn sendResultRawWithId(id: std.json.Value, result_json: []const u8) void {
     buf.appendSlice(wasm_allocator, ",\"result\":") catch return;
     buf.appendSlice(wasm_allocator, result_json) catch return;
     buf.append(wasm_allocator, '}') catch return;
+    enqueue(buf.toOwnedSlice(wasm_allocator) catch return);
+}
+
+/// `window/showMessage` severities, by their wire values.
+const MessageKind = enum(u8) { err = 1, warning = 2, info = 3, log = 4 };
+
+/// Enqueue a `window/showMessage` notification — the one channel this
+/// transport has for putting a sentence in front of the user outside a
+/// diagnostic. Used where a request is refused for a reason the user can
+/// act on and the result alone would say nothing.
+fn sendShowMessage(kind: MessageKind, message: []const u8) void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(wasm_allocator);
+    buf.appendSlice(wasm_allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"window/showMessage\",\"params\":{\"type\":") catch return;
+    appendUint(&buf, @intFromEnum(kind)) catch return;
+    buf.appendSlice(wasm_allocator, ",\"message\":") catch return;
+    appendJsonString(&buf, message) catch return;
+    buf.appendSlice(wasm_allocator, "}}") catch return;
     enqueue(buf.toOwnedSlice(wasm_allocator) catch return);
 }
 
@@ -2284,6 +2318,41 @@ test "textDocument/definition returns the definition Location" {
     try std.testing.expectEqual(@as(i64, 14), start.get("character").?.integer);
     try std.testing.expectEqual(@as(i64, 0), end.get("line").?.integer);
     try std.testing.expectEqual(@as(i64, 16), end.get("character").?.integer);
+}
+
+test "a position outside u32 is no position: hover answers null and didChange keeps the document" {
+    var fx = DispatchFixture.init();
+    defer fx.deinit();
+    try fx.openCrossRefDoc();
+
+    // line = 2^32: `parsePosition` used to @intCast this and panic.
+    var hover = try fx.request(
+        \\{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///a.sjon"},"position":{"line":4294967296,"character":0}}}
+    );
+    defer hover.deinit();
+    try std.testing.expect(hover.value.object.get("result").? == .null);
+
+    // Same cast in the didChange range reader. A malformed change entry
+    // is `handleDidChange`'s "desynced" case: the document is dropped
+    // rather than edited at a wrapped offset, so definition answers null
+    // until the client resyncs with a whole-document change.
+    fx.send(
+        \\{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///a.sjon","version":2},"contentChanges":[{"range":{"start":{"line":0,"character":9999999999},"end":{"line":0,"character":9999999999}},"text":"x"}]}}
+    );
+    var dropped = try fx.request(
+        \\{"jsonrpc":"2.0","id":3,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///a.sjon"},"position":{"line":1,"character":15}}}
+    );
+    defer dropped.deinit();
+    try std.testing.expect(dropped.value.object.get("result").? == .null);
+
+    fx.send(
+        \\{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///a.sjon","version":3},"contentChanges":[{"text":"(phrase :name p0)\n(jump :target p0)"}]}}
+    );
+    var def = try fx.request(
+        \\{"jsonrpc":"2.0","id":4,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///a.sjon"},"position":{"line":1,"character":15}}}
+    );
+    defer def.deinit();
+    try std.testing.expectEqualStrings("file:///a.sjon", def.value.object.get("result").?.object.get("uri").?.string);
 }
 
 test "textDocument/definition returns null off any cross-ref site" {
@@ -2951,6 +3020,48 @@ test "rename edits carry versions through the same serializer" {
     try std.testing.expect(edit.get("changes") == null);
     const td = edit.get("documentChanges").?.array.items[0].object.get("textDocument").?.object;
     try std.testing.expectEqual(@as(i64, 5), td.get("version").?.integer);
+}
+
+test "a rejected rename tells the client why before answering null" {
+    // The handler's refusal carries a reason (`cannot rename to \`)(\`:
+    // not a symbol`, `already declared in this scope`, the provider-backed
+    // refusal) and the transport used to drop it on the floor: the client
+    // saw a null result, which editors render as nothing at all. A
+    // `window/showMessage` warning ahead of the null puts the reason in
+    // front of the user; the result stays null so clients keep treating
+    // the rename as not performed.
+    var fx = DispatchFixture.init();
+    defer fx.deinit();
+    try initializeWithDocumentChanges(fx);
+
+    var schemas = try fx.request(
+        \\{"jsonrpc":"2.0","id":1,"method":"sjon/setSchemas","params":{"schemas":[{"uri":"inmemory://schema/0","text":"(plugin :name song :version \"1.0.0\" (value-kind :name phrase-ref :underlying symbol :cross-ref (cross-ref :target phrase)) (form :name phrase (key :name name :type symbol)) (form :name track (key :name lead :type phrase-ref)))"}]}}
+    );
+    schemas.deinit();
+
+    handleMessage(
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.sjon","version":5,"languageId":"sjon","text":"(phrase :name p0)\n(track :lead p0)"}}}
+    );
+
+    const before = fx.sent().len;
+    handleMessage(
+        \\{"jsonrpc":"2.0","id":2,"method":"textDocument/rename","params":{"textDocument":{"uri":"file:///a.sjon"},"position":{"line":0,"character":15},"newName":"has space"}}
+    );
+    try std.testing.expectEqual(before + 2, fx.sent().len);
+
+    var notice = try std.json.parseFromSlice(std.json.Value, wasm_allocator, fx.sent()[before], .{});
+    defer notice.deinit();
+    try std.testing.expectEqualStrings("window/showMessage", notice.value.object.get("method").?.string);
+    const params = notice.value.object.get("params").?.object;
+    try std.testing.expectEqual(@as(i64, 2), params.get("type").?.integer); // MessageType.Warning
+    const message = params.get("message").?.string;
+    try std.testing.expect(std.mem.indexOf(u8, message, "has space") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "not a symbol") != null);
+
+    var res = try std.json.parseFromSlice(std.json.Value, wasm_allocator, fx.sent()[before + 1], .{});
+    defer res.deinit();
+    try std.testing.expectEqual(@as(i64, 2), res.value.object.get("id").?.integer);
+    try std.testing.expect(res.value.object.get("result").? == .null);
 }
 
 test "code action offers refactor.inline at a union cross-ref reference" {

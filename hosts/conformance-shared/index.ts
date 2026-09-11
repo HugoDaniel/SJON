@@ -44,9 +44,23 @@ interface ClassifierSkipFamily {
   readonly reason: string;
 }
 
+/**
+ * A case family that runs with a non-default validator option. `option` is
+ * the `sjon_host_validate_document` options-JSON key; `value` is what it is
+ * set to for every case whose directory name matches.
+ */
+interface ClassifierOptionFamily {
+  readonly label: string;
+  readonly match: ClassifierMatch;
+  readonly option: string;
+  readonly value: string;
+  readonly reason: string;
+}
+
 interface ClassifierData {
   readonly markers: { readonly legacy: string; readonly query: string; readonly inline: string };
   readonly precedence: readonly Runner[];
+  readonly validatorOptionFamilies: readonly ClassifierOptionFamily[];
   readonly wasmHostSkipFamilies: readonly ClassifierSkipFamily[];
 }
 
@@ -101,6 +115,28 @@ export function loadWasmHostSkipFamilies(): SkipFamily[] {
     match: matcherFor(fam.match),
     reason: fam.reason,
   }));
+}
+
+/**
+ * The `heldSymbol` a case runs with, or `null` for the overwhelming
+ * majority that run with the option off.
+ *
+ * A family prefix rather than a per-case options sibling: every one of the
+ * corpus's siblings is a document or an expectation, never a knob, and
+ * inferring the option from the document instead would be the
+ * document-weakens-its-own-schema hazard the option exists to avoid,
+ * arriving through the test suite. One named option, one named prefix.
+ *
+ * Reads `validatorOptionFamilies` from `classifier.json`, so this function,
+ * `hosts/rust/build.rs`, and (by mirror) `src/conformance_tests.zig`'s
+ * `heldSymbolFor` cannot disagree about which cases opt in.
+ */
+export function heldSymbolFor(caseName: string): string | null {
+  for (const fam of CLASSIFIER.validatorOptionFamilies) {
+    if (fam.option !== 'heldSymbol') continue;
+    if (matcherFor(fam.match)(caseName)) return fam.value;
+  }
+  return null;
 }
 
 // --- corpus discovery + legacy synthesis ---------------------------------

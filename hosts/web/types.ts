@@ -81,6 +81,23 @@ export interface HostOptions {
   readonly projectFile: string | null;
   readonly projectDiagnostics?: readonly HostDiagnostic[];
   readonly failurePolicy?: 'strict' | 'lenient';
+  /**
+   * The symbol a *held* position is spelled with: a value the author has
+   * deliberately not filled in yet. When set, a symbol whose text matches is
+   * accepted wherever a value may appear, without narrowing on the slot's
+   * declared kind or any of its refinements, and registers no cross-ref
+   * name. `undefined` (the default) validates exactly as before.
+   *
+   * The assertion is about the *run* — "this document is being typed" — and
+   * is made by whoever calls the host, never by the document: a manifest is
+   * loaded because the document said `(use-plugin …)`, so a document-level
+   * opt-in would let a document turn off its own type checking.
+   *
+   * `_` is the conventional spelling. SJON does not police the name: a
+   * symbol that collides with one of your own members loses checking on that
+   * member, and a string that does not lex as a symbol never matches.
+   */
+  readonly heldSymbol?: string;
 }
 
 export interface PluginSummary {

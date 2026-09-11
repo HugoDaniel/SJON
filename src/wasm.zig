@@ -142,17 +142,29 @@ export fn sjon_apply_edit(
 }
 
 /// Batched counterpart to `sjon_apply_edit`: `actions` is a JSON **array**
-/// of edit actions applied left-to-right in a single parse/print pass (see
-/// `Edit.applyEdits`). The framed payload is the re-printed `.full` SJON
-/// text; a malformed array or a failing action surfaces the usual framed
-/// error (`InvalidAction` / `PathNotFound` / …) — batches are all-or-nothing.
+/// of edit actions applied left-to-right in a single pass (see
+/// `Edit.applyEdits`). A malformed array or a failing action surfaces the
+/// usual framed error (`InvalidAction` / `PathNotFound` / …) — batches are
+/// all-or-nothing.
+///
+/// `opts` is a JSON object, `{"layout": "reprint" | "preserve"}`, empty
+/// for the default. Under `reprint` (the default, and what
+/// `sjon_apply_edit` always does) the payload is the whole document
+/// re-printed in `.full` mode; under `preserve` it is the source with one
+/// span replaced per action and every other byte the author's.
 export fn sjon_apply_edits(
     src_ptr: [*]const u8,
     src_len: u32,
     actions_ptr: [*]const u8,
     actions_len: u32,
+    opts_ptr: [*]const u8,
+    opts_len: u32,
 ) callconv(.c) ?[*]u8 {
-    return common.guard(wasm_allocator, runApplyEdits(src_ptr[0..src_len], actions_ptr[0..actions_len]));
+    return common.guard(wasm_allocator, runApplyEdits(
+        src_ptr[0..src_len],
+        actions_ptr[0..actions_len],
+        opts_ptr[0..opts_len],
+    ));
 }
 
 // -- Binary IR exports -------------------------------------------------------
@@ -186,9 +198,12 @@ export fn sjon_eval_expr_binary(bin_ptr: [*]const u8, bin_len: u32) callconv(.c)
 /// instantiation time (see `src/wasm_host_resolver.zig`).
 ///
 /// `opts_bytes` is JSON `{ projectRoot?, projectFile?, failurePolicy?,
-/// hasResolver }`. `hasResolver=true` enables the JS bridge; `false`
-/// behaves like calling `Host.validateDocument` with `resolver=null`
-/// (every reference fails as `unresolved_plugin`).
+/// heldSymbol?, hasResolver }`. `hasResolver=true` enables the JS bridge;
+/// `false` behaves like calling `Host.validateDocument` with
+/// `resolver=null` (every reference fails as `unresolved_plugin`).
+/// `heldSymbol` names the spelling of a position the author has
+/// deliberately not filled in yet — the assertion "this document is being
+/// typed", made by whoever invoked the validator.
 export fn sjon_host_validate_document(
     src_ptr: [*]const u8,
     src_len: u32,
@@ -260,6 +275,61 @@ export fn sjon_export_lowering_graph(
 /// well-formed `(plugin …)` manifest.
 export fn sjon_manifest_meta(src_ptr: [*]const u8, src_len: u32) callconv(.c) ?[*]u8 {
     return common.guard(wasm_allocator, runManifestMeta(src_ptr[0..src_len]));
+}
+
+/// Address the node at `[start, end)`: the framed payload is
+/// `{"root":N,"path":[…],"span":[a,b],"kind":"…"}`, or the JSON literal
+/// `null` when the span is inside no root.
+///
+/// The point answer to ask 25's second direction, for a host holding a
+/// span and not a table — a diagnostic's span, a selection, or a caret
+/// (pass `start == end`). The node is the innermost *addressable* one
+/// containing the span, so a span over a whole `:key value` pair answers
+/// the enclosing form: §11.2 addresses a pair's value, and an edit over
+/// the pair itself is a `set_keyword` on the form.
+///
+/// `root` and `path` are an action's two fields verbatim, so the answer
+/// can be handed straight back to `sjon_apply_edits`. `span` and `kind`
+/// ride along so one call decorates as well as addresses.
+///
+/// Offsets are UTF-8 bytes, the unit every other span SJON hands a host
+/// is already in. Answers on the partial tree a recovery leaves behind:
+/// the revision mid-keystroke is the one whose address is wanted.
+export fn sjon_address_of_span(
+    src_ptr: [*]const u8,
+    src_len: u32,
+    start: u32,
+    end: u32,
+) callconv(.c) ?[*]u8 {
+    return common.guard(wasm_allocator, runAddressOfSpan(src_ptr[0..src_len], start, end));
+}
+
+/// Every addressable node of the document, flat, in pre-order, with the
+/// parse diagnostics beside it:
+///
+///     {"nodes":[{"i":0,"parent":-1,"root":0,"seg":null,"kind":"form",
+///                "span":[128,180],"head_span":[129,134]}, …],
+///      "diagnostics":[…]}
+///
+/// The bulk answer to ask 25, one call per revision. `seg` is the row's
+/// own §11.2 path step — a string for a keyword value, an integer for a
+/// positional child or a vector element, `null` for a root — so a row's
+/// full path is the chain of `seg` up the `parent` links, and it is
+/// §11.2 by construction rather than by a host's reading of an encoding.
+/// `parent` is `-1` on a root. `head_span` and `key_span` are present
+/// only on the rows that have one; `key_span` rides on the *value's* row,
+/// because a kvpair is addressed through rather than at and so gets no
+/// row of its own.
+///
+/// Pre-order means a parent always precedes its children and siblings are
+/// in source order, so the innermost node containing a byte is the last
+/// row whose span contains it: hit-testing is one scan on the host side,
+/// with no call back in per pointer move.
+///
+/// Offsets are UTF-8 bytes. Rows are emitted for a partial tree too — the
+/// diagnostics say whether that is what you have.
+export fn sjon_node_table(src_ptr: [*]const u8, src_len: u32) callconv(.c) ?[*]u8 {
+    return common.guard(wasm_allocator, runNodeTable(src_ptr[0..src_len]));
 }
 
 // ---------------------------------------------------------------------------
@@ -342,6 +412,8 @@ fn runToJson(src_bytes: []const u8, opts_bytes: []const u8) ![*]u8 {
     var result = try Json.toJson(wasm_allocator, tree, opts);
     defer result.deinit();
 
+    // std's stringifier recurses on the host stack over the value; the
+    // value mirrors the parsed tree, so its depth is ≤ Parser.MAX_PARSE_DEPTH.
     const out = try std.json.Stringify.valueAlloc(a, result.value, .{});
     return try common.frame(wasm_allocator, true, out);
 }
@@ -376,15 +448,16 @@ fn runApplyEdit(src_bytes: []const u8, action_bytes: []const u8) ![*]u8 {
     return try common.frame(wasm_allocator, true, out.data);
 }
 
-fn runApplyEdits(src_bytes: []const u8, actions_bytes: []const u8) ![*]u8 {
+fn runApplyEdits(src_bytes: []const u8, actions_bytes: []const u8, opts_bytes: []const u8) ![*]u8 {
     var arena = std.heap.ArenaAllocator.init(wasm_allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
     const src = try toSentinel(a, src_bytes);
+    const opts = try parseEditOptions(a, opts_bytes);
     // `applyEditsFromJsonString` owns the JSON parse arena and deep-copies
     // every embedded value, so the actions buffer is fully consumed here.
-    const out = try Edit.applyEditsFromJsonString(wasm_allocator, src, actions_bytes, .{});
+    const out = try Edit.applyEditsFromJsonString(wasm_allocator, src, actions_bytes, opts);
     defer out.deinit();
     return try common.frame(wasm_allocator, true, out.data);
 }
@@ -445,6 +518,7 @@ fn runHostValidateDocument(src_bytes: []const u8, opts_bytes: []const u8) ![*]u8
         .project_root = opts.project_root,
         .project_file = opts.project_file,
         .resolver = if (opts.has_resolver) wasm_host_resolver.build() else null,
+        .held_symbol = opts.held_symbol,
     };
 
     var result = try Host.validateDocument(wasm_allocator, src, host_options);
@@ -541,6 +615,140 @@ fn runManifestMeta(src_bytes: []const u8) ![*]u8 {
     return try common.frame(wasm_allocator, true, json);
 }
 
+/// `[a,b]` — the span shape the address exports use. Two numbers, not an
+/// object: a node span is a pair of byte offsets and nothing else, and
+/// the table repeats it once per row. `appendDiagnostic`'s object form
+/// stays what it is; that one is shared with the read-only artifact and
+/// has consumers.
+fn appendSpanArray(buf: *std.ArrayList(u8), a: std.mem.Allocator, span: sjon.Ast.Span) !void {
+    try buf.append(a, '[');
+    try common.appendUint(buf, a, span.start);
+    try buf.append(a, ',');
+    try common.appendUint(buf, a, span.end);
+    try buf.append(a, ']');
+}
+
+/// `{"root":N,"path":[…],"span":[a,b],"kind":"…"}` for one table row.
+/// Shared by both address exports so a point answer and a table row can
+/// never disagree about how an address is spelled.
+fn appendRowAddress(
+    buf: *std.ArrayList(u8),
+    a: std.mem.Allocator,
+    table: Edit.NodeTable,
+    row_idx: u32,
+) !void {
+    const row = table.rows[row_idx];
+    const address = try table.addressOfRow(a, row_idx);
+    defer address.deinit();
+
+    try buf.appendSlice(a, "{\"root\":");
+    try common.appendUint(buf, a, address.root);
+    try buf.appendSlice(a, ",\"path\":[");
+    for (address.steps, 0..) |step, i| {
+        if (i > 0) try buf.append(a, ',');
+        switch (step) {
+            .key => |k| try common.appendJsonString(buf, a, k),
+            .index => |n| try common.appendUint(buf, a, n),
+        }
+    }
+    try buf.appendSlice(a, "],\"span\":");
+    try appendSpanArray(buf, a, row.span);
+    try buf.appendSlice(a, ",\"kind\":\"");
+    try buf.appendSlice(a, @tagName(row.tag));
+    try buf.appendSlice(a, "\"}");
+}
+
+fn runNodeTable(src_bytes: []const u8) ![*]u8 {
+    var arena = std.heap.ArenaAllocator.init(wasm_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const src = try toSentinel(a, src_bytes);
+    var tree = try Parser.parse(wasm_allocator, src);
+    defer tree.deinit();
+
+    const table = try Edit.nodeTable(a, &tree);
+    defer table.deinit();
+
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.appendSlice(a, "{\"nodes\":[");
+    for (table.rows, 0..) |row, i| {
+        if (i > 0) try buf.append(a, ',');
+        try buf.appendSlice(a, "{\"i\":");
+        try common.appendUint(&buf, a, @intCast(i));
+        try buf.appendSlice(a, ",\"parent\":");
+        if (row.parent) |p| {
+            try common.appendUint(&buf, a, p);
+        } else {
+            // -1, not null: `parent` is an index into this same array and
+            // a host reads it as one, so the absent case stays a number.
+            try buf.appendSlice(a, "-1");
+        }
+        try buf.appendSlice(a, ",\"root\":");
+        try common.appendUint(&buf, a, row.root);
+        try buf.appendSlice(a, ",\"seg\":");
+        if (row.seg) |seg| switch (seg) {
+            .key => |k| try common.appendJsonString(&buf, a, k),
+            .index => |n| try common.appendUint(&buf, a, n),
+        } else try buf.appendSlice(a, "null");
+        try buf.appendSlice(a, ",\"kind\":\"");
+        try buf.appendSlice(a, @tagName(row.tag));
+        try buf.appendSlice(a, "\",\"span\":");
+        try appendSpanArray(&buf, a, row.span);
+        // The two optional channels are omitted rather than nulled: a row
+        // either has a head or is not a form, and either is a pair's value
+        // or is not.
+        if (row.head_span) |h| {
+            try buf.appendSlice(a, ",\"head_span\":");
+            try appendSpanArray(&buf, a, h);
+        }
+        if (row.key_span) |k| {
+            try buf.appendSlice(a, ",\"key_span\":");
+            try appendSpanArray(&buf, a, k);
+        }
+        try buf.append(a, '}');
+    }
+    try buf.appendSlice(a, "],\"diagnostics\":[");
+    for (tree.diagnostics, 0..) |d, i| {
+        if (i > 0) try buf.append(a, ',');
+        try common.appendDiagnostic(&buf, a, d);
+    }
+    try buf.appendSlice(a, "]}");
+    return try common.frame(wasm_allocator, true, buf.items);
+}
+
+fn runAddressOfSpan(src_bytes: []const u8, start: u32, end: u32) ![*]u8 {
+    var arena = std.heap.ArenaAllocator.init(wasm_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // A backwards range is the caller's mistake, not a document's, so it
+    // is refused rather than normalised — silently swapping the ends
+    // would answer a question nobody asked. An *empty* range is not that:
+    // it is a caret, and it is answered like any other.
+    //
+    // The refusal is a bare framed name rather than an `Edit.Error`
+    // variant: nothing in Zig can construct this input (both ends are
+    // `u32`s from the ABI boundary, and every Zig caller passes an
+    // `Ast.Span`), so an error variant would be dead in every set that
+    // had to carry it.
+    if (end < start) return try common.frame(wasm_allocator, false, "InvalidSpan");
+
+    const src = try toSentinel(a, src_bytes);
+    var tree = try Parser.parse(wasm_allocator, src);
+    defer tree.deinit();
+
+    const table = try Edit.nodeTable(a, &tree);
+    defer table.deinit();
+
+    const row = table.rowContaining(.{ .start = start, .end = end }) orelse
+        return try common.frame(wasm_allocator, true, "null");
+
+    var buf: std.ArrayList(u8) = .empty;
+    try appendRowAddress(&buf, a, table, row);
+    return try common.frame(wasm_allocator, true, buf.items);
+}
+
 // ---------------------------------------------------------------------------
 // Option parsing (small, hand-rolled — no allocations on the host side)
 // ---------------------------------------------------------------------------
@@ -587,6 +795,26 @@ fn parsePrintOptions(a: std.mem.Allocator, opts_bytes: []const u8) !Printer.Opti
     return opts;
 }
 
+/// `{"layout": "reprint" | "preserve"}`. The default is `.reprint`, which
+/// is what every consumer of this export got before the blob existed;
+/// `sjon_apply_edit` has no blob and stays on it.
+fn parseEditOptions(a: std.mem.Allocator, opts_bytes: []const u8) !Edit.Options {
+    var opts: Edit.Options = .{};
+    if (opts_bytes.len == 0) return opts;
+    const parsed = std.json.parseFromSlice(std.json.Value, a, opts_bytes, .{}) catch
+        return error.InvalidOptions;
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return error.InvalidOptions,
+    };
+    if (obj.get("layout")) |v| switch (v) {
+        .string => |s| opts.layout = std.meta.stringToEnum(Edit.Layout, s) orelse
+            return error.InvalidOptions,
+        else => return error.InvalidOptions,
+    };
+    return opts;
+}
+
 fn parseToJsonOptions(a: std.mem.Allocator, opts_bytes: []const u8) !Json.ToJsonOptions {
     var opts: Json.ToJsonOptions = .{ .schema = core_schema };
     if (opts_bytes.len == 0) return opts;
@@ -607,6 +835,7 @@ const ParsedHostOptions = struct {
     project_root: ?[]const u8 = null,
     project_file: ?[]const u8 = null,
     has_resolver: bool = false,
+    held_symbol: ?[]const u8 = null,
 };
 
 fn parseHostOptions(a: std.mem.Allocator, opts_bytes: []const u8) !ParsedHostOptions {
@@ -636,6 +865,17 @@ fn parseHostOptions(a: std.mem.Allocator, opts_bytes: []const u8) !ParsedHostOpt
     };
     if (obj.get("hasResolver")) |v| switch (v) {
         .bool => |b| opts.has_resolver = b,
+        else => return error.InvalidOptions,
+    };
+    // The one option here that says something about the *document* rather
+    // than about where its plugins live: "this document is being typed, so a
+    // position spelled with this symbol is one the author has deliberately
+    // not filled in yet". Any string is accepted — SJON does not police the
+    // name (see `Validator.Options.held_symbol`), and one that does not lex
+    // as a symbol simply never matches.
+    if (obj.get("heldSymbol")) |v| switch (v) {
+        .string => |sym| opts.held_symbol = sym,
+        .null => {},
         else => return error.InvalidOptions,
     };
     return opts;

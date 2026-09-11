@@ -1,0 +1,48 @@
+; A cross-reference reached through a union, inside a container's child.
+; The shape PNGine reported (docs/plans/asks/19-*.md): `(box …)` is a
+; container whose positional children are the ordinary forms of the
+; language, so it inherits every value-kind those forms use — unions
+; included. `:unioned` is `union{spot, target-ref}`, the way a colour
+; attachment is either the canvas or a texture.
+;
+; `lowerOneForm` surface-validates the `(box …)` sub-tree before invoking
+; the hook. That sub-tree's cross-ref index holds only `(box …)`, so `t`
+; misses; both alternatives fail and the union reports
+; `union_no_branch_matched` — a shape code, not one of the three cross-ref
+; codes the gate used to excuse by name. The gate closed, the hook never
+; ran, the container emitted nothing, and no diagnostic was produced at
+; any stage. With `Options.defer_cross_refs` the fragment declines to
+; adjudicate identity at all, the cross-ref alternative matches, and the
+; hook runs.
+;
+; `(origin :ref b)` is what makes that observable in a corpus that
+; compares diagnostics: `box-normal` exists only if the hook ran, so
+; before the fix this file reported `not_cross_ref` at [origin ref].
+(plugin :name probe :version "1.0.0"
+  (value-kind :name target-ref :underlying symbol
+    :cross-ref (cross-ref :target target))
+  (value-kind :name spot :underlying symbol
+    :members (member-set :values [here]))
+  (value-kind :name spot-or-target :underlying union
+    :union (union-shape :alternatives [spot target-ref]))
+  (value-kind :name child-item :underlying form
+    :heads (head-set :names [child]))
+  (value-kind :name box-ref :underlying symbol
+    :cross-ref (cross-ref :target box-normal))
+
+  (form :name target
+    (key :name name :type symbol :optional false))
+  (form :name child
+    (key :name unioned :type spot-or-target :optional false))
+  (form :name box
+    (key :name name :type symbol :optional false)
+    :positional child-item
+    :lowering (lowering :hook test/identity-v1 :produces [box-normal]))
+  (form :name box-normal
+    (key :name name :type symbol :optional false))
+  (form :name origin
+    (key :name ref :type box-ref :optional false)))
+
+(target :name t)
+(box :name b (child :unioned t))
+(origin :ref b)

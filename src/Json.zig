@@ -202,6 +202,9 @@ pub fn toJsonNode(
     idx: Ast.NodeIndex,
     opts: ToJsonOptions,
 ) Error!Result {
+    // A kvpair has no JSON value of its own — it is a member of its
+    // form's object — and `buildJson` treats the tag as unreachable.
+    if (tree.tagOf(idx) == .kvpair) return error.InvalidEncoding;
     std.debug.assert(@intFromEnum(idx) < tree.nodes.len); // a real node index into this tree
     var arena = ArenaAllocator.init(gpa);
     errdefer arena.deinit();
@@ -210,6 +213,10 @@ pub fn toJsonNode(
     return .{ .arena = arena, .value = v };
 }
 
+/// Host-stack recursion over the tree, bounded by the tree invariant
+/// every producer keeps: `Parser` at `MAX_PARSE_DEPTH`, `Binary` at
+/// `MAX_TREE_DEPTH`, `fromJson` at `MAX_JSON_DEPTH`, and `Edit`, which
+/// measures each edited tree against `MAX_EDIT_PATH_DEPTH` — all 1024.
 fn buildJson(
     a: Allocator,
     tree: *const Ast.Tree,
@@ -279,6 +286,7 @@ fn treeNumberToJson(a: Allocator, tree: *const Ast.Tree, idx: Ast.NodeIndex) Err
             if (v <= std.math.maxInt(i64)) {
                 break :blk .{ .integer = @intCast(v) };
             }
+            // SAFETY: a u64 prints in at most 20 digits.
             var buf: [24]u8 = undefined;
             const s = std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable;
             break :blk .{ .number_string = try a.dupe(u8, s) };

@@ -157,19 +157,17 @@ pub fn init(
     project_root: []const u8,
     project_file_path: ?[]const u8,
 ) Allocator.Error!Self {
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    errdefer arena.deinit();
-    const a = arena.allocator();
-
-    const root_owned = try a.dupe(u8, project_root);
-    const file_owned = if (project_file_path) |p| try a.dupe(u8, p) else null;
-
+    // The arena lives in `self` from the first allocation. An
+    // `ArenaAllocator` is a value type: a local arena copied into `self`
+    // after some allocations leaves the local's `errdefer` freeing only
+    // the nodes the local saw, while everything `loadProjectFile`
+    // allocated through `self.arena` was orphaned on an OOM.
     var self: Self = .{
         .gpa = gpa,
         .io = io,
-        .arena = arena,
-        .project_root = root_owned,
-        .project_file_path = file_owned,
+        .arena = std.heap.ArenaAllocator.init(gpa),
+        .project_root = "",
+        .project_file_path = null,
         .project_source = null,
         .name_index = .empty,
         .project_diagnostics = &.{},
@@ -178,9 +176,14 @@ pub fn init(
         .project_ignore = &.{},
         .project_exports = null,
     };
+    errdefer self.arena.deinit();
+    const a = self.arena.allocator();
+
+    self.project_root = try a.dupe(u8, project_root);
+    self.project_file_path = if (project_file_path) |p| try a.dupe(u8, p) else null;
 
     var diags: std.ArrayList(Ast.Diagnostic) = .empty;
-    if (file_owned) |path| {
+    if (self.project_file_path) |path| {
         try loadProjectFile(&self, &diags, path);
     }
     self.project_diagnostics = try diags.toOwnedSlice(a);
@@ -1053,6 +1056,36 @@ test "FilesystemResolver: project file with one valid plugin indexes by :name" {
     try testing.expect(res == .manifest);
     try testing.expect(res.manifest.wasm == null);
     try testing.expect(std.mem.indexOf(u8, res.manifest.source, ":name shapes") != null);
+}
+
+test "FilesystemResolver.init converges under allocation failure without leaking the project load" {
+    // Before `init` owned its arena from the first allocation, an OOM
+    // inside `loadProjectFile` leaked every node the load allocated
+    // (29 of 31 failing indices). `checkAllAllocationFailures` walks
+    // every allocation site under `testing.allocator`, which reports a
+    // leak as a test failure.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmpRootPath(testing.allocator, &tmp.sub_path);
+    defer testing.allocator.free(root);
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "shapes.sjon",
+        .data = "(plugin :name shapes :version \"1.0.0\")",
+    });
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "sjon-project.sjon",
+        .data = "(project :plugins [\"shapes.sjon\"])",
+    });
+    const project_file = try std.fmt.allocPrint(testing.allocator, "{s}/sjon-project.sjon", .{root});
+    defer testing.allocator.free(project_file);
+
+    const Probe = struct {
+        fn run(gpa: Allocator, io: Io, r: []const u8, f: []const u8) !void {
+            var fs = try Self.init(gpa, io, r, f);
+            fs.deinit();
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Probe.run, .{ testing.io, root, project_file });
 }
 
 test "FilesystemResolver: duplicate :name across :plugins entries emits duplicate_plugin_name" {

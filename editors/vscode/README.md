@@ -1,7 +1,8 @@
 # SJON for VS Code
 
 Syntax highlighting for `.sjon` plus the `sjon-lsp` language server —
-diagnostics, hover, goto-definition, and semantic tokens, all served by the
+diagnostics with quick fixes, hover, completion, signature help, inlay
+hints, goto-definition, rename, and semantic tokens, all served by the
 same engine the other editors and the playground use. This is a **local-install**
 extension (build from source, run in a dev host or package a `.vsix`); it is
 not on the Marketplace.
@@ -36,7 +37,11 @@ pnpm --filter sjon-vscode run bundle   # → dist/extension.cjs (esbuild)
 - **Dev host:** open `editors/vscode/` in VS Code and press **F5** ("Run
   Extension"). A second window opens with the extension loaded; open any
   `.sjon` file — or a workspace containing a `sjon-project.sjon` — to see
-  diagnostics, hover, and goto-definition.
+  diagnostics, hover, completion, and goto-definition. `zig build lsp`
+  with no `-Doptimize` is a Debug build, and Debug is the one to point
+  the extension at: `initialize` validates the advertised capability set
+  against the handlers behind it, so a mismatch stops the server there
+  instead of surfacing as a dead feature.
 - **Package a `.vsix`:** `pnpm dlx @vscode/vsce package` in `editors/vscode/`,
   then *Extensions: Install from VSIX…* in VS Code.
 

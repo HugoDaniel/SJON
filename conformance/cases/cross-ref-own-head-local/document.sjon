@@ -1,0 +1,45 @@
+; A container that holds children of its own head, and a reference that
+; reaches one of them from outside.
+;
+; `space` declares the positional slot-local `space`: same head, its own
+; body, no `:lowering`. So a nested `(space …)` resolves to the local and
+; is data the container owns, which is what lets a `:lowering` container
+; hold its own head without both hooks firing in one layer.
+;
+; What this case pins is the *other* half. The cross-ref index
+; canonicalises the head string and never consults the slot registry it
+; carries for the registration decision, so a nested local instance is a
+; cross-ref target under `space` exactly like a root one. Both halves are
+; observable here: `title` resolves from a sibling root, and the second
+; `mark` collides with the first.
+;
+; `:depth` is declared on the local only, so accepting it on a nested
+; space and nowhere else is the proof that the head resolved local-first.
+;
+; The kind targets `[space coords]` because a container that lowers is
+; emitted under a second head — the list is the bucket key, so both heads
+; share one namespace and a document resolves whichever of the two its
+; host produced.
+(plugin :name anm :version "1.0.0"
+  (value-kind :name space-ref :underlying symbol
+    :cross-ref (cross-ref :target [space coords]))
+
+  (form :name space
+    (key :name name :type symbol)
+    (form :name space
+      (key :name name :type symbol)
+      (key :name depth :type number :optional true)))
+
+  (form :name coords
+    (key :name name :type symbol))
+
+  (form :name text
+    (key :name name :type symbol)
+    (key :name space :type space-ref :optional true)))
+
+(space :name poster
+  (space :name title :depth 1)
+  (space :name mark)
+  (space :name mark))
+
+(text :name letters :space title)

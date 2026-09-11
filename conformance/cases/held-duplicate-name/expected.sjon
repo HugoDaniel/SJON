@@ -1,0 +1,3 @@
+; No duplicate, and no miss. Three held names collide with nothing, and
+; the one real name is still a reachable target.
+(diagnostics)

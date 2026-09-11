@@ -188,8 +188,11 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) Error!Lockfile {
             if (tree.tagOf(kv.value) != .number_i64) return error.Corrupt;
             const v: i64 = tree.numberI64Of(kv.value);
             if (v < 0) return error.Corrupt;
+            // Range-check on the i64 *before* narrowing: `:version
+            // 4294967296` used to panic in the @intCast (and wrap to 0,
+            // passing the gate, in ReleaseFast).
+            if (v > FORMAT_VERSION) return error.UnsupportedVersion;
             version = @intCast(v);
-            if (version > FORMAT_VERSION) return error.UnsupportedVersion;
         } else if (std.mem.eql(u8, kv.key, "project-hash") and tree.tagOf(kv.value) == .string) {
             project_hash = try a.dupe(u8, tree.stringText(kv.value));
         } else if (std.mem.eql(u8, kv.key, "generated-at") and tree.tagOf(kv.value) == .string) {
@@ -313,6 +316,11 @@ test "Lockfile.parse: rejects unsupported version" {
     const src: [:0]const u8 = "(lockfile :version 99 :plugins [])";
     const r = parse(testing.allocator, src);
     try testing.expectError(error.UnsupportedVersion, r);
+}
+
+test "Lockfile.parse: a version past u32 is UnsupportedVersion, not a narrowing panic" {
+    const src: [:0]const u8 = "(lockfile :version 4294967296 :plugins [])";
+    try testing.expectError(error.UnsupportedVersion, parse(testing.allocator, src));
 }
 
 test "Lockfile.parse: rejects malformed root" {

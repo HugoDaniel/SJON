@@ -140,7 +140,7 @@ export const LESSONS: readonly Lesson[] = [
     sourceStem: '10-discriminated-and-exclusive-forms',
     slug: 'discriminated-and-exclusive-forms',
     title: 'Discriminated and exclusive forms',
-    gloss: 'One head with variant shapes; exclusive groups; multi-key bundles.',
+    gloss: 'One head with variant shapes and their defaults; exclusive groups; multi-key bundles.',
     route: '/schemas/reading/discriminated-and-exclusive-forms',
     part: 'Schemas and Diagnostics',
     chapter: 'Reading Schemas',
@@ -162,7 +162,7 @@ export const LESSONS: readonly Lesson[] = [
     slug: 'value-kinds-refinements',
     title: 'Value kinds: strings, members, heads, unions, slot-local forms',
     gloss:
-      'String bounds, member sets, head sets, unions, slot-local forms, and the diagnostic cheat sheet.',
+      'String bounds, member sets, head sets, unions, slot-local forms, opaque slots, and the diagnostic cheat sheet.',
     route: '/schemas/reading/value-kinds-refinements',
     part: 'Schemas and Diagnostics',
     chapter: 'Reading Schemas',

@@ -1,0 +1,23 @@
+; The control for `held-refinement-axes`. Byte-identical document body, in
+; a directory whose name does NOT start with `held-`, so the run does not
+; set `held_symbol` and `_` is an ordinary symbol again.
+;
+; Without this pair the accept case proves nothing: a schema that never
+; checked these axes would also produce no diagnostics.
+(plugin :name hold :version "1.0.0"
+  (value-kind :name kernel-ref :underlying symbol
+    :cross-ref (cross-ref :target kernel :name-key name))
+  (value-kind :name blend-mode :underlying symbol
+    :members (member-set :values [over add]))
+
+  (form :name kernel
+    (key :name name :type symbol :optional false))
+
+  (form :name warp
+    (key :name amount :type number :optional true)
+    (key :name by :type kernel-ref :optional true)
+    (key :name blend :type blend-mode :optional true)))
+
+(kernel :name flow)
+
+(warp :by _ :amount _ :blend _)

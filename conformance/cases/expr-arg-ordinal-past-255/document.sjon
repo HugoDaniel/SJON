@@ -1,0 +1,29 @@
+; The ordinal is the argument's place in the document, which nothing bounds.
+; It used to be carried in a `u8`: this document panicked the tree walker and
+; made the binary walker answer `[mul 255]`. Both now name argument 256.
+;
+; `:rest` with no `:params` types every position, so the ordinal is free to
+; run as far as the author writes. 256 `1`s, then the string: the well-typed
+; arguments never reach the emitter, so the mismatch is what makes the
+; ordinal observable at all.
+(plugin :name ordinal :version "1.0.0"
+  (expr-func :name mul :arity (at-least 1) :rest number :result number))
+
+(mul
+  1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+  1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+  1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+  1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+  1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+  1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+  1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+  1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+  1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+  1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+  1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+  1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+  1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+  1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+  1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+  1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+  "x")

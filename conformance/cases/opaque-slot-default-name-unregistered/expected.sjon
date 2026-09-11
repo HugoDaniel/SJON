@@ -1,0 +1,4 @@
+; No overlay entry inside the opaque slot means no registered name, so
+; the author's ref misses.
+(diagnostics
+  (diagnostic :code not_cross_ref :path [track anchor]))

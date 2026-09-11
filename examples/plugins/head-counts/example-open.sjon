@@ -14,7 +14,8 @@
 ;   positional_missing  at [scratch-pipeline]
 ;   positional_too_many at [scratch-pipeline fragment]
 ;
-;   sjon validate examples/plugins/head-counts/{plugin,example-open}.sjon
+;   cat examples/plugins/head-counts/plugin.sjon \
+;       examples/plugins/head-counts/example-open.sjon | sjon validate - --no-project
 
 (scratch-pipeline :whatever 1
   (fragment :entry fs_a)

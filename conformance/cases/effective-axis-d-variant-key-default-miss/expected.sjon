@@ -1,0 +1,5 @@
+; `kind = kick` from the overlay selects the variant; the variant's
+; defaulted `:anchor` is materialized in turn and its cross-ref lookup
+; misses.
+(diagnostics
+  (diagnostic :code not_cross_ref :path [track anchor default]))

@@ -94,6 +94,19 @@ string and **neither repairable at the reference**:
 Either way the member set is unknown, so references into it are reported as
 neither valid nor invalid. Silence there is the design, not a missed check.
 
+## Two rules that read like bugs
+
+- **Opaque slots.** A key declared `:walk-opaque true` is typed and not
+  read: nothing inside it is checked, defaulted, or registered. A
+  `(phrase :name x)` written inside one is not a cross-ref target, so a
+  reference to `x` is `not_cross_ref` with the declaration in plain
+  sight. Repair by moving the declaration out of the slot, never by
+  respelling the reference.
+- **Variant defaults.** An omitted key inside a discriminated form's
+  active variant takes its `:default`, and a defaulted discriminant
+  selects a variant. A `path` ending in `default` is about a value you
+  never wrote: declare what the default names, or write the key.
+
 ## The repair loop
 
 ```

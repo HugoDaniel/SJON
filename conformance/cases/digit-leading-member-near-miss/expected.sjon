@@ -1,0 +1,9 @@
+; Three `not_member`s, one per near-miss, and no `wrong_underlying`
+; anywhere — the half of the contract a bare "did it complain?" check
+; would miss. A fractional magnitude is the interesting one: it is not a
+; spelling the loader could ever have derived, and it still reports as a
+; membership failure rather than a shape failure.
+(diagnostics
+  (diagnostic :code not_member :path [texture view])
+  (diagnostic :code not_member :path [texture view])
+  (diagnostic :code not_member :path [texture view]))

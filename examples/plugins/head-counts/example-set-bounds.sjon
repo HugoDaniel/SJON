@@ -3,8 +3,8 @@
 ; part of it: the schema-export round-trip feeds `example.sjon` to ajv and
 ; needs it clean.
 ;
-;   sjon validate examples/plugins/head-counts/example-set-bounds.sjon \
-;     --plugin examples/plugins/head-counts/plugin.sjon
+;   cat examples/plugins/head-counts/plugin.sjon \
+;       examples/plugins/head-counts/example-set-bounds.sjon | sjon validate - --no-project
 
 ; Two DIFFERENT resources. `buffer: at most 1` and `sampler: at most 1` are
 ; both satisfied, since there is one of each. `:max-children 1` is the only

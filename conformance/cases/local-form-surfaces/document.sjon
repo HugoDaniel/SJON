@@ -1,0 +1,47 @@
+; Every shape the LSP's schema-aware surfaces now resolve slot-locally,
+; replayed on the validator so the four hosts agree about what each one
+; means.
+;
+; `canvas.:shape` declares local `circle` (`:r`), `rect` (`:w :h`) and
+; `group` (whose `:child` nests a local `dot`); a *global* `circle`
+; requiring `:radius` sits beside them to be shadowed, and a global
+; `line` to be reached by the additive fallback.
+;
+; The validator has always read this slot local-first. The LSP did not:
+; it resolved every head against the global catalog, so hover on the
+; local `circle` printed the global's card, `:radius` and all, and the
+; head completion offered a snippet the validator rejects. Silence would
+; have been recoverable; a confident wrong answer was not.
+;
+; Sibling of `local-form-shadows-global` and friends, which pin one rule
+; each from the legacy schema+input shape. This case is the *table* — one
+; document carrying the whole set, which is what an editor faces.
+(plugin :name lf :version "1.0.0"
+  (form :name canvas
+    (key :name shape :type form
+      (form :name circle
+        (key :name r :type number))
+      (form :name rect
+        (key :name w :type number)
+        (key :name h :type number))
+      (form :name group
+        (key :name child :type form
+          (form :name dot)))))
+
+  (form :name line
+    (key :name from :type vector)
+    (key :name to :type vector))
+
+  (form :name circle
+    (key :name radius :type number)))
+
+(canvas :shape (circle :r 1))                  ; the local — clean
+(canvas :shape (rect :w 1 :h 2))               ; local-only, invisible globally
+(canvas :shape (group :child (dot)))           ; a local slot inside a local
+(canvas :shape (line :from [0 0] :to [1 1]))   ; the additive global fallback
+(canvas :shape (lf/circle :radius 1))          ; qualified — bypasses locals
+(circle :radius 1)                             ; the global, at the top level
+
+(canvas :shape (circle :radius 1))             ; the shadow, both halves
+(canvas :shape (circle :rr 1))                 ; the misspelling the fix repairs
+(canvas :shape (ghost))                        ; neither local nor global

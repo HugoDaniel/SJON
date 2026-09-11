@@ -73,7 +73,8 @@ fn appendEvaluatedResult(
 ) Allocator.Error!void {
     try buf.appendSlice(a, "{\"index\":");
     var num_buf: [32]u8 = undefined;
-    const s = std.fmt.bufPrint(&num_buf, "{d}", .{entry.forest_index}) catch return error.OutOfMemory;
+    // SAFETY: a usize prints in at most 20 digits; NoSpaceLeft cannot fire.
+    const s = std.fmt.bufPrint(&num_buf, "{d}", .{entry.forest_index}) catch unreachable;
     try buf.appendSlice(a, s);
     try buf.appendSlice(a, ",\"value\":");
     try common.appendValue(buf, a, entry.value);

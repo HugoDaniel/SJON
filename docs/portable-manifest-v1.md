@@ -1080,10 +1080,25 @@ contents are treated as opaque to the surrounding schema. The
 slot-level type check (`:type`) still runs; only the recursive walk of
 the nested form is skipped, so expression-shaped contents like
 `:default (pi)` don't draw a spurious `unknown_form`. It is opt-in per
-key and only ever *suppresses* a diagnostic, so its blast radius is
-small. The meta-schema itself uses it on exactly one slot — the
+key. The meta-schema itself uses it on exactly one slot — the
 `(key …)` form's own `:default` — which is why `manifests/meta.sjon`
 can describe expression-bearing defaults without special-casing.
+
+**Every descent stops there**, not only the shape walk. The defaults
+overlay (§7.8 rule 1 of [`LANGUAGE.md`](LANGUAGE.md)), the cross-ref
+index pass, provider-extraction discovery and the lowering worklist all
+treat the subtree as none of their business. So nothing inside an opaque
+slot is registered as a cross-ref target, opens a lexical scope,
+contributes a cycle edge, supplies a provider source, fires a lowering
+hook, or receives a materialized default.
+
+That is a statement about **authored** content, not only about defaults,
+and it is the point of the flag: the difference between *the validator
+will not tell you what is in there* and *the validator will not quietly
+use what is in there*. It is also the one way `:walk-opaque` can **add**
+a diagnostic rather than suppress one — a `(phrase :name origin)` written
+inside an opaque slot is no longer a cross-ref target, so a ref naming
+`origin` misses.
 
 #### `:requires` — presence implies presence
 

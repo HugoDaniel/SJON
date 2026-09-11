@@ -1,0 +1,5 @@
+; The variant's defaulted `:anchor` is materialized, its cross-ref
+; lookup misses the empty `phrase` registry, and the diagnostic lands on
+; the synthetic default path.
+(diagnostics
+  (diagnostic :code not_cross_ref :path [track anchor default]))

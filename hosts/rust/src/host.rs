@@ -7,8 +7,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::diagnostic::{
-    ExportSchemaOptions, ExportSchemaResult, HostEvalResult, HostOptions, HostResult,
-    WasmExportSchemaOptions, WasmHostOptions,
+    Address, ExportSchemaOptions, ExportSchemaResult, HostEvalResult, HostOptions, HostResult,
+    NodeTable, WasmExportSchemaOptions, WasmHostOptions,
 };
 use crate::error::SjonHostError;
 use crate::resolver::Resolver;
@@ -134,6 +134,7 @@ impl SjonHost {
             project_root: options.project_root.as_deref(),
             project_file: options.project_file.as_deref(),
             failure_policy: options.failure_policy,
+            held_symbol: options.held_symbol.as_deref(),
             has_resolver: self.wasm.has_resolver(),
         };
         serde_json::to_vec(&wasm_opts).map_err(|err| SjonHostError::JsonEncode {
@@ -180,6 +181,62 @@ impl SjonHost {
                 source: err,
             })?;
         Ok(result)
+    }
+
+    /// Address the node at `[start, end)`: the innermost node containing
+    /// that byte range, or `None` when the range is inside no root.
+    ///
+    /// Mirrors `SjonEncoder.addressOfSpan` over WASM. `root` and `path`
+    /// on the returned [`Address`] are an edit action's two fields
+    /// verbatim. Pass `start == end` for a caret.
+    ///
+    /// A range covering a whole `:key value` pair answers the enclosing
+    /// *form*: §11.2 addresses a pair's value, so an edit over the pair
+    /// itself is a `set_keyword` on the form.
+    ///
+    /// Offsets are UTF-8 bytes. Answers on the partial tree a recovery
+    /// leaves behind, so a document mid-edit still has addresses.
+    pub fn address_of_span(
+        &mut self,
+        source: &str,
+        start: u32,
+        end: u32,
+    ) -> Result<Option<Address>, SjonHostError> {
+        let payload = self
+            .wasm
+            .call_address_of_span(source.as_bytes(), start, end)
+            .map_err(|err| SjonHostError::WasmCall {
+                export: "sjon_address_of_span",
+                source: err,
+            })?;
+        serde_json::from_slice(&payload).map_err(|err| SjonHostError::JsonDecode {
+            kind: "Address",
+            source: err,
+        })
+    }
+
+    /// Every addressable node of `source`, flat and in pre-order, with
+    /// the parse diagnostics beside it. Mirrors `SjonEncoder.nodeTable`
+    /// over WASM, payload for payload.
+    ///
+    /// A row's §11.2 path is the chain of `seg` up the `parent` links;
+    /// pair it with the row's `root` and the two are an edit action's
+    /// `root` and `path`. Offsets are UTF-8 bytes.
+    ///
+    /// Rows come back for a document that does not parse too — read
+    /// `diagnostics` to learn whether that is what you have.
+    pub fn node_table(&mut self, source: &str) -> Result<NodeTable, SjonHostError> {
+        let payload = self
+            .wasm
+            .call_node_table(source.as_bytes())
+            .map_err(|err| SjonHostError::WasmCall {
+                export: "sjon_node_table",
+                source: err,
+            })?;
+        serde_json::from_slice(&payload).map_err(|err| SjonHostError::JsonDecode {
+            kind: "NodeTable",
+            source: err,
+        })
     }
 }
 

@@ -361,7 +361,10 @@ pub fn print(gpa: Allocator, tree: Ast.Tree, opts: Printer.Options) Allocator.Er
 /// Validate a `Tree` against a schema. Caller must `result.deinit()`.
 /// O(n) walk; allocates only diagnostics.
 pub fn validate(gpa: Allocator, tree: Ast.Tree, schema: Schema.Schema) Validator.Error!Validator.Result {
-    std.debug.assert(tree.root.len <= Binary.MAX_NODES);
+    // No width precondition: the tree walker has no node ceiling (see
+    // CLAUDE.md), and the parser has none either, so a 1 << 20-root
+    // document is ordinary input here. The binary path enforces
+    // `MAX_NODES` at encode time with an error.
     return Validator.validate(gpa, tree, schema);
 }
 
@@ -428,7 +431,8 @@ pub fn evalExpr(
 /// Encode a single-root `Tree` to JSON. Caller must `result.deinit()`.
 /// O(n) where n = nodes; allocates the result via `gpa`.
 pub fn toJson(gpa: Allocator, tree: Ast.Tree, opts: Json.ToJsonOptions) Json.Error!Json.Result {
-    std.debug.assert(tree.root.len == 1);
+    // A multi-root tree is `error.MultipleRoots` from the bridge, not a
+    // precondition — root count is parser output, i.e. user input.
     return Json.toJson(gpa, tree, opts);
 }
 
@@ -441,14 +445,14 @@ pub fn fromJson(gpa: Allocator, value: std.json.Value, opts: Json.FromJsonOption
 /// Encode a `Tree` (any number of roots) wrapped in `{"$roots": [...]}`.
 /// Caller must `result.deinit()`. O(n) over nodes.
 pub fn toJsonRoots(gpa: Allocator, tree: Ast.Tree, opts: Json.ToJsonOptions) Json.Error!Json.Result {
-    std.debug.assert(tree.root.len <= Binary.MAX_NODES);
     return Json.toJsonRoots(gpa, tree, opts);
 }
 
 /// Decode a `{"$roots": [...]}` wrapper into a multi-root `Tree`.
 /// Caller must `tree.deinit()`. O(n) over JSON value nodes.
 pub fn fromJsonRoots(gpa: Allocator, value: std.json.Value, opts: Json.FromJsonOptions) Json.Error!Ast.Tree {
-    std.debug.assert(value == .object);
+    // A non-object is `error.InvalidEncoding` from the bridge; the value
+    // is decoded caller input.
     return Json.fromJsonRoots(gpa, value, opts);
 }
 

@@ -1,0 +1,21 @@
+; A held position reads as ABSENT to the default overlay, which is what
+; makes a hole "resolve to that position's declared identity value".
+;
+; The corpus observes diagnostics, so what it can pin here is the half
+; that shows: `:fps _` does not suppress the key's `:default`, and neither
+; the held value nor the materialized default reports anything. The value
+; the overlay hands back is pinned Zig-side (`EffectiveView` tests) and at
+; the host boundary (`Host_tests`), where the answer is readable.
+;
+; The neighbouring assertion is the one that keeps this honest: a REQUIRED
+; key with no default is still required. Only an explicit atom is held —
+; omission is not — so `(scene)` below misses `:name`.
+(plugin :name p :version "1.0.0"
+  (form :name scene
+    (key :name name :type symbol :optional false)
+    (key :name fps :type number :default 60 :optional true)))
+
+(scene :name main :fps 30)   ; filled
+(scene :name main :fps _)    ; held — resolves to 60, reports nothing
+(scene :name _)              ; the required key, held: one atom is enough
+(scene)                      ; …and omitting it is not

@@ -1,0 +1,28 @@
+; `:walk-opaque true` stops every descent, not just the validator's.
+;
+; `(phrase :name origin)` is written by the author, inside the opaque
+; `:body` slot. The cross-ref index pass does not descend there any more,
+; so `origin` is never registered and the `:anchor origin` below finds an
+; empty registry.
+;
+; This is the half that changes what an authored document *means*, and it
+; is the point of the flag: a subtree the surrounding schema declined to
+; interpret is not a place to harvest cross-ref targets, lexical scopes or
+; cycle edges out of. The validator will not tell you anything about
+; what is in there; neither will it quietly use it.
+;
+; Move the same `(phrase …)` one key over into a slot the schema reads and
+; it registers as it always did.
+(plugin :name probe :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase))
+  (form :name phrase
+    (key :name name :type symbol :optional false))
+  (form :name host
+    (key :name body :type any :walk-opaque true :optional true))
+  (form :name track
+    (key :name anchor :type phrase-name :optional true)))
+
+(host :body (phrase :name origin))
+(track :anchor origin)

@@ -372,6 +372,20 @@ pub const KeySpec = struct {
     /// Used by MetaSchema's `:default` slot to allow expression-shaped
     /// defaults (`:default (pi)`) whose heads aren't meta-known. The
     /// slot-level type check still runs via `matchValueAgainstType`.
+    ///
+    /// Every descent stops here, not only the shape walk: the defaults
+    /// overlay (`MaterializedDefaults`), the cross-ref index pass and
+    /// provider-extraction discovery (both twins, via `Validator.childSlot`
+    /// and `Validator.BinarySlot`), and the lowering worklist. So nothing
+    /// inside an opaque slot is registered as a cross-ref target, opens a
+    /// lexical scope, contributes a cycle edge, supplies a provider source,
+    /// fires a lowering hook, or receives a materialized default.
+    ///
+    /// That is a statement about *authored* content too, and deliberately
+    /// so — it is the difference between "the validator will not tell you
+    /// what is in there" and "the validator will not quietly use what is
+    /// in there". The slot-level `:type` check is the one thing that still
+    /// runs, because it is about the slot rather than its contents.
     walk_opaque: bool = false,
     /// Slot-local form definitions. When non-empty (and `value_type` is
     /// `.form`), a form-shaped value paired with this key resolves its head
@@ -549,6 +563,27 @@ pub const QualifiedName = struct {
 /// parser and manifest loader want the guarded semantics and keep using
 /// `splitNamespace`; do not consolidate the two without checking the edge
 /// behaviour at every call site.
+/// A head is `name` or `namespace/name` with both halves non-empty.
+/// `ManifestLoader.parseLowering` applies it to `:produces` entries and
+/// `Lowering.validateEmittedForm` to every head a hook emits — the
+/// lexer accepts `/` anywhere in a symbol, and a Zig-built `Plugin`
+/// bypasses the loader, so both ends check.
+pub fn headHalvesNonEmpty(head: []const u8) bool {
+    if (head.len == 0) return false;
+    const slash = std.mem.indexOfScalar(u8, head, '/') orelse return true;
+    if (slash == 0) return false;
+    return slash + 1 < head.len;
+}
+
+test "headHalvesNonEmpty: name, namespace/name, and the malformed shapes" {
+    try std.testing.expect(headHalvesNonEmpty("x"));
+    try std.testing.expect(headHalvesNonEmpty("ns/x"));
+    try std.testing.expect(!headHalvesNonEmpty(""));
+    try std.testing.expect(!headHalvesNonEmpty("x/"));
+    try std.testing.expect(!headHalvesNonEmpty("/x"));
+    try std.testing.expect(!headHalvesNonEmpty("/"));
+}
+
 pub fn splitQualified(text: []const u8) QualifiedName {
     if (std.mem.indexOfScalar(u8, text, '/')) |slash| {
         return .{ .namespace = text[0..slash], .name = text[slash + 1 ..] };

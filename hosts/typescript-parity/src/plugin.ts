@@ -64,6 +64,15 @@ export interface KeySpec {
    */
   readonly localForms?: readonly FormSpec[];
   /**
+   * `:walk-opaque true` — the surrounding schema does not interpret a
+   * form-shaped value in this slot. The slot's own `:type` check still runs;
+   * what stops is every *descent* into the value: the validator's walk, the
+   * cross-ref index pass, provider-extraction discovery and the lowering
+   * worklist all treat the subtree as none of their business. Mirrors
+   * `Plugin.KeySpec.walk_opaque` in `src/Plugin.zig`. Absent means false.
+   */
+  readonly walkOpaque?: boolean;
+  /**
    * Sibling keys this key's presence demands (manifest format 1.3). When
    * this key is present and any named key is absent, the validator emits
    * `dependent_key_missing` naming every absent one. Absent means no
@@ -211,6 +220,10 @@ export interface ExprFunc {
   // `null` ⇒ untyped (validator skips arg-type checking). Mirrors
   // `Plugin.ExprFunc.params == null` ("opaque to validator typing").
   readonly params: readonly ValueType[] | null;
+  // Type for the variadic tail — every position past `params` takes it,
+  // and with no `params` at all it types every position. Mirrors
+  // `Plugin.ExprFunc.rest`; `null` ⇒ the tail is untyped.
+  readonly rest: ValueType | null;
   readonly result: ValueType | null;
 }
 
@@ -604,7 +617,7 @@ export function checkArity(arity: Arity, n: number): boolean {
 
 export function paramTypeAt(fn: ExprFunc, i: number): ValueType | null {
   if (fn.params && i < fn.params.length) return fn.params[i]!;
-  return null;
+  return fn.rest;
 }
 
 // ---------------------------------------------------------------------------
@@ -872,6 +885,30 @@ export function crossRefBucketKey(
   // disagree with the reference host on the same schema.
   parts.sort((x, y) => (x < y ? -1 : x > y ? 1 : 0));
   return [...new Set(parts)].join(' ');
+}
+
+/** A bucket key rendered for a human, plus whether it names more than one
+ *  form. Mirrors `Schema.BucketDisplay`. */
+export interface BucketDisplay {
+  readonly text: string;
+  readonly isGroup: boolean;
+}
+
+/**
+ * Render `crossRefBucketKey`'s output for a message: unchanged for one
+ * target, `a | b` for a group. Mirrors `Schema.describeBucket`, and lives
+ * beside the key for the reason the key's own header gives — the join and
+ * the split are one rule, and two spellings of it would put a space in a
+ * form head on one host and not the other.
+ *
+ * The bucket's order, which is canonical and sorted. `CrossRef.describeTargets`
+ * renders the author's spelling and order instead; the reference host keeps
+ * both because they answer different questions, and this port only needs
+ * the one the validator's messages use.
+ */
+export function describeBucket(bucket: string): BucketDisplay {
+  if (!bucket.includes(' ')) return { text: bucket, isGroup: false };
+  return { text: bucket.split(' ').join(' | '), isGroup: true };
 }
 
 /** The provider vocabulary's twin. Mirrors `Schema.canonicalProviderName`. */

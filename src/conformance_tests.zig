@@ -725,6 +725,25 @@ fn isLoweringCase(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "lowering-");
 }
 
+/// The one validator option a case may carry, named by its directory
+/// prefix. `held-*` runs with `Validator.Options.held_symbol = "_"`: the
+/// document is one being typed, so a position spelled `_` is one the author
+/// has deliberately not filled in yet.
+///
+/// A family prefix and not a general per-case options sibling. Every one of
+/// the corpus's siblings today is a *document* or an *expectation*, never a
+/// knob, and a general knob file would be real work in four runners for a
+/// door nothing else has needed. Inferring the option from the document
+/// instead would be worse than either: that is the
+/// document-weakens-its-own-schema hazard the option exists to avoid,
+/// arriving through the test suite.
+///
+/// Mirrors `validatorOptionFamilies` in `conformance/classifier.json`; the
+/// mirror test below pins the two together.
+fn heldSymbolFor(name: []const u8) ?[]const u8 {
+    return if (std.mem.startsWith(u8, name, "held-")) "_" else null;
+}
+
 /// Part 2 (2.4): replay a legacy `schema+input` case through BOTH
 /// validation walkers on identical input — tree `Validator.validate` vs
 /// `toBinary(spans) → validateBinary` — and assert `(code, severity,
@@ -892,6 +911,7 @@ fn replayInlineCaseBinary(a: Allocator, case_name: []const u8) !void {
         .project_file = if (has_project_file) project_file_path else null,
         .io = std.testing.io,
         .lowering_registry = if (isLoweringCase(case_name)) &lowering_registry else null,
+        .held_symbol = heldSymbolFor(case_name),
     });
     defer hr.deinit();
 
@@ -975,6 +995,7 @@ fn runInlineManifestCase(a: Allocator, case_name: []const u8) !void {
         .project_file = if (has_project_file) project_file_path else null,
         .io = std.testing.io,
         .lowering_registry = if (isLoweringCase(case_name)) &lowering_registry else null,
+        .held_symbol = heldSymbolFor(case_name),
     });
     defer hr.deinit();
 
@@ -1100,27 +1121,6 @@ fn printPath(path: []const []const u8) void {
 // walkers on identical input and compared `(code, severity, path)`.
 // ---------------------------------------------------------------------------
 
-/// True when `full` is `prefix` followed by ≥ 1 additional segments that
-/// are *all* vector element indices (each extra segment non-empty, all
-/// ASCII digits). This is the one sanctioned tree↔binary path divergence:
-/// the tree validator wraps a failing typed-vector element into ONE
-/// diagnostic at the slot path (`[set v]`, message "element [N]: …"),
-/// while the binary validator emits at the failing element's own
-/// index-extended path (`[set v 1]`, or `[set m 3]` / `[set m 3 2]` when
-/// nested). A non-digit extra segment is NOT a vector descent and stays a
-/// real mismatch.
-fn isDigitSuffixExtension(prefix: []const []const u8, full: []const []const u8) bool {
-    if (full.len <= prefix.len) return false;
-    for (prefix, full[0..prefix.len]) |p, f| {
-        if (!std.mem.eql(u8, p, f)) return false;
-    }
-    for (full[prefix.len..]) |seg| {
-        if (seg.len == 0) return false;
-        for (seg) |c| if (c < '0' or c > '9') return false;
-    }
-    return true;
-}
-
 fn diagExact(t: Ast.Diagnostic, b: Ast.Diagnostic) bool {
     return t.code == b.code and t.severity == b.severity and pathEqual(t.path, b.path);
 }
@@ -1149,14 +1149,24 @@ fn reportBinaryParityMismatch(
 }
 
 /// First index pair `.{ti, bi}` where the tree-path and binary-path streams
-/// diverge under the parity contract, or null when they agree. The contract:
-/// both must emit the same `(code, severity, path)` for every diagnostic, in
-/// order, EXCEPT the vector-element exemption (`isDigitSuffixExtension`) —
-/// one tree diagnostic at a slot path absorbs the run of binary diagnostics
-/// that fire per failing element under that slot (matching code + severity).
-/// Any other divergence — count, code, severity, or a non-index path — is
-/// returned as the divergence point. Pure: no printing, no allocation, so
-/// unit tests can assert on it without stderr noise.
+/// diverge under the parity contract, or null when they agree. The contract
+/// is plain: both must emit the same `(code, severity, path)` for every
+/// diagnostic, in order. There used to be one exemption — a tree diagnostic
+/// at a slot path absorbed the run of binary diagnostics firing per failing
+/// element at index-extended paths under it — and B.9 retired the divergence
+/// it excused by making the binary arm report a wrapped typed-vector element
+/// at the slot path too. It was still absorbing nothing on any corpus case,
+/// so it went, and an index-extended path is a real mismatch again.
+///
+/// One tree↔binary divergence does survive, and this comparator is not what
+/// tolerates it: a union whose vector alternative is not the *determined*
+/// arm collapses to `union_no_branch_matched` at the slot on the tree arm
+/// while the binary arm keeps firing the leaf code per element. The codes
+/// differ, so the retired exemption never covered that either — the corpus
+/// simply has no such case.
+///
+/// Pure: no printing, no allocation, so unit tests can assert on it without
+/// stderr noise.
 fn firstBinaryParityDivergence(
     tree_diags: []const Ast.Diagnostic,
     bin_diags: []const Ast.Diagnostic,
@@ -1169,20 +1179,6 @@ fn firstBinaryParityDivergence(
         if (diagExact(t, b)) {
             ti += 1;
             bi += 1;
-            continue;
-        }
-        // Vector-element exemption: the binary diag descends into the tree
-        // diag's slot via an all-index path suffix. Consume the one tree
-        // diag and absorb the whole per-element run (same code + severity,
-        // same slot prefix).
-        if (t.code == b.code and t.severity == b.severity and isDigitSuffixExtension(t.path, b.path)) {
-            ti += 1;
-            bi += 1;
-            while (bi < bin_diags.len and
-                bin_diags[bi].code == t.code and
-                bin_diags[bi].severity == t.severity and
-                isDigitSuffixExtension(t.path, bin_diags[bi].path)) : (bi += 1)
-            {}
             continue;
         }
         return .{ ti, bi };
@@ -1213,15 +1209,6 @@ fn synthDiag(
     return .{ .span = .{ .start = 0, .end = 0 }, .message = "", .severity = severity, .code = code, .path = path };
 }
 
-test "isDigitSuffixExtension: precise about index tails" {
-    try testing.expect(isDigitSuffixExtension(&.{ "set", "v" }, &.{ "set", "v", "0" }));
-    try testing.expect(isDigitSuffixExtension(&.{ "set", "m" }, &.{ "set", "m", "3", "2" }));
-    try testing.expect(!isDigitSuffixExtension(&.{ "set", "v" }, &.{ "set", "v" })); // not longer
-    try testing.expect(!isDigitSuffixExtension(&.{ "set", "v" }, &.{ "set", "w", "0" })); // prefix differs
-    try testing.expect(!isDigitSuffixExtension(&.{ "set", "v" }, &.{ "set", "v", "x" })); // non-digit tail
-    try testing.expect(!isDigitSuffixExtension(&.{ "set", "v" }, &.{ "set", "v", "" })); // empty segment
-}
-
 test "binary parity comparator: identical streams pass" {
     const tree = [_]Ast.Diagnostic{
         synthDiag(.unknown_form, .err, &.{"scene"}),
@@ -1230,26 +1217,14 @@ test "binary parity comparator: identical streams pass" {
     try testing.expect(firstBinaryParityDivergence(&tree, &tree) == null);
 }
 
-test "binary parity comparator: vector-element single index absorbed" {
-    // Tree wraps at the slot; binary fires at element [1]. Same code.
+test "binary parity comparator: an index-extended path diverges" {
+    // The exemption this replaces absorbed exactly this pair. B.9 made the
+    // binary arm report a wrapped typed-vector element at the *slot* path,
+    // so a per-element path with the same code is a regression now, not a
+    // sanctioned divergence — and the comparator has to say so.
     const tree = [_]Ast.Diagnostic{synthDiag(.number_above_max, .err, &.{ "set", "v" })};
     const bin = [_]Ast.Diagnostic{synthDiag(.number_above_max, .err, &.{ "set", "v", "1" })};
-    try testing.expect(firstBinaryParityDivergence(&tree, &bin) == null);
-}
-
-test "binary parity comparator: multi-element run absorbed into one wrap" {
-    const tree = [_]Ast.Diagnostic{synthDiag(.number_above_max, .err, &.{ "set", "v" })};
-    const bin = [_]Ast.Diagnostic{
-        synthDiag(.number_above_max, .err, &.{ "set", "v", "0" }),
-        synthDiag(.number_above_max, .err, &.{ "set", "v", "1" }),
-    };
-    try testing.expect(firstBinaryParityDivergence(&tree, &bin) == null);
-}
-
-test "binary parity comparator: nested index suffix absorbed" {
-    const tree = [_]Ast.Diagnostic{synthDiag(.vector_length_mismatch, .err, &.{ "set", "m" })};
-    const bin = [_]Ast.Diagnostic{synthDiag(.vector_length_mismatch, .err, &.{ "set", "m", "3" })};
-    try testing.expect(firstBinaryParityDivergence(&tree, &bin) == null);
+    try testing.expect(firstBinaryParityDivergence(&tree, &bin) != null);
 }
 
 test "binary parity comparator: genuine code mismatch diverges" {
@@ -1401,6 +1376,55 @@ test "conformance: classifier.json wasm-host skip families match the Zig runner 
     try testing.expect(saw_exact);
 }
 
+test "conformance: classifier.json validator-option families match the Zig runner mirror" {
+    // Same drift net as the skip families above, for the other vocabulary in
+    // the file: `validatorOptionFamilies` names which case prefixes run with
+    // a non-default validator option, and `heldSymbolFor` is the reference
+    // runner's native mirror of it. A family added to the JSON without a Zig
+    // mirror would silently run those cases with the option OFF here and ON
+    // in the two TS hosts and Rust — the corpus would still pass on three
+    // runners and the reference would be the one that is wrong.
+    const a = testing.allocator;
+
+    const Family = struct {
+        label: []const u8,
+        match: struct { type: []const u8, value: []const u8 },
+        option: []const u8,
+        value: []const u8,
+    };
+    const ClassifierData = struct {
+        validatorOptionFamilies: []const Family,
+    };
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        "conformance/classifier.json",
+        a,
+        .unlimited,
+    );
+    defer a.free(bytes);
+
+    const parsed = try std.json.parseFromSlice(ClassifierData, a, bytes, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    const families = parsed.value.validatorOptionFamilies;
+
+    // Exactly the one family the runner hard-codes. Counted, so a JSON-only
+    // addition trips here rather than being quietly ignored.
+    try testing.expectEqual(@as(usize, 1), families.len);
+    const fam = families[0];
+    try testing.expectEqualStrings("prefix", fam.match.type);
+    try testing.expectEqualStrings("held-", fam.match.value);
+    try testing.expectEqualStrings("heldSymbol", fam.option);
+    try testing.expectEqualStrings("_", fam.value);
+
+    // Positive and negative space, asserted separately.
+    try testing.expectEqualStrings("_", heldSymbolFor("held-anything").?);
+    try testing.expect(heldSymbolFor("lowering-foo") == null);
+    try testing.expect(heldSymbolFor("held") == null);
+}
+
 /// Cases that exercise the executable-plugin runtime (D7-exec). Pre-
 /// dating the native runtime adapter, these were skipped entirely on
 /// Zig-native because no in-process wasm runtime existed; now they
@@ -1520,8 +1544,8 @@ test "conformance: legacy cases replay through binary validator" {
 
     // Dual-path invariant across the corpus: every legacy case's Phase-3
     // input validation emits an identical (code, severity, path) stream
-    // whether walked over the tree or the binary IR (modulo the documented
-    // vector-element exemption and the BINARY_REPLAY_SKIP path residuals).
+    // whether walked over the tree or the binary IR (modulo the
+    // BINARY_REPLAY_SKIP path residuals).
     // A KeySpec / value-kind feature added to one walker but not the other
     // surfaces here — even if `expected.sjon` (tree-only) still matches.
     // Inline and query shapes are covered by 2.5 and the PatternQuery
@@ -1552,14 +1576,15 @@ test "conformance: inline cases replay through binary validator" {
     // Dual-path invariant across the inline-manifest corpus: every case's
     // data-forest validation emits an identical (code, severity, path)
     // stream whether walked over the tree or the binary IR (modulo the
-    // vector-element exemption and BINARY_REPLAY_SKIP path residuals). The
-    // inline shape (2.5) complements the legacy shape (2.4): here the input
-    // is a full document driven through `Host.validateDocument`, and the two
-    // walkers run over the resolved `data_forest` under `Options{}` (the
-    // binary walker takes none). `.query` cases are excluded by the kind
-    // filter — PatternQuery parity is covered by its own property tests.
-    // `numeric-vector-elementwise-bound` is live proof the exemption arm
-    // fires here (tree wraps at the slot, binary fires per element).
+    // BINARY_REPLAY_SKIP path residuals). The inline shape (2.5) complements
+    // the legacy shape (2.4): here the input is a full document driven
+    // through `Host.validateDocument`, and the two walkers run over the
+    // resolved `data_forest` under `Options{}` (the binary walker takes
+    // none). `.query` cases are excluded by the kind filter — PatternQuery
+    // parity is covered by its own property tests.
+    // `numeric-vector-elementwise-bound` is the case that used to need the
+    // vector-element exemption; post-B.9 both walkers path it at the slot,
+    // which is why the exemption could go.
     var failures: usize = 0;
     for (cases.items) |c| {
         if (c.kind != .inline_manifest) continue;

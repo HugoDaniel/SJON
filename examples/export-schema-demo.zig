@@ -82,6 +82,16 @@ pub fn main(init: std.process.Init) !u8 {
     // --- S14: a variant selected by several discriminant values. Markdown
     //     too, since the heading spells the set. ---
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/variant-set/plugin.sjon", "examples/plugins/variant-set/variant-set", &any_diff, .{ .markdown = true });
+    // --- An opaque slot (`:walk-opaque true`). The exporters have nothing
+    //     to say about the flag, and the goldens are the proof: the slot
+    //     exports as any form-shaped slot does. The fixture is wired here
+    //     so a manifest that stops loading fails the build. ---
+    try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/opaque-slot/plugin.sjon", "examples/plugins/opaque-slot/opaque-slot", &any_diff, .{});
+    // --- Defaults declared on variant keys, and a discriminant that defaults
+    //     to a value selecting a variant. Markdown too, since the page is
+    //     where a reader sees which keys a variant carries and what they
+    //     default to. ---
+    try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/variant-defaults/plugin.sjon", "examples/plugins/variant-defaults/variant-defaults", &any_diff, .{ .markdown = true });
     // --- M3 multi-plugin per-plugin layout (pair-a/pair-b) ---
     try exportPerPluginPair(gpa, io, regen, stderr, &any_diff);
 

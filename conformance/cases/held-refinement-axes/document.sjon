@@ -1,0 +1,61 @@
+; A held position — the author has deliberately not filled it in yet —
+; is legal wherever a value may appear.
+;
+; This case runs with the validator's `held_symbol` set to `_`, which the
+; `held-` directory prefix selects (`conformance/classifier.json`,
+; `validatorOptionFamilies`). That is a property of the RUN, not of this
+; document: nothing written here turns the checking off, and the same
+; bytes under `held-not-opted-in/` report on every line below.
+;
+; One key per refinement axis, because the claim being pinned is that all
+; of them are downstream of a single gate. `underlying`, `cross_ref`,
+; `members`, `unit`, `numeric`, `repr`, a union arm, a vector element, and
+; the vector itself.
+(plugin :name hold :version "1.0.0"
+  (value-kind :name kernel-ref :underlying symbol
+    :cross-ref (cross-ref :target kernel :name-key name))
+  (value-kind :name blend-mode :underlying symbol
+    :members (member-set :values [over add]))
+  (value-kind :name turn :underlying number
+    :unit (unit-shape :required true :allowed [deg]))
+  (value-kind :name step-count :underlying number
+    :numeric (numeric-bounds :min 1 :max 8 :integer true))
+  (value-kind :name texel :underlying number :repr (repr-shape :type u16))
+  (value-kind :name blend-or-kernel :underlying union
+    :union (union-shape :alternatives [blend-mode kernel-ref]))
+  (value-kind :name pair :underlying vector
+    :vector (vector-shape :len 2 :element number))
+
+  (form :name kernel
+    (key :name name :type symbol :optional false))
+
+  (form :name warp
+    (key :name amount :type number :optional true)
+    (key :name by :type kernel-ref :optional true)
+    (key :name blend :type blend-mode :optional true)
+    (key :name angle :type turn :optional true)
+    (key :name steps :type step-count :optional true)
+    (key :name texel :type texel :optional true)
+    (key :name mode :type blend-or-kernel :optional true)
+    (key :name size :type pair :optional true)))
+
+(kernel :name flow)
+
+; Filled: the ordinary reading, clean.
+(warp :amount 0.4 :by flow :blend over :angle 90deg :steps 3 :texel 8
+      :mode add :size [16 16])
+
+; Held, one axis at a time.
+(warp :amount _)
+(warp :by _)
+(warp :blend _)
+(warp :angle _)
+(warp :steps _)
+(warp :texel _)
+(warp :mode _)
+(warp :size _)
+(warp :size [16 _])
+
+; Held beside filled on one form: the relaxation is a property of the
+; value, so `:amount` is still checked.
+(warp :by _ :amount 0.4)

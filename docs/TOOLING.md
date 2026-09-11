@@ -29,6 +29,20 @@ toolchain. Both land in `zig-out/bin/`.
 | `zig build wasm-lsp` | browser byte-pump | `zig-out/bin/sjon-lsp.wasm` |
 | `zig build lsp-all` | both of the above | both |
 
+The native binary is the one an editor points at: every block under
+[Per-editor setup](#per-editor-setup) launches `sjon-lsp` over stdio. The
+WASM byte-pump is for hosts with no process to spawn — it is what the
+playground on the site runs — and no editor talks to it.
+
+`zig build lsp` with no `-Doptimize` builds in **Debug**, which is the mode
+to point an editor at. `initialize` runs lsp-kit's own capability validator
+over the set the server advertises, so a capability with no handler behind
+it stops the server there instead of promising a client a method that
+answers method-not-found. `-Doptimize=ReleaseSafe` builds a faster server
+without that check. `zig build test` runs the same validator as a test
+(`lsp-main`) whenever `lsp-kit` is fetched, so a mismatch is a red build
+before it is anyone's dead editor.
+
 The native build depends on `lsp-kit`, a **lazy** dependency — the first
 `zig build lsp` fetches it (network required once), later builds are offline.
 The WASM build has no such dependency.
@@ -43,22 +57,56 @@ transport-neutral SJON logic; `main.zig` provides stdio + `lsp-kit`
 JSON-RPC and `wasm.zig` exposes a hand-rolled JSON-RPC dispatcher for
 browser hosts.
 
-Capabilities: diagnostics (with code actions for `ambiguous_form` /
-`missing_required_key` / `expr_kvpair_not_allowed`), hover, completion
-(form-head snippet completion + key completion), signature help (per
-`ExprFunc.signatures` overload), folding ranges, inlay hints, document
-symbols, formatting, goto-definition, document highlight, selection
-ranges, workspace symbols, find-references, prepare-rename, rename,
-semantic tokens (`full` only — schema-resolved heads, keys, members,
-and cross-ref names, which is the one axis the TextMate grammar in
-`hosts/highlight` cannot see), and workspace diagnostics (native only
+Capabilities: diagnostics with code actions (closest-spelling fixes
+for `unknown_form`, `unknown_key`, `unknown_local_form`, `not_member`,
+`not_cross_ref` and `cross_ref_outside_scope`; `ambiguous_form`
+qualification; `missing_required_key` stubs; `duplicate_key` removal;
+`expr_kvpair_not_allowed`), hover, completion (form-head snippets, keys,
+and values), signature help (per `ExprFunc.signatures` overload),
+folding ranges, inlay hints, document symbols, formatting,
+goto-definition, document highlight, selection ranges, workspace
+symbols, find-references, prepare-rename, rename, semantic tokens
+(`full` only — schema-resolved heads, keys, members, and cross-ref
+names, which is the one axis the TextMate grammar in `hosts/highlight`
+cannot see), and workspace diagnostics (native only
 — the server walks `**/*.sjon` under the workspace root so errors in
 files you never opened still reach the Problems panel; the WASM build
-has no filesystem and reports open documents only). Diagnostic codes
-are the bare snake_case tags from `Ast.Diagnostic.Code` (stable across
-SJON versions per [LANGUAGE.md §7.6](LANGUAGE.md)). Schema reloads on
+has no filesystem and reports open documents only; the walk skips
+`sjon-project.sjon`, which is the resolver's config rather than a
+document in any plugin's vocabulary, and real project errors reach
+you on that file's own URI). Diagnostic codes are the bare snake_case
+tags from `Ast.Diagnostic.Code` (stable across SJON versions per
+[LANGUAGE.md §7.6](LANGUAGE.md)). Schema reloads on
 `workspace/didChangeWatchedFiles` for project files and revalidates
 all open documents.
+
+Every schema-aware surface resolves a form the way the validator does,
+against the **slot** it sits in and not the global catalog. Inside a
+`:type form` key or a `:positional` slot that declares local forms,
+head completion offers the slot's own forms first and shadows a
+same-named global (the snippet inserts the local's keys), hover and
+signature help describe the local's keys, key and value completion
+offer them, semantic tokens colour them, inlay hints show the local's
+defaults and label the head with the plugin that resolved it, and the
+quick fixes draw their candidates from the slot, so the fix for `:rr`
+inside a local `circle` is `:r` and not the global's `:radius`. A
+closed head-set narrows head completion to its members whether or not
+a global declaration stands behind each one. A `(variant …)` key is
+live on every surface once the discriminant that selects it precedes
+the cursor, and silent otherwise, which is the validator's
+`unknown_key` rule; key completion likewise offers a variant's keys
+only after that discriminant. A union-typed slot completes to every
+alternative's values and narrows to one arm as soon as the typed text
+has a shape only that arm accepts; a shape two arms reach keeps the
+whole list. Digit-leading members (`2d`, `2d-array`) hover, colour and
+quick-fix like any other member, the fix measured against the raw text
+so `2dd` and `2.5d` both offer `2d`. The playground on the site drives
+the same server and gains all of this except semantic tokens, which it
+does not request (its highlighting is the CodeMirror grammar). Both
+servers advertise inlay hints without a resolve step: the native one
+spells it `resolveProvider: false`, the WASM dispatcher `true`, and
+the two say the same thing to a client, since neither has a resolve
+method.
 
 ## Per-editor setup
 
@@ -216,6 +264,70 @@ The authoritative contract is the header of
 [`lsp-worker.ts`](../landing-page/src/playground/lsp-worker.ts) is the
 reference client that drives it in production.
 
+## Spans and addresses without the server
+
+An editor that decorates a document needs two things the server answers
+awkwardly: the span of every node, and the §11.2 path of the node under a
+byte. `textDocument/selectionRange` gives you the first as a chain of
+ranges, but a range is not an address, and asking it per pointer move is a
+JSON-RPC round trip per mouse event.
+
+`sjon.wasm` answers both directly, in UTF-8 byte offsets, off the same
+parse that validates the text. Neither export refuses a document that does
+not parse: the revision in the middle of a keystroke is the one whose
+addresses you want, and the diagnostics come back beside the answer.
+
+**`sjon_node_table(src)`** — the bulk answer, one call per revision:
+
+```json
+{"nodes":[{"i":0,"parent":-1,"root":1,"seg":null,"kind":"form",
+           "span":[105,157],"head_span":[106,111]},
+          {"i":1,"parent":0,"root":1,"seg":"value","kind":"form",
+           "span":[150,176],"head_span":[151,152],"key_span":[143,149]},
+          {"i":2,"parent":1,"root":1,"seg":0,"kind":"number",
+           "span":[153,156]}],
+ "diagnostics":[]}
+```
+
+`seg` is the row's own §11.2 path step: a string for a keyword value, an
+integer for a positional child or a vector element, `null` for a root. A
+row's full path is the chain of `seg` up the `parent` links, so it is
+§11.2 by construction rather than by your reading of an encoding. `parent`
+is `-1` on a root, and `head_span` / `key_span` appear only on the rows
+that have one.
+
+A `:key value` pair gets no row. §11.2 addresses a pair's *value*, so the
+pair has no address of its own, and its key span rides on the value's row.
+
+Rows are pre-order — a parent always precedes its children, siblings are
+in source order — so the innermost node containing a byte is the **last**
+row whose span contains it. That makes hit-testing a scan on your side,
+with no call back in per pointer move. `@sjon/web` ships that scan as
+`rowContaining(table, start, end?)` and the path walk as
+`pathOfRow(table, row)`.
+
+**`sjon_address_of_span(src, start, end)`** — the point answer, for a host
+holding a span and not a table:
+
+```json
+{"root":1,"path":["value",0],"span":[153,156],"kind":"number"}
+```
+
+or the literal `null` when the range is inside no root. Pass `start ===
+end` for a caret. `root` and `path` are an edit action's two fields
+verbatim, so the answer goes straight back to `sjon edit` or
+`sjon_apply_edits`.
+
+A range covering a whole `:key value` pair answers the **enclosing form**,
+because §11.2 addresses a pair's value and an edit over the pair itself is
+a `set_keyword` on the form.
+
+Both are wrapped on `@sjon/web`'s `SjonEncoder` (`nodeTable`,
+`addressOfSpan`) and on the Rust host (`SjonHost::node_table`,
+`SjonHost::address_of_span`). Offsets are UTF-8 bytes in every case: a
+document past ASCII counts differently in UTF-16, so convert at your
+editor's boundary, not before.
+
 ## The CLI
 
 `zig build` installs `sjon` to `zig-out/bin/`. Every verb reads SJON, writes
@@ -231,6 +343,7 @@ channel. `sjon --help` is the authoritative list; the common verbs:
 | `effective` | `sjon effective doc.sjon` — the document with omitted defaults spliced in; `diff <(sjon effective a) <(sjon effective b)` compares what documents mean |
 | `share` | `sjon share broken.sjon \| pbcopy` — a playground deep link for a repro (schemas as extra args become tabs) |
 | `fmt` | `sjon fmt src/*.sjon` — reformat in place, preserving comments |
+| `edit` | `sjon edit doc.sjon '{"op":"replace","path":["w"],"value":801}'` — apply structural edit actions (LANGUAGE.md §11), inside a root or over the root list; only the edited spans change |
 | `explain` | `sjon explain unknown_form` (or `--list`) |
 | `repl` | `sjon repl` — interactive loop: expressions print values, forms validate; `:schema`, `:explain`, `:query` inside |
 | `export-schema` | `sjon export-schema doc.sjon` — JSON Schema / TypeScript / Markdown reference pages (`--target=markdown`) |
@@ -252,6 +365,73 @@ formats from the decoded value and never sees the source: `1_000` and `1e3`
 both come back as `1000`, and `0xFF` as `255` (LANGUAGE.md §4.2). Values
 round-trip; spellings do not. If you keep hex masks in a formatted file, the
 comment beside them is what survives.
+
+### Changing a document from a script
+
+`sjon edit` applies the structural edit actions of LANGUAGE.md §11 — the same
+vocabulary an editor and the web hosts write in — and prints the result. It
+changes only the bytes of the spans the actions name, so a one-literal edit is
+a one-literal diff:
+
+```console
+$ cat scene.sjon
+(scene
+  :w   800   ; width
+  :h   600)
+
+$ sjon edit scene.sjon '{"op":"replace","path":["w"],"value":801}'
+(scene
+  :w   801   ; width
+  :h   600)
+```
+
+Two of the eight actions add and remove a whole root, so a script can grow a
+document as well as change one. They take `index` and no `path`, and an
+omitted `index` appends:
+
+```console
+$ sjon edit scene.sjon '{"op":"insert_root","value":{"$form":"camera","fov":60}}'
+(scene
+  :w   800   ; width
+  :h   600)
+(camera :fov 60)
+```
+
+The separator is the document's own. A file that already puts a blank line
+between its roots keeps it, because the run between the last two roots is what
+gets copied:
+
+```console
+$ cat two.sjon
+(scene :w 800)
+
+(camera :fov 60)
+
+$ sjon edit two.sjon '{"op":"insert_root","value":{"$form":"light","dir":[0,1,0]}}'
+(scene :w 800)
+
+(camera :fov 60)
+
+(light :dir [0 1 0])
+```
+
+Only a one-root file has no such run, and there the separator is one newline.
+
+Each `ACTION` argument is one JSON action or a JSON array of them, and they
+all form one batch applied left to right. `--actions=PATH` reads the batch
+from a file (`-` for stdin, when the document is not), and `--in-place`
+writes the result back instead of printing it.
+
+Layout is preserved and there is no flag to re-print: `sjon edit … | sjon fmt -`
+is the refold, one verb per job. Like `fmt`, `edit` is purely syntactic — it
+resolves no project and validates nothing, so `sjon edit … && sjon check …`
+is the pair — and it refuses a document it cannot parse rather than writing
+back the parser's recovery. A failing action names itself:
+
+```console
+$ sjon edit scene.sjon '{"op":"replace","path":["nope"],"value":1}'
+sjon edit: PathNotFound (action 0)
+```
 
 ### From a bare code to an explanation
 

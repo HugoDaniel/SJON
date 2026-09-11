@@ -1,0 +1,23 @@
+; The one way an opaque slot adds a diagnostic.
+;
+; `(anchor :name origin)` is a perfectly good declaration, and it sits
+; inside a `:body`. Every descent stops at an opaque slot, the cross-ref
+; index pass included, so `origin` is never registered and the
+; reference below finds an empty registry:
+;
+;   not_cross_ref at [apply target]
+;   form `apply` keyword `:target` expects `anchor-name`, got `origin`
+;   (no `(template/anchor :name …)` form declares this name)
+;
+; The repair is not at the reference. Move the anchor out of the body
+; (one line up, to the top level) and it registers as it always did.
+; The alternative repair, declaring the slot readable, is a schema
+; change and not the author's to make.
+;
+;   cat examples/plugins/opaque-slot/plugin.sjon \
+;       examples/plugins/opaque-slot/example-hidden-target.sjon | sjon validate - --no-project
+
+(template :name intro
+  :body (anchor :name origin))
+
+(apply :template intro :target origin)

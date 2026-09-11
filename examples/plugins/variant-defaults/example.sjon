@@ -1,0 +1,41 @@
+; Four lights, three of them leaning on defaults. Read each against
+; the `sjon effective` line under it.
+;
+;   cat examples/plugins/variant-defaults/plugin.sjon \
+;       examples/plugins/variant-defaults/example.sjon | sjon effective - --no-project
+
+(anchor :name origin)
+
+; Nothing written. `:kind` defaults to `point`, which selects the
+; `point` variant, whose `:range` then defaults too:
+;
+;   (light :kind point :intensity 1 :range 10)
+(light)
+
+; The discriminant written, the variant's keys omitted. `:reach`,
+; `:angle` and `:aim` all materialize, and `:aim origin` resolves
+; against the anchor above:
+;
+;   (light :kind spot :intensity 1 :reach 20 :angle 45 :aim origin)
+(light :kind spot)
+
+; An author value always wins over a default, on a variant key as on a
+; common one. `:angle 30` stays; the other two spot keys fill in:
+;
+;   (light :kind spot :angle 30 :intensity 1 :reach 20 :aim origin)
+(light :kind spot :angle 30)
+
+; `sun` declares no defaults and one required key, so this form is
+; complete as written and gains only the common `:intensity`:
+;
+;   (light :kind sun :direction [0 -1 0] :intensity 1)
+(light :kind sun :direction [0 -1 0])
+
+; The lines NOT written here, both `unknown_key` on `:range`:
+;
+;   (light :kind spot :range 5)      ; `:range` belongs to `point`
+;   (light :range 5 :kind point)     ; ahead of the discriminant
+;
+; A default is a fallback for an omitted declared key. A key the
+; validator does not accept at its position is not declared there, so
+; no default makes it legal.

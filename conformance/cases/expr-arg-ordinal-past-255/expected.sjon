@@ -1,0 +1,2 @@
+(diagnostics
+  (diagnostic :code expr_type_mismatch :path [mul 256]))

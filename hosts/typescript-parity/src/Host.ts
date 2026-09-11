@@ -64,6 +64,15 @@ export interface HostOptions {
   // port also drains its own FilesystemResolver diagnostics inline, so this
   // field is for a caller that wants to prepend additional diagnostics.
   readonly projectDiagnostics?: readonly HostDiagnostic[];
+  // The symbol a *held* position is spelled with: a value the author has
+  // deliberately not filled in yet. Mirrors web (`types.ts`) and rust
+  // (`HostOptions::held_symbol`), and forwards to `validate`. Undefined —
+  // every caller that has not opted in — validates exactly as before.
+  //
+  // The assertion is about the *run*, not the document: a manifest is loaded
+  // because the document said `(use-plugin …)`, so a document-level opt-in
+  // would let a document turn off its own type checking.
+  readonly heldSymbol?: string;
 }
 
 export interface HostResult {
@@ -258,7 +267,7 @@ export function validateDocument(source: string, options: HostOptions): HostResu
   }
 
   // Validation pass — the data forest only.
-  for (const d of validate(schema, part.dataForest)) {
+  for (const d of validate(schema, part.dataForest, options.heldSymbol ?? null)) {
     diagnostics.push(wrapDiagnostic(d, 'validation', null));
   }
 

@@ -54,6 +54,7 @@ import {
   canonicalSpelling,
   checkArity,
   crossRefBucketKey,
+  describeBucket,
   headSetIsUnbounded,
   effectiveOptional,
   lookupExprFunc,
@@ -293,6 +294,22 @@ interface CrossRefRegistry {
   readonly targetsByKind: ReadonlyMap<string, CrossRefTargetSpec>;
   readonly scopeOpeners: ReadonlySet<string>; // canonical scope-opener forms
   readonly cycleDiags: readonly Diagnostic[];
+  /**
+   * The symbol a *held* position is spelled with: a value the author has
+   * deliberately not filled in yet. `null` for every run that has not opted
+   * in, which validates exactly as it did before the field existed.
+   *
+   * Rides on the registry for the reason `Validator.zig` gives: the index is
+   * the one object already threaded to every match site AND to the
+   * registration walk, and a held name registers nothing (matching is not
+   * the only thing a symbol does in a cross-ref schema).
+   */
+  readonly heldSymbol: string | null;
+}
+
+/** True when `node` is the run's held spelling. */
+function isHeld(registry: CrossRefRegistry, node: Node): boolean {
+  return registry.heldSymbol !== null && node.tag === 'symbol' && node.text === registry.heldSymbol;
 }
 
 // ─── Schema helpers ─────────────────────────────────────────────────
@@ -393,13 +410,17 @@ function collectAcyclicSpecs(schema: Schema): AcyclicSpec[] {
 
 // ─── Validate entry ──────────────────────────────────────────────────
 
-export function validate(schema: Schema, roots: readonly Node[]): readonly Diagnostic[] {
+export function validate(
+  schema: Schema,
+  roots: readonly Node[],
+  heldSymbol: string | null = null,
+): readonly Diagnostic[] {
   const diags: Diagnostic[] = [];
 
   // Pre-pass: build cross-ref registry over the forest, capturing
   // duplicate-name diagnostics, lexical scope frames, and per-scope
   // edge graphs for cycle detection.
-  const registry = buildCrossRefIndex(schema, roots, diags);
+  const registry = buildCrossRefIndex(schema, roots, diags, heldSymbol);
 
   // Cycle detection diagnostics live at the document level (path =
   // []), parallel to `duplicate_cross_ref_target`. Append once.
@@ -434,6 +455,7 @@ function buildCrossRefIndex(
   schema: Schema,
   roots: readonly Node[],
   diags: Diagnostic[],
+  heldSymbol: string | null,
 ): CrossRefRegistry {
   // 1. Cross-ref kinds → canonical target specs.
   const targetsByHead = new Map<string, CrossRefTargetSpec[]>();
@@ -500,6 +522,7 @@ function buildCrossRefIndex(
       targetsByKind,
       scopeOpeners,
       cycleDiags: [],
+      heldSymbol,
     };
   }
 
@@ -520,6 +543,8 @@ function buildCrossRefIndex(
       byScope,
       cycleNodesBySpec,
       diags,
+      heldSymbol,
+      [],
     );
   }
 
@@ -539,6 +564,7 @@ function buildCrossRefIndex(
     targetsByKind,
     scopeOpeners,
     cycleDiags,
+    heldSymbol,
   };
 }
 
@@ -554,6 +580,15 @@ function walkIndex(
   byScope: Map<ScopeId, Map<string, Set<string>>>,
   cycleNodesBySpec: Map<ScopeId, CycleNode[]>[],
   diags: Diagnostic[],
+  heldSymbol: string | null,
+  /**
+   * Slot-local registry this node's head resolves against before the global
+   * catalog — the same thing `visit` carries as `LocalFormScope.registry`.
+   * This pass needs it for one reason: to know which `FormSpec` a head
+   * resolved to, so a `:walk-opaque` slot can stop the descent here as it
+   * does there. Empty for the overwhelming majority of nodes.
+   */
+  registry: readonly FormSpec[],
 ): void {
   if (node.tag === 'form') {
     const canonical = canonicalize(schema, namespacedHead(node));
@@ -568,7 +603,7 @@ function walkIndex(
 
     // Register into every bucket this head feeds.
     for (const targetSpec of targetsByHead.get(node.head) ?? []) {
-      registerInstance(node, targetSpec, treeScope, scopeStack, byScope, diags);
+      registerInstance(node, targetSpec, treeScope, scopeStack, byScope, diags, heldSymbol);
     }
 
     for (let i = 0; i < acyclicSpecs.length; i++) {
@@ -577,7 +612,50 @@ function walkIndex(
       captureCycleNode(node, treeIdx, spec, treeScope, scopeStack, cycleNodesBySpec[i]!);
     }
 
+    // Slot-aware descent, matching `visit`'s. A subtree the surrounding
+    // schema declined to interpret is not a place to harvest cross-ref
+    // targets, scopes or cycle edges out of either, so a `:walk-opaque`
+    // slot's value is never recursed into.
+    let ownSpec: FormSpec | null = null;
+    if (node.namespace === null) {
+      for (const lf of registry) {
+        if (lf.name === node.head) {
+          ownSpec = lf;
+          break;
+        }
+      }
+    }
+    if (!ownSpec) {
+      const r = lookupForm(schema, node.head, node.namespace);
+      if (r.kind === 'found') ownSpec = r.value;
+    }
+    // The active variant while walking the children in order, exactly as
+    // `visit` resolves it: a variant key ahead of its discriminant is
+    // `unknown_key` and puts nothing in scope. No overlay leg — this port
+    // has no materialized defaults.
+    let activeVariant: Variant | null = null;
     for (const ch of node.children) {
+      let childRegistry: readonly FormSpec[] = [];
+      if (ch.tag === 'kvpair') {
+        let matchedKey: KeySpec | null = null;
+        if (ownSpec) {
+          const commonIdx = ownSpec.keys.findIndex((k) => k.name === ch.key);
+          if (commonIdx >= 0) {
+            matchedKey = ownSpec.keys[commonIdx]!;
+            if (ownSpec.discriminantIdx === commonIdx && ch.value.tag === 'symbol') {
+              const sym = ch.value.text;
+              const selected = (ownSpec.variants ?? []).find((v) => variantSelects(v, sym));
+              if (selected) activeVariant = selected;
+            }
+          } else if (activeVariant) {
+            matchedKey = activeVariant.keys.find((vk) => vk.name === ch.key) ?? null;
+          }
+        }
+        if (matchedKey?.walkOpaque) continue;
+        childRegistry = matchedKey?.localForms ?? [];
+      } else if (ch.tag === 'form') {
+        childRegistry = ownSpec?.localForms ?? [];
+      }
       walkIndex(
         schema,
         ch,
@@ -590,6 +668,8 @@ function walkIndex(
         byScope,
         cycleNodesBySpec,
         diags,
+        heldSymbol,
+        childRegistry,
       );
     }
 
@@ -608,9 +688,13 @@ function walkIndex(
         byScope,
         cycleNodesBySpec,
         diags,
+        heldSymbol,
+        registry,
       );
     }
   } else if (node.tag === 'kvpair') {
+    // Only reachable for a kvpair handed in as a root; a kvpair *child* had
+    // its slot decided by the form arm above.
     walkIndex(
       schema,
       node.value,
@@ -623,6 +707,8 @@ function walkIndex(
       byScope,
       cycleNodesBySpec,
       diags,
+      heldSymbol,
+      registry,
     );
   }
 }
@@ -647,6 +733,7 @@ function registerInstance(
   scopeStack: readonly ScopeFrame[],
   byScope: Map<ScopeId, Map<string, Set<string>>>,
   diags: Diagnostic[],
+  heldSymbol: string | null,
 ): void {
   // Lexical tolerance: silently skip when the kvpair is missing or
   // its value isn't a symbol — those errors surface elsewhere
@@ -655,6 +742,12 @@ function registerInstance(
     if (ch.tag !== 'kvpair') continue;
     if (ch.key !== spec.nameKey) continue;
     if (ch.value.tag !== 'symbol') return;
+    // A held name is not a name: it does not collide with another held
+    // name, and it is not a target anything else can reach. Without this
+    // the cold start the option exists to serve — several half-written
+    // forms, each holding its `:name` — collects a
+    // `duplicate_cross_ref_target` on every one after the first.
+    if (heldSymbol !== null && ch.value.text === heldSymbol) return;
     const scopeId = pickRegistrationScope(spec, scopeStack, treeScope);
     let scopeMap = byScope.get(scopeId);
     if (!scopeMap) {
@@ -668,9 +761,15 @@ function registerInstance(
     }
     const text = ch.value.text;
     if (nameSet.has(text)) {
+      // The *bucket*, not `form.head`: the head is the bare spelling of
+      // whichever form happens to sit at this span, where the collision is
+      // a property of the registry the group's targets share. A group also
+      // needs its own preposition — `on form` names one form and this is a
+      // set of them.
+      const shown = describeBucket(spec.canonicalTarget);
       diags.push({
         code: 'duplicate_cross_ref_target',
-        message: `duplicate cross-ref name \`${text}\` on form \`${form.head}\``,
+        message: `duplicate cross-ref name \`${text}\` ${shown.isGroup ? 'across forms' : 'on form'} \`${shown.text}\``,
         path: [],
         span: ch.value.span,
         severity: 'err',
@@ -898,6 +997,14 @@ function visit(
               matchedKey = activeVariant.keys.find((vk) => vk.name === child.key) ?? null;
             }
           }
+          // `:walk-opaque true` on the accepted key: the value's contents
+          // are opaque to the surrounding schema, so the whole child frame
+          // is abandoned rather than pushed. The slot's own type check
+          // already ran in `validateFormKeys`; what stops is the per-node
+          // descent that would otherwise report `unknown_form` for an
+          // expression-shaped value. Mirrors `validateOneTree`'s
+          // `continue :outer`.
+          if (matchedKey?.walkOpaque) continue;
           if (value.tag === 'form') {
             if (value.head.length > 0) valuePath = [...kvPath, value.head];
             // Attach the slot's local registry when the accepted KeySpec
@@ -1298,7 +1405,7 @@ function validateFormKeys(
     if (fail) {
       emit(
         diags,
-        child.value.span,
+        fail.span ?? child.value.span,
         [...path, child.key],
         fail.code,
         fail.message(spec.name, child.key),
@@ -1366,12 +1473,18 @@ function validateFormKeys(
       switch (spec.positional.kind) {
         case 'none':
           if (!spec.open) {
+            // A keyword leaf here is a keyword the parser could not pair,
+            // which reads nothing like a positional to an author. Mirrors
+            // Zig's `positionalNotAllowedMsg`; the path step is unchanged.
+            const bareKeyword = child.tag === 'keyword' ? child.name : null;
             emit(
               diags,
               child.span,
               [...path, step],
               'positional_not_allowed',
-              `form \`${spec.name}\` does not accept positional children`,
+              bareKeyword === null
+                ? `form \`${spec.name}\` does not accept positional children`
+                : `form \`${spec.name}\` does not accept positional children — \`:${bareKeyword}\` has no value, so it is a bare keyword, not a keyword pair`,
             );
           }
           break;
@@ -1402,7 +1515,7 @@ function validateFormKeys(
           if (fail) {
             emit(
               diags,
-              child.span,
+              fail.span ?? child.span,
               [...path, step],
               fail.code,
               fail.message(spec.name, '<positional>'),
@@ -1850,6 +1963,11 @@ function unknownKeywordMessage(spec: FormSpec, key: string, resolvedWhen: string
 interface MatchFail {
   readonly code: DiagnosticCode;
   message(formName: string, slot: string): string;
+  // Where the diagnostic points, when that is not the slot's own value.
+  // Set only by `wrapElementFail`: a typed-vector element failure carries
+  // the outer slot's label and path but spans the element that is actually
+  // wrong. Mirrors `Validator.zig`'s `failLeaf`.
+  readonly span?: Span;
 }
 
 function matchType(
@@ -1861,6 +1979,15 @@ function matchType(
   treeScope: ScopeId,
   depth: number,
 ): MatchFail | null {
+  // A *held* position matches whatever the slot declares. One gate here
+  // covers every position a value can occupy and every refinement axis,
+  // because this function is the single door to typed matching: kvpair
+  // values, positional children, vector elements and union alternatives all
+  // arrive here. Held-ness is a property of the value, not the slot — the
+  // moment the author replaces `_` with a real value the full check runs
+  // again. Mirrors the gate at the top of `matchValueAgainstType`.
+  if (isHeld(registry, node)) return null;
+
   // Form values dispatch through the form-expression resolver: data
   // forms in non-form slots are mismatches; expressions with a
   // declared result type are compared; opaque/unresolved expressions
@@ -2064,7 +2191,7 @@ function matchKind(
         const scopeMap = registry.byScope.get(scopeId);
         const set = scopeMap?.get(targetSpec.canonicalTarget);
         if (!set || !set.has(node.text)) {
-          return notCrossRef(node.text, bareFromCanonical(targetSpec.canonicalTarget));
+          return notCrossRef(node.text, describeBucket(targetSpec.canonicalTarget).text);
         }
         return null;
       }
@@ -2094,7 +2221,7 @@ function matchKind(
           for (let i = 0; i < elements.length; i++) {
             const elem = elements[i]!;
             const fail = matchType(schema, registry, elem, elemType, scopeChain, treeScope, depth);
-            if (fail) return wrapElementFail(i, fail);
+            if (fail) return wrapElementFail(i, fail, elem);
           }
         }
       }
@@ -2483,6 +2610,10 @@ function emitValueAdvisories(
   treeScope: ScopeId,
   path: readonly string[],
 ): void {
+  // `matchType` accepted a held value without reading the slot, so no
+  // advisory may read it either: a value the author has not chosen cannot
+  // be deprecated and cannot be ambiguous between union arms.
+  if (isHeld(registry, value)) return;
   emitDeprecatedMember(diags, schema, expected, value, path);
   emitStringPatternUnsupported(diags, schema, expected, value, path);
   emitUnionAmbiguous(diags, schema, registry, expected, value, scopeChain, treeScope, path);
@@ -2543,6 +2674,16 @@ function unitForbidden(got: string): MatchFail {
   };
 }
 
+/// `target` is the rendered bucket (`Schema.describeBucket`), so a
+/// multi-target group reads `a | b` and a single target reads its
+/// canonical `<plugin>/<form>` name — the same target text the reference
+/// host names.
+///
+/// The surrounding *sentence* still differs from Zig's ``got `x` (no
+/// `(y :name …)` form declares this name)``. That is the standing
+/// `MatchFail` message-protocol divergence, not this one: closing it means
+/// threading the form name and the `:name`-key through every leaf
+/// builder, which is a separate plan.
 function notCrossRef(got: string, target: string): MatchFail {
   return {
     code: 'not_cross_ref',
@@ -2557,10 +2698,15 @@ function outsideScope(got: string, scopeForm: string): MatchFail {
   };
 }
 
-function wrapElementFail(idx: number, inner: MatchFail): MatchFail {
+/// Wrap an element failure in its index, keeping the outer slot's framing.
+/// The span is the *innermost* leaf — `inner.span` when the element was
+/// itself a vector whose element failed — so a `mat4` whose row 0 slot 0 is
+/// a string points at the string, not at row 0. Mirrors `failLeaf`.
+function wrapElementFail(idx: number, inner: MatchFail, elem: Node): MatchFail {
   return {
     code: inner.code,
-    message: (formName, slot) => `element ${idx}: ${inner.message(formName, slot)}`,
+    message: (formName, slot) => `element [${idx}]: ${inner.message(formName, slot)}`,
+    span: inner.span ?? elem.span,
   };
 }
 

@@ -1,0 +1,20 @@
+; `:walk-opaque true` says the surrounding schema does not interpret
+; this slot's contents, and the defaults overlay stops there with the
+; validator's tree walk.
+;
+; `(circle)` sits in the opaque `:body` slot, so its `:radius` is never
+; materialized — and the `(nope)` default that would fail at runtime is
+; never evaluated, so no `default_eval_failed` is reported. Compare
+; `default-materialize-expression-failure`, the same schema key in a
+; slot the schema does read.
+;
+; Before the overlay honoured `:walk-opaque`, this document reported
+; that failure against a slot nothing was going to materialize.
+(plugin :name probe :version "1.0.0"
+  (expr-func :name nope :arity (fixed 0) :result number)
+  (form :name host
+    (key :name body :type any :walk-opaque true :optional true))
+  (form :name circle
+    (key :name radius :type number :default (nope))))
+
+(host :body (circle))

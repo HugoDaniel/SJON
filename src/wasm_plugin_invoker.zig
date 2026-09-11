@@ -114,7 +114,19 @@ pub const LastFailure = struct {
     }
 };
 
-pub var last_failure: LastFailure = .{};
+/// The one piece of state this module keeps between a failing `invoke`
+/// and the wrapper that formats it. `threadlocal` for the reason
+/// `runtimes/wasmtime.zig`'s detail buffer is: an embedder may evaluate
+/// on more than one thread, and two failures at once would otherwise
+/// overwrite each other before either was read. Within a thread it is
+/// per-call: every `invoke` path resets it first, and both readers
+/// (`Host.formatEvalErrorMessage`, `ProviderExtraction.
+/// callThroughPluginInvoker`) consume it before the next call. On wasm32
+/// the artifacts are single-threaded, so the keyword lowers to a plain
+/// global there, as it already does for `SchemaExport/TsTypes.zig`.
+/// Reached only through `lastFailure()`; nothing outside this file
+/// names the variable.
+threadlocal var last_failure: LastFailure = .{};
 
 fn recordFailure(code: []const u8, detail: []const u8) void {
     const code_n = @min(code.len, last_failure.code_buf.len);
@@ -211,7 +223,13 @@ fn invokeViaHostImport(
     @memcpy(&header, result_ptr[0..PluginValueCodec.HEADER_SIZE]);
     const ok = std.mem.readInt(u32, header[0..4], .little);
     const len = std.mem.readInt(u32, header[4..8], .little);
-    const total = @as(usize, PluginValueCodec.HEADER_SIZE) + @as(usize, len);
+    // On wasm32 `usize` is `u32`, so the sum can wrap for a hostile
+    // `len`; a frame that does not fit the address space is a failure,
+    // never a wrapped slice length handed to `free`.
+    const total = std.math.add(usize, PluginValueCodec.HEADER_SIZE, len) catch {
+        recordFailure("malformed_value_frame", "frame length overflows the address space");
+        return error.PluginFuncFailed;
+    };
     defer wasm_allocator.free(result_ptr[0..total]);
 
     const payload = result_ptr[PluginValueCodec.HEADER_SIZE..total];
@@ -260,7 +278,7 @@ fn invokeViaNativeRuntime(
     }
     const ok = std.mem.readInt(u32, frame[0..4], .little);
     const len = std.mem.readInt(u32, frame[4..8], .little);
-    if (frame.len < @as(usize, PluginValueCodec.HEADER_SIZE) + @as(usize, len)) {
+    if (len > frame.len - PluginValueCodec.HEADER_SIZE) {
         recordFailure("malformed_value_frame", "frame truncated");
         return error.PluginFuncFailed;
     }

@@ -1,0 +1,4 @@
+; One diagnostic, from the one form that omitted the required key. Held is
+; an explicit atom the author typed; omission stays a miss.
+(diagnostics
+  (diagnostic :code missing_required_key :path [scene]))

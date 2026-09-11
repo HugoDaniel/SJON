@@ -424,6 +424,7 @@ pub fn varintLen(v: u32) u32 {
 
 /// Read a source span `[u32 LE start][u32 LE end]` (8 bytes).
 pub fn readSpan(bytes: []const u8, pos: *u32) Error!Ast.Span {
+    std.debug.assert(pos.* <= bytes.len); // `readVarint` states the same precondition
     if (bytes.len - pos.* < 8) return error.Truncated;
     const start = std.mem.readInt(u32, bytes[pos.*..][0..4], .little);
     const end = std.mem.readInt(u32, bytes[pos.* + 4 ..][0..4], .little);
@@ -433,6 +434,7 @@ pub fn readSpan(bytes: []const u8, pos: *u32) Error!Ast.Span {
 
 /// Read an f64 payload `[f64 LE 8]` — the little-endian u64 bit-reinterpreted.
 pub fn readF64(bytes: []const u8, pos: *u32) Error!f64 {
+    std.debug.assert(pos.* <= bytes.len); // `readVarint` states the same precondition
     if (bytes.len - pos.* < 8) return error.Truncated;
     const bits = std.mem.readInt(u64, bytes[pos.*..][0..8], .little);
     pos.* += 8;
@@ -441,6 +443,7 @@ pub fn readF64(bytes: []const u8, pos: *u32) Error!f64 {
 
 /// Read an exact signed 64-bit payload `[i64 LE 8]`.
 pub fn readI64(bytes: []const u8, pos: *u32) Error!i64 {
+    std.debug.assert(pos.* <= bytes.len); // `readVarint` states the same precondition
     if (bytes.len - pos.* < 8) return error.Truncated;
     const bits = std.mem.readInt(u64, bytes[pos.*..][0..8], .little);
     pos.* += 8;
@@ -449,6 +452,7 @@ pub fn readI64(bytes: []const u8, pos: *u32) Error!i64 {
 
 /// Read an exact unsigned 64-bit payload `[u64 LE 8]`.
 pub fn readU64(bytes: []const u8, pos: *u32) Error!u64 {
+    std.debug.assert(pos.* <= bytes.len); // `readVarint` states the same precondition
     if (bytes.len - pos.* < 8) return error.Truncated;
     const v = std.mem.readInt(u64, bytes[pos.*..][0..8], .little);
     pos.* += 8;
@@ -460,6 +464,7 @@ pub fn readU64(bytes: []const u8, pos: *u32) Error!u64 {
 /// surfaces as `error.InvalidTag` (emitted dates are always constructed, so a
 /// bad one signals a corrupt frame).
 pub fn readDatePayload(bytes: []const u8, pos: *u32) Error!Date {
+    std.debug.assert(pos.* <= bytes.len); // `readVarint` states the same precondition
     if (bytes.len - pos.* < 4) return error.Truncated;
     const y_lo = bytes[pos.* + 0];
     const y_hi = bytes[pos.* + 1];
@@ -475,6 +480,7 @@ pub fn readDatePayload(bytes: []const u8, pos: *u32) Error!Date {
 /// (5 bytes). Validated through `Time.init`; an out-of-range payload surfaces
 /// as `error.InvalidTag` (same corrupt-frame rationale as `readDatePayload`).
 pub fn readTimePayload(bytes: []const u8, pos: *u32) Error!Time {
+    std.debug.assert(pos.* <= bytes.len); // `readVarint` states the same precondition
     if (bytes.len - pos.* < 5) return error.Truncated;
     const hour = bytes[pos.* + 0];
     const minute = bytes[pos.* + 1];

@@ -355,15 +355,23 @@ pub const Error = EngineInitError ||
 //
 // `Error` is a closed enum and can't carry a message. The wasmtime call
 // might fail with a 200-byte trap explanation we want to surface in
-// `plugin_func_trapped` diagnostics. Per-thread/per-call buffer the way
-// `wasm_plugin_invoker.LastFailure` does — module-level state, cleared
-// at the start of every public entry point. The PluginRuntime layer
-// copies the message into its own failure buffer before returning to
-// callers, so concurrent callers don't race on this scratch space.
+// `plugin_func_trapped` diagnostics.
+//
+// The buffer is `threadlocal` because an embedder may drive one
+// `PluginRuntime` per thread; two threads trapping at once would
+// otherwise overwrite each other's message before either was read.
+// Within a thread it is per-call: every public entry point clears it
+// before doing anything, and `PluginRuntime.copyFailure` copies the
+// message into its own storage before returning to callers, so the next
+// call on that thread is free to reuse the space.
+//
+// This file is native-only — `wasm_plugin_invoker` reaches it through a
+// comptime conditional that is false on wasm32 — so the WASM "no TLS"
+// rule does not apply here.
 // ---------------------------------------------------------------------
 
-var detail_storage: [512]u8 = undefined;
-var detail_len: usize = 0;
+threadlocal var detail_storage: [512]u8 = undefined;
+threadlocal var detail_len: usize = 0;
 
 pub fn lastDetail() []const u8 {
     return detail_storage[0..detail_len];
@@ -477,6 +485,8 @@ pub const Module = struct {
         wasmtime_module_imports(self.ptr, &vec);
 
         const descs = try gpa.alloc(ImportDesc, vec.size);
+        errdefer gpa.free(descs);
+        errdefer wasm_importtype_vec_delete(&vec);
         if (vec.data) |arr| {
             var i: usize = 0;
             while (i < vec.size) : (i += 1) {
@@ -822,4 +832,40 @@ test "wasmtime: malformed wasm bytes surface ModuleLoad" {
     try testing.expectError(error.ModuleLoad, Module.compile(engine, "not wasm at all"));
     // Failure detail buffer should have a wasmtime-supplied message.
     try testing.expect(lastDetail().len > 0);
+}
+
+test "wasmtime: the failure-detail buffer is per-thread" {
+    // Two threads each record a different detail and neither reads until
+    // both have written. Were the buffer a plain global, the later write
+    // would be what both threads read back; `threadlocal` keeps each
+    // thread's trap text its own. No wasmtime instance is involved: the
+    // isolation is the claim under test, not the trap path that fills it.
+    const Worker = struct {
+        msg: []const u8,
+        written: *std.atomic.Value(u32),
+        /// Compared on the writing thread. `lastDetail()` borrows that
+        /// thread's own storage, which is gone once the thread exits.
+        saw_own_msg: bool = false,
+
+        fn run(self: *@This()) void {
+            recordDetail(self.msg);
+            _ = self.written.fetchAdd(1, .acq_rel);
+            // Spin until the peer has written too, so a pass can't come
+            // from the two writes simply never overlapping.
+            while (self.written.load(.acquire) < 2) std.Thread.yield() catch {};
+            self.saw_own_msg = std.mem.eql(u8, lastDetail(), self.msg);
+        }
+    };
+
+    var written: std.atomic.Value(u32) = .init(0);
+    var a: Worker = .{ .msg = "trap in thread a", .written = &written };
+    var b: Worker = .{ .msg = "a different trap, over in thread b", .written = &written };
+
+    const ta = try std.Thread.spawn(.{}, Worker.run, .{&a});
+    const tb = try std.Thread.spawn(.{}, Worker.run, .{&b});
+    ta.join();
+    tb.join();
+
+    try testing.expect(a.saw_own_msg);
+    try testing.expect(b.saw_own_msg);
 }

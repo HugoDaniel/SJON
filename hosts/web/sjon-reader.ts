@@ -20,7 +20,7 @@
 // — never reach the import.
 
 import { parseJsonWithBigInt } from './parseJsonWithBigInt.ts';
-import type { SjonValue, ValidatorReport, WasmDescribe } from './types.ts';
+import type { Diagnostic, SjonValue, ValidatorReport, WasmDescribe } from './types.ts';
 
 const HEADER_BYTES = 8;
 const decoder = new TextDecoder();
@@ -180,33 +180,46 @@ export class SjonWasm {
 
   /**
    * Two-buffer counterpart to `_callBytes`. The WASM signature is
-   * `(srcPtr, srcLen, optsPtr, optsLen) -> ?[*]u8`; both buffers are
-   * copied in, the framed result is copied out, and all three WASM
-   * allocations are released before this returns.
-   *
-   * `sjon_alloc(0)` returns null, so an empty first buffer `a` gets a
-   * 1-byte reservation — the length arg stays `a.length` (0), so no
-   * bytes are read from the reserved slot; it only keeps the pointer
-   * well-formed. This is the single two-buffer marshaller for both the
-   * reader exports and `SjonHost`'s host-export calls.
+   * `(srcPtr, srcLen, optsPtr, optsLen) -> ?[*]u8`. The single two-buffer
+   * marshaller for both the reader exports and `SjonHost`'s host-export
+   * calls; {@link _callBytesN} is the general form under it.
    */
   _callBytesTwo(fnName: string, a: Uint8Array, b: Uint8Array): Uint8Array {
-    const aAllocLen = a.length || 1;
+    return this._callBytesN(fnName, [a, b]);
+  }
+
+  /**
+   * The general form: `(p1, n1, p2, n2, …) -> ?[*]u8`. Every buffer is
+   * copied in, the framed result is copied out, and every WASM allocation
+   * is released before this returns — including on the throwing path,
+   * which is why the pointers are collected before the call rather than
+   * allocated inline in the argument list.
+   *
+   * `sjon_alloc(0)` returns null, so an empty buffer gets a 1-byte
+   * reservation; its length arg stays 0, so no bytes are read from the
+   * reserved slot and it only keeps the pointer well-formed.
+   */
+  _callBytesN(fnName: string, parts: readonly Uint8Array[]): Uint8Array {
     const alloc = this.exports['sjon_alloc'] as (n: number) => number;
-    const aPtr = alloc(aAllocLen);
-    if (aPtr === 0) throw new Error('sjon_alloc returned null (OOM in WASM)');
-    if (a.length > 0) new Uint8Array(this.memory.buffer, aPtr, a.length).set(a);
-    let bPtr = 0;
+    const ptrs: number[] = [];
+    const allocLens: number[] = [];
     try {
-      bPtr = this._alloc(b);
-      const fn = this.exports[fnName] as (p1: number, n1: number, p2: number, n2: number) => number;
-      const ptr = fn(aPtr, a.length, bPtr, b.length);
-      const { ok, payload } = this._readFramed(ptr);
+      for (const part of parts) {
+        const allocLen = part.length || 1;
+        const ptr = alloc(allocLen);
+        if (ptr === 0) throw new Error('sjon_alloc returned null (OOM in WASM)');
+        ptrs.push(ptr);
+        allocLens.push(allocLen);
+        if (part.length > 0) new Uint8Array(this.memory.buffer, ptr, part.length).set(part);
+      }
+      const args: number[] = [];
+      for (const [i, part] of parts.entries()) args.push(ptrs[i] as number, part.length);
+      const fn = this.exports[fnName] as (...a: number[]) => number;
+      const { ok, payload } = this._readFramed(fn(...args));
       if (!ok) throw new SjonWasmError(fnName, decoder.decode(payload));
       return payload;
     } finally {
-      this._free(aPtr, aAllocLen);
-      if (bPtr !== 0) this._free(bPtr, b.length);
+      for (const [i, ptr] of ptrs.entries()) this._free(ptr, allocLens[i] as number);
     }
   }
 
@@ -246,6 +259,98 @@ export class SjonWasmError extends Error {
 export type ToJsonMode = 'canonical' | 'compact' | 'full';
 export interface ToJsonOptions {
   mode?: ToJsonMode;
+}
+
+/**
+ * How an applied edit reaches the output.
+ *
+ * `'reprint'` prints the whole edited tree, so layout is the printer's
+ * decision on every run. `'preserve'` replaces one span per action and
+ * leaves every other byte alone.
+ */
+export type SjonEditLayout = 'reprint' | 'preserve';
+export interface SjonEditOptions {
+  layout?: SjonEditLayout;
+}
+
+/** The empty options blob: `sjon_apply_edits` reads no options from it. */
+const EMPTY_BYTES = new Uint8Array(0);
+
+/**
+ * A half-open byte range `[start, end)`, the unit every span SJON hands a
+ * host is in. Not UTF-16 code units: a document past ASCII counts
+ * differently in the two, so convert at the editor boundary.
+ */
+export type SjonByteSpan = readonly [start: number, end: number];
+
+/**
+ * One step of a §11.2 path: a string names a form's keyword value, a
+ * number names a positional child of a form or an element of a vector.
+ */
+export type SjonPathStep = string | number;
+
+/**
+ * Where a node is, in the two fields an edit action already takes, plus
+ * the two an editor wants for drawing.
+ *
+ * An address is where a node is, not which node it is. Insert a sibling
+ * before the target and the same address names a different node, so
+ * re-derive addresses from the document that comes back after a batch.
+ */
+/**
+ * One row of {@link SjonNodeTable}: an addressable node, where it is, and
+ * where its bytes are.
+ *
+ * A `:key value` pair gets no row. §11.2 addresses a pair's *value*, so
+ * the pair has no address of its own; its key span rides on the value's
+ * row as {@link keySpan}.
+ */
+export interface SjonNodeRow {
+  /** This row's index in the table, equal to its position in `nodes`. */
+  readonly i: number;
+  /** The row index of the container this node sits in, `-1` for a root. */
+  readonly parent: number;
+  /** Which root of the document this node is under. */
+  readonly root: number;
+  /**
+   * This row's own §11.2 path step from its parent, `null` for a root.
+   * The chain of these up the `parent` links, reversed, is the path an
+   * edit action takes.
+   */
+  readonly seg: SjonPathStep | null;
+  /** The node's tag — `form`, `number`, `string`, `symbol`, and so on. */
+  readonly kind: string;
+  /** The node's own bytes. */
+  readonly span: SjonByteSpan;
+  /** A form's head bytes. Absent on every other kind. */
+  readonly head_span?: SjonByteSpan;
+  /** The `:key` bytes of the pair this node is the value of. */
+  readonly key_span?: SjonByteSpan;
+}
+
+/**
+ * Every addressable node of one document, plus the diagnostics from the
+ * same parse.
+ *
+ * Rows are pre-order: a parent always precedes its children and siblings
+ * are in source order. So the innermost node containing a byte is the
+ * *last* row whose span contains it, which is what makes hit-testing a
+ * scan in JS rather than a call back into WASM per pointer move.
+ */
+export interface SjonNodeTable {
+  readonly nodes: readonly SjonNodeRow[];
+  readonly diagnostics: readonly Diagnostic[];
+}
+
+export interface SjonAddress {
+  /** Which root of the document, indexing the forest left to right. */
+  readonly root: number;
+  /** The §11.2 path from that root down to the node. */
+  readonly path: readonly SjonPathStep[];
+  /** The node's own bytes. */
+  readonly span: SjonByteSpan;
+  /** The node's tag — `form`, `number`, `string`, `symbol`, and so on. */
+  readonly kind: string;
 }
 
 /**
@@ -369,17 +474,122 @@ export class SjonEncoder extends SjonWasm {
 
   /**
    * Batched counterpart to {@link applyEdit}: apply `actions` left-to-right
-   * in a single WASM parse/print pass (`sjon_apply_edits`) and return the
-   * re-printed `.full` SJON text. Equivalent to threading `applyEdit`'s
-   * output through each action, but one round-trip instead of N. Batches
-   * are all-or-nothing — a failing action throws `SjonWasmError` (carrying
-   * the Zig error name) and nothing is returned.
+   * in a single WASM pass (`sjon_apply_edits`). Equivalent to threading
+   * `applyEdit`'s output through each action, but one round-trip instead
+   * of N. Batches are all-or-nothing — a failing action throws
+   * `SjonWasmError` (carrying the Zig error name) and nothing is returned.
+   *
+   * `options.layout` chooses what comes back. `'reprint'` (the default,
+   * and what {@link applyEdit} always does) is the whole document
+   * re-printed in `.full` mode: trivia outside the edit survives, but line
+   * breaks and alignment are the printer's decision on every run.
+   * `'preserve'` splices instead — one span replaced per action, every
+   * other byte the author's, comments and column alignment included.
    */
-  applyEdits(source: string, actions: readonly object[]): string {
-    const actionsBytes = encoder.encode(JSON.stringify(actions));
-    const bytes = this._callBytesTwo('sjon_apply_edits', encoder.encode(source), actionsBytes);
+  applyEdits(source: string, actions: readonly object[], options?: SjonEditOptions): string {
+    const bytes = this._callBytesN('sjon_apply_edits', [
+      encoder.encode(source),
+      encoder.encode(JSON.stringify(actions)),
+      options ? encoder.encode(JSON.stringify(options)) : EMPTY_BYTES,
+    ]);
     return decoder.decode(bytes);
   }
+
+  /**
+   * Address the node at `[start, end)` — the innermost node containing
+   * that byte range, as `{root, path, span, kind}`, or `null` when the
+   * range is inside no root.
+   *
+   * `root` and `path` are an action's two fields verbatim, so what comes
+   * back can be handed straight to {@link applyEdits}. Pass `start ===
+   * end` for a caret.
+   *
+   * A range covering a whole `:key value` pair answers the *enclosing
+   * form*, because §11.2 addresses a pair's value and an edit over the
+   * pair itself is a `set_keyword` on the form.
+   *
+   * Offsets are UTF-8 bytes. Answers on the partial tree a recovery
+   * leaves behind, so a document mid-keystroke still has addresses; call
+   * {@link validate} to learn whether it parsed.
+   *
+   * Prefer {@link nodeTable} when you want more than one answer per
+   * revision — a table is scanned in JS with no further call in.
+   */
+  addressOfSpan(source: string, start: number, end: number): SjonAddress | null {
+    const input = encoder.encode(source);
+    const inPtr = this._alloc(input);
+    try {
+      const fn = this.exports['sjon_address_of_span'] as (
+        p: number,
+        n: number,
+        s: number,
+        e: number,
+      ) => number;
+      const { ok, payload } = this._readFramed(fn(inPtr, input.length, start, end));
+      const text = decoder.decode(payload);
+      if (!ok) throw new SjonWasmError('sjon_address_of_span', text);
+      return JSON.parse(text) as SjonAddress | null;
+    } finally {
+      this._free(inPtr, input.length);
+    }
+  }
+
+  /**
+   * Every addressable node of `source`, flat and in pre-order, with the
+   * parse diagnostics beside it. One call per revision answers all three
+   * of an editor's questions: decorate every literal, hit-test a
+   * coordinate, and address the node a gesture lands on.
+   *
+   * Build a path with {@link pathOfRow}; find a row under a byte with
+   * {@link rowContaining}. Offsets are UTF-8 bytes.
+   *
+   * Rows come back for a document that does not parse too — read
+   * `diagnostics` to learn whether that is what you have. That is
+   * deliberate: the revision in the middle of a keystroke is the one
+   * whose addresses an editor wants.
+   */
+  nodeTable(source: string): SjonNodeTable {
+    return this._callJson('sjon_node_table', encoder.encode(source)) as SjonNodeTable;
+  }
+}
+
+/**
+ * The §11.2 path of `row`, walked up the table's `parent` links. Pair it
+ * with `row.root` and the two are an edit action's `path` and `root`.
+ */
+export function pathOfRow(table: SjonNodeTable, row: SjonNodeRow): SjonPathStep[] {
+  const steps: SjonPathStep[] = [];
+  let at: SjonNodeRow | undefined = row;
+  while (at) {
+    if (at.seg !== null) steps.push(at.seg);
+    at = at.parent < 0 ? undefined : table.nodes[at.parent];
+  }
+  return steps.reverse();
+}
+
+/**
+ * The innermost row whose span contains `[start, end)` — pass `start ===
+ * end` for a caret — or `undefined` when the range is inside no root.
+ *
+ * The same rule `sjon_address_of_span` applies WASM-side: narrowest
+ * containing span wins, and a tie goes to the later row, which pre-order
+ * makes the deeper one. Use this to hit-test without calling in.
+ */
+export function rowContaining(
+  table: SjonNodeTable,
+  start: number,
+  end: number = start,
+): SjonNodeRow | undefined {
+  let best: SjonNodeRow | undefined;
+  let bestWidth = Number.POSITIVE_INFINITY;
+  for (const row of table.nodes) {
+    if (row.span[0] > start || row.span[1] < end) continue;
+    const width = row.span[1] - row.span[0];
+    if (width > bestWidth) continue;
+    best = row;
+    bestWidth = width;
+  }
+  return best;
 }
 
 /**

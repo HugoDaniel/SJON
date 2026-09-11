@@ -1173,8 +1173,11 @@ fn writeNumericBoundsBody(w: *std.json.Stringify, b: Model.NumericBounds) std.Io
         try w.objectField("multipleOf");
         try w.write(mo.value);
     }
-    var exact_min_buf: [32]u8 = undefined;
-    var exact_max_buf: [32]u8 = undefined;
+    // `{d:.0}` of an exact-int bound writes every digit; a 33+-digit
+    // integer literal overflowed the old [32]u8 into WriteFailed, which
+    // `emit` reports as OutOfMemory. Sized from std's bound instead.
+    var exact_min_buf: [std.fmt.float.bufferSize(.decimal, f64)]u8 = undefined;
+    var exact_max_buf: [std.fmt.float.bufferSize(.decimal, f64)]u8 = undefined;
     var exact_min: ?[]const u8 = null;
     var exact_max: ?[]const u8 = null;
     if (b.min) |min| {

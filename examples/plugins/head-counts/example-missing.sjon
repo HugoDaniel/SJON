@@ -12,7 +12,8 @@
 ; missing `vertex`. Nor would an out-of-set head; that one fails
 ; `not_head_member` and still satisfies nobody's floor.
 ;
-;   sjon validate examples/plugins/head-counts/{plugin,example-missing}.sjon
+;   cat examples/plugins/head-counts/plugin.sjon \
+;       examples/plugins/head-counts/example-missing.sjon | sjon validate - --no-project
 
 (render-pipeline :name no-vertex
   (fragment :entry fs_main)

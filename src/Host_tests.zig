@@ -1272,6 +1272,7 @@ test "D8-lowering: registry=null leaves the pipeline byte-identical" {
 
     try std.testing.expect(r.lowered_tree == null);
     try std.testing.expectEqual(@as(usize, 0), r.lowering_provenance.entries.len);
+    try std.testing.expectEqual(@as(usize, 0), r.lowering_stages.len);
 
     var saw_any_lowering_diag = false;
     for (r.diagnostics) |d| {
@@ -1427,6 +1428,637 @@ test "D8-lowering: lowered_materialized_defaults reflects the terminal layer acr
     const ev = sjon.EffectiveView.EffectiveView.init(&lt, &r.lowered_materialized_defaults);
     const eff = ev.getEffectiveValue(lform, "tag") orelse return error.TestNoEffectiveValue;
     try std.testing.expect(std.meta.activeTag(eff) == .default);
+}
+
+// ---------------------------------------------------------------------------
+// Staging layers in the result (ask 16). `HostResult.lowering_stages` holds
+// one entry per pass, in layer order, and owns every lowered tree; the three
+// single-layer fields alias its last element. The property these pin, and the
+// one the old API could not state, is that **each layer's provenance resolves
+// in the tree that layer ran over** — `HostResult.tree` for layer 0, the
+// previous stage's tree for every layer after it.
+//
+// `test/identity-v1` emits `<head>-normal`, so a manifest that declares
+// `outer -> outer-normal -> outer-normal-normal` lowers once per arrow.
+// ---------------------------------------------------------------------------
+
+/// Build the ask's staging document: `n` lowerable forms chained through
+/// identity-v1, terminated by one that does not lower. `n == 1` is the
+/// single-layer control.
+fn stagingChainSource(a: std.mem.Allocator, buf: *std.ArrayList(u8), layers: usize) ![:0]const u8 {
+    try buf.appendSlice(a, "(plugin :name stage :version \"1.0.0\"\n");
+    var i: usize = 0;
+    while (i <= layers) : (i += 1) {
+        try buf.appendSlice(a, "  (form :name ");
+        try appendChainName(a, buf, i);
+        if (i < layers) {
+            try buf.appendSlice(a, " :open true :lowering (lowering :hook test/identity-v1 :produces [");
+            try appendChainName(a, buf, i + 1);
+            try buf.appendSlice(a, "]))\n");
+        } else {
+            try buf.appendSlice(a, " :open true)\n");
+        }
+    }
+    try buf.appendSlice(a, ")\n(s)\n");
+    try buf.append(a, 0);
+    return buf.items[0 .. buf.items.len - 1 :0];
+}
+
+/// Every stage's provenance names a form that resolves — as a form, with the
+/// head the chain says — in the tree that stage ran over. Layer 0 reads
+/// against `r.tree`; layer `i` against `lowering_stages[i-1].tree`.
+fn expectChainResolvesPerLayer(r: *const Host.HostResult, layers: usize) !void {
+    try std.testing.expectEqual(layers, r.lowering_stages.len);
+    for (r.lowering_stages, 0..) |stage, i| {
+        try std.testing.expectEqual(@as(usize, 1), stage.provenance.entries.len);
+        const entry = stage.provenance.entries[0];
+        try std.testing.expectEqualStrings("test/identity-v1", entry.hook_id);
+
+        const source_tree: *const Ast.Tree = if (i == 0)
+            &r.tree
+        else
+            &r.lowering_stages[i - 1].tree;
+
+        // The hop's source resolves in its own layer's tree…
+        try std.testing.expect(source_tree.tagOf(entry.source_form_idx) == .form);
+        var expect_src: std.ArrayList(u8) = .empty;
+        defer expect_src.deinit(std.testing.allocator);
+        try appendChainName(std.testing.allocator, &expect_src, i);
+        try std.testing.expectEqualStrings(
+            expect_src.items,
+            source_tree.formHeader(entry.source_form_idx).head,
+        );
+
+        // …and its lowered form resolves in this layer's.
+        try std.testing.expect(stage.tree.tagOf(entry.lowered_form_idx) == .form);
+        var expect_lowered: std.ArrayList(u8) = .empty;
+        defer expect_lowered.deinit(std.testing.allocator);
+        try appendChainName(std.testing.allocator, &expect_lowered, i + 1);
+        try std.testing.expectEqualStrings(
+            expect_lowered.items,
+            stage.tree.formHeader(entry.lowered_form_idx).head,
+        );
+    }
+}
+
+test "D8-staging: one layer is one stage, and the terminal fields alias it" {
+    const a = std.testing.allocator;
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(a);
+    try registry.register(a, Lowering_test_hooks.test_identity_v1);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(a);
+    const src = try stagingChainSource(a, &buf, 1);
+
+    var r = try Host.validateDocument(a, src, .{ .lowering_registry = &registry });
+    defer r.deinit();
+    try std.testing.expect(!r.hasErrors());
+
+    try expectChainResolvesPerLayer(&r, 1);
+
+    // The single-layer contract, unchanged: `lowered_tree` and friends are
+    // the terminal stage. Identity is the arena-allocated `root` slice —
+    // the alias is a copy of the struct, not a second tree.
+    const lt = r.lowered_tree orelse return error.TestNoLoweredTree;
+    const terminal = r.lowering_stages[0];
+    try std.testing.expectEqual(terminal.tree.root.ptr, lt.root.ptr);
+    try std.testing.expectEqual(
+        terminal.provenance.entries.ptr,
+        r.lowering_provenance.entries.ptr,
+    );
+    try std.testing.expectEqual(
+        terminal.materialized.entries.ptr,
+        r.lowered_materialized_defaults.entries.ptr,
+    );
+
+    // At one layer the old reading was right, and stays right: the terminal
+    // table's `source_form_idx` does index `r.tree`.
+    try std.testing.expectEqualStrings(
+        "s",
+        r.tree.formHeader(r.lowering_provenance.entries[0].source_form_idx).head,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The staging bound on `resolveRef` (ask 18). A hook resolves against **this
+// layer's input forest**, so a target the author wrote resolves and a target
+// a sibling emits *in the same layer* does not — the latter appears in layer
+// 1's tree, which layer 0's hook cannot see.
+//
+// One manifest, one hook, two documents that differ only in where the target
+// comes from. `test/resolve-ref-v1` reports what it got as `(resolved :count
+// …)`: the neighbour's count on a hit, `-1` on a miss.
+// ---------------------------------------------------------------------------
+
+const RESOLVE_REF_MANIFEST =
+    \\(plugin :name refs :version "1.0.0"
+    \\  (value-kind :name producer-ref :underlying symbol
+    \\    :cross-ref (cross-ref :target carrier-normal))
+    \\  (form :name carrier
+    \\    :lowering (lowering :hook test/identity-v1 :produces [carrier-normal])
+    \\    (key :name name :type symbol)
+    \\    (key :name count :type number))
+    \\  (form :name carrier-normal
+    \\    (key :name name :type symbol)
+    \\    (key :name count :type number))
+    \\  (form :name consumer
+    \\    :lowering (lowering :hook test/resolve-ref-v1 :produces [resolved])
+    \\    (key :name from :type producer-ref))
+    \\  (form :name resolved
+    \\    (key :name count :type number)))
+;
+
+/// The `:count` on the single `(resolved …)` form the consumer's hook
+/// emitted, found in the terminal lowered tree.
+fn resolvedCount(r: anytype) !f64 {
+    const lt = r.lowered_tree orelse return error.TestNoLoweredTree;
+    for (lt.root) |idx| {
+        const hdr = lt.formHeader(idx);
+        if (!std.mem.eql(u8, hdr.head, "resolved")) continue;
+        for (hdr.children) |ch| {
+            if (lt.tagOf(ch) != .kvpair) continue;
+            const kv = lt.kvpairHeader(ch);
+            if (std.mem.eql(u8, kv.key, "count")) return lt.numberOf(kv.value);
+        }
+    }
+    return error.TestNoResolvedForm;
+}
+
+fn runResolveRefDocument(a: std.mem.Allocator, src: [:0]const u8) !f64 {
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(a);
+    try registry.register(a, Lowering_test_hooks.test_identity_v1);
+    try registry.register(a, Lowering_test_hooks.test_resolve_ref_v1);
+
+    var r = try Host.validateDocument(a, src, .{ .lowering_registry = &registry });
+    defer r.deinit();
+    try std.testing.expect(!r.hasErrors());
+    return resolvedCount(r);
+}
+
+test "resolveRef: a target the author wrote resolves in layer 0" {
+    const a = std.testing.allocator;
+    const src: [:0]const u8 = RESOLVE_REF_MANIFEST ++
+        \\
+        \\(carrier-normal :name here :count 7)
+        \\(consumer :from here)
+        \\
+    ;
+    try std.testing.expectEqual(@as(f64, 7), try runResolveRefDocument(a, src));
+}
+
+test "resolveRef: a target a sibling emits in the same layer is not visible" {
+    const a = std.testing.allocator;
+    // `(carrier :name later …)` lowers to `(carrier-normal :name later …)` in
+    // this very layer, so the name exists in layer 1's tree and nowhere in
+    // layer 0's. The hook is the same one that answered 7 above.
+    const src: [:0]const u8 = RESOLVE_REF_MANIFEST ++
+        \\
+        \\(carrier :name later :count 42)
+        \\(consumer :from later)
+        \\
+    ;
+    try std.testing.expectEqual(@as(f64, -1), try runResolveRefDocument(a, src));
+
+    // And it is a miss, not an error: the final-document forest pass sees the
+    // emitted `(carrier-normal :name later …)` beside the lowered consumer, so
+    // nothing anywhere reports the name as unresolved.
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(a);
+    try registry.register(a, Lowering_test_hooks.test_identity_v1);
+    try registry.register(a, Lowering_test_hooks.test_resolve_ref_v1);
+    var r = try Host.validateDocument(a, src, .{ .lowering_registry = &registry });
+    defer r.deinit();
+    for (r.diagnostics) |d| try std.testing.expect(d.code != .not_cross_ref);
+}
+
+test "D8-staging: two layers keep both, each provenance resolving in its own tree" {
+    const a = std.testing.allocator;
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(a);
+    try registry.register(a, Lowering_test_hooks.test_identity_v1);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(a);
+    const src = try stagingChainSource(a, &buf, 2);
+
+    var r = try Host.validateDocument(a, src, .{ .lowering_registry = &registry });
+    defer r.deinit();
+    try std.testing.expect(!r.hasErrors());
+
+    try expectChainResolvesPerLayer(&r, 2);
+
+    // The terminal alias still names the last layer.
+    const lt = r.lowered_tree orelse return error.TestNoLoweredTree;
+    try std.testing.expectEqual(r.lowering_stages[1].tree.root.ptr, lt.root.ptr);
+    try std.testing.expectEqualStrings("s-normal-normal", lt.formHeader(lt.root[0]).head);
+
+    // The hazard the doc comment names, pinned as behaviour: the terminal
+    // table's `source_form_idx` indexes stage 0's tree, where it is the
+    // intermediate `(s-normal)` — not anything in `r.tree`.
+    const terminal_entry = r.lowering_provenance.entries[0];
+    try std.testing.expectEqualStrings(
+        "s-normal",
+        r.lowering_stages[0].tree.formHeader(terminal_entry.source_form_idx).head,
+    );
+}
+
+test "D8-staging: three layers keep three" {
+    const a = std.testing.allocator;
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(a);
+    try registry.register(a, Lowering_test_hooks.test_identity_v1);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(a);
+    const src = try stagingChainSource(a, &buf, 3);
+
+    var r = try Host.validateDocument(a, src, .{ .lowering_registry = &registry });
+    defer r.deinit();
+    try std.testing.expect(!r.hasErrors());
+
+    try expectChainResolvesPerLayer(&r, 3);
+    const lt = r.lowered_tree orelse return error.TestNoLoweredTree;
+    try std.testing.expectEqualStrings(
+        "s-normal-normal-normal",
+        lt.formHeader(lt.root[0]).head,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `provenanceChain` — the walk over `lowering_stages`, source-first. What it
+// adds over reading the stage list by hand is that every index arrives paired
+// with the tree it indexes, so the "read a `u32` against the wrong tree"
+// hazard the single-hop API left open is not reachable through it.
+// ---------------------------------------------------------------------------
+
+/// Assert a chain is the identity-hook chain of `layers` hops: hop `i` reads
+/// `s` + `i` copies of `-normal` and writes one more, and **every index
+/// resolves in the tree its own hop names**.
+fn expectIdentityChain(chain: []const Host.Hop, layers: usize) !void {
+    const a = std.testing.allocator;
+    try std.testing.expectEqual(layers, chain.len);
+    for (chain, 0..) |hop, i| {
+        try std.testing.expectEqualStrings("test/identity-v1", hop.hook_id);
+
+        var want_source: std.ArrayList(u8) = .empty;
+        defer want_source.deinit(a);
+        try appendChainName(a, &want_source, i);
+        try std.testing.expectEqualStrings(
+            want_source.items,
+            hop.source_tree.formHeader(hop.source_form_idx).head,
+        );
+
+        var want_lowered: std.ArrayList(u8) = .empty;
+        defer want_lowered.deinit(a);
+        try appendChainName(a, &want_lowered, i + 1);
+        try std.testing.expectEqualStrings(
+            want_lowered.items,
+            hop.lowered_tree.formHeader(hop.lowered_form_idx).head,
+        );
+
+        // Consecutive hops meet: this hop's source is the previous hop's
+        // emission, in one and the same tree.
+        if (i > 0) {
+            try std.testing.expectEqual(chain[i - 1].lowered_form_idx, hop.source_form_idx);
+            try std.testing.expectEqual(chain[i - 1].lowered_tree, hop.source_tree);
+        }
+    }
+}
+
+test "D8-staging: the provenance chain walks back through every layer" {
+    const a = std.testing.allocator;
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(a);
+    try registry.register(a, Lowering_test_hooks.test_identity_v1);
+
+    var buf: [Lowering.MAX_LOWERING_STAGES]Host.Hop = undefined;
+
+    // One layer: one hop, whose source is the authored `(s)` in `r.tree`.
+    {
+        var src_buf: std.ArrayList(u8) = .empty;
+        defer src_buf.deinit(a);
+        const src = try stagingChainSource(a, &src_buf, 1);
+        var r = try Host.validateDocument(a, src, .{ .lowering_registry = &registry });
+        defer r.deinit();
+        try std.testing.expect(!r.hasErrors());
+
+        const lt = r.lowered_tree orelse return error.TestNoLoweredTree;
+        const chain = r.provenanceChain(lt.root[0], &buf);
+        try expectIdentityChain(chain, 1);
+        try std.testing.expectEqual(&r.tree, chain[0].source_tree);
+        try std.testing.expectEqual(r.data_forest[0], chain[0].source_form_idx);
+    }
+
+    // Two layers: two hops, source-first. Hop 0 starts at the authored
+    // bytes, hop 1 ends at the node asked about — the assertion the
+    // single-hop API could not make.
+    {
+        var src_buf: std.ArrayList(u8) = .empty;
+        defer src_buf.deinit(a);
+        const src = try stagingChainSource(a, &src_buf, 2);
+        var r = try Host.validateDocument(a, src, .{ .lowering_registry = &registry });
+        defer r.deinit();
+        try std.testing.expect(!r.hasErrors());
+
+        const lt = r.lowered_tree orelse return error.TestNoLoweredTree;
+        const chain = r.provenanceChain(lt.root[0], &buf);
+        try expectIdentityChain(chain, 2);
+        try std.testing.expectEqual(&r.tree, chain[0].source_tree);
+        try std.testing.expectEqualStrings(
+            "s",
+            chain[0].source_tree.formHeader(chain[0].source_form_idx).head,
+        );
+        try std.testing.expectEqual(lt.root[0], chain[1].lowered_form_idx);
+    }
+
+    // Three layers: three hops, and the span still chains home.
+    {
+        var src_buf: std.ArrayList(u8) = .empty;
+        defer src_buf.deinit(a);
+        const src = try stagingChainSource(a, &src_buf, 3);
+        var r = try Host.validateDocument(a, src, .{ .lowering_registry = &registry });
+        defer r.deinit();
+        try std.testing.expect(!r.hasErrors());
+
+        const lt = r.lowered_tree orelse return error.TestNoLoweredTree;
+        const chain = r.provenanceChain(lt.root[0], &buf);
+        try expectIdentityChain(chain, 3);
+
+        const authored = r.tree.spanOf(r.data_forest[0]);
+        const terminal = lt.spanOf(lt.root[0]);
+        try std.testing.expectEqual(authored.start, terminal.start);
+        try std.testing.expectEqual(authored.end, terminal.end);
+    }
+}
+
+test "D8-staging: a form no hook produced has an empty chain" {
+    const a = std.testing.allocator;
+    var buf: [Lowering.MAX_LOWERING_STAGES]Host.Hop = undefined;
+
+    // Nothing lowered at all: no stages, so no chain and no panic.
+    {
+        const src: [:0]const u8 =
+            \\(plugin :name p :version "1.0.0"
+            \\  (form :name scene :open true))
+            \\(scene)
+            \\
+        ;
+        var r = try Host.validateDocument(a, src, .{});
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 0), r.lowering_stages.len);
+        try std.testing.expectEqual(@as(usize, 0), r.provenanceChain(r.data_forest[0], &buf).len);
+    }
+
+    // Lowering ran, but the node asked about is not one of its emissions.
+    // `(plain)` never lowers, so its index names no hop — and it is a live
+    // index into `r.tree`, which is the shape that used to read as an
+    // answer.
+    {
+        var registry: Lowering.LoweringRegistry = .{};
+        defer registry.deinit(a);
+        try registry.register(a, Lowering_test_hooks.test_identity_v1);
+
+        const src: [:0]const u8 =
+            \\(plugin :name p :version "1.0.0"
+            \\  (form :name sugar :open true
+            \\    :lowering (lowering :hook test/identity-v1 :produces [sugar-normal]))
+            \\  (form :name sugar-normal :open true)
+            \\  (form :name plain :open true))
+            \\(sugar)
+            \\(plain)
+            \\
+        ;
+        var r = try Host.validateDocument(a, src, .{ .lowering_registry = &registry });
+        defer r.deinit();
+        try std.testing.expect(!r.hasErrors());
+        try std.testing.expectEqual(@as(usize, 1), r.lowering_stages.len);
+
+        var plain_idx: ?Ast.NodeIndex = null;
+        for (r.data_forest) |idx| {
+            if (std.mem.eql(u8, r.tree.formHeader(idx).head, "plain")) plain_idx = idx;
+        }
+        const plain = plain_idx orelse return error.TestNoPlainForm;
+        try std.testing.expectEqual(@as(usize, 0), r.provenanceChain(plain, &buf).len);
+    }
+}
+
+// A form is terminal per form, not per document: `test/bundle-v1` emits an
+// `(asset …)` that lowers again and a `(link …)` that does not, so `link`
+// stays a root of layer 0's tree while `lowered_tree` holds only what layer
+// 1 produced. The final validated forest includes `link` — it is one of the
+// `stage_terminals` the forest pass validates — so a consumer explaining a
+// diagnostic on it needs a chain for it, and `provenanceChain` cannot be
+// asked: the index it would take is not in the terminal tree's index space.
+// `provenanceChainFrom` names the layer instead.
+test "D8-staging: a form terminal at an intermediate layer chains from its own layer" {
+    const a = std.testing.allocator;
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(a);
+    try registry.register(a, Lowering_test_hooks.test_bundle_v1);
+    try registry.register(a, Lowering_test_hooks.test_identity_v1);
+
+    const src: [:0]const u8 =
+        \\(plugin :name fan :version "1.0.0"
+        \\  (form :name bundle
+        \\    (key :name name :type symbol :optional false)
+        \\    (key :name target :type symbol :optional false)
+        \\    :lowering (lowering :hook test/bundle-v1 :produces [asset link]))
+        \\  (form :name asset :open true
+        \\    (key :name name :type symbol :optional false)
+        \\    :lowering (lowering :hook test/identity-v1 :produces [asset-normal]))
+        \\  (form :name asset-normal :open true)
+        \\  (form :name link :open true
+        \\    (key :name from :type symbol :optional false)
+        \\    (key :name to :type symbol :optional false)))
+        \\(bundle :name main :target hero)
+        \\
+    ;
+    var r = try Host.validateDocument(a, src, .{ .lowering_registry = &registry });
+    defer r.deinit();
+    try std.testing.expect(!r.hasErrors());
+
+    // Two layers: bundle fans out to (asset, link), then asset alone lowers.
+    try std.testing.expectEqual(@as(usize, 2), r.lowering_stages.len);
+    const stage0 = r.lowering_stages[0].tree;
+    try std.testing.expectEqual(@as(usize, 2), stage0.root.len);
+
+    var buf: [Lowering.MAX_LOWERING_STAGES]Host.Hop = undefined;
+
+    // The branch that kept lowering reaches the authored bytes in two hops.
+    const lt = r.lowered_tree orelse return error.TestNoLoweredTree;
+    try std.testing.expectEqualStrings("asset-normal", lt.formHeader(lt.root[0]).head);
+    const deep = r.provenanceChain(lt.root[0], &buf);
+    try std.testing.expectEqual(@as(usize, 2), deep.len);
+    try std.testing.expectEqualStrings("test/bundle-v1", deep[0].hook_id);
+    try std.testing.expectEqualStrings("bundle", deep[0].source_tree.formHeader(deep[0].source_form_idx).head);
+    try std.testing.expectEqualStrings("asset", deep[0].lowered_tree.formHeader(deep[0].lowered_form_idx).head);
+    try std.testing.expectEqualStrings("test/identity-v1", deep[1].hook_id);
+
+    // The branch that stopped is answered from the layer it stopped in.
+    var link_idx: ?Ast.NodeIndex = null;
+    for (stage0.root) |idx| {
+        if (std.mem.eql(u8, stage0.formHeader(idx).head, "link")) link_idx = idx;
+    }
+    const link = link_idx orelse return error.TestNoLinkForm;
+    const shallow = r.provenanceChainFrom(0, link, &buf);
+    try std.testing.expectEqual(@as(usize, 1), shallow.len);
+    try std.testing.expectEqualStrings("test/bundle-v1", shallow[0].hook_id);
+    try std.testing.expectEqual(&r.tree, shallow[0].source_tree);
+    try std.testing.expectEqualStrings(
+        "bundle",
+        shallow[0].source_tree.formHeader(shallow[0].source_form_idx).head,
+    );
+    try std.testing.expectEqual(link, shallow[0].lowered_form_idx);
+}
+
+// ---------------------------------------------------------------------------
+// Eject (ask 16). A host that ejects a verb replaces the verb's authored span
+// with the text of what the verb *wrote*. For a verb that lowers once that is
+// the terminal layer and the old API answered it. For a verb that lowers
+// twice it is layer 0, and reading the terminal table there yields the core
+// the sugar eventually becomes rather than the sugar itself — an ejection
+// that reloads through zero lowering layers where the original went through
+// two, agreeing on the final tree and on nothing a reader would ask.
+//
+// This is the ask's `(paint …)` → `(pass …)` → core shape, with identity-v1
+// standing in for both hooks: `paint` writes `paint-normal`, which lowers
+// again to `paint-normal-normal`.
+// ---------------------------------------------------------------------------
+
+/// Print the forms `stage` recorded as emitted from `source_form_idx` — the
+/// eject step, as a host would write it. A tree copy with a substituted
+/// `root` is the same view-narrowing `Host.validateDocument` uses to validate
+/// one layer's terminals, so nothing but the roots slice is allocated.
+fn ejectEmittedText(
+    a: std.mem.Allocator,
+    stage: Host.LoweringStage,
+    source_form_idx: Ast.NodeIndex,
+) !Ast.Bytes {
+    var roots: std.ArrayList(Ast.NodeIndex) = .empty;
+    defer roots.deinit(a);
+    for (stage.provenance.entries) |entry| {
+        if (entry.source_form_idx == source_form_idx) try roots.append(a, entry.lowered_form_idx);
+    }
+    var view = stage.tree;
+    view.root = roots.items;
+    return sjon.Printer.print(a, view, .{});
+}
+
+test "D8-staging: eject reads the layer that authored it" {
+    const a = std.testing.allocator;
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(a);
+    try registry.register(a, Lowering_test_hooks.test_identity_v1);
+
+    const src: [:0]const u8 =
+        \\(plugin :name creative :version "1.0.0"
+        \\  (form :name paint :open true
+        \\    (key :name source :type symbol :optional false)
+        \\    :lowering (lowering :hook test/identity-v1 :produces [paint-normal]))
+        \\  (form :name paint-normal :open true
+        \\    (key :name source :type symbol :optional false)
+        \\    :lowering (lowering :hook test/identity-v1 :produces [paint-normal-normal]))
+        \\  (form :name paint-normal-normal :open true
+        \\    (key :name source :type symbol :optional false)))
+        \\(paint :source dust)
+        \\
+    ;
+    var r = try Host.validateDocument(a, src, .{ .lowering_registry = &registry });
+    defer r.deinit();
+    try std.testing.expect(!r.hasErrors());
+    try std.testing.expectEqual(@as(usize, 2), r.lowering_stages.len);
+
+    const verb = r.data_forest[0];
+    try std.testing.expectEqualStrings("paint", r.tree.formHeader(verb).head);
+
+    // Layer 0 is what the verb wrote, and it is what eject must print.
+    const ejected = try ejectEmittedText(a, r.lowering_stages[0], verb);
+    defer ejected.deinit();
+    try std.testing.expectEqualStrings("(paint-normal :source dust)\n", ejected.data);
+
+    // The span it replaces is the authored `(paint :source dust)` bytes.
+    const span = r.tree.spanOf(verb);
+    try std.testing.expectEqualStrings("(paint :source dust)", src[span.start..span.end]);
+
+    // The contrast the ask is about: ejecting off the terminal layer — the
+    // only layer the API used to return — prints the core, which the verb
+    // never wrote. Same call, one layer later.
+    const wrong = try ejectEmittedText(a, r.lowering_stages[1], r.lowering_stages[0].tree.root[0]);
+    defer wrong.deinit();
+    try std.testing.expectEqualStrings("(paint-normal-normal :source dust)\n", wrong.data);
+
+    // And the chain names both hops, so a host can pick its layer rather
+    // than discover which one it got.
+    var buf: [Lowering.MAX_LOWERING_STAGES]Host.Hop = undefined;
+    const lt = r.lowered_tree orelse return error.TestNoLoweredTree;
+    const chain = r.provenanceChain(lt.root[0], &buf);
+    try std.testing.expectEqual(@as(usize, 2), chain.len);
+    try std.testing.expectEqual(verb, chain[0].source_form_idx);
+    try std.testing.expectEqual(&r.tree, chain[0].source_tree);
+}
+
+test "D8-staging: the deepest chain the stage cap allows fits the buffer" {
+    const a = std.testing.allocator;
+    const stages = Lowering.MAX_LOWERING_STAGES;
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(a);
+    try registry.register(a, Lowering_test_hooks.test_identity_v1);
+
+    // The cap bounds the stage *counter* and stops the pass before
+    // building the layer that would reach it, so the deepest document
+    // that lowers cleanly runs `MAX_LOWERING_STAGES - 1` layers and its
+    // chain is that many hops. The caller's buffer is sized by the
+    // ceiling, so it has exactly one slot to spare — which is the point:
+    // the size the API asks for is never the size that overflows.
+    var src_buf: std.ArrayList(u8) = .empty;
+    defer src_buf.deinit(a);
+    const src = try stagingChainSource(a, &src_buf, stages - 1);
+
+    var r = try Host.validateDocument(a, src, .{ .lowering_registry = &registry });
+    defer r.deinit();
+    try std.testing.expect(!r.hasErrors());
+    try std.testing.expectEqual(stages - 1, r.lowering_stages.len);
+
+    var buf: [Lowering.MAX_LOWERING_STAGES]Host.Hop = undefined;
+    const lt = r.lowered_tree orelse return error.TestNoLoweredTree;
+    const chain = r.provenanceChain(lt.root[0], &buf);
+    try expectIdentityChain(chain, stages - 1);
+}
+
+test "D8-staging: the stage cap leaves the layers it did build readable" {
+    const a = std.testing.allocator;
+    const stages = Lowering.MAX_LOWERING_STAGES;
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(a);
+    try registry.register(a, Lowering_test_hooks.test_identity_v1);
+
+    // One layer past the cap: `lowering_output_too_large` fires (pinned by
+    // its own test further down) and the layers that did run stay
+    // readable, so a consumer explaining the failure can still say how it
+    // got as far as it did.
+    var src_buf: std.ArrayList(u8) = .empty;
+    defer src_buf.deinit(a);
+    const src = try stagingChainSource(a, &src_buf, stages + 1);
+
+    var r = try Host.validateDocument(a, src, .{ .lowering_registry = &registry });
+    defer r.deinit();
+
+    var saw_too_large = false;
+    for (r.diagnostics) |d| {
+        if (d.code == .lowering_output_too_large) saw_too_large = true;
+    }
+    try std.testing.expect(saw_too_large);
+
+    // The cap stops the pass *before* the layer that would exceed it, so
+    // the stage list holds one layer fewer than the ceiling.
+    try std.testing.expectEqual(stages - 1, r.lowering_stages.len);
+
+    var buf: [Lowering.MAX_LOWERING_STAGES]Host.Hop = undefined;
+    const lt = r.lowered_tree orelse return error.TestNoLoweredTree;
+    const chain = r.provenanceChain(lt.root[0], &buf);
+    try expectIdentityChain(chain, stages - 1);
 }
 
 // Overlay semantics carry over to lowered trees: it holds only *omitted*
@@ -2820,4 +3452,115 @@ test "provider extraction: an unknown member set is silent, not a miss" {
     defer r.deinit();
 
     for (r.diagnostics) |d| try std.testing.expect(d.code != .not_cross_ref);
+}
+
+// ---------------------------------------------------------------------------
+// `HostOptions.held_symbol` — the option at the host boundary.
+//
+// A document whose author is mid-keystroke, validated twice: once as a
+// finished document (every axis reports) and once as a document being typed
+// (nothing does). The pair is the whole contract, and the first half is what
+// keeps the second from being "accept everything".
+// ---------------------------------------------------------------------------
+
+const held_doc: [:0]const u8 =
+    \\(plugin :name hold :version "1.0.0"
+    \\  (form :name kernel
+    \\    (key :name name :type symbol))
+    \\  (form :name warp
+    \\    (key :name by :type kernel-ref)
+    \\    (key :name amount :type number)
+    \\    (key :name blend :type blend-mode :optional true))
+    \\  (value-kind :name kernel-ref
+    \\    :underlying symbol
+    \\    :cross-ref (cross-ref :target kernel :name-key name))
+    \\  (value-kind :name blend-mode
+    \\    :underlying symbol
+    \\    :members (member-set (member :name over) (member :name add))))
+    \\
+    \\(kernel :name flow)
+    \\(warp :by _ :amount _ :blend _)
+    \\
+;
+
+test "held: the ask's own document, without the option" {
+    const a = std.testing.allocator;
+    var r = try Host.validateDocument(a, held_doc, .{});
+    defer r.deinit();
+
+    // Three axes, three codes — exactly the transcript the ask filed.
+    var saw_ref = false;
+    var saw_underlying = false;
+    var saw_member = false;
+    for (r.diagnostics) |d| switch (d.code) {
+        .not_cross_ref => saw_ref = true,
+        .wrong_underlying => saw_underlying = true,
+        .not_member => saw_member = true,
+        else => {},
+    };
+    try std.testing.expect(saw_ref);
+    try std.testing.expect(saw_underlying);
+    try std.testing.expect(saw_member);
+}
+
+test "held: the same document with the option is clean" {
+    const a = std.testing.allocator;
+    var r = try Host.validateDocument(a, held_doc, .{ .held_symbol = "_" });
+    defer r.deinit();
+
+    for (r.diagnostics) |d| {
+        std.debug.print("unexpected: {s}: {s}\n", .{ @tagName(d.code), d.message });
+    }
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    try std.testing.expect(!r.hasErrors());
+}
+
+test "held: two half-written forms do not collide at the host boundary" {
+    const a = std.testing.allocator;
+    const src: [:0]const u8 =
+        \\(plugin :name hold :version "1.0.0"
+        \\  (form :name kernel
+        \\    (key :name name :type symbol))
+        \\  (value-kind :name kernel-ref
+        \\    :underlying symbol
+        \\    :cross-ref (cross-ref :target kernel :name-key name)))
+        \\
+        \\(kernel :name _)
+        \\(kernel :name _)
+        \\
+    ;
+    var r = try Host.validateDocument(a, src, .{ .held_symbol = "_" });
+    defer r.deinit();
+
+    for (r.diagnostics) |d| try std.testing.expect(d.code != .duplicate_cross_ref_target);
+    try std.testing.expect(!r.hasErrors());
+}
+
+test "held: the overlay the host hands back resolves a held key to its default" {
+    // The other half of the feature, end to end: `HostOptions.held_symbol`
+    // reaches `materializeDefaults`, so pairing `tree` with
+    // `materialized_defaults` through `EffectiveView.initHeld` answers
+    // `.default` rather than the author's `_`.
+    const EffectiveView = sjon.EffectiveView.EffectiveView;
+    const a = std.testing.allocator;
+    const src: [:0]const u8 =
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name scene
+        \\    (key :name fps :type number :default 60 :optional true)))
+        \\(scene :fps _)
+        \\
+    ;
+    var r = try Host.validateDocument(a, src, .{ .held_symbol = "_" });
+    defer r.deinit();
+    try std.testing.expect(!r.hasErrors());
+
+    var form_idx: ?Ast.NodeIndex = null;
+    for (r.data_forest) |idx| {
+        if (r.tree.tagOf(idx) == .form) form_idx = idx;
+    }
+    const view = EffectiveView.initHeld(&r.tree, &r.materialized_defaults, "_");
+    const ev = view.getEffectiveValue(form_idx.?, "fps").?;
+    try std.testing.expect(ev == .default);
+    try std.testing.expectEqual(@as(f64, 60), ev.default.value.number);
+    try std.testing.expect(view.isHeld(form_idx.?, "fps"));
 }

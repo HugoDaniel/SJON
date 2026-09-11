@@ -32,6 +32,7 @@ import {
   classifyCase,
   discoverCaseDirs,
   hostCaseName,
+  heldSymbolFor,
   loadWasmHostSkipFamilies,
   queryCaseName,
   readMarkers,
@@ -170,10 +171,15 @@ for (const name of INLINE_CASES) {
     });
 
     const host = await SjonHost.loadFromBytes(wasmBytes, { resolver });
+    // `held-*` cases are documents being typed: the run sets `heldSymbol`,
+    // so a position spelled `_` is one the author has deliberately not
+    // filled in yet. Every other case passes the option off.
+    const heldSymbol = heldSymbolFor(name);
     const result = host.validateDocument(documentSrc, {
       projectRoot: caseDir,
       projectFile,
       projectDiagnostics,
+      ...(heldSymbol === null ? {} : { heldSymbol }),
     });
 
     const diags = result.diagnostics;

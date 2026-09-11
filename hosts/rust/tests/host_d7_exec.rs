@@ -514,3 +514,80 @@ fn project_diagnostics_merge_preserves_materialized_defaults() {
     assert_eq!(r.materialized_defaults.len(), 1);
     assert_eq!(r.materialized_defaults[0].value.as_f64().unwrap(), 32.0);
 }
+
+// --- `held_symbol` — a document being typed -------------------------------
+//
+// Same pair as `hosts/web/test/host-options.test.ts` and the Zig
+// `Host_tests`: without the option the three refinement axes report, with it
+// the result is empty. Only the pair is the contract — the first half is what
+// keeps the second from being "accept everything".
+
+const HELD_DOC: &str = r#"(plugin :name hold :version "1.0.0"
+  (form :name kernel
+    (key :name name :type symbol))
+  (form :name warp
+    (key :name by :type kernel-ref)
+    (key :name amount :type number)
+    (key :name blend :type blend-mode :optional true))
+  (value-kind :name kernel-ref
+    :underlying symbol
+    :cross-ref (cross-ref :target kernel :name-key name))
+  (value-kind :name blend-mode
+    :underlying symbol
+    :members (member-set (member :name over) (member :name add))))
+
+(kernel :name flow)
+(warp :by _ :amount _ :blend _)
+"#;
+
+#[test]
+fn without_held_symbol_every_refinement_axis_reports() {
+    let mut host = SjonHost::load(&wasm_path(), None).unwrap();
+    let r = host
+        .validate_document(HELD_DOC, &HostOptions::default())
+        .unwrap();
+    let codes = err_codes(&r.diagnostics);
+    assert!(codes.contains(&"not_cross_ref".to_string()));
+    assert!(codes.contains(&"wrong_underlying".to_string()));
+    assert!(codes.contains(&"not_member".to_string()));
+}
+
+#[test]
+fn with_held_symbol_the_same_document_is_clean() {
+    let mut host = SjonHost::load(&wasm_path(), None).unwrap();
+    let r = host
+        .validate_document(
+            HELD_DOC,
+            &HostOptions {
+                held_symbol: Some("_".to_string()),
+                ..HostOptions::default()
+            },
+        )
+        .unwrap();
+    assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+}
+
+#[test]
+fn two_held_cross_ref_names_do_not_collide() {
+    let src = r#"(plugin :name hold :version "1.0.0"
+  (form :name kernel
+    (key :name name :type symbol))
+  (value-kind :name kernel-ref
+    :underlying symbol
+    :cross-ref (cross-ref :target kernel :name-key name)))
+
+(kernel :name _)
+(kernel :name _)
+"#;
+    let mut host = SjonHost::load(&wasm_path(), None).unwrap();
+    let r = host
+        .validate_document(
+            src,
+            &HostOptions {
+                held_symbol: Some("_".to_string()),
+                ..HostOptions::default()
+            },
+        )
+        .unwrap();
+    assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+}

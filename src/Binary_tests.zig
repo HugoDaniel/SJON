@@ -27,6 +27,7 @@ const HEADER_SIZE = Binary.HEADER_SIZE;
 const wire_magic = Binary.wire_magic;
 const wire_version = Binary.wire_version;
 const MAX_TREE_DEPTH = Binary.MAX_TREE_DEPTH;
+const MAX_NODES = Binary.MAX_NODES;
 const ToBinaryOptions = Binary.ToBinaryOptions;
 const toBinary = Binary.toBinary;
 const fromBinary = Binary.fromBinary;
@@ -634,6 +635,110 @@ test "decoder rejects reserved header bytes" {
     defer a.free(poisoned);
     poisoned[6] = 0xFF;
     try testing.expectError(error.InvalidFlags, fromBinary(a, poisoned, .{}));
+}
+
+test "encoder: more roots than MAX_NODES is NodeCountExceeded, not an assert" {
+    // The parser has no width ceiling, so a 2 MiB document of `1 1 1 …`
+    // reaches the encoder with MAX_NODES + 1 roots. It used to assert;
+    // now it returns the same error the decoders raise on such a frame.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var b: Ast.TreeBuilder = .{ .a = arena.allocator() };
+    const roots = try arena.allocator().alloc(Ast.NodeIndex, MAX_NODES + 1);
+    for (roots) |*r| r.* = try b.appendNumber(1, .{ .start = 0, .end = 0 });
+    var tree = try b.finalize(&arena, "", roots);
+    defer tree.deinit();
+    try testing.expectError(error.NodeCountExceeded, toBinary(testing.allocator, tree, ToBinaryOptions.forMode(.compact)));
+}
+
+test "encoder: a vector wider than MAX_NODES is NodeCountExceeded, not an unreadable frame" {
+    // Before the guard the encoder wrote the count and produced a frame
+    // that its own decoder — and the cursor — refuse with NodeCountExceeded.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var b: Ast.TreeBuilder = .{ .a = arena.allocator() };
+    const elements = try arena.allocator().alloc(Ast.NodeIndex, MAX_NODES + 1);
+    for (elements) |*e| e.* = try b.appendNumber(1, .{ .start = 0, .end = 0 });
+    const vec = try b.appendVector(elements, .{ .start = 0, .end = 0 });
+    var tree = try b.finalize(&arena, "", &.{vec});
+    defer tree.deinit();
+    try testing.expectError(error.NodeCountExceeded, toBinary(testing.allocator, tree, ToBinaryOptions.forMode(.compact)));
+}
+
+test "decoder: a container count the frame cannot carry is Truncated before any task is pushed" {
+    // `[1]` encodes as … vector tag, count varint 0x01, then the element
+    // (tag + 8-byte f64). Splice the count to 1 << 20 (varint 80 80 40):
+    // the decoder used to push a task per declared element *before*
+    // reading one, so this 30-byte frame reserved ~40 MiB and only then
+    // hit Truncated. A 256 KiB fixed buffer as the gpa makes that
+    // reservation observable: the old behaviour is OutOfMemory.
+    const Case = struct { src: [:0]const u8, tail: usize };
+    const cases = [_]Case{
+        .{ .src = "[1]", .tail = 9 }, // element = tag + f64
+        .{ .src = "(f 1)", .tail = 10 }, // child = child-tag + tag + f64
+    };
+    for (cases) |c| {
+        var tree = try Parser.parse(testing.allocator, c.src);
+        defer tree.deinit();
+        const bin = try toBinary(testing.allocator, tree, ToBinaryOptions.forMode(.compact));
+        defer bin.deinit();
+        const count_pos = bin.data.len - c.tail - 1;
+        try testing.expectEqual(@as(u8, 1), bin.data[count_pos]);
+
+        var poisoned: std.ArrayList(u8) = .empty;
+        defer poisoned.deinit(testing.allocator);
+        try poisoned.appendSlice(testing.allocator, bin.data[0..count_pos]);
+        try poisoned.appendSlice(testing.allocator, &.{ 0x80, 0x80, 0x40 });
+        try poisoned.appendSlice(testing.allocator, bin.data[count_pos + 1 ..]);
+
+        var buf: [256 * 1024]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&buf);
+        try testing.expectError(error.Truncated, fromBinary(fba.allocator(), poisoned.items, .{}));
+    }
+}
+
+test "both decoders validate the string pool by count AND byte size" {
+    // `"a"` compact: header (16), then pool [count=1][byte_size=2][len=1]['a'],
+    // then roots. Two poisonings, one per half the decoders used to trust:
+    //   count 1 -> 2 with the bytes unchanged: the cursor accepted this and
+    //     resolved string index 1 into the roots block;
+    //   byte_size 2 -> 1 with the entries unchanged: the tree decoder
+    //     ignored byte_size and accepted this.
+    // Both decoders now reject both.
+    const BinaryCursor = @import("BinaryCursor.zig");
+    const a = testing.allocator;
+    var tree = try Parser.parse(a, "\"a\"");
+    defer tree.deinit();
+    const bin = try toBinary(a, tree, ToBinaryOptions.forMode(.compact));
+    defer bin.deinit();
+    try testing.expectEqual(@as(u8, 1), bin.data[HEADER_SIZE]);
+    try testing.expectEqual(@as(u8, 2), bin.data[HEADER_SIZE + 1]);
+
+    const Poison = struct { at: usize, byte: u8 };
+    for ([_]Poison{ .{ .at = HEADER_SIZE, .byte = 2 }, .{ .at = HEADER_SIZE + 1, .byte = 1 } }) |p| {
+        var poisoned = try a.dupe(u8, bin.data);
+        defer a.free(poisoned);
+        poisoned[p.at] = p.byte;
+        try testing.expectError(error.Truncated, fromBinary(a, poisoned, .{}));
+        try testing.expectError(error.Truncated, BinaryCursor.Cursor.init(poisoned));
+    }
+}
+
+test "decoder: a unit pointing at an empty pool entry is InvalidTag, not an assert" {
+    // `""` is a legitimate pool entry (index 0 here); a crafted frame can
+    // aim `1px`'s unit varint at it. Before the check the decoder built the
+    // node and `Tree.numberWithUnitOf` asserted `unit.len > 0` on read.
+    const a = testing.allocator;
+    var tree = try Parser.parse(a, "\"\" 1px");
+    defer tree.deinit();
+    const bin = try toBinary(a, tree, ToBinaryOptions.forMode(.compact));
+    defer bin.deinit();
+    var poisoned = try a.dupe(u8, bin.data);
+    defer a.free(poisoned);
+    // The frame ends with the unit's pool-index varint (px = entry 1).
+    try testing.expectEqual(@as(u8, 1), poisoned[poisoned.len - 1]);
+    poisoned[poisoned.len - 1] = 0;
+    try testing.expectError(error.InvalidTag, fromBinary(a, poisoned, .{}));
 }
 
 test "truncation fuzz: every prefix of basic.sjon binary is rejected cleanly" {

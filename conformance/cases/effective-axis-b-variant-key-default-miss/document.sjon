@@ -1,0 +1,35 @@
+; Axis B over a *variant* key's default.
+;
+; `:anchor` is declared inside `(variant :when kick …)`, typed
+; `phrase-name` (cross-ref to `phrase`), and defaults to the symbol
+; `ghost`. No `(phrase)` instance exists, so the registry is empty.
+;
+; The author writes `(track :kind kick)`: the discriminant selects the
+; `kick` variant and `:anchor` is omitted. The overlay materializes the
+; active variant's defaults, so the axis-B lookup runs over `ghost`,
+; finds nothing, and reports `not_cross_ref` on the synthetic default
+; path — the same shape a common key's default produces in
+; `effective-axis-b-default-miss`.
+;
+; Before the overlay carried variant-key defaults this case was silent:
+; `checkEffectiveRefLookups` looped the variant's keys and found no
+; entry to check, while `effectiveOptional` had already let the
+; omission through.
+(plugin :name probe :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase))
+  (value-kind :name kind-tag
+    :underlying symbol
+    :members (member-set :values [kick bass]))
+  (form :name phrase
+    (key :name name :type symbol :optional false))
+  (form :name track
+    :discriminant kind
+    (key :name kind :type kind-tag :optional false)
+    (variant :when kick
+      (key :name anchor :type phrase-name :default ghost :optional true))
+    (variant :when bass
+      (key :name sequence :type any :optional true))))
+
+(track :kind kick)

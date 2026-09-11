@@ -477,7 +477,10 @@ pub const Schema = struct {
     /// and made `union_ambiguous` warn that order picks the entity when
     /// both readings picked the same one. Sorting also means a group reads
     /// the same way in every message whichever kind's declaration produced
-    /// it; the author's own order is still what `describeTargets` renders.
+    /// it. Two surfaces render a group and they differ deliberately: hover
+    /// and the exporters take the author's spelling and order through
+    /// `CrossRef.describeTargets`, the validator's and the LSP's messages
+    /// take this canonical sorted order through `describeBucket`.
     ///
     /// **All-or-nothing.** If any listed target fails to resolve, the
     /// whole cross-ref contributes nothing — the same rule an unresolvable
@@ -512,6 +515,7 @@ pub const Schema = struct {
         }
         for (cr.targets) |t| {
             const canonical = (try self.canonicalFormName(a, t)) orelse return null;
+            errdefer a.free(canonical); // not yet in `parts`, which the errdefer above frees
             try parts.append(a, canonical);
         }
         std.debug.assert(parts.items.len == cr.targets.len);
@@ -531,7 +535,54 @@ pub const Schema = struct {
         }
         std.debug.assert(write >= 1);
         std.debug.assert(write <= cr.targets.len);
+        // The separator is also the split point: `describeBucket` recovers
+        // the parts by splitting on `' '`, which is only sound while no
+        // part can contain one. A canonical name is `<plugin>/<form>` and
+        // both halves are symbols, which the lexer ends at whitespace — so
+        // this holds today. Assert it at the join rather than trusting it
+        // at the split: a pre-condition here is a post-condition there.
+        for (parts.items[0..write]) |part| std.debug.assert(std.mem.indexOfScalar(u8, part, ' ') == null);
         return try std.mem.join(a, " ", parts.items[0..write]);
+    }
+
+    /// A bucket key rendered for a human, plus whether it names more than
+    /// one form — callers need that to pick a preposition (`on form` for
+    /// one, `across forms` for a set), and re-deriving it by probing
+    /// `text` for a space would restate what this already knows.
+    pub const BucketDisplay = struct { text: []const u8, is_group: bool };
+
+    /// Render `crossRefBucketKey`'s output for a message: unchanged for
+    /// one target, `a | b` for a group — the separator
+    /// `CrossRef.describeTargets` and the Markdown exporter already use,
+    /// so the codebase has one display convention for a group and not two.
+    ///
+    /// The two renderers answer different questions and so read
+    /// differently on purpose. `describeTargets` echoes what the author
+    /// wrote (their spelling, their order); this one names the namespace
+    /// that rejected a reference, which is canonical, sorted and
+    /// de-duplicated because the bucket is.
+    ///
+    /// **Ownership depends on the count**, exactly as `describeTargets`:
+    /// one target returns the caller's own slice *borrowed* and
+    /// unchanged, a group returns a fresh allocation on `a`. There is no
+    /// unconditional `free` for the result, so every caller passes an
+    /// arena.
+    pub fn describeBucket(a: Allocator, bucket: []const u8) Allocator.Error!BucketDisplay {
+        std.debug.assert(bucket.len > 0);
+        if (std.mem.indexOfScalar(u8, bucket, ' ') == null) {
+            return .{ .text = bucket, .is_group = false };
+        }
+        var buf: std.ArrayList(u8) = .empty;
+        errdefer buf.deinit(a);
+        var it = std.mem.splitScalar(u8, bucket, ' ');
+        var first = true;
+        while (it.next()) |part| {
+            if (!first) try buf.appendSlice(a, " | ");
+            first = false;
+            try buf.appendSlice(a, part);
+        }
+        std.debug.assert(!first);
+        return .{ .text = try buf.toOwnedSlice(a), .is_group = true };
     }
 
     /// Byte order over the bucket key's canonical parts. Any total order
@@ -1938,7 +1989,17 @@ pub fn collectAcyclicSpecs(
     gpa: Allocator,
 ) Allocator.Error![]AcyclicSpec {
     var out: std.ArrayList(AcyclicSpec) = .empty;
-    errdefer out.deinit(gpa);
+    // Every appended spec already owns three gpa allocations, so a
+    // failure after the first append must release them the way
+    // `freeAcyclicSpecs` does — `out.deinit` alone drops only the list.
+    errdefer {
+        for (out.items) |s| {
+            gpa.free(s.target_form);
+            if (s.scope_form) |sf| gpa.free(sf);
+            gpa.free(s.edges);
+        }
+        out.deinit(gpa);
+    }
     for (self.plugins) |*plugin| {
         for (plugin.value_kinds) |*kind| {
             const cr = kind.cross_ref orelse continue;
@@ -2003,12 +2064,17 @@ pub fn collectAcyclicSpecs(
             }
             errdefer if (scope_canonical) |sc| gpa.free(sc);
 
+            // Take ownership before the append: `toOwnedSlice` runs
+            // first, and if the append then fails nothing else holds
+            // the slice.
+            const owned_edges = try edges.toOwnedSlice(gpa);
+            errdefer gpa.free(owned_edges);
             try out.append(gpa, .{
                 .kind_name = kind.name,
                 .target_form = canonical,
                 .name_key = cr.name_key,
                 .scope_form = scope_canonical,
-                .edges = try edges.toOwnedSlice(gpa),
+                .edges = owned_edges,
             });
         }
     }
@@ -2625,6 +2691,45 @@ test "crossRefBucketKey: one form under two spellings is one target" {
     defer testing.allocator.free(key);
     try testing.expectEqualStrings("audio/phrase", key);
     try testing.expect(std.mem.indexOfScalar(u8, key, ' ') == null);
+}
+
+test "describeBucket: one target passes through borrowed and unchanged" {
+    // The byte-identity rule the whole plan rests on: a bucket with no
+    // space is not rendered at all, so every pre-group message and every
+    // test pinning one stays exactly as it was.
+    const bucket = "phrase";
+    const shown = try Schema.describeBucket(testing.allocator, bucket);
+    try testing.expect(!shown.is_group);
+    try testing.expectEqualStrings("phrase", shown.text);
+    try testing.expect(shown.text.ptr == bucket.ptr);
+}
+
+test "describeBucket: a namespaced single target keeps its `/` and is not a group" {
+    // `/` is not the separator — a canonical single-target key carries one
+    // and is still one form.
+    const bucket = "audio/phrase";
+    const shown = try Schema.describeBucket(testing.allocator, bucket);
+    try testing.expect(!shown.is_group);
+    try testing.expectEqualStrings("audio/phrase", shown.text);
+    try testing.expect(shown.text.ptr == bucket.ptr);
+}
+
+test "describeBucket: a group renders the bucket's order with ` | `" {
+    const shown = try Schema.describeBucket(testing.allocator, "gpu/compute-pipeline gpu/render-pipeline");
+    defer testing.allocator.free(shown.text);
+    try testing.expect(shown.is_group);
+    // The bucket's order, not the author's: canonical and sorted, which is
+    // what `describeTargets` deliberately does not do.
+    try testing.expectEqualStrings("gpu/compute-pipeline | gpu/render-pipeline", shown.text);
+}
+
+test "describeBucket: a three-target group gets two separators" {
+    // The loop, not a two-part special case.
+    const shown = try Schema.describeBucket(testing.allocator, "p/a p/b p/c");
+    defer testing.allocator.free(shown.text);
+    try testing.expect(shown.is_group);
+    try testing.expectEqualStrings("p/a | p/b | p/c", shown.text);
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, shown.text, " | "));
 }
 
 test "validateCrossRefs: unknown target emits unknown_cross_ref_target" {

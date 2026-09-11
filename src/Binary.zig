@@ -225,9 +225,14 @@ pub const FromBinaryOptions = struct {
 // ---------------------------------------------------------------------------
 
 /// Encode a `Tree` to a freshly-allocated, caller-owned `Ast.Bytes`.
-/// O(n) emit; output ≤ `MAX_FILE_SIZE` bytes.
+/// O(n) emit; output ≤ `MAX_FILE_SIZE` bytes. A tree wider than the wire
+/// admits — more than `MAX_NODES` roots, or one container with more than
+/// `MAX_NODES` children — is `error.NodeCountExceeded`: the parser has no
+/// width ceiling, so this is user input, and the decoders refuse such a
+/// frame anyway. Refusing here keeps every frame the encoder emits
+/// readable by both decoders.
 pub fn toBinary(gpa: Allocator, tree2: Ast.Tree, opts: ToBinaryOptions) Error!Ast.Bytes {
-    std.debug.assert(tree2.root.len <= MAX_NODES);
+    if (tree2.root.len > MAX_NODES) return error.NodeCountExceeded;
     std.debug.assert((opts.flags() & Flag.reserved_mask) == 0);
 
     var pool_arena = std.heap.ArenaAllocator.init(gpa);
@@ -569,6 +574,7 @@ fn emitOneNode(
         },
         .vector => {
             const elements = tree.vectorElements(idx);
+            if (elements.len > MAX_NODES) return error.NodeCountExceeded;
             try writeVarint(gpa, out, @intCast(elements.len));
             // Trailing comments follow the elements on the wire (mirroring the
             // form arm below). Push the task before the element tasks so it pops
@@ -589,6 +595,7 @@ fn emitOneNode(
                 try writeVarint(gpa, out, try string_pool.indexOf(ns));
             }
             try writeVarint(gpa, out, try string_pool.indexOf(hdr.head));
+            if (hdr.children.len > MAX_NODES) return error.NodeCountExceeded;
             try writeVarint(gpa, out, @intCast(hdr.children.len));
 
             if (opts.with_node_comments) {
@@ -710,8 +717,19 @@ fn readPool(
 ) Error!PoolView {
     const count = try readVarint(bytes, pos);
     if (count > MAX_STRING_POOL_ENTRIES) return error.NodeCountExceeded;
-    _ = try readVarint(bytes, pos); // byte_size hint, used by the cursor
-    if (count == 0) return .{ .entries = &.{} };
+    // The pool declares both its entry count and its byte size, and the
+    // two decoders used to validate different halves: the cursor trusted
+    // `byte_size` to find the next block, this walker trusted `count` and
+    // ignored `byte_size`. A frame that satisfied one and not the other
+    // was admitted by exactly one decoder. Both now require the entries
+    // to end exactly `byte_size` bytes after the size varint.
+    const byte_size = try readVarint(bytes, pos);
+    if (byte_size > bytes.len - pos.*) return error.Truncated;
+    const entries_end = pos.* + byte_size;
+    if (count == 0) {
+        if (byte_size != 0) return error.Truncated;
+        return .{ .entries = &.{} };
+    }
     const entries = try arena.alloc([]const u8, count);
     var i: u32 = 0;
     while (i < count) : (i += 1) {
@@ -721,6 +739,7 @@ fn readPool(
         entries[i] = try arena.dupe(u8, bytes[pos.*..][0..len]);
         pos.* += len;
     }
+    if (pos.* != entries_end) return error.Truncated;
     return .{ .entries = entries };
 }
 
@@ -827,6 +846,11 @@ const Decoder = struct {
                 const x = try readF64(self.bytes, &self.pos);
                 const unit_idx = try readVarint(self.bytes, &self.pos);
                 const unit = try self.string_pool.lookup(unit_idx);
+                // An empty pool entry is a valid string literal but never a
+                // unit: `TreeBuilder.packNumberWithUnit` would accept it and
+                // every reader asserts `unit.len > 0`. Same rule as the JSON
+                // bridge (`Json.numberWithUnitFromJson`) and the cursor.
+                if (unit.len == 0) return error.InvalidTag;
                 const hdr_at = try self.builder.packNumberWithUnit(x, unit);
                 try self.pushAtom(.number_with_unit, span, .{ .single = hdr_at }, leading_range);
             },
@@ -844,6 +868,11 @@ const Decoder = struct {
             .vector => {
                 const count = try readVarint(self.bytes, &self.pos);
                 if (count > MAX_NODES) return error.NodeCountExceeded;
+                // Every element costs at least its tag byte, so a count the
+                // remaining bytes cannot carry is already truncated. Checking
+                // here, before the task pushes below, keeps a 31-byte frame
+                // from reserving MAX_NODES tasks per nesting level.
+                if (count > self.bytes.len - self.pos) return error.Truncated;
                 try self.tasks.append(self.gpa, .{ .finalize_vector = .{
                     .count = count,
                     .span = span,
@@ -870,6 +899,8 @@ const Decoder = struct {
                 const head_idx = try self.builder.addString(head_str);
                 const child_count = try readVarint(self.bytes, &self.pos);
                 if (child_count > MAX_NODES) return error.NodeCountExceeded;
+                // Same bound as the vector arm: a child is at least one byte.
+                if (child_count > self.bytes.len - self.pos) return error.Truncated;
 
                 try self.tasks.append(self.gpa, .{ .finalize_form = .{
                     .count = child_count,

@@ -1,0 +1,37 @@
+; The control one alternative over: the same union taking its member arm.
+; `here` is in `spot`'s member set, which needs no cross-ref index, so
+; this shape matched inside the fragment and the hook always ran.
+;
+; That asymmetry is what made the defect so hard to read from outside: a
+; `(draw-graph …)` could render to the canvas (the member arm) and not to
+; an offscreen colour target (the ref arm), with the same key, the same
+; form and no diagnostic either way. Pinned so the fix keeps the arm that
+; already worked.
+(plugin :name probe :version "1.0.0"
+  (value-kind :name target-ref :underlying symbol
+    :cross-ref (cross-ref :target target))
+  (value-kind :name spot :underlying symbol
+    :members (member-set :values [here]))
+  (value-kind :name spot-or-target :underlying union
+    :union (union-shape :alternatives [spot target-ref]))
+  (value-kind :name child-item :underlying form
+    :heads (head-set :names [child]))
+  (value-kind :name box-ref :underlying symbol
+    :cross-ref (cross-ref :target box-normal))
+
+  (form :name target
+    (key :name name :type symbol :optional false))
+  (form :name child
+    (key :name unioned :type spot-or-target :optional false))
+  (form :name box
+    (key :name name :type symbol :optional false)
+    :positional child-item
+    :lowering (lowering :hook test/identity-v1 :produces [box-normal]))
+  (form :name box-normal
+    (key :name name :type symbol :optional false))
+  (form :name origin
+    (key :name ref :type box-ref :optional false)))
+
+(target :name t)
+(box :name b (child :unioned here))
+(origin :ref b)

@@ -191,8 +191,9 @@ function compileForm(node: AstNode & { tag: 'form' }, diags: QueryDiagnostic[]):
     const nBits = nNode.integerBits;
     const kBits = kNode.integerBits;
     // Out-of-domain (k < 1, n > k) degrades to silence; n < 1 IS silence —
-    // the empty rhythm. Mirrors the Zig substrate's compileEuclid gate.
-    if (kBits < 1n || nBits < 1n || nBits > kBits) return SILENCE;
+    // the empty rhythm. Mirrors the Zig substrate's compileEuclid gate,
+    // including its MAX_EUCLID_STEPS ceiling on k.
+    if (kBits < 1n || nBits < 1n || nBits > kBits || kBits > MAX_EUCLID_STEPS) return SILENCE;
     const child = compileNode(pos[2]!, diags);
     return {
       tag: 'seq',
@@ -214,6 +215,9 @@ function compileForm(node: AstNode & { tag: 'form' }, diags: QueryDiagnostic[]):
 // sequence pairing: both sides stay uniform, so each is one
 // (pattern, count) pair and a round is a single concatenation. Mirrors the
 // Zig substrate's `bjorklund`. Precondition: 1 <= n <= k.
+/** Mirrors `PatternQuery.MAX_EUCLID_STEPS`: past it `euclid` is silence. */
+const MAX_EUCLID_STEPS = 1n << 16n;
+
 function bjorklund(n: number, k: number): boolean[] {
   let patA: boolean[] = [true];
   let patB: boolean[] = [false];

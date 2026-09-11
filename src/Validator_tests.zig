@@ -2942,14 +2942,15 @@ test "validateBinary: full-mode binary walks a vector without desync" {
     try testing.expect(!via_bin.hasErrors());
 }
 
-test "validateBinary: nested typed-vector element reports against the outer slot" {
+test "validateBinary: nested typed-vector element reports the outer slot's label at the element's span" {
     // mat4 = vec of vec4. Bad inner element [0 0 0] (length 3, expected 4).
     // Post-B.9, the binary path converges on the tree framing: it reports the
-    // failure against the OUTER `:m` slot — "expects `mat4`, element [3]: got
-    // vector of length 3" at the whole vector's span, not "expects `vec4`, …"
-    // at the inner element. Cross-arm message/span/path identity is pinned by
-    // "message parity: nested typed-vector element"; this locks the binary
-    // arm's own outcome.
+    // failure with the OUTER `:m` slot's label and path — "expects `mat4`,
+    // element [3]: got vector of length 3", not "expects `vec4`, …". The span
+    // is the offending element's, not the outer vector's: the caret belongs
+    // under the row that is wrong. Cross-arm message/span/path identity is
+    // pinned by "message parity: nested typed-vector element"; this locks the
+    // binary arm's own outcome.
     const p: Plugin.Plugin = .{
         .name = "demo",
         .forms = &.{.{ .name = "set", .keys = &.{.{ .name = "m", .value_type = .{ .named = .{ .name = "mat4" } } }} }},
@@ -2969,8 +2970,8 @@ test "validateBinary: nested typed-vector element reports against the outer slot
     try testing.expect(std.mem.indexOf(u8, d.message, "`mat4`") != null);
     try testing.expect(std.mem.indexOf(u8, d.message, "element [3]:") != null);
     try testing.expect(std.mem.indexOf(u8, d.message, "vector of length 3") != null);
-    // Span points at the whole outer vector, not the inner [0 0 0].
-    try testing.expectEqualStrings("[[1 0 0 0] [0 1 0 0] [0 0 1 0] [0 0 0]]", src[d.span.start..d.span.end]);
+    // Span points at the offending inner element, not the whole outer vector.
+    try testing.expectEqualStrings("[0 0 0]", src[d.span.start..d.span.end]);
 }
 
 test "validateBinary: unit-required slot rejects bare number" {
@@ -3783,8 +3784,8 @@ test "validate [union-div 3]: same-arity labeled multi-sig narrows on tree, defe
 // Divergence #4: a form-valued expression argument that fails result-typing.
 // Both walkers agree on code (`expr_type_mismatch`), severity, and count —
 // they disagree only on the arg's PATH SEGMENT. The tree labels an expr arg
-// by its positional ordinal (`[sum 0]`, via the `expr_arg` PathStep). The
-// binary walker routes the form through the generic `.positional` StepKind,
+// by its positional ordinal (`[sum 0]`, via `Slot.expr_arg`). The binary
+// walker routes the form through the generic `.positional` StepKind,
 // whose `computeBinaryPathPair` labels ANY form child by its head — correct
 // for data-form children (`[scene track]`) but wrong for expr args, yielding
 // `[sum vec-result]`. This is PRE-EXISTING (predates the union-over-forms
@@ -5489,9 +5490,9 @@ test "validateBinary [O2]: type-mismatch span anchors at value, not at form head
     try testing.expectEqualStrings("\"oops\"", src[d.span.start..d.span.end]);
 }
 
-test "validateBinary [O3]: nested mat4 failure reports at the outer slot span" {
-    // Post-B.9 the binary arm points a nested typed-vector failure at the
-    // outer slot's span (the whole vector), converging on the tree walker.
+test "validateBinary [O3]: nested mat4 failure reports at the failing row's span" {
+    // Post-B.9 the binary arm carries the outer slot's label and path; the
+    // span is the offending row's, converging on the tree walker's `failLeaf`.
     const p: Plugin.Plugin = .{
         .name = "demo",
         .forms = &.{.{ .name = "set", .keys = &.{.{ .name = "m", .value_type = .{ .named = .{ .name = "mat4" } } }} }},
@@ -5507,7 +5508,7 @@ test "validateBinary [O3]: nested mat4 failure reports at the outer slot span" {
     var r = try validateBinary(testing.allocator, bin.data, schema);
     defer r.deinit();
     try testing.expectEqual(@as(usize, 1), r.diagnostics.len);
-    try testing.expectEqualStrings("[[1 0 0 0] [0 1 0 0] [0 0 1 0] [0 0 0]]", src[r.diagnostics[0].span.start..r.diagnostics[0].span.end]);
+    try testing.expectEqualStrings("[0 0 0]", src[r.diagnostics[0].span.start..r.diagnostics[0].span.end]);
 }
 
 test "validateBinary [O4]: stripped binary diagnostics all carry zero spans" {
@@ -6498,15 +6499,17 @@ test "binary path parity: duplicate key emits at [form, key]" {
 
 test "binary path: typed-vector element mismatch reports against the outer slot" {
     // Post-B.9: a typed-vector element failure converges on the tree
-    // framing — one diagnostic against the `:v` slot, path `[set, v]` (NOT
-    // the old index-extended `[set, v, 1]`), message wrapped with
-    // `element [1]: …`. Count still matches the tree (one per slot).
+    // framing — one diagnostic labelled and pathed at the `:v` slot,
+    // path `[set, v]` (NOT the old index-extended `[set, v, 1]`), message
+    // wrapped with `element [1]: …`. Count still matches the tree (one per
+    // slot). The span, though, is the element's: `"two"`, quotes included.
     const p: Plugin.Plugin = .{
         .name = "demo",
         .forms = &.{.{ .name = "set", .keys = &.{.{ .name = "v", .value_type = .{ .named = .{ .name = "ints" } } }} }},
         .value_kinds = &.{.{ .name = "ints", .underlying = .vector, .vector = .{ .element = .{ .name = "number" } } }},
     };
-    const bin = try encodeForValidate("(set :v [1 \"two\" 3])");
+    const src: [:0]const u8 = "(set :v [1 \"two\" 3])";
+    const bin = try encodeForValidate(src);
     defer bin.deinit();
     var r = try validateBinary(testing.allocator, bin.data, Schema.Schema.init(&.{p}));
     defer r.deinit();
@@ -6517,6 +6520,7 @@ test "binary path: typed-vector element mismatch reports against the outer slot"
     try testing.expectEqualStrings("v", d.path[1]);
     try testing.expect(std.mem.indexOf(u8, d.message, "element [1]:") != null);
     try testing.expect(std.mem.indexOf(u8, d.message, "got string") != null);
+    try testing.expectEqualStrings("\"two\"", src[d.span.start..d.span.end]);
 }
 
 test "binary path parity: positional_not_allowed step uses head when value is a form" {
@@ -6536,6 +6540,16 @@ test "binary path parity: positional_not_allowed step uses idx when value isn't 
         .forms = &.{.{ .name = "parent", .keys = &.{} }},
     };
     try parityCheckPaths("(parent 42)", Schema.Schema.init(&.{p}));
+}
+
+test "binary path parity: a bare keyword positional still steps by idx" {
+    const p: Plugin.Plugin = .{
+        .name = "demo",
+        .forms = &.{.{ .name = "parent", .keys = &.{} }},
+    };
+    // The keyword tail is prose only. The path is what the corpus
+    // compares, so it stays the positional ordinal on both walkers.
+    try parityCheckPaths("(parent :name)", Schema.Schema.init(&.{p}));
 }
 
 // ===========================================================================
@@ -6724,6 +6738,36 @@ fn expectMessageSpanPathOnBoth(
     for (td.path, bd.path) |ts, bs| try testing.expectEqualStrings(ts, bs);
 }
 
+/// Both walkers' `code` diagnostic covers exactly `expected_text` in `src`.
+/// Sibling of `expectMessageSpanPathOnBoth`: that one pins the two arms to
+/// each other, this one pins *where* they agree, so a coordinated move of
+/// both spans cannot pass unnoticed.
+fn expectSpanTextOnBoth(
+    src: [:0]const u8,
+    schema: Schema.Schema,
+    code: Diagnostic.Code,
+    expected_text: []const u8,
+) !void {
+    const a = testing.allocator;
+    var tree = try Parser.parse(a, src);
+    defer tree.deinit();
+    var tr = try validate(a, tree, schema);
+    defer tr.deinit();
+    const td = diagForCode(tr.diagnostics, code) orelse return error.TreeDiagnosticMissing;
+    try testing.expectEqualStrings(expected_text, src[td.span.start..td.span.end]);
+
+    const bin = try Binary.toBinary(a, tree, .{
+        .with_spans = true,
+        .with_head_spans = true,
+        .with_kvpair_key_spans = true,
+    });
+    defer bin.deinit();
+    var br = try validateBinary(a, bin.data, schema);
+    defer br.deinit();
+    const bd = diagForCode(br.diagnostics, code) orelse return error.BinaryDiagnosticMissing;
+    try testing.expectEqualStrings(expected_text, src[bd.span.start..bd.span.end]);
+}
+
 test "message parity: duplicate_key" {
     const p: Plugin.Plugin = .{
         .name = "demo",
@@ -6751,6 +6795,39 @@ test "message parity: positional_not_allowed" {
         .forms = &.{.{ .name = "scene", .positional = .none }},
     };
     try expectMessageOnBoth("(scene 42)", Schema.Schema.init(&.{p}), .positional_not_allowed, "form `scene` does not accept positional children");
+}
+
+test "message parity: positional_not_allowed (bare keyword tail)" {
+    const p: Plugin.Plugin = .{
+        .name = "demo",
+        .forms = &.{.{ .name = "scene", .positional = .none }},
+    };
+    // The whole point of the tail: `:name` is a positional because the
+    // parser had nothing to pair it with, and the plain message gives an
+    // author no way to work that out.
+    try expectMessageOnBoth(
+        "(scene :name)",
+        Schema.Schema.init(&.{p}),
+        .positional_not_allowed,
+        "form `scene` does not accept positional children — `:name` has no value, so it is a bare keyword, not a keyword pair",
+    );
+}
+
+test "message parity: positional_not_allowed (bare keyword mid-form, not just trailing)" {
+    const p: Plugin.Plugin = .{
+        .name = "demo",
+        .forms = &.{.{ .name = "scene", .positional = .none }},
+    };
+    // `:ortho` is followed by another keyword, so the greedy pairing rule
+    // leaves it bare there too. `:zoom 2` does pair, so it earns
+    // `unknown_key` instead and `positional_not_allowed` has exactly one
+    // candidate.
+    try expectMessageOnBoth(
+        "(scene :ortho :zoom 2)",
+        Schema.Schema.init(&.{p}),
+        .positional_not_allowed,
+        "form `scene` does not accept positional children — `:ortho` has no value, so it is a bare keyword, not a keyword pair",
+    );
 }
 
 test "message parity: missing_discriminant_key" {
@@ -6817,6 +6894,43 @@ test "message parity: nested typed-vector element (mat4 with a short row)" {
         Schema.Schema.init(&.{p}),
         .vector_length_mismatch,
     );
+}
+
+/// `mat4` = vector<vec4, 4>, `vec4` = vector<number, 4>. Shared by the two
+/// span-anchoring tests below.
+const mat4_plugin: Plugin.Plugin = .{
+    .name = "demo",
+    .forms = &.{.{
+        .name = "set",
+        .keys = &.{.{ .name = "m", .value_type = .{ .named = .{ .name = "mat4" } } }},
+    }},
+    .value_kinds = &.{
+        .{ .name = "vec4", .underlying = .vector, .vector = .{ .len = 4, .element = .{ .name = "number" } } },
+        .{ .name = "mat4", .underlying = .vector, .vector = .{ .len = 4, .element = .{ .name = "vec4" } } },
+    },
+};
+
+test "span: a doubly-nested element failure points at the innermost leaf" {
+    // `element_at` nests: mat4 → vec4 → number. A string in row 0 slot 0
+    // wraps twice, and the span belongs to the string, not to row 0 and not
+    // to the whole matrix. Both arms, same answer — the binary walker's
+    // `view` is the eval frame's node at whatever depth, so the innermost
+    // leaf is the only choice the two can agree on for free.
+    const src: [:0]const u8 = "(set :m [[\"x\" 0 0 0] [0 1 0 0] [0 0 1 0] [0 0 0 1]])";
+    const schema = Schema.Schema.init(&.{mat4_plugin});
+    try expectMessageSpanPathOnBoth(src, schema, .wrong_underlying);
+    try expectSpanTextOnBoth(src, schema, .wrong_underlying, "\"x\"");
+}
+
+test "span: a container-level vector failure stays on the container" {
+    // `vector_length_mismatch` on the mat4 itself is not an `element_at`:
+    // the fault is the arity, not any one row, so the span stays the whole
+    // outer vector. The trip test for the half of the rule that does NOT
+    // move.
+    const src: [:0]const u8 = "(set :m [[1 0 0 0]])";
+    const schema = Schema.Schema.init(&.{mat4_plugin});
+    try expectMessageSpanPathOnBoth(src, schema, .vector_length_mismatch);
+    try expectSpanTextOnBoth(src, schema, .vector_length_mismatch, "[[1 0 0 0]]");
 }
 
 test "code: unknown_form on unknown head" {
@@ -12220,11 +12334,11 @@ test "budget: the per-buffer binary walk trips its step ceiling" {
     // the frame cap, so the step count is the only ceiling that can fire.
     try testing.expectError(
         error.DepthExceeded,
-        Validator.validateBinaryWithBudget(testing.allocator, bin.data, schema, .{ .steps = 1 }, null),
+        Validator.validateBinaryWithBudget(testing.allocator, bin.data, schema, .{ .steps = 1 }, null, false, null),
     );
 
     // Control: the same buffer under the production ceilings.
-    var ok = try Validator.validateBinaryWithBudget(testing.allocator, bin.data, schema, .{}, null);
+    var ok = try Validator.validateBinaryWithBudget(testing.allocator, bin.data, schema, .{}, null, false, null);
     defer ok.deinit();
     try testing.expect(!ok.hasErrors());
 }
@@ -12238,7 +12352,7 @@ test "budget: the per-buffer binary walk trips its frame ceiling" {
     // Steps are left at the production value, so this is the frame guard.
     try testing.expectError(
         error.DepthExceeded,
-        Validator.validateBinaryWithBudget(testing.allocator, bin.data, schema, .{ .frames = 1 }, null),
+        Validator.validateBinaryWithBudget(testing.allocator, bin.data, schema, .{ .frames = 1 }, null, false, null),
     );
 }
 
@@ -12250,10 +12364,10 @@ test "budget: forest-wide entry honors the same ceilings" {
 
     try testing.expectError(
         error.DepthExceeded,
-        Validator.validateForestBinaryWithBudget(testing.allocator, &bins, schema, .{ .steps = 1 }, null),
+        Validator.validateForestBinaryWithBudget(testing.allocator, &bins, schema, .{ .steps = 1 }, null, false, null),
     );
 
-    var ok = try Validator.validateForestBinaryWithBudget(testing.allocator, &bins, schema, .{}, null);
+    var ok = try Validator.validateForestBinaryWithBudget(testing.allocator, &bins, schema, .{}, null, false, null);
     defer ok.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 2), ok.results.len);
 }
@@ -13981,6 +14095,20 @@ test "cross-ref group: a name from neither target is not_cross_ref" {
     , schema, .not_cross_ref);
 }
 
+test "cross-ref group: not_cross_ref reads the group as a disjunction" {
+    // The bucket key is the registry's *identity* string, space-joined —
+    // rendering it verbatim produced a form whose head contained a space.
+    // `Schema.describeBucket` gives it the ` | ` the hover cards and the
+    // Markdown exporter already use, in the bucket's canonical sorted
+    // order (`describeTargets` renders the author's, on purpose).
+    const schema = Schema.Schema.init(&.{buildPipelineGroupPlugin()});
+    try expectMessageOnBoth(
+        \\(render-pipeline :name blit)
+        \\(compute-pipeline :name reduce)
+        \\(dispatch :pipeline blot)
+    , schema, .not_cross_ref, "form `dispatch` keyword `:pipeline` expects `pipeline-ref`, got `blot` (no `(gpu/compute-pipeline | gpu/render-pipeline :name …)` form declares this name)");
+}
+
 test "cross-ref group: the same name in two targets is duplicate_cross_ref_target" {
     // The whole point of one namespace: the collision is caught at the
     // *declarations*, not silently resolved to whichever came first.
@@ -13989,6 +14117,40 @@ test "cross-ref group: the same name in two targets is duplicate_cross_ref_targe
         \\(render-pipeline :name same)
         \\(compute-pipeline :name same)
     , schema, .duplicate_cross_ref_target);
+}
+
+test "cross-ref group: the duplicate message says `across forms`, not `on form`" {
+    // ``on form `a b` `` was wrong twice over: it rendered the identity
+    // string raw, and it called a set of forms a form. The group gets its
+    // own preposition rather than a bent version of the singular one —
+    // which is why `describeBucket` hands back `is_group` instead of
+    // making the caller probe the text for a separator.
+    //
+    // Both walkers: the tree (`registerName`) and binary
+    // (`registerCrossRefBinary`) index builders funnel through
+    // `registerSite`, and a fix in one that missed the other is exactly
+    // the tree/binary drift this suite exists to catch.
+    const schema = Schema.Schema.init(&.{buildPipelineGroupPlugin()});
+    try expectMessageOnBoth(
+        \\(render-pipeline :name same)
+        \\(compute-pipeline :name same)
+    , schema, .duplicate_cross_ref_target, "duplicate cross-ref name `same` across forms `gpu/compute-pipeline | gpu/render-pipeline`");
+}
+
+test "cross-ref group: a single target still reads `on form`, byte-identical" {
+    // The other half of the pin: one target is not rendered at all, so the
+    // canonical name reaches the message exactly as it did before groups
+    // existed. If this moves, `describeBucket`'s borrow-and-return rule
+    // broke.
+    const p: Plugin.Plugin = .{
+        .name = "demo",
+        .value_kinds = &.{.{ .name = "phrase-name", .underlying = .symbol, .cross_ref = .{ .targets = &.{"phrase"} } }},
+        .forms = &.{.{ .name = "phrase", .keys = &.{.{ .name = "name", .value_type = .symbol }} }},
+    };
+    try expectMessageOnBoth(
+        \\(phrase :name same)
+        \\(phrase :name same)
+    , Schema.Schema.init(&.{p}), .duplicate_cross_ref_target, "duplicate cross-ref name `same` on form `demo/phrase`");
 }
 
 test "cross-ref group: a name in one target only is no duplicate" {
@@ -14217,6 +14379,120 @@ test "cross-ref group: two kinds listing the same group share one bucket" {
         try testing.expect(std.mem.indexOf(u8, d.message, "the target group") != null);
     }
     try testing.expect(found);
+}
+
+// ---------------------------------------------------------------------------
+// Ask 22 — a slot-local instance registers in its head's bucket.
+//
+// `buildCrossRefIndexForest` canonicalises the **head string** against the
+// schema catalog and never consults the `item.registry` it carries for the
+// registration decision; the registry steers descent only. So a form written
+// inside a slot whose local shadows a global head is still a cross-reference
+// target under that head — which is what makes a `:lowering` container able to
+// hold children of its own head *and* stay referenceable from outside.
+//
+// It reads like an inconsistency (the walker carries a registry and declines
+// to use it here), so without these it is exactly the kind of thing a tidying
+// refactor deletes in silence.
+// ---------------------------------------------------------------------------
+
+/// `space` is a cross-ref target by `:name` and declares the positional
+/// slot-local `space` — the same head, its own `FormSpec`, no `:lowering`.
+/// `coords` is the second head of the two-head convention (B1): a container
+/// that lowers is emitted as `coords`, and one `space-ref` kind targets both,
+/// so a document resolves whichever of the two is in the forest.
+fn buildOwnHeadLocalPlugin() Plugin.Plugin {
+    const local_space: []const Plugin.FormSpec = &.{.{
+        .name = "space",
+        .positional = .any,
+        .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = false }},
+    }};
+    return .{
+        .name = "anm",
+        .value_kinds = &.{.{
+            .name = "space-ref",
+            .underlying = .symbol,
+            .cross_ref = .{ .targets = &.{ "space", "coords" } },
+        }},
+        .forms = &.{
+            .{
+                .name = "space",
+                .positional = .any,
+                .local_forms = local_space,
+                .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = false }},
+            },
+            .{
+                .name = "coords",
+                .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = false }},
+            },
+            .{
+                .name = "text",
+                .keys = &.{
+                    .{ .name = "name", .value_type = .symbol, .optional = false },
+                    .{ .name = "space", .value_type = .{ .named = .{ .name = "space-ref" } }, .optional = true },
+                },
+            },
+        },
+    };
+}
+
+test "own-head local: a nested slot-local instance is a cross-ref target" {
+    // `title` is written inside `poster`, where the head resolves to the
+    // container's own local. A sibling root still reaches it.
+    const schema = Schema.Schema.init(&.{buildOwnHeadLocalPlugin()});
+    try expectNoCodeOnBoth(
+        \\(space :name poster
+        \\  (space :name title))
+        \\(text :name letters :space title)
+    , schema, .not_cross_ref);
+}
+
+test "own-head local: two nested instances of the same name collide" {
+    // The other direction of the same fact: registration happened, so the
+    // duplicate is caught. If the index had skipped local-resolved forms,
+    // this would validate clean and `title` would resolve to whichever came
+    // first.
+    const schema = Schema.Schema.init(&.{buildOwnHeadLocalPlugin()});
+    try expectCodeOnBoth(
+        \\(space :name poster
+        \\  (space :name title)
+        \\  (space :name title))
+    , schema, .duplicate_cross_ref_target);
+}
+
+test "own-head local: the registration lands in the head's bucket" {
+    // White-box, and the load-bearing claim: the bucket is keyed by the
+    // canonical *head*, so a nested local `space` and a root `space` share
+    // one namespace with `coords`. `contains` is asked under the group key
+    // because `space-ref` lists both heads.
+    const a = testing.allocator;
+    const schema = Schema.Schema.init(&.{buildOwnHeadLocalPlugin()});
+    var tree = try Parser.parse(a,
+        \\(space :name poster
+        \\  (space :name title))
+        \\(coords :name mark)
+    );
+    defer tree.deinit();
+    const trees = [_]Ast.Tree{tree};
+    var fr = try Validator.validateForest(a, &trees, schema);
+    defer fr.deinit(a);
+
+    const bucket = "anm/coords anm/space";
+    try testing.expect(fr.cross_ref_index.contains(.tree(0), bucket, "poster"));
+    try testing.expect(fr.cross_ref_index.contains(.tree(0), bucket, "title"));
+    try testing.expect(fr.cross_ref_index.contains(.tree(0), bucket, "mark"));
+}
+
+test "own-head local: the two-head bucket resolves with only one head present" {
+    // B1's argument, as a test. A host that runs no lowering pass — the CLI
+    // and all three parity hosts — sees `space` and never `coords`; a forest
+    // that lowered sees `coords` and never `space`. `:target [space coords]`
+    // resolves in both worlds, which a single-head target cannot.
+    const schema = Schema.Schema.init(&.{buildOwnHeadLocalPlugin()});
+    try expectNoCodeOnBoth(
+        \\(coords :name title)
+        \\(text :name letters :space title)
+    , schema, .not_cross_ref);
 }
 
 // ---------------------------------------------------------------------------
@@ -14721,4 +14997,525 @@ test "aggregate head-set: a union-typed positional slot carries no counts" {
     // The union's own dispatch is untouched: a form outside the branch's
     // head-set and not a number still fails.
     try expectNoCodeOnBoth("(entry 42)", schema, .union_no_branch_matched);
+}
+
+// ---------------------------------------------------------------------------
+// `Options.defer_cross_refs` — the fragment rule.
+//
+// The only thing that differs between validating a form alone and validating
+// it inside its document is which names are registered: schema, overlay and
+// axes are the same objects in both passes. So a fragment can decide every
+// check except identity, and under the flag it declines exactly that one.
+// Each pair below is the same source twice — once whole-document (the code
+// fires) and once as a fragment (it does not) — which is what keeps the flag
+// from quietly becoming "accept everything".
+// ---------------------------------------------------------------------------
+
+/// Fragment twin of `expectNoCodeOnBoth`: validate `src` through both
+/// walkers with `defer_cross_refs` on and assert neither emits `code`.
+/// Pair every call with a plain `expectCodeOnBoth` on the same source, or
+/// the assertion proves nothing.
+///
+/// A twin rather than an options-taking helper family: the binary walker
+/// takes plain parameters, not `Options` (see `validateForestBinary`), so
+/// one flag is all the two paths can share here.
+fn expectNoCodeOnBothDeferred(
+    src: [:0]const u8,
+    schema: Schema.Schema,
+    code: Diagnostic.Code,
+) !void {
+    const a = testing.allocator;
+    var tree = try Parser.parse(a, src);
+    defer tree.deinit();
+
+    var tr = try Validator.validateWithOptions(a, tree, schema, .{ .defer_cross_refs = true });
+    defer tr.deinit();
+    try testing.expect(!anyCode(tr.diagnostics, code));
+
+    const bin = try Binary.toBinary(a, tree, .{});
+    defer bin.deinit();
+    var br = try Validator.validateBinaryWithBudget(a, bin.data, schema, .{}, null, true, null);
+    defer br.deinit();
+    try testing.expect(!anyCode(br.diagnostics, code));
+}
+
+/// The ask's own shape (`docs/plans/asks/19-*.md`): a `(union-shape …)`
+/// with a member-set arm and a cross-ref arm, on a key of a form nested
+/// one positional level down — the container child that started this.
+const Validator_test_fragment: Plugin.Plugin = .{
+    .name = "probe",
+    .value_kinds = &.{
+        .{
+            .name = "target-ref",
+            .underlying = .symbol,
+            .cross_ref = .{ .targets = &.{"target"} },
+        },
+        .{
+            .name = "spot",
+            .underlying = .symbol,
+            .members = .{ .members = &.{.{ .name = "here" }} },
+        },
+        .{
+            .name = "spot-or-target",
+            .underlying = .union_of,
+            .union_of = .{ .alternatives = &.{ .{ .name = "spot" }, .{ .name = "target-ref" } } },
+        },
+        .{
+            .name = "child-item",
+            .underlying = .form,
+            .heads = .{ .heads = &.{.{ .name = "child" }} },
+        },
+    },
+    .forms = &.{
+        .{ .name = "target", .keys = &.{
+            .{ .name = "name", .value_type = .symbol, .optional = false },
+        } },
+        .{ .name = "child", .keys = &.{
+            .{ .name = "plain", .value_type = .{ .named = .{ .name = "target-ref" } }, .optional = true },
+            .{ .name = "unioned", .value_type = .{ .named = .{ .name = "spot-or-target" } }, .optional = true },
+        } },
+        .{ .name = "box", .positional = .{ .kind = .{ .name = "child-item" } } },
+    },
+};
+
+test "fragment: a plain cross-ref miss is not adjudicated under defer_cross_refs" {
+    const schema = Schema.Schema.init(&.{Validator_test_fragment});
+    // The control the ask calls row 1 — already filtered today by
+    // `Lowering`'s code list, and the base case the flag has to keep.
+    try expectCodeOnBoth("(box (child :plain t))", schema, .not_cross_ref);
+    try expectNoCodeOnBothDeferred("(box (child :plain t))", schema, .not_cross_ref);
+}
+
+test "fragment: a union reaching a cross-ref alternative matches under defer_cross_refs" {
+    const schema = Schema.Schema.init(&.{Validator_test_fragment});
+    // The ask itself. The union is genuinely ambiguous by shape (two
+    // symbol-underlying alternatives), so `15`'s `determinedArm` finds no
+    // arm and the failure is `union_no_branch_matched` — a shape code, not
+    // one of the three cross-ref codes the old list filtered.
+    try expectCodeOnBoth("(box (child :unioned t))", schema, .union_no_branch_matched);
+    try expectNoCodeOnBothDeferred("(box (child :unioned t))", schema, .union_no_branch_matched);
+    // One arm over: the member arm needs no index and was never affected.
+    try expectNoCodeOnBoth("(box (child :unioned here))", schema, .union_no_branch_matched);
+    try expectNoCodeOnBothDeferred("(box (child :unioned here))", schema, .union_no_branch_matched);
+}
+
+test "fragment: the deferral is identity-only, not a blanket accept" {
+    const schema = Schema.Schema.init(&.{Validator_test_fragment});
+    // Everything a fragment *can* decide it still decides: a value whose
+    // shape reaches neither alternative fails under the flag exactly as it
+    // does without one.
+    try expectCodeOnBoth("(box (child :unioned 42))", schema, .union_no_branch_matched);
+    try expectNoCodeOnBothDeferred("(box (child :plain 42))", schema, .not_cross_ref);
+    try expectCodeOnBoth("(box (child :plain 42))", schema, .wrong_underlying);
+    // And a head outside the positional slot's set is still a head error.
+    try expectCodeOnBoth("(box (target :name t))", schema, .not_head_member);
+}
+
+test "fragment: two same-named targets are not a duplicate under defer_cross_refs" {
+    const schema = Schema.Schema.init(&.{Validator_test_fragment});
+    // Arguably decidable inside a fragment — but "a fragment does not
+    // adjudicate cross-reference identity" is the whole rule, and the
+    // duplicate check *is* identity. Suppressed, deliberately.
+    try expectCodeOnBoth("(target :name t) (target :name t)", schema, .duplicate_cross_ref_target);
+    try expectNoCodeOnBothDeferred("(target :name t) (target :name t)", schema, .duplicate_cross_ref_target);
+}
+
+test "fragment: a :scope'd reference outside its scope is not adjudicated under defer_cross_refs" {
+    const plugin = buildScopedPiecePlugin();
+    const schema = Schema.Schema.init(&.{plugin});
+    // A fragment does not carry the enclosing `(piece …)` either, so
+    // "outside its scope" is the same unknowable as "not registered".
+    try expectCodeOnBoth("(phrase :name p0) (track :sequence [p0])", schema, .cross_ref_outside_scope);
+    try expectNoCodeOnBothDeferred("(phrase :name p0) (track :sequence [p0])", schema, .cross_ref_outside_scope);
+}
+
+/// `runWithAxes` with the fragment flag exposed. Tree-only: the defaulted
+/// cross-ref site it drives lives behind the defaults overlay, which the
+/// binary walker does not take.
+fn runWithAxesDeferring(
+    a: Allocator,
+    src: [:0]const u8,
+    schema: Schema.Schema,
+    axes: Validator.EffectiveAxes,
+    defer_cross_refs: bool,
+) !struct {
+    tree: Ast.Tree,
+    mat: MaterializedDefaultsMod.Result,
+    arena: std.heap.ArenaAllocator,
+    result: Validator.Result,
+} {
+    var tree = try Parser.parse(a, src);
+    errdefer tree.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    errdefer arena.deinit();
+
+    var mat = try MaterializedDefaultsMod.materializeDefaults(a, arena.allocator(), &tree, tree.root, schema);
+    errdefer mat.deinit(a);
+
+    const result = try Validator.validateWithOptions(a, tree, schema, .{
+        .overlay = &mat.materialized,
+        .axes = axes,
+        .defer_cross_refs = defer_cross_refs,
+    });
+    return .{ .tree = tree, .mat = mat, .arena = arena, .result = result };
+}
+
+test "fragment: a defaulted cross-ref miss is not adjudicated under defer_cross_refs" {
+    const a = testing.allocator;
+    const schema = Schema.Schema.init(&.{Validator_test_actor});
+    const src: [:0]const u8 = "(actor :name ada) (track)";
+
+    // `(track)`'s `:hero` defaults to `ghost`, which names no actor. That
+    // is the second place `not_cross_ref` is emitted and it needs the same
+    // deferral, or the gate closes on a default pointing outward.
+    var whole = try runWithAxesDeferring(a, src, schema, .{ .ref_lookup = true }, false);
+    defer {
+        whole.result.deinit();
+        whole.mat.deinit(a);
+        whole.arena.deinit();
+        whole.tree.deinit();
+    }
+    try testing.expect(hasDiagAtPath(
+        whole.result.diagnostics,
+        .not_cross_ref,
+        &.{ "track", "hero", "default" },
+    ));
+
+    var fragment = try runWithAxesDeferring(a, src, schema, .{ .ref_lookup = true }, true);
+    defer {
+        fragment.result.deinit();
+        fragment.mat.deinit(a);
+        fragment.arena.deinit();
+        fragment.tree.deinit();
+    }
+    try testing.expectEqual(
+        @as(usize, 0),
+        countDiagWithCode(fragment.result.diagnostics, .not_cross_ref),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Positional-ordinal width. `Slot.expr_arg` and `FormWalk.pos_idx` were both
+// `u8` until 2026-08-28: the tree walker panicked on `@intCast` at argument
+// 256, and the binary walker's saturating increment answered `argument 255` —
+// and, worse, `path = [* 255]` — for every ordinal past it. An expression
+// takes as many arguments as the author writes, so the ordinal is
+// document-scale; both fields are `u32` now.
+//
+// The ±1 pair is what the corpus case cannot give on its own: a single case
+// at 256 would also pass against a clamp moved by one. 255 pins the last
+// ordinal the old width could hold, 256 the first it could not, on both
+// walkers, asserting the path segment AND the prose ordinal.
+// ---------------------------------------------------------------------------
+
+/// `(* 1 1 … 1 "x")` with `ordinal` leading `1`s, so the string — the only
+/// argument that mismatches, and so the only one that reaches the emitter —
+/// sits at positional index `ordinal`. Caller owns the returned slice.
+fn exprArgOrdinalSrc(a: Allocator, ordinal: usize) ![:0]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(a);
+    try buf.appendSlice(a, "(*");
+    for (0..ordinal) |_| try buf.appendSlice(a, " 1");
+    try buf.appendSlice(a, " \"x\")");
+    return buf.toOwnedSliceSentinel(a, 0);
+}
+
+fn anyMessageContains(diags: []const Diagnostic, code: Diagnostic.Code, needle: []const u8) bool {
+    for (diags) |d| {
+        if (d.code != code) continue;
+        if (std.mem.indexOf(u8, d.message, needle) != null) return true;
+    }
+    return false;
+}
+
+/// Both walkers name `ordinal` in the path and in the prose. Core `*` is
+/// `:rest number`, so `ExprFunc.paramType` types every argument past the
+/// declared params and the mismatch lands wherever the string is put.
+fn expectExprArgOrdinal(ordinal: usize) !void {
+    const a = testing.allocator;
+    const schema = Schema.Schema.init(&.{core.plugin});
+
+    const src = try exprArgOrdinalSrc(a, ordinal);
+    defer a.free(src);
+    const idx = try std.fmt.allocPrint(a, "{d}", .{ordinal});
+    defer a.free(idx);
+    const prose = try std.fmt.allocPrint(a, "argument {d} expects number", .{ordinal});
+    defer a.free(prose);
+
+    var tree = try Parser.parse(a, src);
+    defer tree.deinit();
+
+    var tr = try validate(a, tree, schema);
+    defer tr.deinit();
+    try testing.expect(anyCodeAtPath(tr.diagnostics, .expr_type_mismatch, &.{ "*", idx }));
+    try testing.expect(anyMessageContains(tr.diagnostics, .expr_type_mismatch, prose));
+
+    const bin = try Binary.toBinary(a, tree, .{});
+    defer bin.deinit();
+    var br = try validateBinary(a, bin.data, schema);
+    defer br.deinit();
+    try testing.expect(anyCodeAtPath(br.diagnostics, .expr_type_mismatch, &.{ "*", idx }));
+    try testing.expect(anyMessageContains(br.diagnostics, .expr_type_mismatch, prose));
+}
+
+test "expr arg ordinal 255: the last one a u8 could hold" {
+    try expectExprArgOrdinal(255);
+}
+
+test "expr arg ordinal 256: the first one a u8 could not" {
+    try expectExprArgOrdinal(256);
+}
+
+// ---------------------------------------------------------------------------
+// `Options.held_symbol` — a held position, spelled `_`.
+//
+// A held position is one the author has deliberately not filled in yet. The
+// rule is one `if` at the top of each walker's typed-match entry point —
+// `matchValueAgainstType` on the Tree path, `matchAgainstExpected` on the
+// Binary one — and each is the single door to typed matching there, so every
+// refinement axis is downstream of it and none needs per-axis work. These
+// tests are the proof of that claim: one pair per axis, the same source twice
+// — once without the option (the axis's own diagnostic fires on both walkers)
+// and once with it (neither says anything). Without the paired control the
+// accept case proves nothing, because a schema that never checked the axis
+// would also pass it.
+// ---------------------------------------------------------------------------
+
+/// One plugin covering every axis the ask names — `underlying`, `cross_ref`,
+/// `members`, `numeric`, `unit`, `repr`, a union arm and a vector element —
+/// plus a typed positional slot, all on one form so each case differs by a
+/// single keyword.
+const Validator_test_held: Plugin.Plugin = .{
+    .name = "hold",
+    .value_kinds = &.{
+        .{
+            .name = "kernel-ref",
+            .underlying = .symbol,
+            .cross_ref = .{ .targets = &.{"kernel"} },
+        },
+        .{
+            .name = "blend-mode",
+            .underlying = .symbol,
+            .members = .{ .members = &.{ .{ .name = "over" }, .{ .name = "add" } } },
+        },
+        .{
+            .name = "angle",
+            .underlying = .number,
+            .unit = .{ .required = true, .allowed = &.{"deg"} },
+        },
+        .{
+            .name = "steps",
+            .underlying = .number,
+            .numeric = .{ .min = .{ .value = 1 }, .max = .{ .value = 8 }, .integer = true },
+        },
+        .{ .name = "texel", .underlying = .number, .repr = .u16 },
+        .{
+            .name = "blend-or-kernel",
+            .underlying = .union_of,
+            .union_of = .{ .alternatives = &.{ .{ .name = "blend-mode" }, .{ .name = "kernel-ref" } } },
+        },
+        .{
+            .name = "pair",
+            .underlying = .vector,
+            .vector = .{ .len = 2, .element = .{ .name = "number" } },
+        },
+    },
+    .forms = &.{
+        .{ .name = "kernel", .keys = &.{
+            .{ .name = "name", .value_type = .symbol, .optional = false },
+        } },
+        .{ .name = "warp", .keys = &.{
+            .{ .name = "amount", .value_type = .number, .optional = true },
+            .{ .name = "by", .value_type = .{ .named = .{ .name = "kernel-ref" } }, .optional = true },
+            .{ .name = "blend", .value_type = .{ .named = .{ .name = "blend-mode" } }, .optional = true },
+            .{ .name = "angle", .value_type = .{ .named = .{ .name = "angle" } }, .optional = true },
+            .{ .name = "steps", .value_type = .{ .named = .{ .name = "steps" } }, .optional = true },
+            .{ .name = "texel", .value_type = .{ .named = .{ .name = "texel" } }, .optional = true },
+            .{ .name = "mode", .value_type = .{ .named = .{ .name = "blend-or-kernel" } }, .optional = true },
+            .{ .name = "size", .value_type = .{ .named = .{ .name = "pair" } }, .optional = true },
+        } },
+        .{ .name = "curl", .positional = .{ .kind = .{ .name = "kernel-ref" } } },
+    },
+};
+
+/// Validate `src` through BOTH walkers with `held_symbol = "_"` and assert
+/// neither says anything at all. Stronger than "not this code": the whole
+/// point of the feature is that a held position is silent, so any diagnostic
+/// is a failure — including one from an axis the case did not mean to
+/// exercise. Dual-path because a `KeySpec` behaviour landing in one walker
+/// and not the other is this validator's standing silent failure.
+fn expectHeldSilent(src: [:0]const u8, schema: Schema.Schema) !void {
+    const a = testing.allocator;
+    var tree = try Parser.parse(a, src);
+    defer tree.deinit();
+
+    var tr = try Validator.validateWithOptions(a, tree, schema, .{ .held_symbol = "_" });
+    defer tr.deinit();
+    try expectNoDiagnostics("tree", tr.diagnostics);
+
+    const bin = try Binary.toBinary(a, tree, .{});
+    defer bin.deinit();
+    var br = try Validator.validateBinaryWithBudget(a, bin.data, schema, .{}, null, false, "_");
+    defer br.deinit();
+    try expectNoDiagnostics("binary", br.diagnostics);
+}
+
+/// Name what fired before failing on the count — "expected 0, found 2" alone
+/// does not say which axis leaked.
+fn expectNoDiagnostics(path: []const u8, diags: []const Diagnostic) !void {
+    for (diags) |d| std.debug.print("unexpected ({s}): {s}: {s}\n", .{ path, @tagName(d.code), d.message });
+    try testing.expectEqual(@as(usize, 0), diags.len);
+}
+
+/// Assert BOTH walkers still emit `code` *with the option on*. The relaxation
+/// is a property of the value, not of the run: turning it on must not soften
+/// anything a held value is not standing in for.
+fn expectHeldStillReports(src: [:0]const u8, schema: Schema.Schema, code: Diagnostic.Code) !void {
+    const a = testing.allocator;
+    var tree = try Parser.parse(a, src);
+    defer tree.deinit();
+
+    var tr = try Validator.validateWithOptions(a, tree, schema, .{ .held_symbol = "_" });
+    defer tr.deinit();
+    try testing.expect(anyCode(tr.diagnostics, code));
+
+    const bin = try Binary.toBinary(a, tree, .{});
+    defer bin.deinit();
+    var br = try Validator.validateBinaryWithBudget(a, bin.data, schema, .{}, null, false, "_");
+    defer br.deinit();
+    try testing.expect(anyCode(br.diagnostics, code));
+}
+
+test "held: an underlying mismatch is accepted" {
+    const schema = Schema.Schema.init(&.{Validator_test_held});
+    try expectCodeOnBoth("(warp :amount _)", schema, .wrong_underlying);
+    try expectHeldSilent("(warp :amount _)", schema);
+}
+
+test "held: a cross-ref miss is accepted" {
+    const schema = Schema.Schema.init(&.{Validator_test_held});
+    try expectCodeOnBoth("(warp :by _)", schema, .not_cross_ref);
+    try expectHeldSilent("(warp :by _)", schema);
+}
+
+test "held: a member-set miss is accepted" {
+    const schema = Schema.Schema.init(&.{Validator_test_held});
+    try expectCodeOnBoth("(warp :blend _)", schema, .not_member);
+    try expectHeldSilent("(warp :blend _)", schema);
+}
+
+test "held: a unit-bearing number slot is accepted" {
+    const schema = Schema.Schema.init(&.{Validator_test_held});
+    try expectCodeOnBoth("(warp :angle _)", schema, .wrong_underlying);
+    try expectHeldSilent("(warp :angle _)", schema);
+}
+
+test "held: a numeric-bounded slot is accepted" {
+    const schema = Schema.Schema.init(&.{Validator_test_held});
+    try expectCodeOnBoth("(warp :steps _)", schema, .wrong_underlying);
+    try expectHeldSilent("(warp :steps _)", schema);
+}
+
+test "held: a repr-pinned slot is accepted" {
+    const schema = Schema.Schema.init(&.{Validator_test_held});
+    try expectCodeOnBoth("(warp :texel _)", schema, .wrong_underlying);
+    try expectHeldSilent("(warp :texel _)", schema);
+}
+
+test "held: a union slot is accepted without trying an arm" {
+    const schema = Schema.Schema.init(&.{Validator_test_held});
+    try expectCodeOnBoth("(warp :mode _)", schema, .union_no_branch_matched);
+    try expectHeldSilent("(warp :mode _)", schema);
+}
+
+test "held: a vector element is accepted" {
+    const schema = Schema.Schema.init(&.{Validator_test_held});
+    try expectCodeOnBoth("(warp :size [1 _])", schema, .wrong_underlying);
+    try expectHeldSilent("(warp :size [1 _])", schema);
+}
+
+test "held: a typed positional slot is accepted" {
+    // Positionals route through `matchValueAgainstType` at the same site as
+    // kvpair values, so this falls out of the one gate with no extra work —
+    // which is what the ask's scope question 2 asked and this pins.
+    const schema = Schema.Schema.init(&.{Validator_test_held});
+    try expectCodeOnBoth("(curl _)", schema, .not_cross_ref);
+    try expectHeldSilent("(curl _)", schema);
+}
+
+test "held: the whole vector may be held, not only an element" {
+    const schema = Schema.Schema.init(&.{Validator_test_held});
+    try expectCodeOnBoth("(warp :size _)", schema, .wrong_underlying);
+    try expectHeldSilent("(warp :size _)", schema);
+}
+
+test "held: a filled position beside a held one still checks" {
+    // The relaxation is a property of the value, not of the slot or the
+    // form: `:blend` is held, `:amount` is not, and `:amount` still fails.
+    const schema = Schema.Schema.init(&.{Validator_test_held});
+    try expectCodeOnBoth("(warp :blend _ :amount \"x\")", schema, .wrong_underlying);
+    try expectHeldStillReports("(warp :blend _ :amount \"x\")", schema, .wrong_underlying);
+}
+
+test "held: a typo is still a typo" {
+    // The ask's must-not #1. Omission is held; a misspelled key is a
+    // mistake, and collapsing the two is the failure this feature would be
+    // blamed for.
+    const schema = Schema.Schema.init(&.{Validator_test_held});
+    try expectHeldStillReports("(warp :blnd _)", schema, .unknown_key);
+}
+
+test "held: a schema that has not opted in is unchanged" {
+    // The ask's must-not #2. `_` with the option null is exactly the
+    // diagnostic it was before the field existed — every `expectCodeTree`
+    // above is this assertion once per axis; this one names it.
+    const schema = Schema.Schema.init(&.{Validator_test_held});
+    try expectCodeOnBoth("(warp :by _ :amount _ :blend _)", schema, .not_cross_ref);
+    try expectCodeOnBoth("(warp :by _ :amount _ :blend _)", schema, .wrong_underlying);
+    try expectCodeOnBoth("(warp :by _ :amount _ :blend _)", schema, .not_member);
+}
+
+test "held: only the run's own spelling is held" {
+    // SJON does not police the name, but it does not guess it either: with
+    // `held_symbol = "_"` the symbol `hole` is an ordinary symbol and fails
+    // exactly as it did.
+    const schema = Schema.Schema.init(&.{Validator_test_held});
+    try expectHeldStillReports("(warp :amount hole)", schema, .wrong_underlying);
+}
+
+test "held: two held names do not collide" {
+    // The cold start the feature exists to serve: two half-written forms,
+    // both holding their `:name`. Without the registration gate the second
+    // is a `duplicate_cross_ref_target` — a diagnostic from a feature whose
+    // whole purpose is to emit nothing.
+    const schema = Schema.Schema.init(&.{Validator_test_held});
+    try expectCodeOnBoth("(kernel :name flow)(kernel :name flow)", schema, .duplicate_cross_ref_target);
+    try expectHeldSilent("(kernel :name _)(kernel :name _)", schema);
+}
+
+test "held: a held name is not a target anything can reach" {
+    // The other half of "not a name": holding `:name` registers nothing, so
+    // a reference spelled `_` is not resolving *to* it — it is held in its
+    // own right. Spelling the reference for real still misses, which is what
+    // proves the registration did not happen.
+    const schema = Schema.Schema.init(&.{Validator_test_held});
+    try expectHeldStillReports("(kernel :name _)(warp :by flow)", schema, .not_cross_ref);
+    try expectHeldSilent("(kernel :name _)(warp :by _)", schema);
+}
+
+test "held: a real name beside a held one still registers" {
+    // The gate is on the value, not the key: `flow` indexes normally even
+    // though its sibling holds, so a reference to it resolves.
+    const schema = Schema.Schema.init(&.{Validator_test_held});
+    try expectHeldSilent("(kernel :name _)(kernel :name flow)(warp :by flow)", schema);
+}
+
+test "held: a required key is still required" {
+    // The ask's scope question 3, answered no. Only an explicit atom is
+    // held; omission stays `missing_required_key`, which is the diagnostic
+    // the ask itself says it would lose for sibling forms it does not own.
+    const schema = Schema.Schema.init(&.{Validator_test_held});
+    try expectHeldStillReports("(kernel)", schema, .missing_required_key);
+    // …and one character of typing gets it back to silent.
+    try expectHeldSilent("(kernel :name _)", schema);
 }

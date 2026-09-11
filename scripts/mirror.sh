@@ -12,7 +12,10 @@
 # The mirror is built in a git worktree on an orphan `release` branch located
 # OUTSIDE this repo (default ../sjon-release), committed as one snapshot per
 # release titled "SJON <version>" (version read from src/version.zig, the
-# semver truth every manifest follows), and tagged v<version>.
+# semver truth every manifest follows), and tagged v<version>. The snapshot's
+# commit message carries that version's CHANGELOG.md entry, so the public
+# history says what each release changed; a version with no `## <version>`
+# entry is refused before anything is touched.
 #
 # Usage:
 #   scripts/mirror.sh           prepare + commit + tag the cut locally (no push)
@@ -64,6 +67,20 @@ fi
 VERSION="$(sed -n 's/^pub const string = "\(.*\)";$/\1/p' "$PROJECT_DIR/src/version.zig")"
 if [ -z "$VERSION" ]; then
     echo "error: no \`pub const string\` in src/version.zig" >&2
+    exit 1
+fi
+
+# --- Changelog: the version's entry, heading included, up to the next `## ` ---
+# Headings read `## 1.3.0 — 2026-08-27`, so the version is the second field.
+# `## Unreleased` never matches a version, which is the point: a cut whose
+# entry is still called Unreleased has not been closed.
+CHANGELOG_ENTRY="$(awk -v v="$VERSION" '
+    /^## / { if (found) exit; if ($2 == v) found = 1 }
+    found { print }
+' "$PROJECT_DIR/CHANGELOG.md")"
+if [ -z "$CHANGELOG_ENTRY" ]; then
+    echo "error: CHANGELOG.md has no \`## ${VERSION}\` entry; close the" >&2
+    echo "       Unreleased section as ${VERSION} before cutting it." >&2
     exit 1
 fi
 
@@ -141,13 +158,21 @@ git add -A
 if git diff --cached --quiet; then
     echo "==> No changes to mirror; nothing to commit."
 else
-    # Release-style message: a versioned title plus one description paragraph
-    # of what SJON is. Signing off: snapshots are automated and may run
+    # Release-style message: a versioned title, one description paragraph of
+    # what SJON is, then the version's CHANGELOG entry. `-F` with
+    # `--cleanup=whitespace` because the entry's `## ` / `### ` headings would
+    # be stripped as comment lines under the `strip` cleanup a `commit.cleanup`
+    # setting can select. Signing off: snapshots are automated and may run
     # headless.
-    git -c commit.gpgsign=false commit -q \
-        -m "SJON ${VERSION}" \
-        -m "SJON is a schema-constrained data language for domain tools and the agents that operate them: deterministic S-expression data plus a pure, bounded expression layer, one front-end, a stable binary wire format, append-only diagnostic codes, and parity hosts in Zig, Node, Rust, and TypeScript."
-    echo "==> Committed release snapshot (SJON ${VERSION})"
+    msg="$(mktemp)"
+    trap 'rm -f "$msg"' EXIT
+    {
+        printf 'SJON %s\n\n' "$VERSION"
+        printf '%s\n\n' "SJON is a schema-constrained data language for domain tools and the agents that operate them: deterministic S-expression data plus a pure, bounded expression layer, one front-end, a stable binary wire format, append-only diagnostic codes, and parity hosts in Zig, Node, Rust, and TypeScript."
+        printf '%s\n' "$CHANGELOG_ENTRY"
+    } >"$msg"
+    git -c commit.gpgsign=false commit -q --cleanup=whitespace -F "$msg"
+    echo "==> Committed release snapshot (SJON ${VERSION}, with its changelog entry)"
 fi
 
 # --- Tag the snapshot (immutable; a new release bumps src/version.zig) ---

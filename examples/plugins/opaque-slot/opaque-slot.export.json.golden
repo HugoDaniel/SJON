@@ -1,0 +1,221 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "template",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "anchor",
+          "description": "A named point an animation can target.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "name",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            }
+          ]
+        },
+        {
+          "name": "animate",
+          "description": "A finished animation. Every key is checked when this form is written at the top level.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "target",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "cross_ref",
+                "targets": [
+                  "anchor"
+                ],
+                "name_key": "name",
+                "acyclic": false,
+                "scope_form": null,
+                "provider": null,
+                "source_key": null
+              }
+            },
+            {
+              "name": "from",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "number"
+              }
+            },
+            {
+              "name": "to",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "number"
+              }
+            },
+            {
+              "name": "ease",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "symbol_members",
+                "names": [
+                  "linear",
+                  "ease-in",
+                  "ease-out"
+                ]
+              },
+              "default": {
+                "$sym": "linear"
+              }
+            }
+          ]
+        },
+        {
+          "name": "template",
+          "description": "A named body the host expands later. `:body` is typed `form` and read by nobody here.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "name",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "symbol"
+              }
+            },
+            {
+              "name": "body",
+              "optional": false,
+              "description": "Opaque: the slot is a form, and what is inside it is the expander's business.",
+              "value": {
+                "kind": "form"
+              }
+            }
+          ]
+        },
+        {
+          "name": "apply",
+          "description": "Expand a template against a target.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "template",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "cross_ref",
+                "targets": [
+                  "template"
+                ],
+                "name_key": "name",
+                "acyclic": false,
+                "scope_form": null,
+                "provider": null,
+                "source_key": null
+              }
+            },
+            {
+              "name": "target",
+              "optional": false,
+              "description": "",
+              "value": {
+                "kind": "cross_ref",
+                "targets": [
+                  "anchor"
+                ],
+                "name_key": "name",
+                "acyclic": false,
+                "scope_form": null,
+                "provider": null,
+                "source_key": null
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": [
+        {
+          "name": "ease",
+          "description": "The easing curve names the host knows.",
+          "shape": {
+            "kind": "symbol_members",
+            "names": [
+              "linear",
+              "ease-in",
+              "ease-out"
+            ]
+          }
+        },
+        {
+          "name": "anchor-name",
+          "description": "Cross-ref to an `(anchor :name …)` the document declares.",
+          "shape": {
+            "kind": "cross_ref",
+            "targets": [
+              "anchor"
+            ],
+            "name_key": "name",
+            "acyclic": false,
+            "scope_form": null,
+            "provider": null,
+            "source_key": null
+          }
+        },
+        {
+          "name": "template-name",
+          "description": "Cross-ref to a `(template :name …)` the document declares.",
+          "shape": {
+            "kind": "cross_ref",
+            "targets": [
+              "template"
+            ],
+            "name_key": "name",
+            "acyclic": false,
+            "scope_form": null,
+            "provider": null,
+            "source_key": null
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `anchor-name` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin_name": "template",
+      "kind_name": "anchor-name"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `anchor-name` cross-ref annotation surfaces target-form=`anchor` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "plugin_name": "template",
+      "kind_name": "anchor-name"
+    },
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `template-name` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin_name": "template",
+      "kind_name": "template-name"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `template-name` cross-ref annotation surfaces target-form=`template` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "plugin_name": "template",
+      "kind_name": "template-name"
+    }
+  ]
+}

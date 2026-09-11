@@ -684,7 +684,10 @@ fn unitOf(shape: Model.ValueShape) ?Model.UnitShape {
 }
 
 fn printF64(w: *std.Io.Writer, v: f64) std.Io.Writer.Error!void {
-    var buf: [64]u8 = undefined;
+    // `{d}` on a non-integer f64 writes the full expansion (`1e-70` is 72
+    // characters); sized from std's bound so a legal bound never turns
+    // into WriteFailed.
+    var buf: [std.fmt.float.bufferSize(.decimal, f64)]u8 = undefined;
     const trunc: f64 = @trunc(v);
     const is_integer = trunc == v and @abs(v) < 1e18;
     const s = if (is_integer)

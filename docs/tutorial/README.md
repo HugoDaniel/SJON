@@ -55,9 +55,9 @@ are what a schema does with it.
 7. [Safe Expressions](07-safe-expressions.md) - expression position, typed diagnostics, and core vocabulary.
 8. [Bindings and Control Flow](08-bindings-and-control-flow.md) - `let`, `if`, `cond`, and host bindings.
 9. [Reading Plugin Schemas](09-reading-plugin-schemas.md) - author-facing schema literacy: keys, required/optional, defaults, positional policy, open forms, lowering metadata, and exporting schemas.
-10. [Discriminated and Exclusive Forms](10-discriminated-and-exclusive-forms.md) - one head with variant shapes; exclusive groups (`exactly-one` / `at-most-one`); multi-key bundles.
+10. [Discriminated and Exclusive Forms](10-discriminated-and-exclusive-forms.md) - one head with variant shapes and their defaults; exclusive groups (`exactly-one` / `at-most-one`); multi-key bundles.
 11. [Value Kinds: Shapes, Vectors, Units, Bounds, Representation](11-value-kinds-shapes.md) - underlying shapes, vector shapes, unit shapes, numeric bounds, representation.
-12. [Value Kinds: Strings, Members, Heads, Unions, Slot-Local Forms](12-value-kinds-refinements.md) - string bounds, member sets, head sets, unions, slot-local forms, and the diagnostic cheat sheet.
+12. [Value Kinds: Strings, Members, Heads, Unions, Slot-Local Forms](12-value-kinds-refinements.md) - string bounds, member sets, head sets, unions, slot-local forms, opaque slots, and the diagnostic cheat sheet.
 13. [Cross-References](13-cross-references.md) - document-discovered name resolution between forms.
 14. [Diagnostics-Driven Repair](14-diagnostics-driven-repair.md) - using stable diagnostic codes as a repair workflow.
 15. [Style, Portability, and Capstone](15-style-portability-and-capstone.md) - durable authoring habits.

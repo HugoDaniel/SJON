@@ -45,7 +45,7 @@ gate that checks it.
 | --------- | ---- | ------ |
 | `version` | 1 B  | `0x05` |
 
-374 fixtures replayed bit-identically across the Zig, Node, Rust, and
+393 fixtures replayed bit-identically across the Zig, Node, Rust, and
 TypeScript hosts. 18 never-panic fuzz harnesses. 119 explained
 diagnostic codes. Zero dependencies in the core library. Every number
 here is drift-gated by `zig build audit-docs`; run `zig build verify`

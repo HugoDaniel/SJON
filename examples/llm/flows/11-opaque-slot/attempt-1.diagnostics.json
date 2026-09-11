@@ -1,0 +1,24 @@
+{
+  "file": "examples/llm/flows/11-opaque-slot/attempt-1.sjon",
+  "project_file": null,
+  "diagnostics": [
+    {
+      "phase": "validation",
+      "code": "not_cross_ref",
+      "severity": "error",
+      "message": "form `track` keyword `:anchor` expects `phrase-name`, got `outro` (no `(refs/phrase :name …)` form declares this name)",
+      "span": {
+        "start": 493,
+        "end": 498,
+        "line": 15,
+        "column": 16
+      },
+      "path": [
+        "track",
+        "anchor"
+      ],
+      "declaration_span": null,
+      "docs": "https://hugodaniel.com/pages/sjon/errors/not_cross_ref"
+    }
+  ]
+}

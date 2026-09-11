@@ -268,9 +268,13 @@ pub const CompletionItem = struct {
     /// slice to the LSP `tags: number[]` shape.
     tags: []const Tag = &.{},
     /// LSP `sortText`. Editors sort items alphabetically by this field
-    /// (falling back to `label` when null). The server uses it to bias
-    /// required-missing keys, local-schema forms, and non-deprecated
-    /// members to the top of the list without renaming the label.
+    /// (falling back to `label` when null). The server writes it in two
+    /// places, both to move an item without renaming its label:
+    /// `appendKeyCandidates` lifts required-missing keys above optional
+    /// ones, and `biasDeprecatedLast` sinks deprecated items to the
+    /// bottom of whatever list they landed in. Everything else leaves it
+    /// null, which is what keeps a schema-ordered list (a union's arms,
+    /// a member set) in the order the schema stated.
     sort_text: ?[]const u8 = null,
     /// LSP `filterText`. Editors filter items by matching the user's
     /// typed prefix against this field (falling back to `label`). The
@@ -307,11 +311,11 @@ pub const CompletionItem = struct {
 /// One text edit. The transport translates the byte span into an LSP
 /// `Range`. `new_text` is arena-owned. Used by both formatting and
 /// code-action paths — they're the same shape, just differently scoped.
-pub const TextEdit = struct {
-    span_start: u32,
-    span_end: u32,
-    new_text: []const u8,
-};
+///
+/// The alias, not a copy: `Edit.textEdit` lowers a structural action to
+/// this same shape, so an edit the handler produces and an edit the
+/// library produces are one type and can be handed to the same transport.
+pub const TextEdit = sjon.Edit.TextEdit;
 
 /// One source location. Used by `findReferences` and goto-definition.
 /// `uri` borrows from the handler's `tree_uris` slice (lifetime-bound to
@@ -765,8 +769,13 @@ pub fn loadProject(self: *Self, io: Io, workspace_root_path: ?[]const u8) Alloca
 /// Errors limited to OOM. On OOM mid-iteration, documents already
 /// updated stay updated; the rest keep their previous caches.
 pub fn revalidateOpenDocuments(self: *Self) Allocator.Error!void {
-    // Two-phase: reparse every doc (fresh trees), then run a single
-    // forest revalidation so cross-document references resolve.
+    // Two-phase: reparse every doc (fresh trees), then one forest
+    // revalidation over the whole set. One pass, not n: the schema is
+    // shared, so validating each doc as it is reparsed would produce
+    // n-1 results describing a forest that never existed. It does not
+    // make references resolve across documents — cross-ref scope is
+    // per-tree here on purpose (`Handler_tests.zig`, "the LSP
+    // deliberately does not set `Validator.Options.share_scope`").
     var it = self.documents.iterator();
     while (it.next()) |entry| {
         const doc = entry.value_ptr;
@@ -898,8 +907,10 @@ fn revalidateForest(self: *Self) Allocator.Error!void {
     // anything, so everything executable runs ahead of it and hands over
     // a finished table. Content-addressed by `(provider, source)`, so one
     // pass over the whole forest answers every lookup the index pass
-    // makes — including the cross-document ones, where a `(shader …)` in
-    // one open file is the target of a reference in another.
+    // makes. Forest-wide because extraction is, not because resolution
+    // is: the index that consumes this table is keyed per tree (the LSP
+    // never sets `Validator.Options.share_scope`), so a `(shader …)` in
+    // one open file is never the target of a reference in another.
     //
     // Borrowed for the call only: the index dupes the bytes it keeps, so
     // the table dies at the end of this function while `cross_ref_arena`
@@ -912,7 +923,25 @@ fn revalidateForest(self: *Self) Allocator.Error!void {
     );
     defer extractions.deinit();
 
+    // Defaults are materialized *before* the walk and handed to it, one
+    // overlay per tree, the way `Host.validateDocument` does for `sjon
+    // check` and the corpus. This is the single choke point for every
+    // path that refreshes a document's diagnostics (open, change, close,
+    // `setUserSchemas`, `reloadProject`), so its defaults refresh here
+    // too. A per-document OOM clears that document's overlay rather than
+    // leaving a stale one: author-only diagnostics on one document are
+    // recoverable, diagnostics computed against a previous schema's
+    // defaults are not, and failing the whole revalidation would cost
+    // every open document its diagnostics.
+    const overlay_ptrs = try self.allocator.alloc(?*const MaterializedDefaults.MaterializedDefaults, n);
+    defer self.allocator.free(overlay_ptrs);
+    for (pairs, 0..) |p, i| {
+        self.rebuildMaterialized(p.doc) catch self.clearMaterialized(p.doc);
+        overlay_ptrs[i] = &p.doc.materialized;
+    }
+
     var fr = try Validator.validateForestWithOptions(self.allocator, trees, self.schema, .{
+        .overlays = overlay_ptrs,
         .extractions = &extractions.map,
     });
     // Past this point validateForest succeeded. The remaining work:
@@ -937,16 +966,6 @@ fn revalidateForest(self: *Self) Allocator.Error!void {
     }
     self.allocator.free(fr.results);
 
-    // Overlays are rebuilt here, after the results land, so every path
-    // that refreshes a document's diagnostics (open, change, close,
-    // `setUserSchemas`, `reloadProject`) refreshes its defaults too —
-    // this function is the single choke point for all of them. A
-    // per-document OOM is swallowed for the same reason the index
-    // rebuild below tolerates one: a stale overlay costs a wrong inlay
-    // hint, while failing the whole revalidation costs every open
-    // document its diagnostics.
-    for (pairs) |p| self.rebuildMaterialized(p.doc) catch {};
-
     if (self.cross_ref_arena) |*ar| ar.deinit();
     self.cross_ref_arena = fr.index_arena;
     self.cross_ref_index = fr.cross_ref_index;
@@ -963,20 +982,24 @@ fn revalidateForest(self: *Self) Allocator.Error!void {
 
 /// Recompute `doc.materialized` against the current schema, swapping in
 /// a fresh arena only once the walk has succeeded (so a failed rebuild
-/// leaves the previous overlay intact rather than a half-filled one).
+/// leaves the previous overlay intact rather than a half-filled one;
+/// `revalidateForest` then clears it, see there).
 ///
-/// **The overlay never reaches the validator.** `Validator.Options`
-/// takes an `overlays` field (`Validator.EffectiveAxes`) that would make
-/// defaulted keys participate in validation — passing this one there is
-/// the mistake to avoid. LSP diagnostics must stay byte-identical to
-/// what `sjon check` and the conformance corpus produce for the same
-/// document; an editor that reports a different set of errors than the
-/// build is worse than an editor with no defaults feature. Materialized
-/// values exist here for *display and editing assists only*: inlay
-/// hints, the materialize-defaults action, and the effective-document
-/// view.
+/// **The overlay reaches the validator**, through
+/// `Validator.Options.overlays` in `revalidateForest`, because
+/// `Host.validateDocument` passes the same overlay for `sjon check` and
+/// the conformance corpus. LSP diagnostics must stay byte-identical to
+/// what those produce for the same document, and the overlay is part of
+/// what they produce: a discriminant supplied by its own `:default`
+/// selects a variant (axis D), a defaulted cross-ref is looked up (axis
+/// B). Validating author-only here reported `unknown_key` and
+/// `missing_discriminant_key` on `(light :range 5)`, a document the
+/// build accepts — an editor that reports errors the build does not is
+/// worse than an editor with no defaults feature. The same overlay
+/// also feeds the display and editing assists: inlay hints, the
+/// materialize-defaults action, and the effective-document view.
 ///
-/// Same reasoning applies to the walk's own diagnostics.
+/// The walk's own diagnostics are a different matter.
 /// `materializeDefaults` emits `default_eval_failed` for every
 /// expression default it cannot evaluate — `Host.validateDocument`
 /// surfaces those, and this deliberately drops them. A broken default
@@ -1006,6 +1029,15 @@ fn rebuildMaterialized(self: *Self, doc: *Document) Allocator.Error!void {
     doc.materialized_arena.deinit();
     doc.materialized_arena = fresh;
     doc.materialized = overlay;
+}
+
+/// Drop `doc.materialized` to the empty overlay. The fallback when a
+/// rebuild fails: an empty overlay is author-only validation, which is a
+/// complete answer, where a stale one describes a schema that is gone.
+fn clearMaterialized(self: *Self, doc: *Document) void {
+    doc.materialized_arena.deinit();
+    doc.materialized_arena = .init(self.allocator);
+    doc.materialized = .{};
 }
 
 /// Composition of `loadProject` + `revalidateOpenDocuments`. Call this
@@ -1190,8 +1222,10 @@ pub fn getProjectInfo(self: *const Self) ?*const Host.LoadedProject {
 }
 
 /// Open a document. If the URI is already open, replaces its state.
-/// Triggers a forest revalidation so cross-document references in
-/// other open docs reflect the new doc's contents.
+/// Triggers a forest revalidation so every open doc is re-checked
+/// against one schema in one pass — not so references reach across
+/// files: cross-ref scope is per-tree (the LSP never sets
+/// `Validator.Options.share_scope`).
 pub fn openDocument(self: *Self, uri: []const u8, version: i64, text: []const u8) Allocator.Error!void {
     // An opened URI is `.open` regardless of what it was before, which is
     // what promotes a previously-ingested workspace file rather than
@@ -1259,6 +1293,18 @@ pub fn ingestWorkspaceFiles(self: *Self, files: []const WorkspaceFile) Allocator
 /// merely the last thing that got saved. Such a file is skipped, not
 /// counted, and not overwritten.
 ///
+/// **The project file is not a document.** `sjon-project.sjon` is the
+/// resolver's config, in a vocabulary no plugin declares, so validating
+/// it as a document reports `unknown_form` on every correctly-configured
+/// workspace. It is skipped by URI rather than by root-form head: which
+/// file is the project file is the resolver's answer, and a document may
+/// legitimately contain a `(project …)` form some plugin declares. Only
+/// ingestion is skipped — real project errors (`unknown_project_key`,
+/// `pin_disagreement`) still reach the client on the project URI through
+/// the transport's own project branch. A project file the user has
+/// *opened* stays a document, because everything else the editor asks
+/// about that buffer needs one.
+///
 /// **Clipping is a property of the file set, not of the walk order.**
 /// Files are sorted by URI before the cap applies, so the same workspace
 /// yields the same subset no matter what order the transport's directory
@@ -1281,9 +1327,19 @@ pub fn ingestWorkspaceFilesWithCap(
         }
     }.lt);
 
+    // Read once: the project is fixed for the whole batch, and the
+    // comparison below runs per file.
+    const project_uri: ?[]const u8 = if (self.getProjectInfo()) |proj| proj.project_uri else null;
+
     var held = self.workspaceDocumentCount();
     var out: WorkspaceIngest = .{ .ingested = 0, .clipped = 0 };
     for (sorted) |f| {
+        // Compared under the document map's own equality, not byte-wise:
+        // `Host` builds the project URI without percent-encoding while
+        // the scanner encodes everything outside the unreserved set, so a
+        // workspace root containing a space spells the same file two ways.
+        if (project_uri) |pu| if (uri_key.HashContext.eql(.{}, f.uri, pu)) continue;
+
         if (self.documents.getPtr(f.uri)) |doc| {
             // Already present. An open buffer shadows disk; a workspace
             // entry is refreshed in place, which doesn't grow the set.
@@ -1384,8 +1440,9 @@ pub fn diagnosticResultId(
 
 /// Replace the source of an open document with `new_text` and re-validate.
 /// Caller has already merged any incremental change ranges into `new_text`.
-/// Also runs a forest revalidation so cross-document references in
-/// every open doc reflect the new content of `uri`.
+/// Also runs a forest revalidation, so every open doc is re-checked in
+/// the same pass. References still do not reach across files — scope is
+/// per-tree (the LSP never sets `Validator.Options.share_scope`).
 pub fn changeDocumentFull(self: *Self, uri: []const u8, version: i64, new_text: []const u8) Error!void {
     const entry = self.documents.getPtr(uri) orelse return error.UnknownDocument;
 
@@ -1649,6 +1706,267 @@ fn findKvpairByKey(
     return null;
 }
 
+/// The two lookups every schema-aware surface makes about a *document's*
+/// key: which variant is active at a byte offset, and which `KeySpec` a
+/// key name means there. Both rules live in `Validator` — the anchor rule
+/// is the validator's own "the discriminant must precede the variant-only
+/// key it unlocks", and a second copy here is exactly the drift that had
+/// hover, completion and the quick fixes answering null on every variant
+/// key. What this layer adds is the document: `revalidateForest` hands
+/// the validator each document's defaults overlay, so a discriminant the
+/// author omitted and its `:default` supplied selects a variant (axis
+/// D) in the diagnostics, and every surface here has to read the same
+/// variant or it describes a key the squiggles accept as unknown. The
+/// overlay leg fires only when the written leg found nothing: an overlay
+/// entry exists only for a key the author left out, so a discriminant
+/// written anywhere — before the anchor, after it, or selecting nothing
+/// — keeps the validator's answer.
+fn activeVariantIn(
+    self: *const Self,
+    tree: *const Ast.Tree,
+    form_idx: Ast.NodeIndex,
+    hdr: Ast.FormHeader,
+    spec: *const sjon.Plugin.FormSpec,
+    anchor: u32,
+) ?*const sjon.Plugin.Variant {
+    return sjon.Validator.activeVariantAt(tree, hdr, spec, anchor) orelse self.overlayVariantOf(tree, form_idx, spec);
+}
+
+/// `Validator.resolveKeyAt`, plus the axis-D leg — the same composition
+/// `Validator.acceptedKey` makes for the overlay walk.
+fn resolveKeyIn(
+    self: *const Self,
+    tree: *const Ast.Tree,
+    form_idx: Ast.NodeIndex,
+    hdr: Ast.FormHeader,
+    spec: *const sjon.Plugin.FormSpec,
+    key_name: []const u8,
+    anchor: u32,
+) ?*const sjon.Plugin.KeySpec {
+    if (sjon.Validator.resolveKeyAt(tree, hdr, spec, key_name, anchor)) |k| return k;
+    const v = self.overlayVariantOf(tree, form_idx, spec) orelse return null;
+    return sjon.Validator.variantKeyByName(v, key_name);
+}
+
+/// The variant `form_idx`'s defaulted discriminant selects, read off the
+/// overlay of the document `tree` belongs to. Null with no overlay entry
+/// — the author wrote the discriminant, or the key has no default.
+fn overlayVariantOf(
+    self: *const Self,
+    tree: *const Ast.Tree,
+    form_idx: Ast.NodeIndex,
+    spec: *const sjon.Plugin.FormSpec,
+) ?*const sjon.Plugin.Variant {
+    const overlay = self.overlayOf(tree) orelse return null;
+    return sjon.Validator.overlayVariant(spec, form_idx, overlay);
+}
+
+/// The defaults overlay of the open document whose tree is `tree`. Every
+/// schema-aware surface is asked about an open document, so a miss is a
+/// caller passing some other tree; author-only resolution is the safe
+/// reading of that. Linear in open documents, which is a handful.
+fn overlayOf(self: *const Self, tree: *const Ast.Tree) ?*const MaterializedDefaults.MaterializedDefaults {
+    var it = self.documents.valueIterator();
+    while (it.next()) |doc| {
+        if (&doc.tree == tree) return &doc.materialized;
+    }
+    return null;
+}
+
+// ---------------------------------------------------------------------
+// Slot-local form resolution
+//
+// The validator resolves a form head against the slot it arrived in
+// before it consults the global catalog: a `(key … :type form)` or a
+// form's positional slot may declare its own `local_forms`, a local
+// shadows a same-named global, and a bare miss falls back additively
+// (`Validator.validateFormHead` step 0). The LSP starts from a cursor
+// rather than from a descent, so it has to reconstruct that slot before
+// it can agree — and until it did, every schema-aware surface answered
+// a shadowed local with the *global* card, which is worse than
+// answering nothing.
+//
+// `SlotContext` is one step of that descent. It threads down from the
+// document root exactly as the validator's frame stack does, so the two
+// cannot drift on which registry is in scope where; the local-first
+// match itself is `Validator.matchLocalForm`, shared rather than
+// copied.
+// ---------------------------------------------------------------------
+
+/// What a node's children resolve against: the nearest enclosing form,
+/// its resolved spec, the plugin that owns that spec (and therefore
+/// owns any local declared inside it), and the registry a *form-shaped*
+/// child of this node matches its head against before the global
+/// catalog.
+///
+/// `child_registry` is empty for every node that puts no locals in
+/// scope, which is the overwhelming majority — an empty slice rather
+/// than an optional because "no locals" and "no registry" are the same
+/// answer to every caller.
+const SlotContext = struct {
+    form_idx: ?Ast.NodeIndex = null,
+    form_spec: ?*const sjon.Plugin.FormSpec = null,
+    plugin: ?*const sjon.Plugin.Plugin = null,
+    child_registry: []const sjon.Plugin.FormSpec = &.{},
+};
+
+/// Advance the slot context one step of the descent, into `idx`.
+///
+/// The three carriers, matching `validateOneTree`'s three pushes:
+///   * a **form** re-bases the context — its own head resolves against
+///     the registry it inherited, and its `FormSpec.local_forms` scope
+///     its positional form children;
+///   * a **kvpair** keeps the enclosing form but narrows the registry to
+///     the accepted key's `local_forms` (variant keys included, via
+///     `resolveKeyAt`);
+///   * everything else (vectors, leaves) keeps the enclosing form and
+///     puts no locals in scope, which is what the validator's vector arm
+///     does too.
+fn stepSlotContext(
+    self: *const Self,
+    tree: *const Ast.Tree,
+    ctx: SlotContext,
+    idx: Ast.NodeIndex,
+) SlotContext {
+    switch (tree.tagOf(idx)) {
+        .form => {
+            const hit = switch (self.lookupFormIn(tree.formHeader(idx), ctx)) {
+                .found => |h| h,
+                else => return .{ .form_idx = idx },
+            };
+            return .{
+                .form_idx = idx,
+                .form_spec = hit.form,
+                .plugin = hit.plugin,
+                .child_registry = hit.form.local_forms,
+            };
+        },
+        .kvpair => {
+            var next: SlotContext = .{
+                .form_idx = ctx.form_idx,
+                .form_spec = ctx.form_spec,
+                .plugin = ctx.plugin,
+            };
+            const spec = ctx.form_spec orelse return next;
+            const form_idx = ctx.form_idx orelse return next;
+            const kvh = tree.kvpairHeader(idx);
+            const key = self.resolveKeyIn(tree, form_idx, tree.formHeader(form_idx), spec, kvh.key, kvh.key_span.start) orelse return next;
+            next.child_registry = key.local_forms;
+            return next;
+        },
+        else => return .{
+            .form_idx = ctx.form_idx,
+            .form_spec = ctx.form_spec,
+            .plugin = ctx.plugin,
+        },
+    }
+}
+
+/// Resolve `hdr` local-first against `ctx`'s registry, then additively
+/// against the global catalog — `Validator.validateFormHead` step 0,
+/// with the same two gates: a qualified head bypasses locals entirely,
+/// and an empty registry means there was never a local slot to consult.
+///
+/// A local hit is reported as a `FormHit` owned by the plugin that
+/// declared the enclosing form, because that is where the local's
+/// storage lives; hover then names the right plugin instead of
+/// inventing one.
+fn lookupFormIn(
+    self: *const Self,
+    hdr: Ast.FormHeader,
+    ctx: SlotContext,
+) Schema.FormLookup {
+    return self.lookupHeadIn(hdr.head, hdr.namespace, ctx);
+}
+
+/// `lookupFormIn` for a head that came from the schema rather than from
+/// a document node — a `(head-set …)` member, whose body the completion
+/// list has to render. Same two gates, same additive fallback.
+fn lookupHeadIn(
+    self: *const Self,
+    name: []const u8,
+    namespace: ?[]const u8,
+    ctx: SlotContext,
+) Schema.FormLookup {
+    if (namespace == null and ctx.child_registry.len > 0) {
+        if (sjon.Validator.matchLocalForm(ctx.child_registry, name)) |local| {
+            // The registry can only be non-empty if a spec resolved to
+            // supply it, and a resolved spec always carries its plugin.
+            std.debug.assert(ctx.plugin != null);
+            return .{ .found = .{ .plugin = ctx.plugin.?, .form = local } };
+        }
+    }
+    return self.schema.lookupForm(name, namespace);
+}
+
+/// The slot `target` sits in: the `SlotContext` of its parent.
+///
+/// Descends from whichever document root encloses `target`, following
+/// the one child whose span encloses it — an ancestor path by
+/// construction, the same rule `selectionChainAt` uses, and iterative
+/// so a `MAX_PARSE_DEPTH`-deep document costs a loop rather than host
+/// stack (CLAUDE.md's frame-stack discipline).
+///
+/// An empty context is the answer whenever the descent cannot reach
+/// `target` — an unreachable parser-recovery node, or a target that is
+/// itself a root. Callers then see the global catalog, which is what
+/// they saw before slot-local resolution existed.
+///
+/// O(depth × siblings). Cursor-anchored callers pay it once per
+/// request; whole-document walks thread the context instead.
+fn slotContextOf(
+    self: *const Self,
+    tree: *const Ast.Tree,
+    target: Ast.NodeIndex,
+) SlotContext {
+    const tspan = tree.spanOf(target);
+    var current: Ast.NodeIndex = for (tree.root) |r| {
+        if (r == target) return .{};
+        if (spanEncloses(tree.spanOf(r), tspan)) break r;
+    } else return .{};
+
+    var ctx: SlotContext = .{};
+    var depth: usize = 0;
+    descend: while (depth < NodeWalker.MAX_WALK_DEPTH) : (depth += 1) {
+        ctx = self.stepSlotContext(tree, ctx, current);
+        const kids = NodeWalker.childrenOf(tree, current);
+        var i: usize = 0;
+        while (i < kids.len()) : (i += 1) {
+            const child = kids.at(i);
+            if (child == target) return ctx;
+            if (spanEncloses(tree.spanOf(child), tspan)) {
+                current = child;
+                continue :descend;
+            }
+        }
+        return .{};
+    }
+    return .{};
+}
+
+/// Resolve `form_idx`'s head the way the validator would: local-first
+/// against the slot it sits in, then the global catalog.
+///
+/// The one head lookup every schema-aware surface should make about a
+/// *document's* form. `Schema.lookupForm` alone answers a question about
+/// the catalog, and returns the shadowed global for every head a slot
+/// declared locally — which is how hover came to print the global
+/// `circle` card over a local `circle` that requires different keys.
+fn resolveFormAt(
+    self: *const Self,
+    tree: *const Ast.Tree,
+    form_idx: Ast.NodeIndex,
+) Schema.FormLookup {
+    std.debug.assert(tree.tagOf(form_idx) == .form);
+    return self.lookupFormIn(tree.formHeader(form_idx), self.slotContextOf(tree, form_idx));
+}
+
+/// Does `outer` cover all of `inner`? Sibling spans never overlap, so
+/// this picks out the unique child to descend into.
+fn spanEncloses(outer: Ast.Span, inner: Ast.Span) bool {
+    return outer.start <= inner.start and outer.end >= inner.end;
+}
+
 /// Build the hover payload for the token at `byte_offset` in `uri`.
 /// Returns null when there's no hover content (cursor outside any node,
 /// on whitespace, or on a token without registered metadata).
@@ -1663,9 +1981,9 @@ pub fn getHover(
 
     var buf: std.ArrayList(u8) = .empty;
     const base = switch (ctx) {
-        .form_head => |fh| try self.renderHeadHover(arena, &buf, fh.hdr),
-        .kvpair_key => |kk| try self.renderKvpairHover(arena, &buf, kk),
-        .member_value => |mv| try self.renderMemberValueHover(arena, &buf, mv),
+        .form_head => |fh| try self.renderHeadHover(arena, &buf, &doc.tree, fh.idx),
+        .kvpair_key => |kk| try self.renderKvpairHover(arena, &buf, &doc.tree, kk),
+        .member_value => |mv| try self.renderMemberValueHover(arena, &buf, &doc.tree, mv),
     } orelse return null;
 
     const with_value = try self.appendEvaluatedValue(arena, base, uri, byte_offset);
@@ -2101,22 +2419,30 @@ fn diagnosticTouches(d: Ast.Span, span: Ast.Span) bool {
 }
 
 const HoverContext = union(enum) {
-    form_head: struct { hdr: Ast.FormHeader },
+    form_head: struct { idx: Ast.NodeIndex },
+    /// The enclosing form arrives as a node index, not as head +
+    /// namespace: `resolveKeyAt` needs its children to find the
+    /// discriminant that decides whether `kv.key` is a variant key, and
+    /// `resolveFormAt` needs its position to find the slot it sits in.
     kvpair_key: struct {
-        parent_head: []const u8,
-        parent_namespace: ?[]const u8,
+        parent_idx: Ast.NodeIndex,
         kv: Ast.KvPairHeader,
     },
-    /// Cursor sits on a symbol or string value of a kvpair whose
-    /// declared key resolves to a `(member-set …)`-typed slot. Hover
-    /// renders the matched `Member`'s label / description /
-    /// deprecation hint when one matches by byte-equality.
+    /// Cursor sits on a member-shaped value of a kvpair whose declared
+    /// key resolves to a `(member-set …)`-typed slot. Hover renders the
+    /// matched `Member`'s label / description / deprecation hint.
+    ///
+    /// The value arrives as a node index, not as text: a digit-leading
+    /// member (`2d`) is a `number_with_unit`, and naming it costs an
+    /// allocation the pure descent below does not have. The renderer,
+    /// which does, derives both text and span from the node.
     member_value: struct {
-        parent_head: []const u8,
-        parent_namespace: ?[]const u8,
-        key_name: []const u8,
-        text: []const u8,
-        span: Ast.Span,
+        parent_idx: Ast.NodeIndex,
+        kv: Ast.KvPairHeader,
+        value_idx: Ast.NodeIndex,
+        /// The value is one element of the vector `kv` holds, so the
+        /// kind to match it against is the slot kind's element kind.
+        via_vector: bool = false,
     },
 };
 
@@ -2128,7 +2454,7 @@ const HoverContext = union(enum) {
 fn findHoverContext(tree: *const Ast.Tree, pos: u32) ?HoverContext {
     for (tree.root) |idx| {
         if (containsOffset(tree.spanOf(idx), pos)) {
-            return descendForHover(tree, idx, pos, null, null);
+            return descendForHover(tree, idx, pos, null);
         }
     }
     return null;
@@ -2138,26 +2464,25 @@ fn descendForHover(
     tree: *const Ast.Tree,
     idx: Ast.NodeIndex,
     pos: u32,
-    parent_head: ?[]const u8,
-    parent_ns: ?[]const u8,
+    parent_idx: ?Ast.NodeIndex,
 ) ?HoverContext {
     switch (tree.tagOf(idx)) {
         .form => {
             const hdr = tree.formHeader(idx);
             if (containsOffset(hdr.head_span, pos)) {
-                return .{ .form_head = .{ .hdr = hdr } };
+                return .{ .form_head = .{ .idx = idx } };
             }
             for (hdr.children) |child| {
                 if (containsOffset(tree.spanOf(child), pos)) {
-                    return descendForHover(tree, child, pos, hdr.head, hdr.namespace);
+                    return descendForHover(tree, child, pos, idx);
                 }
             }
-            return .{ .form_head = .{ .hdr = hdr } };
+            return .{ .form_head = .{ .idx = idx } };
         },
         .vector => {
             for (tree.vectorElements(idx)) |child| {
                 if (containsOffset(tree.spanOf(child), pos)) {
-                    return descendForHover(tree, child, pos, parent_head, parent_ns);
+                    return descendForHover(tree, child, pos, parent_idx);
                 }
             }
             return null;
@@ -2165,36 +2490,48 @@ fn descendForHover(
         .kvpair => {
             const kv = tree.kvpairHeader(idx);
             if (containsOffset(kv.key_span, pos)) {
-                if (parent_head) |ph| {
-                    return .{ .kvpair_key = .{
-                        .parent_head = ph,
-                        .parent_namespace = parent_ns,
-                        .kv = kv,
-                    } };
+                if (parent_idx) |pi| {
+                    return .{ .kvpair_key = .{ .parent_idx = pi, .kv = kv } };
                 }
                 return null;
             }
             if (containsOffset(tree.spanOf(kv.value), pos)) {
-                // Symbol/string leaf in a kvpair value position: surface
+                // Member-shaped leaf in a kvpair value position: surface
                 // as a `member_value` hover so the renderer can resolve
                 // against the declared key's MemberSet (if any). Other
-                // value shapes (forms, vectors, numbers) recurse as
+                // value shapes (forms, vectors, plain numbers) recurse as
                 // before.
+                //
+                // `number_with_unit` is in the set because a digit-leading
+                // member spelling (`2d`) lexes as one — the same widening
+                // the validator's member match already carries.
                 const value_tag = tree.tagOf(kv.value);
-                if ((value_tag == .symbol or value_tag == .string) and parent_head != null) {
-                    const text = if (value_tag == .symbol)
-                        tree.symbolText(kv.value)
-                    else
-                        tree.stringText(kv.value);
+                if (isMemberValueTag(value_tag) and parent_idx != null) {
                     return .{ .member_value = .{
-                        .parent_head = parent_head.?,
-                        .parent_namespace = parent_ns,
-                        .key_name = kv.key,
-                        .text = text,
-                        .span = tree.spanOf(kv.value),
+                        .parent_idx = parent_idx.?,
+                        .kv = kv,
+                        .value_idx = kv.value,
                     } };
                 }
-                return descendForHover(tree, kv.value, pos, parent_head, parent_ns);
+                // A member-shaped element of the kvpair's vector is the
+                // same hover one level down: `:views [2d cu|be]` names a
+                // member of the slot's element kind. Forms and nested
+                // vectors keep descending.
+                if (value_tag == .vector and parent_idx != null) {
+                    for (tree.vectorElements(kv.value)) |el| {
+                        if (!containsOffset(tree.spanOf(el), pos)) continue;
+                        if (isMemberValueTag(tree.tagOf(el))) {
+                            return .{ .member_value = .{
+                                .parent_idx = parent_idx.?,
+                                .kv = kv,
+                                .value_idx = el,
+                                .via_vector = true,
+                            } };
+                        }
+                        break;
+                    }
+                }
+                return descendForHover(tree, kv.value, pos, parent_idx);
             }
             return null;
         },
@@ -2206,15 +2543,46 @@ fn containsOffset(span: Ast.Span, pos: u32) bool {
     return pos >= span.start and pos < span.end;
 }
 
+/// The node tags a member-set match can land on: text for the ordinary
+/// members, and a unit-bearing number for the digit-leading spellings the
+/// lexer cannot read as symbols. `memberValueText` is the other half.
+fn isMemberValueTag(tag: Ast.Tag) bool {
+    return tag == .symbol or tag == .string or tag == .number_with_unit;
+}
+
+/// The member name a value node would match, or null when the node is not
+/// member-shaped (or is a magnitude no spelling can be — `2.5d`).
+///
+/// The `number_with_unit` arm goes through the validator's own
+/// `canonicalMemberSpelling`, so a spelling cannot read one way in a
+/// diagnostic and another in a hover. Twin of `Validator`'s
+/// `emitDeprecatedMemberTree` dispatch, deliberately.
+///
+/// Allocates into `arena` on the numeric arm only.
+fn memberValueText(
+    arena: Allocator,
+    tree: *const Ast.Tree,
+    idx: Ast.NodeIndex,
+) Allocator.Error!?[]const u8 {
+    return switch (tree.tagOf(idx)) {
+        .symbol => tree.symbolText(idx),
+        .string => tree.stringText(idx),
+        .number_with_unit => try sjon.Validator.canonicalMemberSpelling(arena, tree.numberWithUnitOf(idx)),
+        else => null,
+    };
+}
+
 fn renderHeadHover(
     self: *const Self,
     arena: Allocator,
     buf: *std.ArrayList(u8),
-    hdr: Ast.FormHeader,
+    tree: *const Ast.Tree,
+    idx: Ast.NodeIndex,
 ) Allocator.Error!?Hover {
+    const hdr = tree.formHeader(idx);
     if (hdr.head.len == 0) return null;
 
-    const form_lookup = self.schema.lookupForm(hdr.head, hdr.namespace);
+    const form_lookup = self.resolveFormAt(tree, idx);
     switch (form_lookup) {
         .found => |hit| {
             try renderFormSpec(arena, buf, self.schema, hit, hdr);
@@ -2261,14 +2629,15 @@ fn renderKvpairHover(
     self: *const Self,
     arena: Allocator,
     buf: *std.ArrayList(u8),
+    tree: *const Ast.Tree,
     kk: anytype,
 ) Allocator.Error!?Hover {
-    const form_lookup = self.schema.lookupForm(kk.parent_head, kk.parent_namespace);
-    const hit = switch (form_lookup) {
+    const parent_hdr = tree.formHeader(kk.parent_idx);
+    const hit = switch (self.resolveFormAt(tree, kk.parent_idx)) {
         .found => |h| h,
         else => return null,
     };
-    if (hit.form.keyByName(kk.kv.key)) |key| {
+    if (self.resolveKeyIn(tree, kk.parent_idx, parent_hdr, hit.form, kk.kv.key, kk.kv.key_span.start)) |key| {
         try renderKeySpec(arena, buf, self.schema, hit, key, kk.kv);
         return .{
             .contents = try buf.toOwnedSlice(arena),
@@ -2283,62 +2652,145 @@ fn renderMemberValueHover(
     self: *const Self,
     arena: Allocator,
     buf: *std.ArrayList(u8),
+    tree: *const Ast.Tree,
     mv: anytype,
 ) Allocator.Error!?Hover {
-    const form_lookup = self.schema.lookupForm(mv.parent_head, mv.parent_namespace);
-    const hit = switch (form_lookup) {
+    const parent_hdr = tree.formHeader(mv.parent_idx);
+    const hit = switch (self.resolveFormAt(tree, mv.parent_idx)) {
         .found => |h| h,
         else => return null,
     };
-    const key = hit.form.keyByName(mv.key_name) orelse return null;
+    const key = self.resolveKeyIn(tree, mv.parent_idx, parent_hdr, hit.form, mv.kv.key, mv.kv.key_span.start) orelse return null;
     const vt = key.value_type;
     const named = switch (vt) {
         .named => |n| n,
         else => return null,
     };
     const kind_lookup = self.schema.lookupValueKind(named.name, named.namespace);
-    const kind = switch (kind_lookup) {
+    const declared = switch (kind_lookup) {
         .found => |k| k,
         else => return null,
     };
+    const value_tag = tree.tagOf(mv.value_idx);
+    // An element is matched against the slot's element kind.
+    const slot_kind = if (mv.via_vector) (self.vectorElementKind(declared) orelse return null) else declared;
+    // A union slot answers for the arm this value's shape determines —
+    // the rule the validator blames a failure on, and the quick fix reads
+    // its candidates from. A non-union, or a union no shape narrows, is
+    // its own answer.
+    const kind = self.unionArmKind(slot_kind, sjon.Validator.shapeOfTag(value_tag));
+    const span = tree.spanOf(mv.value_idx);
+    const text = (try memberValueText(arena, tree, mv.value_idx)) orelse return null;
+    // A union no shape narrows — a symbol against `member-set |
+    // cross-ref`, or against two cross-ref arms — still has something
+    // to say: the arm whose member set names this value, else the
+    // reference arms the value may resolve in, in declaration order.
+    if (kind.union_of) |us| {
+        return self.renderUndeterminedUnionValueHover(arena, buf, us, kind, text, value_tag, span);
+    }
     // A kind may carry both a member set and a cross-ref; a matched
     // member is the more specific answer (it has a label/description),
     // so the cross-ref rendering at the tail is the fallback, not a
     // rival — it also covers a cross-ref value that resolves to nothing,
     // where saying what *would* count is exactly what the hover is for.
-    const m = kind.members orelse sjon.Plugin.ValueKind.MemberSet{ .members = &.{} };
-    for (m.members) |mem| {
-        if (!std.mem.eql(u8, mem.name, mv.text)) continue;
-        try buf.appendSlice(arena, "**");
-        try buf.appendSlice(arena, mem.name);
-        try buf.appendSlice(arena, "** (kind `");
-        try buf.appendSlice(arena, kind.name);
-        try buf.appendSlice(arena, "`)");
-        if (mem.label.len > 0) {
-            try buf.appendSlice(arena, "\n\n");
-            try buf.appendSlice(arena, mem.label);
-        }
-        if (mem.description.len > 0) {
-            try buf.appendSlice(arena, "\n\n");
-            try buf.appendSlice(arena, mem.description);
-        }
-        if (mem.deprecated) {
-            try buf.appendSlice(arena, "\n\n**Deprecated**");
-            if (mem.deprecation_message.len > 0) {
-                try buf.appendSlice(arena, ": ");
-                try buf.appendSlice(arena, mem.deprecation_message);
-            }
-        }
-        return .{
-            .contents = try buf.toOwnedSlice(arena),
-            .span_start = mv.span.start,
-            .span_end = mv.span.end,
-        };
-    }
+    if (findMember(kind, text)) |mem| return renderMemberCard(arena, buf, kind, mem, span);
+    // A cross-ref name is a symbol, never a number: the fallback card
+    // says what *would* count in this slot, and offering it over a
+    // unit-bearing literal would name a shape the slot cannot take.
+    if (value_tag == .number_with_unit) return null;
     if (kind.cross_ref) |cr| {
-        return renderCrossRefValueHover(arena, buf, mv, kind.name, cr);
+        return renderCrossRefValueHover(arena, buf, text, span, kind.name, cr);
     }
     return null;
+}
+
+/// The member of `kind` spelled `text`, or null.
+fn findMember(kind: *const sjon.Plugin.ValueKind, text: []const u8) ?*const sjon.Plugin.ValueKind.MemberSet.Member {
+    const m = kind.members orelse return null;
+    for (m.members) |*mem| {
+        if (std.mem.eql(u8, mem.name, text)) return mem;
+    }
+    return null;
+}
+
+/// `**name** (kind \`k\`)`, then the member's label, description and
+/// deprecation notice.
+fn renderMemberCard(
+    arena: Allocator,
+    buf: *std.ArrayList(u8),
+    kind: *const sjon.Plugin.ValueKind,
+    mem: *const sjon.Plugin.ValueKind.MemberSet.Member,
+    span: Ast.Span,
+) Allocator.Error!?Hover {
+    try buf.appendSlice(arena, "**");
+    try buf.appendSlice(arena, mem.name);
+    try buf.appendSlice(arena, "** (kind `");
+    try buf.appendSlice(arena, kind.name);
+    try buf.appendSlice(arena, "`)");
+    if (mem.label.len > 0) {
+        try buf.appendSlice(arena, "\n\n");
+        try buf.appendSlice(arena, mem.label);
+    }
+    if (mem.description.len > 0) {
+        try buf.appendSlice(arena, "\n\n");
+        try buf.appendSlice(arena, mem.description);
+    }
+    if (mem.deprecated) {
+        try buf.appendSlice(arena, "\n\n**Deprecated**");
+        if (mem.deprecation_message.len > 0) {
+            try buf.appendSlice(arena, ": ");
+            try buf.appendSlice(arena, mem.deprecation_message);
+        }
+    }
+    return .{
+        .contents = try buf.toOwnedSlice(arena),
+        .span_start = span.start,
+        .span_end = span.end,
+    };
+}
+
+/// Hover for a value in a union slot whose shape reaches more than one
+/// arm (`Validator.determinedArm` returned null). Matching is unchanged
+/// by this — the validator tries the arms in declaration order and the
+/// first to accept wins — so the card says what the value *may* be: a
+/// member of the first arm that names it, else a reference into any of
+/// the cross-ref arms, listed in the order they are tried. Null when no
+/// arm can take a symbol at all.
+fn renderUndeterminedUnionValueHover(
+    self: *const Self,
+    arena: Allocator,
+    buf: *std.ArrayList(u8),
+    us: sjon.Plugin.ValueKind.UnionShape,
+    kind: *const sjon.Plugin.ValueKind,
+    text: []const u8,
+    value_tag: Ast.Tag,
+    span: Ast.Span,
+) Allocator.Error!?Hover {
+    var ref_arms: std.ArrayList(*const sjon.Plugin.ValueKind) = .empty;
+    for (us.alternatives) |alt| {
+        const arm = self.armKind(alt) orelse continue;
+        if (findMember(arm, text)) |mem| return renderMemberCard(arena, buf, arm, mem, span);
+        if (arm.cross_ref != null) try ref_arms.append(arena, arm);
+    }
+    if (value_tag == .number_with_unit or ref_arms.items.len == 0) return null;
+
+    try buf.appendSlice(arena, "**");
+    try buf.appendSlice(arena, text);
+    try buf.appendSlice(arena, "** (kind `");
+    try buf.appendSlice(arena, kind.name);
+    try buf.appendSlice(arena, "`)\n\nCross-reference to ");
+    for (ref_arms.items, 0..) |arm, i| {
+        if (i > 0) try buf.appendSlice(arena, if (i + 1 == ref_arms.items.len) " or " else ", ");
+        try buf.appendSlice(arena, "`(");
+        try buf.appendSlice(arena, try arm.cross_ref.?.describeTargets(arena));
+        try buf.appendSlice(arena, " …)`");
+    }
+    try buf.appendSlice(arena, " — tried in this order; the first that declares the name wins.");
+    return .{
+        .contents = try buf.toOwnedSlice(arena),
+        .span_start = span.start,
+        .span_end = span.end,
+    };
 }
 
 /// Hover for a symbol sitting in a cross-ref-kinded slot, both routes.
@@ -2350,12 +2802,13 @@ fn renderMemberValueHover(
 fn renderCrossRefValueHover(
     arena: Allocator,
     buf: *std.ArrayList(u8),
-    mv: anytype,
+    text: []const u8,
+    span: Ast.Span,
     kind_name: []const u8,
     cr: sjon.Plugin.ValueKind.CrossRef,
 ) Allocator.Error!?Hover {
     try buf.appendSlice(arena, "**");
-    try buf.appendSlice(arena, mv.text);
+    try buf.appendSlice(arena, text);
     try buf.appendSlice(arena, "** (kind `");
     try buf.appendSlice(arena, kind_name);
     try buf.appendSlice(arena, "`)\n\nCross-reference to `(");
@@ -2379,8 +2832,8 @@ fn renderCrossRefValueHover(
     }
     return .{
         .contents = try buf.toOwnedSlice(arena),
-        .span_start = mv.span.start,
-        .span_end = mv.span.end,
+        .span_start = span.start,
+        .span_end = span.end,
     };
 }
 
@@ -2888,7 +3341,8 @@ fn appendUnionFacts(
 
 /// `` cross-ref to `(shader …)` via provider `lines` over `:src` `` /
 /// `` cross-ref to `(phrase …)` by `:name` ``, plus `` , scoped to
-/// `(piece …)` `` when a scope form constrains resolution. Both routes
+/// `(piece …)` `` when a scope form constrains resolution and
+/// `` , acyclic `` when the kind forbids cycles. Both routes
 /// name the key the member set is actually drawn from — the same rule
 /// the `not_cross_ref` message follows, and for the same reason: a
 /// summary that always implied `:name` would send the provider route's
@@ -2919,6 +3373,10 @@ fn appendCrossRefFacts(
         try buf.appendSlice(arena, sf);
         try buf.appendSlice(arena, " …)`");
     }
+    // The cycle rule is the whole of what separates this kind from a
+    // bare cross-ref, and without it the only warning the author gets is
+    // `cyclic_cross_ref`, after they have already written the cycle.
+    if (cr.acyclic) try buf.appendSlice(arena, ", acyclic");
 }
 
 fn appendValueType(
@@ -2958,7 +3416,7 @@ pub fn getCompletion(
 ) Allocator.Error!?[]const CompletionItem {
     const doc = self.getDocument(uri) orelse return null;
     const ctx = resolveContextAt(&doc.tree, doc.source, byte_offset);
-    return switch (ctx.position) {
+    const items: ?[]const CompletionItem = switch (ctx.position) {
         .none => null,
         .form_head => try self.completionsForFormHead(arena, &doc.tree, ctx, byte_offset),
         .kvpair_key => try self.completionsForKeywordKey(arena, &doc.tree, byte_offset),
@@ -2966,6 +3424,52 @@ pub fn getCompletion(
         .vector_elem => try self.completionsForVectorElement(arena, uri, doc, byte_offset, ctx),
         .expr_arg => try self.completionsForExprArg(arena, &doc.tree, ctx, byte_offset),
     };
+    return try biasDeprecatedLast(arena, items orelse return null);
+}
+
+/// Sink deprecated items to the end of the list without disturbing the
+/// order of anything else.
+///
+/// This is the one reordering the server applies to a completed
+/// candidate list, and it runs here rather than at the dozen sites that
+/// build items because `sort_text` is a *flat* key: a per-site bias
+/// keyed on the item's own name would silently alphabetise a list whose
+/// order is meaningful — a union's arms are emitted in declaration
+/// order on purpose (`completionsForUnionSlot`), and a member set reads
+/// the way the schema wrote it.
+///
+/// So the key encodes the deprecation bit and the item's *position*,
+/// which reproduces emission order exactly within each group. Nothing
+/// is written when no item is deprecated (there is nothing to move, and
+/// an invented key would freeze an order the client is free to refine),
+/// and an item that already set its own `sort_text` keeps it.
+fn biasDeprecatedLast(
+    arena: Allocator,
+    items: []const CompletionItem,
+) Allocator.Error![]const CompletionItem {
+    var any_deprecated = false;
+    for (items) |item| {
+        if (itemIsDeprecated(item)) {
+            any_deprecated = true;
+            break;
+        }
+    }
+    if (!any_deprecated) return items;
+
+    const out = try arena.dupe(CompletionItem, items);
+    for (out, 0..) |*item, i| {
+        if (item.sort_text != null) continue;
+        const prefix: u8 = if (itemIsDeprecated(item.*)) '1' else '0';
+        // Fixed width so the key orders numerically under the client's
+        // lexicographic sort.
+        item.sort_text = try std.fmt.allocPrint(arena, "{c}_{d:0>6}", .{ prefix, i });
+    }
+    return out;
+}
+
+fn itemIsDeprecated(item: CompletionItem) bool {
+    for (item.tags) |t| if (t == .deprecated) return true;
+    return false;
 }
 
 /// Structured cursor-context output for completion (and, eventually,
@@ -3251,7 +3755,21 @@ fn isWhitespace(c: u8) bool {
 /// expression (parent is an expr-func or kvpair value typed `.expr`),
 /// `.form` when the slot is restricted to data forms, `.any` when the
 /// slot is unconstrained (top-level, unknown parent, ambiguous head).
-const Vocabulary = enum { any, expr, form };
+///
+/// `heads` is the narrowing on top of `.form`: a slot typed by a
+/// value-kind with a `(head-set …)` accepts exactly those heads and
+/// reports `not_head_member` for anything else, so offering the catalog
+/// there offers 67 rejections. Empty means no head-set, which is every
+/// slot that never had one.
+const Vocabulary = struct {
+    kind: Kind,
+    heads: []const sjon.Plugin.ValueKind.HeadSet.Head = &.{},
+
+    const Kind = enum { any, expr, form };
+
+    const any: Vocabulary = .{ .kind = .any };
+    const expr: Vocabulary = .{ .kind = .expr };
+};
 
 /// Decide which vocabulary `(here|` should expose, given the parent
 /// form's typing. Kvpair value_type wins over parent expr-func-ness —
@@ -3266,6 +3784,13 @@ fn resolveFormHeadVocabulary(
 ) Vocabulary {
     const parent = ctx.parent_form_idx orelse return .any;
     const parent_hdr = tree.formHeader(parent);
+    // Slot-local: the parent may itself be a head declared only inside
+    // its own slot, and a local `entry`'s positional typing is exactly
+    // what the row below it needs.
+    const parent_hit = switch (self.resolveFormAt(tree, parent)) {
+        .found => |h| h,
+        else => null,
+    };
 
     // (a) kvpair value_type wins when present and the partial form sits
     // inside that kvpair (kv span overlaps the parent's children).
@@ -3273,28 +3798,75 @@ fn resolveFormHeadVocabulary(
         const kv_span = tree.spanOf(kv_idx);
         const parent_span = tree.spanOf(parent);
         if (kv_span.start >= parent_span.start and kv_span.end <= parent_span.end) {
-            switch (self.schema.lookupForm(parent_hdr.head, parent_hdr.namespace)) {
-                .found => |hit| {
-                    const kv_hdr = tree.kvpairHeader(kv_idx);
-                    if (hit.form.keyByName(kv_hdr.key)) |k| {
-                        return switch (k.value_type) {
-                            .expr => .expr,
-                            .form => .form,
-                            else => .any,
-                        };
-                    }
-                },
-                else => {},
+            if (parent_hit) |hit| {
+                const kv_hdr = tree.kvpairHeader(kv_idx);
+                if (self.resolveKeyIn(tree, parent, parent_hdr, hit.form, kv_hdr.key, kv_hdr.key_span.start)) |k| {
+                    // The partial form is either the kvpair's value or
+                    // sits inside it — one element of the vector the
+                    // slot holds, `(k :eases [(|)])`. An element is
+                    // typed by the slot's element kind, which is where
+                    // its head-set lives.
+                    const is_element = if (ctx.enclosing_form_idx) |pf| @intFromEnum(kv_hdr.value) != @intFromEnum(pf) else false;
+                    return switch (k.value_type) {
+                        .expr => .expr,
+                        .form => .{ .kind = .form },
+                        .named => |ref| self.formVocabularyOfKind(ref, is_element),
+                        else => .any,
+                    };
+                }
             }
         }
     }
 
-    // (b) parent form is itself an expr-func → positional arg expects expr.
+    // (b) the partial form is a *positional* child of the parent, and the
+    // parent types its positional slot by a value-kind. That is the head-set
+    // recipe (`portable-manifest-v1` §5.2): the slot names its members and
+    // the parent's `local_forms` supply their bodies.
+    if (parent_hit) |hit| {
+        switch (hit.form.positional) {
+            .kind => |ref| {
+                const v = self.formVocabularyOfKind(ref, false);
+                if (v.heads.len > 0) return v;
+            },
+            else => {},
+        }
+    }
+
+    // (c) parent form is itself an expr-func → positional arg expects expr.
     switch (self.schema.lookupExprFunc(parent_hdr.head, parent_hdr.namespace)) {
         .found => return .expr,
         else => {},
     }
     return .any;
+}
+
+/// The vocabulary a slot typed by value-kind `ref` exposes: `.form` with
+/// the kind's head-set when it declares one, `.form` bare when its
+/// underlying is `form` without a set, `.any` otherwise. An *empty*
+/// head-set is "no narrowing" — the validator reads it that way
+/// (`ValueKind.HeadSet` docs), and so must the completion list.
+///
+/// `is_element` says the form being typed is an element of the vector
+/// the slot holds rather than the slot's own value, so the kind to read
+/// is the element kind; a vector slot's own value is never a form, and
+/// that case keeps `.any` rather than offering heads the slot rejects.
+fn formVocabularyOfKind(self: *const Self, ref: sjon.Plugin.QualifiedRef, is_element: bool) Vocabulary {
+    const slot = switch (self.schema.lookupValueKind(ref.name, ref.namespace)) {
+        .found => |k| k,
+        else => return .any,
+    };
+    const declared = if (is_element) (self.vectorElementKind(slot) orelse return .any) else slot;
+    // A union slot narrows by the shape being typed, and `(|` is a form:
+    // the alternative to read a head-set from is whichever one a form
+    // reaches, asked of `Validator.determinedArm` — the same rule the
+    // value path and the quick fix narrow by. No determined arm leaves the
+    // kind unchanged, and a union's underlying is never `.form`, so the
+    // slot falls back to `.any` exactly as it did before.
+    const kind = self.unionArmKind(declared, .form);
+    if (kind.underlying != .form) return .any;
+    const hs = kind.heads orelse return .{ .kind = .form };
+    if (hs.heads.len == 0) return .{ .kind = .form };
+    return .{ .kind = .form, .heads = hs.heads };
 }
 
 fn completionsForFormHead(
@@ -3312,7 +3884,7 @@ fn completionsForFormHead(
     // expected type for the active arg position and filter candidates
     // whose declared result type can't satisfy it.
     var expected: ?sjon.Plugin.ValueType = null;
-    if (vocab == .expr) {
+    if (vocab.kind == .expr) {
         if (ctx.parent_form_idx) |pf_idx| {
             const pf_hdr = tree.formHeader(pf_idx);
             const pf_span = tree.spanOf(pf_idx);
@@ -3332,10 +3904,45 @@ fn completionsForFormHead(
         }
     }
 
+    // The slot the partial form sits in. Its `local_forms` come first
+    // and shadow the catalog by name: offering the global `circle`'s
+    // `:radius` snippet inside a slot whose own `circle` requires `:r`
+    // hands the author two diagnostics for accepting a suggestion.
+    const slot: SlotContext = if (ctx.enclosing_form_idx) |form_idx|
+        self.slotContextOf(tree, form_idx)
+    else
+        .{};
+
     var items: std.ArrayList(CompletionItem) = .empty;
+
+    // A closed head-set is the whole answer: the slot accepts these heads
+    // and reports `not_head_member` for every other, so the catalog has
+    // nothing to add and the expression vocabulary is not on the table.
+    if (vocab.heads.len > 0) {
+        for (vocab.heads) |h| try self.appendHeadSetCandidate(arena, &items, slot, h);
+        return items.toOwnedSlice(arena);
+    }
+
+    if (vocab.kind != .expr) {
+        for (slot.child_registry) |*f| {
+            std.debug.assert(slot.plugin != null);
+            const snippet = try buildFormSnippet(arena, self.schema, f.*);
+            try items.append(arena, .{
+                .label = f.name,
+                .kind = .constructor,
+                .detail = try std.fmt.allocPrint(arena, "local form ({s})", .{slot.plugin.?.name}),
+                .documentation = f.description,
+                .insert_text = snippet,
+                .insert_text_format = if (snippet != null) .snippet else .plain_text,
+                .filter_text = f.name,
+            });
+        }
+    }
     for (self.schema.plugins) |p| {
-        if (vocab != .expr) {
+        if (vocab.kind != .expr) {
             for (p.forms) |f| {
+                // Shadowed: the local of the same name was emitted above.
+                if (sjon.Validator.matchLocalForm(slot.child_registry, f.name) != null) continue;
                 const snippet = try buildFormSnippet(arena, self.schema, f);
                 try items.append(arena, .{
                     .label = f.name,
@@ -3344,10 +3951,11 @@ fn completionsForFormHead(
                     .documentation = f.description,
                     .insert_text = snippet,
                     .insert_text_format = if (snippet != null) .snippet else .plain_text,
+                    .filter_text = f.name,
                 });
             }
         }
-        if (vocab != .form) {
+        if (vocab.kind != .form) {
             for (p.expr_funcs) |*f| {
                 if (!candidateMatches(f, expected)) continue;
                 try items.append(arena, .{
@@ -3360,6 +3968,47 @@ fn completionsForFormHead(
         }
     }
     return items.toOwnedSlice(arena);
+}
+
+/// One head-set member as a completion item. The body comes from the
+/// head's *resolved* form — slot-local first, exactly as the validator
+/// resolves it, which is what lets a member with no global declaration
+/// carry a snippet at all. A member resolving to nothing still gets an
+/// item: the head is accepted here, and the head-set's `:description`
+/// is the only documentation there is for it.
+fn appendHeadSetCandidate(
+    self: *const Self,
+    arena: Allocator,
+    items: *std.ArrayList(CompletionItem),
+    slot: SlotContext,
+    head: sjon.Plugin.ValueKind.HeadSet.Head,
+) Allocator.Error!void {
+    var spec: ?*const sjon.Plugin.FormSpec = null;
+    var owner: ?*const sjon.Plugin.Plugin = null;
+    switch (self.lookupHeadIn(head.name, null, slot)) {
+        .found => |hit| {
+            spec = hit.form;
+            owner = hit.plugin;
+        },
+        else => {},
+    }
+
+    const snippet: ?[]const u8 = if (spec) |sp| try buildFormSnippet(arena, self.schema, sp.*) else null;
+    const description = if (head.description.len > 0)
+        head.description
+    else if (spec) |sp| sp.description else "";
+    try items.append(arena, .{
+        .label = head.name,
+        .kind = .constructor,
+        .detail = if (owner) |o|
+            try std.fmt.allocPrint(arena, "head ({s})", .{o.name})
+        else
+            "head",
+        .documentation = description,
+        .insert_text = snippet,
+        .insert_text_format = if (snippet != null) .snippet else .plain_text,
+        .filter_text = head.name,
+    });
 }
 
 /// Argument-slot completions: cursor sits inside an expr-func call,
@@ -3747,9 +4396,9 @@ fn completionsForKeywordKey(
     tree: *const Ast.Tree,
     cursor: u32,
 ) Allocator.Error![]const CompletionItem {
-    const enclosing = findEnclosingForm(tree, cursor) orelse return &.{};
-    const lookup = self.schema.lookupForm(enclosing.head, enclosing.namespace);
-    const hit = switch (lookup) {
+    const enclosing_idx = findEnclosingFormIdx(tree, cursor) orelse return &.{};
+    const enclosing = tree.formHeader(enclosing_idx);
+    const hit = switch (self.resolveFormAt(tree, enclosing_idx)) {
         .found => |h| h,
         else => return &.{},
     };
@@ -3765,24 +4414,13 @@ fn completionsForKeywordKey(
         try present.put(arena, kv.key, {});
     }
 
-    // Discriminant narrowing: when the form declares a discriminant
-    // and its symbol value is already typed, the matching variant's
-    // keys become valid alongside the base keys. Use the validator's
-    // canonical helper would require a complete form; the partial-
-    // input completion path scans kvpair children directly.
-    var active_variant: ?*const sjon.Plugin.Variant = null;
-    if (hit.form.discriminant_name) |disc_name| {
-        if (findKvpairSymbolValue(tree, enclosing, disc_name)) |value| {
-            if (hit.form.variants) |variants| {
-                for (variants) |*v| {
-                    if (v.selects(value)) {
-                        active_variant = v;
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    // Discriminant narrowing: when the form declares a discriminant and
+    // its symbol value is already typed *ahead of the cursor*, the
+    // matching variant's keys become valid alongside the base keys. The
+    // cursor is the anchor because a variant-only key written before the
+    // discriminant is `unknown_key` — offering one there would suggest
+    // exactly what the resulting message forbids.
+    const active_variant = self.activeVariantIn(tree, enclosing_idx, enclosing, hit.form, cursor);
 
     // For each exclusive group with one alternative already present,
     // mark every other key in the group as excluded — suggesting one
@@ -3857,25 +4495,6 @@ fn appendKeyCandidates(
     }
 }
 
-/// Return the symbol-typed value text of the first kvpair in
-/// `form` whose key matches `key_name`. Used by discriminant
-/// narrowing to read the current `:kind <symbol>` value.
-fn findKvpairSymbolValue(
-    tree: *const Ast.Tree,
-    form: Ast.FormHeader,
-    key_name: []const u8,
-) ?[]const u8 {
-    const tags = tree.nodes.items(.tag);
-    for (form.children) |child| {
-        if (tags[@intFromEnum(child)] != .kvpair) continue;
-        const kv = tree.kvpairHeader(child);
-        if (!std.mem.eql(u8, kv.key, key_name)) continue;
-        if (tags[@intFromEnum(kv.value)] != .symbol) return null;
-        return tree.symbolText(kv.value);
-    }
-    return null;
-}
-
 /// Build completion items for the value position of a kvpair. Dispatch
 /// is keyed on the kvpair's resolved `ValueKind`:
 ///   * `kind.cross_ref` → names registered for that target in the
@@ -3897,18 +4516,27 @@ fn completionsForKvpairValue(
 ) Allocator.Error![]const CompletionItem {
     const enclosing_form_idx = findEnclosingDelimIdxAtCursor(&doc.tree, doc.source, cursor, .form) orelse return &.{};
     const enclosing = doc.tree.formHeader(enclosing_form_idx);
-    const lookup = self.schema.lookupForm(enclosing.head, enclosing.namespace);
-    const hit = switch (lookup) {
+    const hit = switch (self.resolveFormAt(&doc.tree, enclosing_form_idx)) {
         .found => |h| h,
         else => return &.{},
     };
     const key_name = findEnclosingKvpairKey(doc.source, cursor) orelse return &.{};
 
-    const key = hit.form.keyByName(key_name) orelse return &.{};
+    // The cursor stands in for the key's span start: it sits in that
+    // kvpair's own value position, so no sibling can start between the
+    // two and the pair picks out the same discriminant either way.
+    const key = self.resolveKeyIn(&doc.tree, enclosing_form_idx, enclosing, hit.form, key_name, cursor) orelse return &.{};
     const vt = key.value_type;
 
     // Primitive-shape slots: `.boolean` and `.nil` value types have a
     // fixed, finite literal set we can surface without a value kind.
+    //
+    // The `.nil` arm is not reachable from a manifest-declared key:
+    // `nil` lexes as its own tag, so `:type nil` is `wrong_underlying`
+    // before it gets here (`ManifestLoader.value_type_by_name` carries
+    // the why). It stays because `ValueType.nil` is reachable by other
+    // routes — a union alternative, a Zig-declared plugin — and a
+    // deleted arm would be a silent gap the day one of those arrives.
     switch (vt) {
         .boolean => return try literalSet(arena, &.{ "true", "false" }),
         .nil => return try literalSet(arena, &.{"nil"}),
@@ -3925,11 +4553,55 @@ fn completionsForKvpairValue(
         else => return &.{},
     };
 
-    // Cross-ref takes precedence over members — a kind shouldn't carry
-    // both, but if it does, cross_ref is the more useful surface (named
-    // symbols vs. abstract enum tags).
+    const ctx: ValueSlotCtx = .{
+        .uri = uri,
+        .doc = doc,
+        .enclosing_form_idx = enclosing_form_idx,
+        .plugin = hit.plugin,
+        .local_forms = key.local_forms,
+        .value_idx = findKvpairValueByKey(&doc.tree, enclosing, key_name),
+        .cursor = cursor,
+    };
+    if (kind.union_of != null) return self.completionsForUnionSlot(arena, ctx, kind);
+    return self.completionsForValueKind(arena, ctx, kind);
+}
+
+/// Everything the per-kind completion arms read besides the kind itself.
+/// Bundled because a union slot runs them once per alternative, and
+/// because the two entry points — a kvpair's value and a vector's element
+/// — differ only in which node they call the value.
+const ValueSlotCtx = struct {
+    uri: []const u8,
+    doc: *const Document,
+    /// The form the slot sits in: the anchor a cross-ref's scope search
+    /// walks out from.
+    enclosing_form_idx: Ast.NodeIndex,
+    /// The plugin the enclosing form came from, and the key's own
+    /// `local_forms` — together the registry a head-set slot resolves its
+    /// snippet bodies through.
+    plugin: *const sjon.Plugin.Plugin,
+    local_forms: []const sjon.Plugin.FormSpec = &.{},
+    /// The value node the cursor is typing into, when one exists. Null for
+    /// an empty slot — `(k :ease |)` parses to a bare keyword, no kvpair —
+    /// which is both "no unit anchor" and "no shape to narrow a union by".
+    value_idx: ?Ast.NodeIndex,
+    cursor: u32,
+};
+
+/// Candidates for a slot typed by one non-union value kind. The arms are
+/// ordered by specificity, and each returns rather than falling through:
+/// a kind shouldn't carry two refinements, but if it does, the earlier arm
+/// is the more useful surface.
+fn completionsForValueKind(
+    self: *const Self,
+    arena: Allocator,
+    ctx: ValueSlotCtx,
+    kind: *const sjon.Plugin.ValueKind,
+) Allocator.Error![]const CompletionItem {
+    // Cross-ref takes precedence over members — named symbols vs. abstract
+    // enum tags.
     if (kind.cross_ref) |xref| {
-        return self.completionsForCrossRef(arena, uri, doc, enclosing_form_idx, xref);
+        return self.completionsForCrossRef(arena, ctx.uri, ctx.doc, ctx.enclosing_form_idx, xref);
     }
 
     // Number with declared `unit.allowed`: cursor at the end of a bare
@@ -3938,9 +4610,8 @@ fn completionsForKvpairValue(
     // candidates — guessing units would mislead.
     if (kind.underlying == .number) {
         if (kind.unit) |u| if (u.allowed.len > 0) {
-            if (findKvpairValueByKey(&doc.tree, enclosing, key_name)) |value_idx| {
-                return try unitSuffixCompletions(arena, &doc.tree, value_idx, u.allowed, cursor);
-            }
+            const value_idx = ctx.value_idx orelse return &.{};
+            return try unitSuffixCompletions(arena, &ctx.doc.tree, value_idx, u.allowed, ctx.cursor);
         };
     }
 
@@ -3961,7 +4632,12 @@ fn completionsForKvpairValue(
     // `(head $0)` placeholder.
     if (kind.underlying == .form) {
         if (kind.heads) |hs| if (hs.heads.len > 0) {
-            return self.completionsForFormValuedSlot(arena, hs.heads);
+            // The head-set recipe on a *key*: the slot names its members
+            // and the key's own `local_forms` supply their bodies.
+            return self.completionsForFormValuedSlot(arena, hs.heads, .{
+                .plugin = ctx.plugin,
+                .child_registry = ctx.local_forms,
+            });
         };
     }
 
@@ -3983,15 +4659,87 @@ fn completionsForKvpairValue(
     return items.toOwnedSlice(arena);
 }
 
+/// Candidates for a union-typed slot.
+///
+/// A union carries no `members` / `cross_ref` / `heads` of its own, so the
+/// dispatch above found nothing and the one slot shape whose hover already
+/// prints "one of X, Y" completed to nothing at all.
+///
+/// What narrows a union is what is already typed, and `determinedArm`
+/// takes a `NodeShape`, which a value must exist to have. So there are two
+/// rules:
+///
+///   * **A value is there** — `(k :ease smooth|)`. Its shape determines
+///     one alternative by the validator's own rule, and that arm's
+///     candidates are the whole list. Same rule the quick fix reads its
+///     candidate set by (15), so completion and the fix cannot blame
+///     different arms of the same union.
+///   * **Nothing typed yet, or a shape two arms reach** — `(k :ease |)`,
+///     `(edge :pipeline bl|)`. Nothing narrows, so every alternative's
+///     candidates are offered. That is what hover already promises and
+///     what the author needs before choosing an arm; emptying the list
+///     the moment a letter appears would be worse than the gap this
+///     closes.
+///
+/// Declaration order, arm by arm, each arm's own order preserved: union
+/// matching is declaration-ordered (`docs/LANGUAGE.md` §4.9, "alternatives
+/// are tried in declaration order and the first to accept wins"), so the
+/// list reads the way the schema resolves. No `sort_text` bias between
+/// arms — inventing one would imply a preference the schema does not
+/// state. `biasDeprecatedLast` is the one exception, and it is not a
+/// preference between arms: it moves deprecated items and preserves the
+/// emitted order of everything else, arms included.
+///
+/// One level of flattening: a nested union alternative contributes
+/// nothing rather than recursing. Nested unions are already discouraged
+/// (`Validator.determinedArm` works on node shape, which does not
+/// distinguish them), and an unbounded walk here would be a
+/// schema-controlled depth on the host stack.
+fn completionsForUnionSlot(
+    self: *const Self,
+    arena: Allocator,
+    ctx: ValueSlotCtx,
+    kind: *const sjon.Plugin.ValueKind,
+) Allocator.Error![]const CompletionItem {
+    const us = kind.union_of orelse return &.{};
+    if (ctx.value_idx) |value_idx| {
+        const shape = sjon.Validator.shapeOfTag(ctx.doc.tree.tagOf(value_idx));
+        if (sjon.Validator.determinedArm(self.schema, kind, shape)) |ai| {
+            if (self.armKind(us.alternatives[ai])) |arm| {
+                return self.completionsForValueKind(arena, ctx, arm);
+            }
+            return &.{};
+        }
+    }
+    var items: std.ArrayList(CompletionItem) = .empty;
+    for (us.alternatives) |alt| {
+        const arm = self.armKind(alt) orelse continue;
+        try items.appendSlice(arena, try self.completionsForValueKind(arena, ctx, arm));
+    }
+    return items.toOwnedSlice(arena);
+}
+
+/// One union alternative resolved to the kind its candidates come from, or
+/// null when it names nothing — or names another union, which is where the
+/// one level of flattening stops.
+fn armKind(self: *const Self, alt: sjon.Plugin.QualifiedRef) ?*const sjon.Plugin.ValueKind {
+    const k = switch (self.schema.lookupValueKind(alt.name, alt.namespace)) {
+        .found => |found| found,
+        else => return null,
+    };
+    return if (k.union_of == null) k else null;
+}
+
 /// Completions for a cursor sitting inside a `[...]` vector. The
 /// element kind comes from the kvpair whose value is the enclosing
 /// vector → `ValueType.named` → `ValueKind.vector.element` → resolved
-/// kind. Falls through to the member / cross-ref dispatch the kvpair
-/// value path already implements, plus a number-with-unit arm that
-/// fires when the cursor sits at the end of a bare-number element in
-/// a vector whose element kind has `unit.allowed`. Vectors that
-/// aren't a direct kvpair value (top-level, or nested) return empty —
-/// v1 limitation.
+/// kind, and then goes through the very dispatch a kvpair value does:
+/// one `ValueSlotCtx`, one `completionsForValueKind`, one union arm. The
+/// only thing this path decides for itself is which node counts as "the
+/// value" — the element at the cursor rather than the kvpair's.
+///
+/// Vectors that aren't a direct kvpair value (top-level, or nested)
+/// return empty — v1 limitation.
 fn completionsForVectorElement(
     self: *const Self,
     arena: Allocator,
@@ -4008,23 +4756,22 @@ fn completionsForVectorElement(
     // Within the enclosing form, find the kvpair whose value IS this
     // vector. Reading kvpair headers via the SoA tree is cheap.
     const form_header = tree.formHeader(form_idx);
-    var owning_key: ?[]const u8 = null;
+    var owning: ?Ast.KvPairHeader = null;
     for (form_header.children) |child| {
         if (tags[@intFromEnum(child)] != .kvpair) continue;
         const kv = tree.kvpairHeader(child);
         if (@intFromEnum(kv.value) == @intFromEnum(vec_idx)) {
-            owning_key = kv.key;
+            owning = kv;
             break;
         }
     }
-    const key_name = owning_key orelse return &.{};
+    const owner = owning orelse return &.{};
 
-    const lookup = self.schema.lookupForm(form_header.head, form_header.namespace);
-    const hit = switch (lookup) {
+    const hit = switch (self.resolveFormAt(tree, form_idx)) {
         .found => |h| h,
         else => return &.{},
     };
-    const key = hit.form.keyByName(key_name) orelse return &.{};
+    const key = self.resolveKeyIn(tree, form_idx, form_header, hit.form, owner.key, owner.key_span.start) orelse return &.{};
     const vt = key.value_type;
     const named = switch (vt) {
         .named => |n| n,
@@ -4044,41 +4791,35 @@ fn completionsForVectorElement(
         else => return &.{},
     };
 
-    if (elem_kind.cross_ref) |xref| {
-        return self.completionsForCrossRef(arena, uri, doc, form_idx, xref);
-    }
+    const ctx_slot: ValueSlotCtx = .{
+        .uri = uri,
+        .doc = doc,
+        .enclosing_form_idx = form_idx,
+        .plugin = hit.plugin,
+        .local_forms = key.local_forms,
+        .value_idx = vectorElementAtCursor(tree, vec_idx, cursor),
+        .cursor = cursor,
+    };
+    if (elem_kind.union_of != null) return self.completionsForUnionSlot(arena, ctx_slot, elem_kind);
+    return self.completionsForValueKind(arena, ctx_slot, elem_kind);
+}
 
-    // Number element with declared `unit.allowed`: locate the vector
-    // element whose span ends exactly at the cursor; if its tag is a
-    // bare-number variant, surface allowed-unit completions. Mirrors
-    // the kvpair-value arm; same deferral for `.number_with_unit`.
-    if (elem_kind.underlying == .number) {
-        if (elem_kind.unit) |u| if (u.allowed.len > 0) {
-            for (tree.vectorElements(vec_idx)) |elem_idx| {
-                if (tree.spanOf(elem_idx).end == cursor) {
-                    return try unitSuffixCompletions(arena, tree, elem_idx, u.allowed, cursor);
-                }
-            }
-            return &.{};
-        };
+/// The vector element the cursor is typing into: the one whose span ends
+/// exactly at the cursor (mid-token, or just finished), else the one it
+/// sits inside. Null in the gap between elements — a fresh element with no
+/// shape yet, which is a vector's version of an empty slot.
+///
+/// Elements are disjoint, so at most one answers either test.
+fn vectorElementAtCursor(
+    tree: *const Ast.Tree,
+    vec_idx: Ast.NodeIndex,
+    cursor: u32,
+) ?Ast.NodeIndex {
+    for (tree.vectorElements(vec_idx)) |elem_idx| {
+        const span = tree.spanOf(elem_idx);
+        if (span.end == cursor or containsOffset(span, cursor)) return elem_idx;
     }
-
-    const m = elem_kind.members orelse return &.{};
-    if (m.members.len == 0) return &.{};
-
-    var items: std.ArrayList(CompletionItem) = .empty;
-    try items.ensureTotalCapacity(arena, m.members.len);
-    const deprecated_tags: []const CompletionItem.Tag = &.{.deprecated};
-    for (m.members) |mem| {
-        items.appendAssumeCapacity(.{
-            .label = mem.name,
-            .kind = .enum_member,
-            .detail = mem.label,
-            .documentation = mem.description,
-            .tags = if (mem.deprecated) deprecated_tags else &.{},
-        });
-    }
-    return items.toOwnedSlice(arena);
+    return null;
 }
 
 /// Build a `[]const CompletionItem` carrying one `.enum_member`-kinded
@@ -4143,6 +4884,7 @@ fn completionsForFormValuedSlot(
     self: *const Self,
     arena: Allocator,
     heads: []const Plugin.ValueKind.HeadSet.Head,
+    slot: SlotContext,
 ) Allocator.Error![]const CompletionItem {
     var items: std.ArrayList(CompletionItem) = .empty;
     try items.ensureTotalCapacity(arena, heads.len);
@@ -4154,15 +4896,16 @@ fn completionsForFormValuedSlot(
             ns = raw_name[0..slash];
             name = raw_name[slash + 1 ..];
         }
-        const snippet = switch (self.schema.lookupForm(name, ns)) {
+        const lookup = self.lookupHeadIn(name, ns, slot);
+        const snippet = switch (lookup) {
             .found => |h| try buildFormValueSnippet(arena, self.schema, h.form.*),
             else => try std.fmt.allocPrint(arena, "({s} $0)", .{raw_name}),
         };
-        const detail: []const u8 = switch (self.schema.lookupForm(name, ns)) {
+        const detail: []const u8 = switch (lookup) {
             .found => |h| try std.fmt.allocPrint(arena, "form ({s})", .{h.plugin.name}),
             else => "",
         };
-        const documentation: []const u8 = switch (self.schema.lookupForm(name, ns)) {
+        const documentation: []const u8 = switch (lookup) {
             .found => |h| h.form.description,
             else => "",
         };
@@ -4214,6 +4957,12 @@ fn completionsForCrossRef(
     // its `:name-key` value and exclude that name so we don't suggest the
     // symbol the user is currently defining.
     var self_name: ?[]const u8 = null;
+    // Deliberately the *global* lookup, not `resolveFormAt`. The question
+    // is "is this form one of the cross-ref's targets", and a target is
+    // always a global name — whether the validator's index registers a
+    // shadowing local as a definition of the target it shadows is a
+    // question about `CrossRefIndex`, not about this filter, and nothing
+    // pins the answer today.
     const enc_lookup = self.schema.lookupForm(enclosing.head, enclosing.namespace);
     if (enc_lookup == .found) {
         const enc_hit = enc_lookup.found;
@@ -4225,6 +4974,12 @@ fn completionsForCrossRef(
         }
     }
 
+    // `canonical_target` is the registry *key*, which for a group is the
+    // canonical names joined with a space — not something to show anyone.
+    // Rendered once, outside the loop: every item in a slot names the same
+    // bucket.
+    const shown_target = (try sjon.Schema.Schema.describeBucket(arena, canonical_target)).text;
+
     var items: std.ArrayList(CompletionItem) = .empty;
     var it = xri.iterateNames(scope, canonical_target);
     while (it.next()) |entry| {
@@ -4233,7 +4988,7 @@ fn completionsForCrossRef(
         try items.append(arena, .{
             .label = name,
             .kind = .enum_member,
-            .detail = try std.fmt.allocPrint(arena, "ref → {s}", .{canonical_target}),
+            .detail = try std.fmt.allocPrint(arena, "ref → {s}", .{shown_target}),
         });
     }
     return items.toOwnedSlice(arena);
@@ -4344,7 +5099,7 @@ pub fn getSignatureHelp(
     // Cursor still on the head — completion territory, not sig-help.
     if (containsOffset(hdr.head_span, byte_offset)) return null;
 
-    switch (self.schema.lookupForm(hdr.head, hdr.namespace)) {
+    switch (self.resolveFormAt(&doc.tree, idx)) {
         .found => |hit| return try buildFormSignature(arena, hit, &doc.tree, hdr, byte_offset),
         else => {},
     }
@@ -4417,7 +5172,7 @@ fn buildExprSignature(
         sigs[i] = try buildOneExprSignature(arena, hdr.namespace, func.name, s, func.description);
     }
 
-    const active_sig = try chooseActiveSignature(arena, func, specs, tree, hdr);
+    const active_sig = try chooseActiveSignature(arena, func, specs, tree, hdr, cursor);
     std.debug.assert(active_sig < specs.len);
     return .{
         .signatures = sigs,
@@ -4439,22 +5194,28 @@ fn buildOneExprSignature(
     var label: std.ArrayList(u8) = .empty;
     try appendQualifiedHead(arena, &label, namespace, name);
 
-    const fixed = sig.params orelse &.{};
-    var params = try arena.alloc(Parameter, fixed.len + @intFromBool(sig.rest != null));
-    for (fixed, 0..) |p, i| {
+    // Names and types are two axes (`Plugin.ExprFunc.param_names`): a
+    // function may declare either, both, or neither. Each fixed slot
+    // renders whatever it has — `:name type`, `:name`, or `type` — so
+    // `clamp :x :lo :hi` gets parameter ranges even though `clamp` is
+    // untyped, and only a function with neither falls back to ` …`.
+    const fixed_len = fixedSlotCount(sig);
+    var params = try arena.alloc(Parameter, fixed_len + @intFromBool(sig.rest != null));
+    for (0..fixed_len) |i| {
         try label.append(arena, ' ');
         const start: u32 = @intCast(label.items.len);
         // A labeled-call overload shows its parameter names — otherwise
         // two overloads that differ only by label render identically and
         // the picker can't be read.
-        if (sig.param_names) |names| {
-            if (i < names.len) {
-                try label.append(arena, ':');
-                try label.appendSlice(arena, names[i]);
-                try label.append(arena, ' ');
-            }
+        const named = if (sig.param_names) |names| i < names.len else false;
+        if (named) {
+            try label.append(arena, ':');
+            try label.appendSlice(arena, sig.param_names.?[i]);
         }
-        try appendValueType(arena, &label, p);
+        if (sig.params) |types| {
+            if (named) try label.append(arena, ' ');
+            try appendValueType(arena, &label, types[i]);
+        }
         params[i] = .{ .label_start = start, .label_end = @intCast(label.items.len) };
     }
     if (sig.rest) |r| {
@@ -4462,7 +5223,7 @@ fn buildOneExprSignature(
         const start: u32 = @intCast(label.items.len);
         try label.appendSlice(arena, "...");
         try appendValueType(arena, &label, r);
-        params[fixed.len] = .{ .label_start = start, .label_end = @intCast(label.items.len) };
+        params[fixed_len] = .{ .label_start = start, .label_end = @intCast(label.items.len) };
     }
     // Untyped, no rest — surface a `…` so the label reads as a call rather
     // than a bare name; no parameter ranges to highlight.
@@ -4485,6 +5246,12 @@ fn buildOneExprSignature(
 /// matching `Validator.resolveFormExpression`'s deliberate choice not to
 /// unify literal argument types statically.
 ///
+/// A cursor sitting past the last written argument is producing one
+/// more, so the positional rule counts `written + 1` first and only
+/// falls back to `written`. Without it the card describes the call one
+/// argument behind the one being written: `(pick 1 |)` showed the
+/// 1-argument overload for the whole time the user typed the second.
+///
 /// Falls back to the first overload when nothing matches (a call that is
 /// mid-edit or simply wrong): showing the first signature beats showing
 /// none while the user is still typing.
@@ -4494,6 +5261,7 @@ fn chooseActiveSignature(
     specs: []const sjon.Plugin.ExprFunc.Signature,
     tree: *const Ast.Tree,
     hdr: Ast.FormHeader,
+    cursor: u32,
 ) Allocator.Error!u32 {
     if (specs.len == 1) return 0;
 
@@ -4507,10 +5275,31 @@ fn chooseActiveSignature(
     }
 
     const argc = hdr.children.len;
+    if (cursorOpensNextArg(tree, hdr, cursor)) {
+        for (specs, 0..) |s, i| {
+            if (s.checkArity(argc + 1)) return @intCast(i);
+        }
+    }
     for (specs, 0..) |s, i| {
         if (s.checkArity(argc)) return @intCast(i);
     }
     return 0;
+}
+
+/// Is the cursor in the whitespace *after* everything written so far —
+/// the position from which the next argument gets typed?
+///
+/// Strictly past the last child's end, not at it: at the end of `(f 1|)`
+/// the user is still writing `1`, and reading that as a second argument
+/// would step the picker forward on the last keystroke of every
+/// argument. With nothing written yet, the head's end plays the same
+/// role.
+fn cursorOpensNextArg(tree: *const Ast.Tree, hdr: Ast.FormHeader, cursor: u32) bool {
+    const written_end = if (hdr.children.len > 0)
+        tree.spanOf(hdr.children[hdr.children.len - 1]).end
+    else
+        hdr.head_span.end;
+    return cursor > written_end;
 }
 
 /// Position of `needle` within `specs`. `resolveExprArgs` hands back a
@@ -4531,13 +5320,24 @@ fn indexOfSignature(
 }
 
 /// Index of the parameter the cursor sits in, within `sig`.
+/// How many fixed parameter slots a signature can name or type: the
+/// typed list's length when there is one, else the named list's. Zero
+/// for a fully opaque signature. Signature help and its active-parameter
+/// index read this one count so the highlighted slot is always one the
+/// label rendered.
+fn fixedSlotCount(sig: sjon.Plugin.ExprFunc.Signature) usize {
+    if (sig.params) |p| return p.len;
+    if (sig.param_names) |n| return n.len;
+    return 0;
+}
+
 fn activeParamIndex(
     sig: sjon.Plugin.ExprFunc.Signature,
     tree: *const Ast.Tree,
     hdr: Ast.FormHeader,
     cursor: u32,
 ) ?u32 {
-    const fixed_len = if (sig.params) |p| p.len else 0;
+    const fixed_len = fixedSlotCount(sig);
     if (fixed_len == 0 and sig.rest == null) return null;
     const arg_idx = positionalIndex(tree, hdr.children, cursor);
     if (arg_idx < fixed_len) return @intCast(arg_idx);
@@ -4572,38 +5372,66 @@ fn appendQualifiedHead(
     try buf.appendSlice(arena, name);
 }
 
-/// Find the kvpair child that contains `cursor` and map it back to its
-/// index in `keys`. Returns null when the cursor sits between kvpairs
-/// or on a key the form doesn't declare.
+/// Which declared key the cursor is writing, as an index into `keys`.
+///
+/// Same rule as `positionalIndex`, its expr-func sibling: a child whose
+/// span *contains* the cursor is active, and otherwise the last child
+/// that ended at or before the cursor is. The trailing half is what
+/// keeps the highlight lit while the user types a value — the cursor
+/// sits past the kvpair's span for the whole of `(box :name a|)`, and
+/// answering null there switches the highlight off exactly when it is
+/// wanted. Containment wins over trailing, so a cursor at the next
+/// key's first byte belongs to that key.
+///
+/// Returns null when no key is being written: before the first kvpair,
+/// on a key the form doesn't declare, or past a *positional* child —
+/// the cursor is then in the tail of something that is not a key.
 fn activeKeyIndex(
     tree: *const Ast.Tree,
     hdr: Ast.FormHeader,
     keys: []const sjon.Plugin.KeySpec,
     cursor: u32,
 ) ?u32 {
+    var trailing: ?u32 = null;
     for (hdr.children) |c_idx| {
-        if (tree.tagOf(c_idx) != .kvpair) continue;
         const span = tree.spanOf(c_idx);
-        if (cursor < span.start) return null;
-        if (cursor >= span.end) continue;
-        const kv = tree.kvpairHeader(c_idx);
-        for (keys, 0..) |k, i| {
-            if (std.mem.eql(u8, k.name, kv.key)) return @intCast(i);
+        // Children are in source order, so the first one starting after
+        // the cursor ends the search; `trailing` already holds the last
+        // completed child.
+        if (cursor < span.start) break;
+        if (tree.tagOf(c_idx) != .kvpair) {
+            trailing = null;
+            continue;
         }
-        return null;
+        const kv = tree.kvpairHeader(c_idx);
+        const idx = keyIndexOf(keys, kv.key);
+        if (cursor < span.end) return idx;
+        trailing = idx;
+    }
+    return trailing;
+}
+
+/// Position of the key named `name` within `keys`, or null when the
+/// form doesn't declare it.
+fn keyIndexOf(keys: []const sjon.Plugin.KeySpec, name: []const u8) ?u32 {
+    for (keys, 0..) |k, i| {
+        if (std.mem.eql(u8, k.name, name)) return @intCast(i);
     }
     return null;
 }
 
 /// Count completed children before `cursor` to derive a positional arg
-/// index. A child whose span contains the cursor counts as the active
-/// arg (its index, not the next one).
+/// index. A child whose span contains the cursor, *or ends at it*, is
+/// the active arg (its index, not the next one): the cursor sits at the
+/// trailing edge of an argument for the whole time that argument is
+/// being typed, so `(f 1|)` is still writing argument 0. Only a cursor
+/// strictly past a child counts it as completed — the same rule
+/// `activeKeyIndex` applies to kvpairs.
 fn positionalIndex(tree: *const Ast.Tree, children: []const Ast.NodeIndex, cursor: u32) usize {
     var i: usize = 0;
     for (children) |c| {
         const span = tree.spanOf(c);
-        if (cursor < span.start) break;
-        if (cursor < span.end) break;
+        if (cursor <= span.end) break;
         i += 1;
     }
     return i;
@@ -4611,14 +5439,11 @@ fn positionalIndex(tree: *const Ast.Tree, children: []const Ast.NodeIndex, curso
 
 /// Smallest form whose span contains `pos`. Linear over node count —
 /// fine for typical document sizes (parser caps at MAX_PARSE_DEPTH).
-fn findEnclosingForm(tree: *const Ast.Tree, pos: u32) ?Ast.FormHeader {
-    if (findEnclosingFormIdx(tree, pos)) |idx| return tree.formHeader(idx);
-    return null;
-}
-
-/// `findEnclosingForm` companion that returns the node index instead of
-/// the materialised header. Code-action paths need both: header for
-/// schema lookup, span via the index for insertion-point math.
+///
+/// Returns the node index, not the materialised header: every caller
+/// needs the index anyway, because resolving the head against its slot
+/// (`resolveFormAt`) is a question about the form's *position*, and a
+/// header alone cannot answer it. The header is one `formHeader` away.
 fn findEnclosingFormIdx(tree: *const Ast.Tree, pos: u32) ?Ast.NodeIndex {
     return smallestContainingIdx(tree, pos, .form);
 }
@@ -4849,8 +5674,16 @@ fn printRootFull(
 /// across transparent vector / kvpair nesting).
 const WalkNode = struct {
     idx: Ast.NodeIndex,
-    enclosing_head: ?[]const u8,
-    enclosing_ns: ?[]const u8,
+    /// The nearest enclosing form, or null at document root. Carried as a
+    /// node index rather than head + namespace because a kvpair consumer
+    /// needs the form's *children* too — `resolveKeyAt` reads the
+    /// discriminant out of them.
+    enclosing_form: ?Ast.NodeIndex,
+    /// The slot this node sits in — what a form head here resolves
+    /// against, and the enclosing form's resolved spec. Empty unless the
+    /// walker was given a handler (`NodeWalker.slots`); the schema-free
+    /// walks neither ask for it nor pay for it.
+    slot: SlotContext,
 };
 
 /// Pre-order tree iterator with a heap frame stack — the shared descent
@@ -4861,6 +5694,13 @@ const NodeWalker = struct {
     tree: *const Ast.Tree,
     arena: Allocator,
     stack: std.ArrayList(Level),
+    /// The handler whose schema resolves each head as the walk descends,
+    /// or null for the schema-free walks. With one, every yielded node
+    /// carries the slot it sits in, computed once per node on the way
+    /// down — a whole-document consumer that instead called
+    /// `resolveFormAt` per node would re-descend from the root each
+    /// time.
+    slots: ?*const Self = null,
 
     /// The ceiling on frame-stack depth. The parser refuses to build a
     /// tree deeper than this, so it is defensive for parser-produced
@@ -4895,13 +5735,21 @@ const NodeWalker = struct {
     const Level = struct {
         kids: Kids,
         i: usize,
-        enclosing_head: ?[]const u8,
-        enclosing_ns: ?[]const u8,
+        enclosing_form: ?Ast.NodeIndex,
+        /// The slot `kids` sit in — produced by stepping into the node
+        /// that owns them. The root level's is empty: a top-level form
+        /// resolves against the global catalog and nothing else.
+        slot: SlotContext,
     };
 
-    fn init(arena: Allocator, tree: *const Ast.Tree, roots: []const Ast.NodeIndex) Allocator.Error!NodeWalker {
-        var w: NodeWalker = .{ .tree = tree, .arena = arena, .stack = .empty };
-        try w.stack.append(arena, .{ .kids = .{ .slice = roots }, .i = 0, .enclosing_head = null, .enclosing_ns = null });
+    fn init(
+        arena: Allocator,
+        tree: *const Ast.Tree,
+        roots: []const Ast.NodeIndex,
+        slots: ?*const Self,
+    ) Allocator.Error!NodeWalker {
+        var w: NodeWalker = .{ .tree = tree, .arena = arena, .stack = .empty, .slots = slots };
+        try w.stack.append(arena, .{ .kids = .{ .slice = roots }, .i = 0, .enclosing_form = null, .slot = .{} });
         return w;
     }
 
@@ -4924,29 +5772,25 @@ const NodeWalker = struct {
             }
             const idx = top.kids.at(top.i);
             top.i += 1;
-            const node: WalkNode = .{
-                .idx = idx,
-                .enclosing_head = top.enclosing_head,
-                .enclosing_ns = top.enclosing_ns,
-            };
+            const node: WalkNode = .{ .idx = idx, .enclosing_form = top.enclosing_form, .slot = top.slot };
             // Push idx's children so the next `next()` descends into them
             // before advancing to idx's sibling (pre-order). A form
             // re-bases the enclosing context; vectors/kvpairs inherit it.
             if (self.stack.items.len < MAX_WALK_DEPTH) {
                 const kids = childrenOf(self.tree, idx);
                 if (kids.len() > 0) {
-                    var enc_head = node.enclosing_head;
-                    var enc_ns = node.enclosing_ns;
-                    if (self.tree.tagOf(idx) == .form) {
-                        const hdr = self.tree.formHeader(idx);
-                        enc_head = hdr.head;
-                        enc_ns = hdr.namespace;
-                    }
+                    // Stepping the slot costs a head lookup, so it is
+                    // paid only when someone asked for slots and only
+                    // for a node that has children to hand it to.
+                    const child_slot: SlotContext = if (self.slots) |h|
+                        h.stepSlotContext(self.tree, top.slot, idx)
+                    else
+                        .{};
                     try self.stack.append(self.arena, .{
                         .kids = kids,
                         .i = 0,
-                        .enclosing_head = enc_head,
-                        .enclosing_ns = enc_ns,
+                        .enclosing_form = if (self.tree.tagOf(idx) == .form) idx else node.enclosing_form,
+                        .slot = child_slot,
                     });
                 }
             }
@@ -5023,7 +5867,7 @@ pub fn getFoldingRanges(
 ) Allocator.Error!?[]const FoldingRange {
     const doc = self.getDocument(uri) orelse return null;
     var out: std.ArrayList(FoldingRange) = .empty;
-    var walker = try NodeWalker.init(arena, &doc.tree, doc.tree.root);
+    var walker = try NodeWalker.init(arena, &doc.tree, doc.tree.root, null);
     while (try walker.next()) |node| {
         switch (doc.tree.tagOf(node.idx)) {
             .form, .vector => {
@@ -5060,10 +5904,10 @@ pub fn getSemanticTokens(
     const xrefs = try self.crossRefSpans(arena, uri);
 
     var out: std.ArrayList(SemanticToken) = .empty;
-    var walker = try NodeWalker.init(arena, &doc.tree, doc.tree.root);
+    var walker = try NodeWalker.init(arena, &doc.tree, doc.tree.root, self);
     while (try walker.next()) |node| {
         switch (doc.tree.tagOf(node.idx)) {
-            .form => try self.appendHeadTokens(arena, &out, doc.tree.formHeader(node.idx)),
+            .form => try self.appendHeadTokens(arena, &out, &doc.tree, node),
             .kvpair => try self.appendKvpairTokens(arena, &out, &doc.tree, node, &xrefs),
             .symbol => try appendCrossRefToken(arena, &out, doc.tree.spanOf(node.idx), &xrefs),
             else => {},
@@ -5149,17 +5993,23 @@ fn crossRefSpans(
 /// when the author wrote one. Emits nothing for an unknown head (the
 /// `unknown_form` squiggle says it better) or an ambiguous one (two
 /// answers, and the quickfix is to qualify it).
+///
+/// Resolution is slot-local — `node.slot` is what the walker threaded
+/// down — so a head that only exists inside its slot is coloured rather
+/// than left grey next to the keys it declares.
 fn appendHeadTokens(
     self: *const Self,
     arena: Allocator,
     out: *std.ArrayList(SemanticToken),
-    hdr: Ast.FormHeader,
+    tree: *const Ast.Tree,
+    node: WalkNode,
 ) Allocator.Error!void {
+    const hdr = tree.formHeader(node.idx);
     if (hdr.head.len == 0) return;
 
     var kind: SemanticToken.Type = undefined;
     var owner: *const sjon.Plugin.Plugin = undefined;
-    switch (self.schema.lookupForm(hdr.head, hdr.namespace)) {
+    switch (self.lookupFormIn(hdr, node.slot)) {
         .found => |hit| {
             kind = .macro;
             owner = hit.plugin;
@@ -5205,13 +6055,14 @@ fn appendKvpairTokens(
     node: WalkNode,
     xrefs: *const std.AutoHashMapUnmanaged(u64, bool),
 ) Allocator.Error!void {
-    const enclosing = node.enclosing_head orelse return;
-    const hit = switch (self.schema.lookupForm(enclosing, node.enclosing_ns)) {
-        .found => |h| h,
-        else => return,
-    };
+    const enclosing_idx = node.enclosing_form orelse return;
+    // The walker threads both, from the same descent — a kvpair inherits
+    // its enclosing form's slot across any vector nesting between them.
+    std.debug.assert(node.slot.form_idx == enclosing_idx);
+    const enclosing = tree.formHeader(enclosing_idx);
+    const spec = node.slot.form_spec orelse return;
     const kv = tree.kvpairHeader(node.idx);
-    const key = hit.form.keyByName(kv.key) orelse return;
+    const key = self.resolveKeyIn(tree, enclosing_idx, enclosing, spec, kv.key, kv.key_span.start) orelse return;
 
     // The span includes the leading `:` — `:radius` reads as one thing.
     try out.append(arena, .{
@@ -5220,22 +6071,54 @@ fn appendKvpairTokens(
         .type = .property,
     });
 
-    if (tree.tagOf(kv.value) != .symbol) return;
-    const value_span = tree.spanOf(kv.value);
-    // A cross-ref site is coloured by the `.symbol` arm; two tokens over
-    // one span is not a shape the relative wire encoding can express.
-    if (xrefs.contains(spanKey(value_span))) return;
-
     const named = switch (key.value_type) {
         .named => |n| n,
         else => return,
     };
-    const value_kind = switch (self.schema.lookupValueKind(named.name, named.namespace)) {
+    const declared = switch (self.schema.lookupValueKind(named.name, named.namespace)) {
         .found => |k| k,
         else => return,
     };
+    const value_tag = tree.tagOf(kv.value);
+    if (value_tag == .vector) {
+        // Each member-shaped element is matched against the slot's
+        // element kind, the way hover matches it.
+        const elem_kind = self.vectorElementKind(declared) orelse return;
+        for (tree.vectorElements(kv.value)) |el| {
+            try self.appendMemberToken(arena, out, tree, el, elem_kind, xrefs);
+        }
+        return;
+    }
+    try self.appendMemberToken(arena, out, tree, kv.value, declared, xrefs);
+}
+
+/// One `enumMember` token over `value_idx` when it names a member of
+/// `slot_kind` — through the arm its shape determines, when the kind is
+/// a union. Nothing for any other node.
+fn appendMemberToken(
+    self: *const Self,
+    arena: Allocator,
+    out: *std.ArrayList(SemanticToken),
+    tree: *const Ast.Tree,
+    value_idx: Ast.NodeIndex,
+    slot_kind: *const sjon.Plugin.ValueKind,
+    xrefs: *const std.AutoHashMapUnmanaged(u64, bool),
+) Allocator.Error!void {
+    // Symbols, and the unit-bearing numbers a digit-leading member
+    // spelling lexes as. No other tag can name a member, and the walker
+    // emits nothing else over either span.
+    const value_tag = tree.tagOf(value_idx);
+    if (value_tag != .symbol and value_tag != .number_with_unit) return;
+    const value_span = tree.spanOf(value_idx);
+    // A cross-ref site is coloured by the `.symbol` arm; two tokens over
+    // one span is not a shape the relative wire encoding can express.
+    if (xrefs.contains(spanKey(value_span))) return;
+
+    // Through a union, the member set is the determined arm's — the same
+    // resolution hover makes for this value.
+    const value_kind = self.unionArmKind(slot_kind, sjon.Validator.shapeOfTag(value_tag));
     const set = value_kind.members orelse return;
-    const text = tree.symbolText(kv.value);
+    const text = (try memberValueText(arena, tree, value_idx)) orelse return;
     for (set.members) |member| {
         if (!std.mem.eql(u8, member.name, text)) continue;
         try out.append(arena, .{
@@ -5387,12 +6270,16 @@ pub fn getInlayHints(
 ) Allocator.Error!?[]const InlayHint {
     const doc = self.getDocument(uri) orelse return null;
     var out: std.ArrayList(InlayHint) = .empty;
-    var walker = try NodeWalker.init(arena, &doc.tree, doc.tree.root);
+    // Slot-carrying walk: a bare head in a local-forms slot resolves
+    // local-first, so the plugin hint names the plugin that declared the
+    // form the author wrote — and a local-only head, invisible to the
+    // catalog, gets a hint at all.
+    var walker = try NodeWalker.init(arena, &doc.tree, doc.tree.root, self);
     while (try walker.next()) |node| {
         if (doc.tree.tagOf(node.idx) != .form) continue;
         const hdr = doc.tree.formHeader(node.idx);
-        try self.maybeAppendHeadHint(arena, hdr, range_start, range_end, &out);
-        try self.appendDefaultHints(arena, doc, node.idx, hdr, range_start, range_end, &out);
+        try self.maybeAppendHeadHint(arena, hdr, node.slot, range_start, range_end, &out);
+        try appendDefaultHints(arena, doc, node.idx, range_start, range_end, &out);
     }
     return try out.toOwnedSlice(arena);
 }
@@ -5409,34 +6296,23 @@ pub const MAX_HINT_VALUE_BYTES = 32;
 /// would go if the author wrote it, and where CP3's materialize action
 /// inserts it.
 fn appendDefaultHints(
-    self: *const Self,
     arena: Allocator,
     doc: *const Document,
     form_idx: Ast.NodeIndex,
-    hdr: Ast.FormHeader,
     range_start: u32,
     range_end: u32,
     out: *std.ArrayList(InlayHint),
 ) Allocator.Error!void {
     if (doc.materialized.entries.len == 0) return;
 
+    // A form the parser recovered from may end at EOF, or on an inner
+    // form's `)`, rather than on its own. Anchoring a hint there drops
+    // ghost text into the identifier the user is still typing (or into
+    // the inner form), so skip until the form is closed. The overlay
+    // itself stays populated — only the display waits.
+    const anchor = sjon.EffectiveDocument.formClosingParen(doc.source, &doc.tree, form_idx) orelse return;
     const span = doc.tree.spanOf(form_idx);
-    // A form the parser recovered from may end at EOF rather than on a
-    // `)`. Anchoring a hint there drops ghost text into the middle of
-    // the identifier the user is still typing, so skip until the form
-    // is closed. The overlay itself stays populated — only the display
-    // waits.
-    if (span.end == 0 or span.end > doc.source.len) return;
-    const anchor = span.end - 1;
-    if (doc.source[anchor] != ')') return;
     if (!spanOverlaps(.{ .start = anchor, .end = span.end }, range_start, range_end)) return;
-
-    // Resolved once per form, not once per entry: the entries already
-    // name keys this form declares, so a single lookup serves them all.
-    const form_spec: ?*const sjon.Plugin.FormSpec = switch (self.schema.lookupForm(hdr.head, hdr.namespace)) {
-        .found => |hit| hit.form,
-        else => null,
-    };
 
     for (doc.materialized.entries) |*entry| {
         if (entry.form != form_idx) continue;
@@ -5445,7 +6321,7 @@ fn appendDefaultHints(
         // action: an approximate rendering is fine to *show* and not
         // fine to *write*.
         var value: std.ArrayList(u8) = .empty;
-        _ = try sjon.EffectiveDocument.appendEffectiveValue(arena, &value, entry, form_spec);
+        _ = try sjon.EffectiveDocument.appendEffectiveValue(arena, &value, entry);
 
         var label: std.ArrayList(u8) = .empty;
         try label.append(arena, ':');
@@ -5510,6 +6386,7 @@ fn maybeAppendHeadHint(
     self: *const Self,
     arena: Allocator,
     hdr: Ast.FormHeader,
+    slot: SlotContext,
     range_start: u32,
     range_end: u32,
     out: *std.ArrayList(InlayHint),
@@ -5521,10 +6398,16 @@ fn maybeAppendHeadHint(
     if (!spanOverlaps(hdr.head_span, range_start, range_end)) return;
 
     const plugin: *const sjon.Plugin.Plugin = blk: {
-        switch (self.schema.lookupForm(hdr.head, null)) {
+        // Slot-first, like every other schema-aware surface. A local
+        // form belongs to the plugin that declared the form holding the
+        // slot; naming a shadowed global's plugin credits the wrong one,
+        // and a local-only head has no global to name at all.
+        switch (self.lookupFormIn(hdr, slot)) {
             .found => |hit| break :blk hit.plugin,
             else => {},
         }
+        // Expression functions are never slot-local, so this leg stays
+        // on the catalog.
         switch (self.schema.lookupExprFunc(hdr.head, null)) {
             .found => |hit| break :blk hit.plugin,
             else => return,
@@ -5568,7 +6451,7 @@ pub fn getCodeActions(
         if (!spanOverlaps(d.span, range_start, range_end)) continue;
         try self.appendActionsFor(arena, uri, doc, d, &actions, &seen_missing_forms);
     }
-    try self.appendMaterializeAction(arena, doc, range_start, &actions);
+    try appendMaterializeAction(arena, doc, range_start, &actions);
     try self.appendExtractAction(arena, uri, doc, range_start, range_end, &actions);
     try self.appendInlineAction(arena, uri, doc, range_start, &actions);
     const out: []const CodeAction = try actions.toOwnedSlice(arena);
@@ -5590,14 +6473,13 @@ pub fn getCodeActions(
 /// outer form's defaults while the cursor sits in an inner one would
 /// edit text they are not reading.
 fn appendMaterializeAction(
-    self: *const Self,
     arena: Allocator,
     doc: *const Document,
     cursor: u32,
     out: *std.ArrayList(CodeAction),
 ) Allocator.Error!void {
     const form_idx = findEnclosingFormIdx(&doc.tree, cursor) orelse return;
-    const ins = (try self.materializedInsertion(arena, doc, form_idx)) orelse return;
+    const ins = (try materializedInsertion(arena, doc, form_idx)) orelse return;
 
     const edits = try arena.alloc(TextEdit, 1);
     edits[0] = .{
@@ -5689,12 +6571,9 @@ fn appendExtractAction(
             // rather than emit an edit set that fails to validate.
             if (scope_idx == site.enclosing_form_idx) return;
 
-            // Just before the scope form's closing paren, space-separated —
-            // same splice point as the materialize action.
-            const scope_span = doc.tree.spanOf(scope_idx);
-            if (scope_span.end == 0 or scope_span.end > doc.source.len) return;
-            const close = scope_span.end - 1;
-            if (doc.source[close] != ')') return;
+            // Just before the scope form's own closing paren, space-
+            // separated — same splice point as the materialize action.
+            const close = sjon.EffectiveDocument.formClosingParen(doc.source, &doc.tree, scope_idx) orelse return;
             insert_offset = close;
             try insert_text.append(arena, ' ');
             try insert_text.appendSlice(arena, def.items);
@@ -5783,13 +6662,12 @@ fn appendInlineAction(
     // definition's head. A pure (symbol-only) cross-ref slot fails this, so
     // inlining there — which would splice a form — is correctly not offered.
     const declaring_idx = findEnclosingFormIdx(&doc.tree, ref_span.start) orelse return;
-    const declaring = doc.tree.formHeader(declaring_idx);
     const kvpair_idx = findEnclosingKvpairIdx(&doc.tree, ref_span.start) orelse return;
     // The mirror of the extract resolver's guard: a positional reference is
     // enclosed by an ancestor's kvpair without being its value.
     if (!kvpairHolds(&doc.tree, kvpair_idx, sym_idx)) return;
     const kvh = doc.tree.kvpairHeader(kvpair_idx);
-    const union_kind = self.unionSlotOf(declaring, kvh.key) orelse return;
+    const union_kind = self.unionSlotOf(&doc.tree, declaring_idx, kvh) orelse return;
     if (!try self.unionHasFormAlt(arena, union_kind, cr.target)) return;
 
     // Acyclic self-reference guard: a reference nested inside its own
@@ -5873,12 +6751,11 @@ fn strippedDefinitionBody(
 /// the effective document (every form), so the two can never disagree
 /// about what materializing a form produces.
 fn materializedInsertion(
-    self: *const Self,
     arena: Allocator,
     doc: *const Document,
     form_idx: Ast.NodeIndex,
 ) Allocator.Error!?sjon.EffectiveDocument.Insertion {
-    return sjon.EffectiveDocument.formInsertion(arena, doc.source, &doc.tree, &doc.materialized, &self.schema, form_idx);
+    return sjon.EffectiveDocument.formInsertion(arena, doc.source, &doc.tree, &doc.materialized, form_idx);
 }
 
 /// The document as it effectively reads: the author's source with every
@@ -5893,7 +6770,7 @@ pub fn getEffectiveDocument(
     uri: []const u8,
 ) Allocator.Error!?[]const u8 {
     const doc = self.getDocument(uri) orelse return null;
-    return try sjon.EffectiveDocument.render(arena, doc.source, &doc.tree, &doc.materialized, &self.schema);
+    return try sjon.EffectiveDocument.render(arena, doc.source, &doc.tree, &doc.materialized);
 }
 
 fn spanOverlaps(span: Ast.Span, range_start: u32, range_end: u32) bool {
@@ -5911,6 +6788,7 @@ fn appendActionsFor(
 ) Allocator.Error!void {
     switch (d.code) {
         .unknown_form => try self.appendUnknownFormFix(arena, doc, d, out),
+        .unknown_local_form => try self.appendUnknownLocalFormFix(arena, doc, d, out),
         .unknown_key => try self.appendUnknownKeyFix(arena, doc, d, out),
         .ambiguous_form => try self.appendAmbiguousFormFix(arena, doc, d, out),
         .missing_required_key => try self.appendMissingRequiredKeyFix(arena, doc, d, out, seen_missing_forms),
@@ -5918,6 +6796,7 @@ fn appendActionsFor(
         .duplicate_key => try appendDuplicateKeyFix(arena, doc, d, out),
         .not_cross_ref, .cross_ref_outside_scope => try self.appendCrossRefFix(arena, uri, doc, d, out),
         .not_member => try self.appendNotMemberFix(arena, doc, d, out),
+        .union_no_branch_matched => try self.appendUnionArmFix(arena, uri, doc, d, out),
         else => {},
     }
 }
@@ -5954,6 +6833,28 @@ fn appendSingleEditAction(
     try out.append(arena, .{ .title = title, .edits = edits, .diagnostics = diags });
 }
 
+/// Offer the nearest spelling for a head the global catalog does not
+/// hold — the top-level twin of `appendUnknownLocalFormFix`.
+///
+/// Expression functions are candidates here, unlike in the slot-local
+/// twin, because a bare expr-func head *is* a legal head at this
+/// position. What is not legal is one that the call's own keyword
+/// arguments refuse: `(rect :w 1 :h 2)` used to be fixed to `fract`,
+/// which accepts no labels at all, so the fix only exchanged
+/// `unknown_form` for `expr_kvpair_not_allowed` at the same span.
+///
+/// So a labeled call filters the expression side to the functions that
+/// would actually take it. The question is asked once, of
+/// `Schema.resolveExprArgs` — the validator's own tree-side resolver,
+/// handed the same `FormHeader` the validator would hand it — so the
+/// fix cannot invent a labelling rule of its own, and it covers the
+/// whole judgement (labels-not-supported, mixed, duplicate, unknown,
+/// missing) rather than the one code the note happened to catch.
+///
+/// A **positional** call is not filtered, and that too is the
+/// resolver's answer rather than a rule of ours: with no kvpairs it
+/// returns `.ok` without consulting arity. Argument *count* stays the
+/// author's to fix, exactly as a data form's keys do.
 fn appendUnknownFormFix(
     self: *const Self,
     arena: Allocator,
@@ -5962,7 +6863,76 @@ fn appendUnknownFormFix(
     out: *std.ArrayList(CodeAction),
 ) Allocator.Error!void {
     const bad = doc.source[d.span.start..d.span.end];
-    const suggestion = (try self.closestFormName(arena, bad)) orelse return;
+    // Both emit sites pass a form header's `head_span`, so the lookup
+    // finds the form this head heads. Null is unreachable rather than
+    // meaningful, and falls back to the unfiltered catalog — the
+    // behaviour before this filter — rather than to no fix at all.
+    const call: ?Ast.FormHeader = if (findEnclosingFormIdx(&doc.tree, d.span.start)) |form_idx|
+        doc.tree.formHeader(form_idx)
+    else
+        null;
+    const suggestion = (try self.closestFormName(arena, bad, &doc.tree, call)) orelse return;
+
+    const title = try std.fmt.allocPrint(arena, "Replace with `{s}`", .{suggestion});
+    try appendSingleEditAction(arena, out, d, title, d.span.start, d.span.end, suggestion);
+}
+
+/// Offer the nearest spelling for a head that matched neither the
+/// slot's own forms nor, after the additive fallback, the global
+/// catalog.
+///
+/// Sibling of `appendUnknownFormFix`, and not a re-use of it, because
+/// the candidate set is a different set. Two differences, both from
+/// `Validator.validateFormHead` step 0:
+///
+///   * the slot's `local_forms` are candidates, and a global that a
+///     local shadows is only ever reachable by its qualified spelling
+///     (which the author can write, and which this fix does not
+///     produce);
+///   * expression functions are *not* candidates. Step 0's fallback is
+///     `lookupForm` alone, so a bare expr-func head inside a
+///     local-forms slot is this same diagnostic — suggesting one would
+///     replace an error with the identical error.
+fn appendUnknownLocalFormFix(
+    self: *const Self,
+    arena: Allocator,
+    doc: *const Document,
+    d: Ast.Diagnostic,
+    out: *std.ArrayList(CodeAction),
+) Allocator.Error!void {
+    // The diagnostic's *path* points at the slot (that is where the
+    // rule lives), but its span is the offending head — which is what
+    // the edit replaces, and what locates the form it belongs to.
+    const bad = doc.source[d.span.start..d.span.end];
+    const form_idx = findEnclosingFormIdx(&doc.tree, d.span.start) orelse return;
+    const slot = self.slotContextOf(&doc.tree, form_idx);
+    if (slot.child_registry.len == 0) return;
+
+    var locals: std.ArrayList([]const u8) = .empty;
+    for (slot.child_registry) |*lf| try locals.append(arena, lf.name);
+    var globals: std.ArrayList([]const u8) = .empty;
+    for (self.schema.plugins) |p| {
+        for (p.forms) |f| try globals.append(arena, f.name);
+    }
+
+    // Ranked separately rather than merged: `DidYouMean` breaks a
+    // distance tie alphabetically, and here the tie belongs to the
+    // slot's own vocabulary — the set the author was writing in, and
+    // the set the validator consults first. A *closer* global still
+    // wins.
+    const local_hit = try DidYouMean.suggest(arena, bad, locals.items, 1);
+    const global_hit = try DidYouMean.suggest(arena, bad, globals.items, 1);
+    const suggestion: []const u8 = blk: {
+        if (local_hit.len > 0 and global_hit.len > 0) {
+            break :blk if (global_hit[0].distance < local_hit[0].distance)
+                global_hit[0].name
+            else
+                local_hit[0].name;
+        }
+        if (local_hit.len > 0) break :blk local_hit[0].name;
+        if (global_hit.len > 0) break :blk global_hit[0].name;
+        return;
+    };
 
     const title = try std.fmt.allocPrint(arena, "Replace with `{s}`", .{suggestion});
     try appendSingleEditAction(arena, out, d, title, d.span.start, d.span.end, suggestion);
@@ -5983,9 +6953,8 @@ fn appendUnknownKeyFix(
     if (bad_with_colon[0] != ':') return;
     const bad = bad_with_colon[1..];
 
-    const enclosing = findEnclosingForm(&doc.tree, d.span.start) orelse return;
-    const lookup = self.schema.lookupForm(enclosing.head, enclosing.namespace);
-    const hit = switch (lookup) {
+    const enclosing_idx = findEnclosingFormIdx(&doc.tree, d.span.start) orelse return;
+    const hit = switch (self.resolveFormAt(&doc.tree, enclosing_idx)) {
         .found => |h| h,
         else => return,
     };
@@ -6032,8 +7001,7 @@ fn appendMissingRequiredKeyFix(
     if (gop.found_existing) return;
 
     const hdr = doc.tree.formHeader(form_idx);
-    const lookup = self.schema.lookupForm(hdr.head, hdr.namespace);
-    const hit = switch (lookup) {
+    const hit = switch (self.resolveFormAt(&doc.tree, form_idx)) {
         .found => |h| h,
         else => return,
     };
@@ -6043,7 +7011,30 @@ fn appendMissingRequiredKeyFix(
     // the parens, so end - 1 is the byte index of `)`.
     const close_paren = form_span.end - 1;
 
-    for (hit.form.keys) |k| {
+    try appendMissingKeyStubs(arena, doc, d, out, hdr, hit.form.keys, close_paren);
+    // The variant the written discriminant selects contributes its
+    // required keys too — the validator reports them as missing under
+    // that variant, so the fix offers exactly that variant's keys and
+    // nothing from a sibling. Anchored at the form's end: for a fix,
+    // a discriminant written anywhere in the form is in scope.
+    if (self.activeVariantIn(&doc.tree, form_idx, hdr, hit.form, form_span.end)) |variant| {
+        try appendMissingKeyStubs(arena, doc, d, out, hdr, variant.keys, close_paren);
+    }
+}
+
+/// One `Insert \`:key\` with stub` action per required key in `keys`
+/// the form does not write. Shared by the form's own keys and the active
+/// variant's, so the two halves of a form's requirement render alike.
+fn appendMissingKeyStubs(
+    arena: Allocator,
+    doc: *const Document,
+    d: Ast.Diagnostic,
+    out: *std.ArrayList(CodeAction),
+    hdr: Ast.FormHeader,
+    keys: []const sjon.Plugin.KeySpec,
+    close_paren: u32,
+) Allocator.Error!void {
+    for (keys) |k| {
         if (k.effectiveOptional()) continue;
         if (kvpairChildPresent(&doc.tree, hdr.children, k.name)) continue;
 
@@ -6199,7 +7190,7 @@ fn resolveKvpairSlotKind(self: *const Self, doc: *const Document, d: Ast.Diagnos
         .found => |h| h,
         else => return null,
     };
-    const key = form_hit.form.keyByName(kvh.key) orelse return null;
+    const key = self.resolveKeyIn(&doc.tree, enclosing_form_idx, enclosing, form_hit.form, kvh.key, kvh.key_span.start) orelse return null;
     const named = switch (key.value_type) {
         .named => |n| n,
         else => return null,
@@ -6225,9 +7216,6 @@ fn appendCrossRefFix(
     out: *std.ArrayList(CodeAction),
 ) Allocator.Error!void {
     const slot = self.resolveKvpairSlotKind(doc, d) orelse return;
-    const enclosing_form_idx = slot.enclosing_form_idx;
-    const enclosing = slot.enclosing;
-    const form_hit = slot.form_hit;
     const kind = slot.kind;
 
     // Either the kvpair's value IS a cross-ref symbol, or it's a vector
@@ -6243,95 +7231,78 @@ fn appendCrossRefFix(
                 .found => |k| k,
                 else => return,
             };
-            // The validator wraps a leaf failure in `element_at` and emits at
-            // the enclosing vector, so a union element kind is decided per
-            // element, not from the vector's own shape.
-            if (self.vectorElementArmKind(doc, d.span, elem_kind, .cross_ref)) |ek| {
-                if (ek.cross_ref) |x| break :blk x;
-            }
-            if (elem_kind.cross_ref) |x| break :blk x;
+            // The validator wraps a leaf failure in `element_at` but spans the
+            // offending element, so the element's own shape decides the arm.
+            // `unionArmKind` passes a non-union element kind through, so this
+            // one call covers both the union and the plain element.
+            const arm = self.unionArmKind(elem_kind, shapeAtSpan(&doc.tree, d.span));
+            if (arm.cross_ref) |x| break :blk x;
         }
         return;
     };
 
-    const xri = self.cross_ref_index orelse return;
-    const tree_idx = self.uri_to_tree_idx.get(uri) orelse return;
-
-    const resolved = (try self.resolveCrossRefTargetAndScope(arena, doc, tree_idx, enclosing_form_idx, xref)) orelse return;
-    const canonical_target = resolved.bucket;
-    const scope = resolved.scope;
-
-    // The diagnostic span is either the bad symbol itself OR the
-    // enclosing vector (when the validator wrapped the leaf failure in
-    // `MatchFail.element_at`). Resolve down to the actual symbol so
-    // the edit replaces only the typo, not the whole `[...]`.
-    const bad_span = resolveCrossRefBadSpan(&doc.tree, xri, scope, canonical_target, d.span) orelse return;
+    // The diagnostic span is the bad symbol, inside a vector or not.
+    const bad_span = resolveCrossRefBadSpan(&doc.tree, d.span) orelse return;
     const bad = doc.source[bad_span.start..bad_span.end];
 
-    // When the enclosing form IS a definition of the same target,
-    // suppress its own name from the candidate set (mirrors the
-    // self-name filter in `completionsForCrossRef`).
-    var self_name: ?[]const u8 = null;
-    for (resolved.targets) |target_hit| {
-        if (form_hit.plugin == target_hit.plugin and form_hit.form == target_hit.form) {
-            self_name = findKvpairValueText(doc, enclosing, xref.name_key);
-            break;
-        }
-    }
-
     var names: std.ArrayList([]const u8) = .empty;
-    var it = xri.iterateNames(scope, canonical_target);
-    while (it.next()) |entry| {
-        const name = entry.key_ptr.*;
-        if (self_name) |s| if (std.mem.eql(u8, s, name)) continue;
-        try names.append(arena, name);
-    }
+    try self.appendCrossRefCandidates(arena, uri, doc, slot, xref, &names);
     const suggestion = (try firstSuggestion(arena, bad, names.items)) orelse return;
 
     const title = try std.fmt.allocPrint(arena, "Replace with `{s}`", .{suggestion});
     try appendSingleEditAction(arena, out, d, title, bad_span.start, bad_span.end, suggestion);
 }
 
-/// Find the symbol span the cross-ref diagnostic actually points at.
+/// Every name registered for `xref` in the scope `slot`'s form sits in: the
+/// candidate set a "did you mean" over a cross-ref draws from, appended to
+/// `names`.
 ///
-/// `not_cross_ref` / `cross_ref_outside_scope` emit with `tree.spanOf(value_idx)`:
-/// for a direct symbol-typed slot that's the symbol's span; for a
-/// vector-of-cross-refs slot, the validator wraps the leaf failure in
-/// `MatchFail.element_at` and emits at the *vector's* span instead.
-/// This resolver normalises both shapes to the actual symbol span by
-/// finding the first child symbol whose text isn't registered under
-/// `(scope, target)` — the validator stops at the first failing
-/// element, so the first non-registered symbol is the one the
-/// diagnostic refers to.
-fn resolveCrossRefBadSpan(
-    tree: *const Ast.Tree,
-    xri: Validator.CrossRefIndex,
-    scope: Validator.ScopeId,
-    canonical_target: []const u8,
-    diag_span: Ast.Span,
-) ?Ast.Span {
-    const tags = tree.nodes.items(.tag);
-    var i: u32 = 0;
-    while (i < tags.len) : (i += 1) {
-        const idx = Ast.NodeIndex.from(i);
-        const span = tree.spanOf(idx);
-        if (span.start != diag_span.start or span.end != diag_span.end) continue;
-        switch (tags[i]) {
-            .symbol => return span,
-            .vector => {
-                for (tree.vectorElements(idx)) |el| {
-                    if (tree.tagOf(el) != .symbol) continue;
-                    const text = tree.symbolText(el);
-                    if (!xri.contains(scope, canonical_target, text)) {
-                        return tree.spanOf(el);
-                    }
-                }
-                return null;
-            },
-            else => return null,
+/// When the enclosing form IS a definition of one of the targets, its own
+/// name is suppressed (mirrors the self-name filter in
+/// `completionsForCrossRef`) — the reference is being written from inside
+/// that form, so its own name is the one thing it cannot have meant.
+///
+/// Appends nothing when there is no index, no tree index for `uri`, or no
+/// resolvable target/scope; the caller then finds no candidate and declines.
+fn appendCrossRefCandidates(
+    self: *const Self,
+    arena: Allocator,
+    uri: []const u8,
+    doc: *const Document,
+    slot: KvpairSlot,
+    xref: sjon.Plugin.ValueKind.CrossRef,
+    names: *std.ArrayList([]const u8),
+) Allocator.Error!void {
+    const xri = self.cross_ref_index orelse return;
+    const tree_idx = self.uri_to_tree_idx.get(uri) orelse return;
+    const resolved = (try self.resolveCrossRefTargetAndScope(arena, doc, tree_idx, slot.enclosing_form_idx, xref)) orelse return;
+
+    var self_name: ?[]const u8 = null;
+    for (resolved.targets) |target_hit| {
+        if (slot.form_hit.plugin == target_hit.plugin and slot.form_hit.form == target_hit.form) {
+            self_name = findKvpairValueText(doc, slot.enclosing, xref.name_key);
+            break;
         }
     }
-    return null;
+
+    var it = xri.iterateNames(resolved.scope, resolved.bucket);
+    while (it.next()) |entry| {
+        const name = entry.key_ptr.*;
+        if (self_name) |s| if (std.mem.eql(u8, s, name)) continue;
+        try names.append(arena, name);
+    }
+}
+
+/// Find the symbol span the cross-ref diagnostic actually points at.
+///
+/// `not_cross_ref` / `cross_ref_outside_scope` emit at the offending value,
+/// including inside a vector-of-cross-refs slot: the validator wraps the
+/// leaf failure in `MatchFail.element_at` for the *message*, but spans the
+/// element (`failLeaf`). So the only work left is confirming the node there
+/// is a symbol — anything else and the edit would rewrite the wrong text.
+fn resolveCrossRefBadSpan(tree: *const Ast.Tree, diag_span: Ast.Span) ?Ast.Span {
+    const idx = sjon.Edit.nodeAtSpan(tree, diag_span) orelse return null;
+    return if (tree.tagOf(idx) == .symbol) tree.spanOf(idx) else null;
 }
 
 /// Replace a value that failed a member-set check with the closest
@@ -6359,36 +7330,80 @@ fn appendNotMemberFix(
                 .found => |k| k,
                 else => return,
             };
-            if (self.vectorElementArmKind(doc, d.span, elem_kind, .members)) |ek| {
-                if (ek.members) |m| break :blk m;
-            }
-            if (elem_kind.members) |m| break :blk m;
+            // As above: the span is the element, so its shape decides the arm.
+            const arm = self.unionArmKind(elem_kind, shapeAtSpan(&doc.tree, d.span));
+            if (arm.members) |m| break :blk m;
         }
         return;
     };
     if (member_set.members.len == 0) return;
 
-    const bad_span = resolveNotMemberBadSpan(&doc.tree, member_set.members, d.span) orelse return;
-    const bad_node_tag = doc.tree.tagOf(findNodeBySpan(&doc.tree, bad_span) orelse return);
-    const bad_text: []const u8 = switch (bad_node_tag) {
-        .symbol => doc.tree.symbolText(findNodeBySpan(&doc.tree, bad_span).?),
-        .string => doc.tree.stringText(findNodeBySpan(&doc.tree, bad_span).?),
-        else => return,
-    };
+    const bad_span = resolveNotMemberBadSpan(&doc.tree, d.span) orelse return;
+    const bad_idx = sjon.Edit.nodeAtSpan(&doc.tree, bad_span) orelse return;
+    const bad_text = replaceableValueText(doc, bad_idx, bad_span) orelse return;
 
     var names: std.ArrayList([]const u8) = .empty;
+    try appendMemberCandidates(arena, member_set, &names);
+    try appendClosestValueFix(arena, d, bad_span, doc.tree.tagOf(bad_idx), bad_text, names.items, out);
+}
+
+/// The member spellings a fix may suggest, appended to `names`: every
+/// non-deprecated one. Deprecated members are excluded for the reason
+/// completion strikes them through — a fix must not move an author onto a
+/// spelling the schema is retiring.
+fn appendMemberCandidates(
+    arena: Allocator,
+    member_set: sjon.Plugin.ValueKind.MemberSet,
+    names: *std.ArrayList([]const u8),
+) Allocator.Error!void {
     for (member_set.members) |m| {
         if (m.deprecated) continue;
         try names.append(arena, m.name);
     }
-    const suggestion = (try firstSuggestion(arena, bad_text, names.items)) orelse return;
+}
 
-    // Member names today are bare identifiers — guard against future
-    // names that would need `|…|` quoting in source by suppressing the
-    // fix rather than producing syntactically invalid output.
-    if (bad_node_tag == .symbol and !isPlainSymbol(suggestion)) return;
+/// The text a value-replacing fix measures its candidates against: the
+/// symbol's or the string's content, or — for a digit-leading spelling — the
+/// source as the author typed it.
+///
+/// The `number_with_unit` arm deliberately skips `canonicalMemberSpelling`:
+/// the distance is from the mistake, and `2.5d` — a magnitude no spelling can
+/// be, so the canonical form declines it — is exactly the input that still
+/// wants `2d` offered.
+///
+/// Null for any other tag, which is what makes this the gate on whether a
+/// one-token replacement means anything here at all.
+fn replaceableValueText(doc: *const Document, idx: Ast.NodeIndex, span: Ast.Span) ?[]const u8 {
+    return switch (doc.tree.tagOf(idx)) {
+        .symbol => doc.tree.symbolText(idx),
+        .string => doc.tree.stringText(idx),
+        .number_with_unit => doc.source[span.start..span.end],
+        else => null,
+    };
+}
 
-    const new_text: []const u8 = switch (bad_node_tag) {
+/// Offer the closest of `candidates` to `bad_text` as a replacement for the
+/// value at `bad_span`, or nothing when none is within
+/// `DidYouMean.MAX_DISTANCE`. The shared tail of the member-set fix and the
+/// union fix, which differ only in where their candidates come from.
+///
+/// A string value keeps its quotes. A symbol value declines a winner that
+/// would need `|…|` quoting rather than writing text the lexer reads back as
+/// something else — member names today are bare identifiers, so that guards
+/// a future name, not a present one.
+fn appendClosestValueFix(
+    arena: Allocator,
+    d: Ast.Diagnostic,
+    bad_span: Ast.Span,
+    bad_tag: Ast.Tag,
+    bad_text: []const u8,
+    candidates: []const []const u8,
+    out: *std.ArrayList(CodeAction),
+) Allocator.Error!void {
+    const suggestion = (try firstSuggestion(arena, bad_text, candidates)) orelse return;
+    if (bad_tag == .symbol and !isPlainSymbol(suggestion)) return;
+
+    const new_text: []const u8 = switch (bad_tag) {
         .string => try std.fmt.allocPrint(arena, "\"{s}\"", .{suggestion}),
         else => suggestion,
     };
@@ -6397,73 +7412,79 @@ fn appendNotMemberFix(
     try appendSingleEditAction(arena, out, d, title, bad_span.start, bad_span.end, new_text);
 }
 
-/// Normalise a `not_member` diagnostic span the same way
-/// `resolveCrossRefBadSpan` handles cross-ref spans: the validator
-/// emits at the enclosing vector when a leaf element fails inside
-/// `MatchFail.element_at`, so we walk vector children for the first
-/// non-member symbol/string when the diagnostic span turns out to be
-/// a vector.
-fn resolveNotMemberBadSpan(
-    tree: *const Ast.Tree,
-    members: []const sjon.Plugin.ValueKind.MemberSet.Member,
-    diag_span: Ast.Span,
-) ?Ast.Span {
-    const tags = tree.nodes.items(.tag);
-    var i: u32 = 0;
-    while (i < tags.len) : (i += 1) {
-        const idx = Ast.NodeIndex.from(i);
-        const span = tree.spanOf(idx);
-        if (span.start != diag_span.start or span.end != diag_span.end) continue;
-        switch (tags[i]) {
-            .symbol, .string => return span,
-            .vector => {
-                for (tree.vectorElements(idx)) |el| {
-                    const el_tag = tree.tagOf(el);
-                    const text: []const u8 = switch (el_tag) {
-                        .symbol => tree.symbolText(el),
-                        .string => tree.stringText(el),
-                        else => continue,
-                    };
-                    if (!memberSetContains(members, text)) return tree.spanOf(el);
-                }
-                return null;
-            },
-            else => return null,
-        }
+/// Replace a value that matched no alternative of a union slot with the
+/// closest spelling any *reachable* arm offers.
+///
+/// `union_no_branch_matched` fires exactly when the value's shape reaches
+/// zero alternatives or two or more (`Validator.determinedArm`), so there is
+/// no one arm to read a candidate set from — which is why the two leaf fixes
+/// decline here, and why the diagnostic itself only names the kinds. But when
+/// two symbol arms reach, every spelling either of them accepts is something
+/// the author might have meant, and one of them is often one edit away.
+/// Pooling them asks the same Damerau-Levenshtein question the leaf fixes
+/// ask, over the union of the sets they would each have used.
+///
+/// Reachability is the validator's own rule (`alternativeReaches`), so an arm
+/// the value could not have meant contributes nothing, and a value that
+/// reaches no arm at all — a string against `number | symbol` — pools nothing
+/// and declines. That is right: a shape error is not repaired by a spelling.
+fn appendUnionArmFix(
+    self: *const Self,
+    arena: Allocator,
+    uri: []const u8,
+    doc: *const Document,
+    d: Ast.Diagnostic,
+    out: *std.ArrayList(CodeAction),
+) Allocator.Error!void {
+    const slot = self.resolveKvpairSlotKind(doc, d) orelse return;
+    const union_kind = self.unionOfSlotKind(slot.kind) orelse return;
+    const us = union_kind.union_of.?; // `unionOfSlotKind` returns unions only
+
+    // The span is the offending value, inside a vector or not: the validator
+    // wraps a union failure in `element_at` for the message but spans the
+    // element (`failLeaf`), exactly as the leaf codes do. A value no
+    // one-token replacement could repair — a form, a vector — stops here.
+    const bad_idx = sjon.Edit.nodeAtSpan(&doc.tree, d.span) orelse return;
+    const bad_span = doc.tree.spanOf(bad_idx);
+    const bad_tag = doc.tree.tagOf(bad_idx);
+    const bad_text = replaceableValueText(doc, bad_idx, bad_span) orelse return;
+
+    const shape = sjon.Validator.shapeOfTag(bad_tag);
+    var names: std.ArrayList([]const u8) = .empty;
+    for (us.alternatives) |alt| {
+        if (!sjon.Validator.alternativeReaches(self.schema, alt, shape)) continue;
+        // A nested union alternative resolves to null here and contributes
+        // nothing — the same one level of flattening `completionsForUnionSlot`
+        // stops at, and `alternativeReaches` already refuses.
+        const arm = self.armKind(alt) orelse continue;
+        if (arm.members) |m| try appendMemberCandidates(arena, m, &names);
+        if (arm.cross_ref) |x| try self.appendCrossRefCandidates(arena, uri, doc, slot, x, &names);
     }
-    return null;
+
+    try appendClosestValueFix(arena, d, bad_span, bad_tag, bad_text, names.items, out);
 }
 
-fn memberSetContains(
-    members: []const sjon.Plugin.ValueKind.MemberSet.Member,
-    text: []const u8,
-) bool {
-    for (members) |m| {
-        if (std.mem.eql(u8, m.name, text)) return true;
-    }
-    return false;
+/// Confirm a `not_member` diagnostic span holds a value the fix can rewrite,
+/// the same way `resolveCrossRefBadSpan` does for cross-refs: the validator
+/// emits at the offending value, inside a vector or not (`failLeaf`), so
+/// this is a tag check rather than a search.
+///
+/// The accepted tags are `isMemberValueTag`'s, which include the
+/// unit-bearing numbers a digit-leading spelling lexes as — `2.5d` is a
+/// magnitude no spelling can be, and it is exactly the input that still
+/// wants `2d` offered.
+fn resolveNotMemberBadSpan(tree: *const Ast.Tree, diag_span: Ast.Span) ?Ast.Span {
+    const idx = sjon.Edit.nodeAtSpan(tree, diag_span) orelse return null;
+    return if (isMemberValueTag(tree.tagOf(idx))) tree.spanOf(idx) else null;
 }
 
-/// Smallest node whose span equals `target_span` exactly. Used by the
-/// member-set fix to recover the value node from a normalised span.
-/// Returns the first match found in node-index order; ties are
-/// impossible for `.symbol` / `.string` / `.vector` because parser
-/// spans are unique per token.
-fn findNodeBySpan(tree: *const Ast.Tree, target_span: Ast.Span) ?Ast.NodeIndex {
-    const tags = tree.nodes.items(.tag);
-    var i: u32 = 0;
-    while (i < tags.len) : (i += 1) {
-        const span = tree.nodes.items(.span)[i];
-        if (span.start == target_span.start and span.end == target_span.end) {
-            return Ast.NodeIndex.from(i);
-        }
-    }
-    return null;
-}
-
-/// True when `name` is a syntactically valid SJON symbol (i.e., can be
-/// emitted bare without `|…|` quoting). Matches `isSymbolChar`'s
-/// vocabulary plus the symbol-start-character constraint.
+/// True when `name` can be written into a document verbatim — every byte
+/// is in `isSymbolChar`'s vocabulary, so no `|…|` quoting is needed.
+///
+/// Deliberately no symbol-start constraint: a digit-leading member
+/// spelling (`2d`) is not a bare symbol, but it is the canonical text the
+/// lexer reads back as the very member being suggested, so a fix
+/// replacing `d` with `1d` produces a document that validates.
 fn isPlainSymbol(name: []const u8) bool {
     if (name.len == 0) return false;
     for (name) |c| {
@@ -6511,15 +7532,36 @@ fn appendDuplicateKeyFix(
     try appendSingleEditAction(arena, out, d, title, sweep_start, kvpair_span.end, "");
 }
 
-/// Nearest declared form/expr-func name to `target`, or null when none
+/// Nearest declared head to `target` — every plugin's data forms, plus
+/// the expression functions that could head `call` — or null when none
 /// is within `DidYouMean.MAX_DISTANCE`. Shares the Damerau-Levenshtein
 /// engine (and its distance-then-alphabetical ranking) with the CLI's
 /// rich diagnostics, so both surfaces suggest identically.
-fn closestFormName(self: *const Self, arena: Allocator, target: []const u8) Allocator.Error!?[]const u8 {
+///
+/// `call` is the offending form's header; null asks for no filtering at
+/// all. Data forms are never filtered by it — keywords are how they are
+/// written, and a key they do not declare is `unknown_key`, which
+/// carries its own fix. See `appendUnknownFormFix` for why the
+/// expression side is filtered.
+fn closestFormName(
+    self: *const Self,
+    arena: Allocator,
+    target: []const u8,
+    tree: *const Ast.Tree,
+    call: ?Ast.FormHeader,
+) Allocator.Error!?[]const u8 {
     var names: std.ArrayList([]const u8) = .empty;
     for (self.schema.plugins) |p| {
         for (p.forms) |f| try names.append(arena, f.name);
-        for (p.expr_funcs) |f| try names.append(arena, f.name);
+        for (p.expr_funcs) |f| {
+            if (call) |hdr| {
+                switch (try Schema.resolveExprArgs(arena, f, tree, hdr)) {
+                    .ok => {},
+                    .err => continue,
+                }
+            }
+            try names.append(arena, f.name);
+        }
     }
     return firstSuggestion(arena, target, names.items);
 }
@@ -6907,8 +7949,7 @@ pub fn findExtractSite(
 
     // The slot F's parent declares must be a union (directly, or as a vector's
     // element kind when F is one element of a `[…]`).
-    const parent = doc.tree.formHeader(parent_form_idx);
-    const union_kind = self.unionSlotOf(parent, kvh.key) orelse return null;
+    const union_kind = self.unionSlotOf(&doc.tree, parent_form_idx, kvh) orelse return null;
 
     // …with a cross-ref alternative whose target is F's own head — i.e. a
     // name reference could have stood in for the inline form.
@@ -6951,6 +7992,18 @@ fn findCrossRefAlt(
     return null;
 }
 
+/// The element kind of a vector-shaped slot — directly, or through the
+/// arm of a union a vector reaches — or null when `kind` types no
+/// vector or its element names no kind (a primitive element).
+fn vectorElementKind(self: *const Self, kind: *const sjon.Plugin.ValueKind) ?*const sjon.Plugin.ValueKind {
+    const vk = self.unionArmKind(kind, .vector);
+    const vs = vk.vector orelse return null;
+    return switch (self.schema.lookupValueKind(vs.element.name, vs.element.namespace)) {
+        .found => |k| k,
+        else => null,
+    };
+}
+
 /// The kind a quick-fix should read its candidate set from, for a slot whose
 /// declared kind may be a union. A union whose alternatives are disjoint by
 /// node shape reports the determined arm's own diagnostic (15), so the fix
@@ -6959,9 +8012,10 @@ fn findCrossRefAlt(
 /// caller then finds nothing and declines to offer a fix, which is right:
 /// the diagnostic in that case is `union_no_branch_matched`, not a leaf code.
 ///
-/// `shape` is the node shape at the diagnostic span (or, inside a vector, the
-/// element's), asked of `Validator.determinedArm` — the validator's own rule,
-/// so the fix cannot blame a different arm than the message did.
+/// `shape` is the node shape at the diagnostic span — which, for a vector
+/// element, is the element's, since that is where the diagnostic points.
+/// Asked of `Validator.determinedArm`, the validator's own rule, so the fix
+/// cannot blame a different arm than the message did.
 fn unionArmKind(
     self: *const Self,
     kind: *const sjon.Plugin.ValueKind,
@@ -6976,61 +8030,30 @@ fn unionArmKind(
     };
 }
 
-/// The refinement a quick-fix is hunting for inside a vector's element kind.
-const ArmWant = enum { cross_ref, members };
-
-/// The determined-arm kind of a union *element* kind, decided per element.
-///
-/// The validator wraps a leaf failure in `MatchFail.element_at` and emits at
-/// the enclosing vector, so `span` is the vector and its own shape says
-/// nothing about which arm was blamed. Walk the elements instead and take
-/// the first whose determined arm carries `want`; every element that could
-/// have produced this diagnostic has the same shape, so the first is the
-/// arm. Null when `span` is not a vector or no element determines an arm
-/// with `want` — the caller then falls back to the element kind itself.
-fn vectorElementArmKind(
-    self: *const Self,
-    doc: *const Document,
-    span: Ast.Span,
-    elem_kind: *const sjon.Plugin.ValueKind,
-    want: ArmWant,
-) ?*const sjon.Plugin.ValueKind {
-    if (elem_kind.union_of == null) return null;
-    const vec_idx = findNodeBySpan(&doc.tree, span) orelse return null;
-    if (doc.tree.tagOf(vec_idx) != .vector) return null;
-    for (doc.tree.vectorElements(vec_idx)) |el| {
-        const arm = self.unionArmKind(elem_kind, sjon.Validator.shapeOfTag(doc.tree.tagOf(el)));
-        const has = switch (want) {
-            .cross_ref => arm.cross_ref != null,
-            .members => arm.members != null,
-        };
-        if (has) return arm;
-    }
-    return null;
-}
-
 /// The node shape at `span`, for `unionArmKind`. `.other` when no node has
 /// exactly that span — which selects no arm, so the fix declines.
 fn shapeAtSpan(tree: *const Ast.Tree, span: Ast.Span) sjon.Validator.NodeShape {
-    const idx = findNodeBySpan(tree, span) orelse return .other;
+    const idx = sjon.Edit.nodeAtSpan(tree, span) orelse return .other;
     return sjon.Validator.shapeOfTag(tree.tagOf(idx));
 }
 
 /// The `union{…}` ValueKind of the slot declared by `declaring`'s key
-/// `key_name` — directly, or as the element kind of a `.vector` slot. Null
+/// `kvh.key` — directly, or as the element kind of a `.vector` slot. Null
 /// when the form/key/kind isn't schema-known or the slot isn't a union.
 /// Shared by the extract-site and inline-site resolvers so the two agree on
 /// exactly which slots are union-shaped.
 fn unionSlotOf(
     self: *const Self,
-    declaring: Ast.FormHeader,
-    key_name: []const u8,
+    tree: *const Ast.Tree,
+    declaring_idx: Ast.NodeIndex,
+    kvh: Ast.KvPairHeader,
 ) ?*const sjon.Plugin.ValueKind {
+    const declaring = tree.formHeader(declaring_idx);
     const form_hit = switch (self.schema.lookupForm(declaring.head, declaring.namespace)) {
         .found => |h| h,
         else => return null,
     };
-    const key = form_hit.form.keyByName(key_name) orelse return null;
+    const key = self.resolveKeyIn(tree, declaring_idx, declaring, form_hit.form, kvh.key, kvh.key_span.start) orelse return null;
     const named = switch (key.value_type) {
         .named => |n| n,
         else => return null,
@@ -7039,6 +8062,21 @@ fn unionSlotOf(
         .found => |k| k,
         else => return null,
     };
+    return self.unionOfSlotKind(slot_kind);
+}
+
+/// The union a value in a slot of kind `slot_kind` is matched against: the
+/// slot's own kind, or its element kind when the slot is a vector of unions.
+/// Null when neither is a union.
+///
+/// Split out of `unionSlotOf` so the union quick fix — which is handed a
+/// resolved slot kind rather than a kvpair — reaches through the vector the
+/// same way, and so the two cannot disagree about which slots are
+/// union-shaped.
+fn unionOfSlotKind(
+    self: *const Self,
+    slot_kind: *const sjon.Plugin.ValueKind,
+) ?*const sjon.Plugin.ValueKind {
     if (slot_kind.union_of != null) return slot_kind;
     if (slot_kind.vector) |vs| {
         switch (self.schema.lookupValueKind(vs.element.name, vs.element.namespace)) {
@@ -7330,9 +8368,10 @@ pub fn prepareRename(
     return .{ .span_start = cursor_span.start, .span_end = cursor_span.end };
 }
 
-/// Diagnostic explaining why a rename was rejected. Currently the only
-/// failure mode is collision with an existing name in the same scope —
-/// the editor surfaces this as a notification.
+/// Diagnostic explaining why a rename was rejected: a provider-backed
+/// site, a candidate that is not a symbol, or a collision with an
+/// existing name in the same scope. The editor surfaces this as a
+/// notification.
 pub const RenameError = struct {
     message: []const u8,
 };
@@ -7342,12 +8381,36 @@ pub const RenameResult = union(enum) {
     err: RenameError,
 };
 
+/// Does `name` lex as exactly one `.symbol` token covering all of it?
+///
+/// The rule about what the parser will read back is answered by the
+/// lexer, not by a character table here: `Handler.isSymbolChar` is
+/// already an LSP-local copy of the lexer's class and would drift.
+/// Lexing also settles the reserved literals for free — `nil`, `true`
+/// and `false` carry their own tags, so they are refused without a
+/// special case, while `truefoo` is an ordinary symbol.
+///
+/// Allocates a sentinel-terminated copy in `arena` (the lexer's input
+/// contract). O(name.len).
+fn isOneSymbol(arena: Allocator, name: []const u8) bool {
+    if (name.len == 0) return false;
+    // Only reachable on OOM; a rename that cannot allocate is refused
+    // rather than allowed through unchecked.
+    const src = arena.dupeZ(u8, name) catch return false;
+    var lexer = sjon.Lexer.init(src);
+    const tok = lexer.next();
+    if (tok.tag != .symbol) return false;
+    if (tok.start != 0 or tok.end != name.len) return false;
+    return lexer.next().tag == .eof;
+}
+
 /// Build the workspace-wide edit list to rename the cross-ref symbol
 /// under the cursor to `new_name`. Returns:
 ///   - `null` when the cursor isn't on a cross-ref site (caller maps to
 ///     LSP "no-op" / null result),
-///   - `.err` when `new_name` would collide with an existing definition
-///     in the same scope,
+///   - `.err` when the site is provider-backed, when `new_name` does not
+///     lex as a single symbol, or when it would collide with an existing
+///     definition in the same scope,
 ///   - `.edits` with one `TextEdit` per definition + reference site,
 ///     grouped by URI.
 ///
@@ -7380,6 +8443,20 @@ pub fn rename(
                 arena,
                 "cannot rename `{s}`: the name is extracted from opaque content by provider `{s}` — edit the source string instead",
                 .{ site.name, provider },
+            ),
+        } };
+    }
+
+    // The candidate must read back as exactly the symbol it replaces.
+    // Every edit below substitutes `new_name` verbatim into a name span,
+    // so a candidate the lexer does not read as one whole symbol hands
+    // the client an edit that breaks the document it is applied to.
+    if (!isOneSymbol(arena, new_name)) {
+        return .{ .err = .{
+            .message = try std.fmt.allocPrint(
+                arena,
+                "cannot rename to `{s}`: not a symbol",
+                .{new_name},
             ),
         } };
     }

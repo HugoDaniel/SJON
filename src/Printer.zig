@@ -67,6 +67,74 @@ pub const Options = struct {
 /// Print a `Tree` to a freshly-allocated, caller-owned `Ast.Bytes`
 /// (`bytes.deinit()` to release). Always succeeds unless allocation fails.
 pub fn print(gpa: Allocator, tree: Tree, opts: Options) Allocator.Error!Ast.Bytes {
+    var out = try printForest(gpa, &tree, tree.root, tree.tree_trailing_comments, opts);
+    errdefer out.deinit(gpa);
+    // A document ends in a newline; a *fragment* does not, which is the
+    // one thing `printNode` needs `printForest` not to have decided.
+    if (tree.root.len > 0 or !tree.tree_trailing_comments.isEmpty()) {
+        try out.append(gpa, '\n');
+    }
+    return .{ .gpa = gpa, .data = try out.toOwnedSlice(gpa) };
+}
+
+/// Print the single node `idx` as if it were the document's only root,
+/// then indent every line after the first by `column` spaces. The result
+/// is a *fragment*: no trailing newline, and no tree-level trailing
+/// comments (they belong to the document, not to any node).
+///
+/// `column` is the column of the span the fragment is going to replace,
+/// so a multi-line fragment lands under its own opening delimiter instead
+/// of against the left margin. It is applied after the layout decisions,
+/// not before: `opts.wrap_at` still measures the node as a root would be
+/// measured, so the same node prints the same shape wherever it lands.
+/// Blank lines stay blank rather than gaining trailing spaces.
+///
+/// Caller releases via `bytes.deinit()`. `tree` is borrowed read-only.
+///
+/// Complexity: O(n + m) — the two `print` pre-passes over n nodes, plus
+/// one pass over the m emitted bytes for the re-indent.
+pub fn printNode(
+    gpa: Allocator,
+    tree: Tree,
+    idx: NodeIndex,
+    opts: Options,
+    column: u16,
+) Allocator.Error!Ast.Bytes {
+    std.debug.assert(idx.raw() < tree.nodes.len);
+
+    var fragment = try printForest(gpa, &tree, &.{idx}, .empty, opts);
+    defer fragment.deinit(gpa);
+    std.debug.assert(fragment.items.len > 0);
+    if (column == 0) return .{ .gpa = gpa, .data = try gpa.dupe(u8, fragment.items) };
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (fragment.items) |c| {
+        try out.append(gpa, c);
+        if (c != '\n') continue;
+        // Skip the indent on an empty line: padding it would leave
+        // trailing whitespace in the caller's document.
+        const next = out.items.len;
+        if (next >= fragment.items.len or fragment.items[next] == '\n') continue;
+        try out.appendNTimes(gpa, ' ', column);
+    }
+    return .{ .gpa = gpa, .data = try out.toOwnedSlice(gpa) };
+}
+
+/// Emit `roots` in order, preceded by `tree_trailing` (full mode only),
+/// into a caller-owned buffer with **no** terminal newline. The whole of
+/// `print` and `printNode` above the newline / re-indent decisions.
+///
+/// `roots` need not be `tree.root`: the two pre-passes walk the forest
+/// they are given, so a single interior node is as printable as the
+/// document, and is exactly what `printNode` asks for.
+fn printForest(
+    gpa: Allocator,
+    tree: *const Tree,
+    roots: []const NodeIndex,
+    tree_trailing: Ast.CommentRange,
+    opts: Options,
+) Allocator.Error!std.ArrayList(u8) {
     // Node indices are u32 throughout the SoA tree, so a well-formed tree never
     // holds more than u32-max nodes; the per-node length table below indexes by
     // that width.
@@ -76,7 +144,7 @@ pub fn print(gpa: Allocator, tree: Tree, opts: Options) Allocator.Error!Ast.Byte
     const lengths = try gpa.alloc(u32, node_count);
     defer gpa.free(lengths);
     @memset(lengths, 0);
-    try computeLengths(gpa, &tree, lengths);
+    try computeLengths(gpa, tree, roots, lengths);
 
     var has_inner: []bool = &.{};
     // Register the free up-front so OOM in the body still cleans up.
@@ -85,11 +153,11 @@ pub fn print(gpa: Allocator, tree: Tree, opts: Options) Allocator.Error!Ast.Byte
     if (opts.mode == .full) {
         has_inner = try gpa.alloc(bool, node_count);
         @memset(has_inner, false);
-        try computeHasInnerComments(gpa, &tree, has_inner);
+        try computeHasInnerComments(gpa, tree, roots, has_inner);
     }
 
     const ctx: PrintCtx = .{
-        .tree = &tree,
+        .tree = tree,
         .lengths = lengths,
         .has_inner_comments = has_inner,
         .opts = opts,
@@ -102,34 +170,26 @@ pub fn print(gpa: Allocator, tree: Tree, opts: Options) Allocator.Error!Ast.Byte
     defer tasks.deinit(gpa);
 
     // Push tree-level trailing comments first (they pop after root nodes).
-    // Each trailing comment goes on its own line; print() adds the final \n.
-    if (opts.mode == .full) {
-        const trailing = tree.tree_trailing_comments;
-        if (!trailing.isEmpty()) {
-            const texts = tree.commentTexts(trailing);
-            var ti: usize = texts.len;
-            while (ti > 0) : (ti -= 1) {
-                if (ti < texts.len) try tasks.append(gpa, .raw_newline);
-                try tasks.append(gpa, .{ .text = texts[ti - 1] });
-            }
-            if (tree.root.len > 0) try tasks.append(gpa, .raw_newline);
+    // Each trailing comment goes on its own line; `print` adds the final \n.
+    if (opts.mode == .full and !tree_trailing.isEmpty()) {
+        const texts = tree.commentTexts(tree_trailing);
+        var ti: usize = texts.len;
+        while (ti > 0) : (ti -= 1) {
+            if (ti < texts.len) try tasks.append(gpa, .raw_newline);
+            try tasks.append(gpa, .{ .text = texts[ti - 1] });
         }
+        if (roots.len > 0) try tasks.append(gpa, .raw_newline);
     }
 
     // Push top-level nodes in reverse so the first one pops first.
-    var i: usize = tree.root.len;
+    var i: usize = roots.len;
     while (i > 0) : (i -= 1) {
-        if (i < tree.root.len) try tasks.append(gpa, .raw_newline);
-        try tasks.append(gpa, .{ .expand = .{ .node = tree.root[i - 1], .depth = 0 } });
+        if (i < roots.len) try tasks.append(gpa, .raw_newline);
+        try tasks.append(gpa, .{ .expand = .{ .node = roots[i - 1], .depth = 0 } });
     }
 
     while (tasks.pop()) |t| try executeTask(gpa, &out, &tasks, t, ctx);
-
-    if (tree.root.len > 0 or !tree.tree_trailing_comments.isEmpty()) {
-        try out.append(gpa, '\n');
-    }
-
-    return .{ .gpa = gpa, .data = try out.toOwnedSlice(gpa) };
+    return out;
 }
 
 /// Read-only context threaded through executeTask for ergonomics.
@@ -398,6 +458,7 @@ fn pushKvPair(
 fn computeLengths(
     gpa: Allocator,
     tree: *const Tree,
+    roots: []const NodeIndex,
     lengths: []u32,
 ) Allocator.Error!void {
     const Frame = struct {
@@ -407,7 +468,7 @@ fn computeLengths(
     var stack: std.ArrayList(Frame) = .empty;
     defer stack.deinit(gpa);
 
-    for (tree.root) |r| {
+    for (roots) |r| {
         try stack.append(gpa, .{ .node = r, .cursor = 0 });
 
         while (stack.items.len > 0) {
@@ -516,6 +577,7 @@ inline fn lenU32(s: []const u8) u32 {
 fn computeHasInnerComments(
     gpa: Allocator,
     tree: *const Tree,
+    roots: []const NodeIndex,
     set: []bool,
 ) Allocator.Error!void {
     const Frame = struct {
@@ -525,7 +587,7 @@ fn computeHasInnerComments(
     var stack: std.ArrayList(Frame) = .empty;
     defer stack.deinit(gpa);
 
-    for (tree.root) |r| {
+    for (roots) |r| {
         try stack.append(gpa, .{ .node = r, .cursor = 0 });
         while (stack.items.len > 0) {
             const top = &stack.items[stack.items.len - 1];
@@ -611,18 +673,28 @@ fn formatNumberInto(buf: []u8, x: f64) []const u8 {
     return std.fmt.bufPrint(buf, "{d}", .{x}) catch unreachable;
 }
 
+/// Scratch size for one formatted number. `{d}` on an f64 renders the
+/// full decimal expansion — `1e308` is 310 characters and the smallest
+/// denormal 326 — so the buffer is sized from std's published bound, not
+/// a guess. The old `[64]u8` turned `formatNumberInto`'s `catch
+/// unreachable` into an abort on `1e64` and above (`sjon fmt`, `wasm.zig`'s
+/// `sjon_from_binary`, every Edit output). `wasm_common.appendValue`,
+/// `PatternQuery`'s hap serializer and `cli/ValueText` size theirs the
+/// same way. The i64 / u64 arms need 20 bytes, well inside it.
+const NUMBER_BUF_LEN = std.fmt.float.bufferSize(.decimal, f64);
+
 fn writeNumber(
     gpa: Allocator,
     out: *std.ArrayList(u8),
     x: f64,
 ) Allocator.Error!void {
-    var buf: [64]u8 = undefined;
+    var buf: [NUMBER_BUF_LEN]u8 = undefined;
     const s = formatNumberInto(&buf, x);
     try out.appendSlice(gpa, s);
 }
 
 fn numberLen(x: f64) u32 {
-    var buf: [64]u8 = undefined;
+    var buf: [NUMBER_BUF_LEN]u8 = undefined;
     return @intCast(formatNumberInto(&buf, x).len);
 }
 
@@ -645,13 +717,13 @@ fn writeNumberFromTree(
     tree: *const Ast.Tree,
     idx: NodeIndex,
 ) Allocator.Error!void {
-    var buf: [64]u8 = undefined;
+    var buf: [NUMBER_BUF_LEN]u8 = undefined;
     const s = formatNumberFromTreeInto(&buf, tree, idx);
     try out.appendSlice(gpa, s);
 }
 
 fn numberLenFromTree(tree: *const Ast.Tree, idx: NodeIndex) u32 {
-    var buf: [64]u8 = undefined;
+    var buf: [NUMBER_BUF_LEN]u8 = undefined;
     return @intCast(formatNumberFromTreeInto(&buf, tree, idx).len);
 }
 
@@ -1601,4 +1673,124 @@ test "lossless: comment between form head and first child attaches as child's le
     const out2 = try print(testing.allocator, reparsed, Options{ .mode = .full });
     defer out2.deinit();
     try testing.expectEqualStrings(out.data, out2.data);
+}
+
+test "numbers: a float whose decimal expansion exceeds 64 characters prints and round-trips" {
+    // `{d}` writes the full expansion; 1e100 is 101 characters, the
+    // smallest denormal 326. Each used to abort in `formatNumberInto`.
+    const cases = [_][:0]const u8{ "1e64", "1e100", "1e308", "1e-70", "5e-324" };
+    for (cases) |src| {
+        var tree = try Parser.parse(testing.allocator, src);
+        defer tree.deinit();
+        const printed = try print(testing.allocator, tree, .{});
+        defer printed.deinit();
+        try testing.expect(printed.data.len > 64);
+
+        const printed_z = try testing.allocator.dupeZ(u8, printed.data);
+        defer testing.allocator.free(printed_z);
+        var back = try Parser.parse(testing.allocator, printed_z);
+        defer back.deinit();
+        try testing.expectEqual(tree.numberOf(tree.root[0]), back.numberOf(back.root[0]));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// printNode — one node, printed as a root, indented to its column
+// ---------------------------------------------------------------------------
+
+test "printNode: a root's fragment is the whole-tree print minus the newline" {
+    // The fragment is what `print` emits for a single-root document, so
+    // the two can only differ by the terminal newline `print` adds.
+    var tree = try Parser.parse(testing.allocator, "(scene :w 800 :h 600)");
+    defer tree.deinit();
+
+    const whole = try print(testing.allocator, tree, .{});
+    defer whole.deinit();
+    const fragment = try printNode(testing.allocator, tree, tree.root[0], .{}, 0);
+    defer fragment.deinit();
+
+    try testing.expectEqualStrings("(scene :w 800 :h 600)\n", whole.data);
+    try testing.expectEqualStrings("(scene :w 800 :h 600)", fragment.data);
+}
+
+test "printNode: an interior node prints as if it were the only root" {
+    var tree = try Parser.parse(testing.allocator, "(scene (canvas :name \"main\"))");
+    defer tree.deinit();
+    const inner = tree.formHeader(tree.root[0]).children[0];
+
+    const fragment = try printNode(testing.allocator, tree, inner, .{}, 0);
+    defer fragment.deinit();
+    try testing.expectEqualStrings("(canvas :name \"main\")", fragment.data);
+}
+
+test "printNode: a single-line fragment ignores its column" {
+    // Nothing to indent when there is no line after the first, so the
+    // column is not a prefix — a fragment is spliced *at* the column, it
+    // does not carry the leading padding with it.
+    var tree = try Parser.parse(testing.allocator, "(a :x 1)");
+    defer tree.deinit();
+
+    const fragment = try printNode(testing.allocator, tree, tree.root[0], .{}, 7);
+    defer fragment.deinit();
+    try testing.expectEqualStrings("(a :x 1)", fragment.data);
+}
+
+test "printNode: continuation lines carry the column" {
+    var tree = try Parser.parse(
+        testing.allocator,
+        "(scene :name \"a rather long name that forces the wrap\" :w 800 :h 600)",
+    );
+    defer tree.deinit();
+
+    const at_zero = try printNode(testing.allocator, tree, tree.root[0], .{}, 0);
+    defer at_zero.deinit();
+    try testing.expect(std.mem.indexOfScalar(u8, at_zero.data, '\n') != null);
+
+    const at_four = try printNode(testing.allocator, tree, tree.root[0], .{}, 4);
+    defer at_four.deinit();
+
+    // Same layout decisions, four more spaces on every line but the first.
+    var zero_lines = std.mem.splitScalar(u8, at_zero.data, '\n');
+    var four_lines = std.mem.splitScalar(u8, at_four.data, '\n');
+    var first = true;
+    while (zero_lines.next()) |zl| {
+        const fl = four_lines.next() orelse return error.TestUnexpectedResult;
+        if (first) {
+            try testing.expectEqualStrings(zl, fl);
+            first = false;
+            continue;
+        }
+        try testing.expect(std.mem.startsWith(u8, fl, "    "));
+        try testing.expectEqualStrings(zl, fl[4..]);
+    }
+    try testing.expect(four_lines.next() == null);
+}
+
+test "printNode: a blank line stays blank rather than gaining trailing spaces" {
+    // Full mode puts each comment on its own line; a trailing comment
+    // after the last child is the shape that can leave an empty line.
+    var tree = try Parser.parse(testing.allocator,
+        \\(scene
+        \\  ; why
+        \\  :w 800)
+    );
+    defer tree.deinit();
+
+    const fragment = try printNode(testing.allocator, tree, tree.root[0], .{ .mode = .full }, 3);
+    defer fragment.deinit();
+
+    var lines = std.mem.splitScalar(u8, fragment.data, '\n');
+    while (lines.next()) |line| {
+        try testing.expect(line.len == 0 or line[line.len - 1] != ' ');
+    }
+}
+
+test "printNode: a scalar node is its own fragment" {
+    var tree = try Parser.parse(testing.allocator, "(a 42)");
+    defer tree.deinit();
+    const child = tree.formHeader(tree.root[0]).children[0];
+
+    const fragment = try printNode(testing.allocator, tree, child, .{}, 9);
+    defer fragment.deinit();
+    try testing.expectEqualStrings("42", fragment.data);
 }

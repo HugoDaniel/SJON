@@ -107,7 +107,7 @@
   {
     "code": "positional_not_allowed",
     "short": "Form's `:positional` declaration is `none` but a positional child was provided.",
-    "long": ""
+    "long": "A form declares what may sit between its parentheses. With no\n`:positional` declaration the answer is \"keyword pairs only\", and\nanything else in there fires this.\n\n`(circle 42)` is the plain shape: `42` sits under no key. Wrap it\nin the key it belongs to, `(circle :radius 42)`, or move it under\na parent that does take children.\n\n**The other shape looks like a keyword.** `(lane :name)` fires\nthis too, on `:name`, which reads as a key and not as a\npositional at all. The parser pairs `:key value` greedily, so a\nkeyword with nothing left to pair (the end of the form, or\nanother keyword straight after it) becomes a bare keyword\n*value* instead. That is the rule behind\n`(camera :ortho :zoom 2)`, where `:ortho` is a flag; it is also\nwhat a missing value turns into. The message names the keyword\nwhen this is the shape you hit.\n\nSo `(lane :name)` is almost always a half-written\n`(lane :name \"left\")`. If you did mean the flag, the form has to\ndeclare one: `:positional (flag-set (flag :name ortho))`."
   },
   {
     "code": "expr_kvpair_not_allowed",

@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 1,
+  "x-sjon-export-warnings": [
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `anchor-name` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin": "template",
+      "kind": "anchor-name"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `anchor-name` cross-ref annotation surfaces target-form=`anchor` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "plugin": "template",
+      "kind": "anchor-name"
+    },
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `template-name` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin": "template",
+      "kind": "template-name"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `template-name` cross-ref annotation surfaces target-form=`template` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "plugin": "template",
+      "kind": "template-name"
+    }
+  ],
+  "$defs": {
+    "form.template.anchor": {
+      "type": "object",
+      "description": "A named point an animation can target.",
+      "properties": {
+        "$form": {
+          "const": "anchor"
+        },
+        "$ns": {
+          "const": "template"
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "$form",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "form.template.animate": {
+      "type": "object",
+      "description": "A finished animation. Every key is checked when this form is written at the top level.",
+      "properties": {
+        "$form": {
+          "const": "animate"
+        },
+        "$ns": {
+          "const": "template"
+        },
+        "ease": {
+          "enum": [
+            {
+              "$sym": "linear"
+            },
+            {
+              "$sym": "ease-in"
+            },
+            {
+              "$sym": "ease-out"
+            }
+          ],
+          "default": {
+            "$sym": "linear"
+          }
+        },
+        "from": {
+          "type": "number"
+        },
+        "target": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false,
+          "x-sjon-cross-ref": {
+            "target-form": "anchor",
+            "name-key": "name",
+            "acyclic": false
+          }
+        },
+        "to": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "$form",
+        "target",
+        "from",
+        "to"
+      ],
+      "additionalProperties": false
+    },
+    "form.template.template": {
+      "type": "object",
+      "description": "A named body the host expands later. `:body` is typed `form` and read by nobody here.",
+      "properties": {
+        "$form": {
+          "const": "template"
+        },
+        "$ns": {
+          "const": "template"
+        },
+        "body": {
+          "description": "Opaque: the slot is a form, and what is inside it is the expander's business.",
+          "type": "object",
+          "required": [
+            "$form"
+          ]
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "$form",
+        "name",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "form.template.apply": {
+      "type": "object",
+      "description": "Expand a template against a target.",
+      "properties": {
+        "$form": {
+          "const": "apply"
+        },
+        "$ns": {
+          "const": "template"
+        },
+        "target": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false,
+          "x-sjon-cross-ref": {
+            "target-form": "anchor",
+            "name-key": "name",
+            "acyclic": false
+          }
+        },
+        "template": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false,
+          "x-sjon-cross-ref": {
+            "target-form": "template",
+            "name-key": "name",
+            "acyclic": false
+          }
+        }
+      },
+      "required": [
+        "$form",
+        "template",
+        "target"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.template.anchor"
+    },
+    {
+      "$ref": "#/$defs/form.template.animate"
+    },
+    {
+      "$ref": "#/$defs/form.template.template"
+    },
+    {
+      "$ref": "#/$defs/form.template.apply"
+    }
+  ]
+}

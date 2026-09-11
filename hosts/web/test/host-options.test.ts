@@ -57,3 +57,66 @@ test('validateDocument: failurePolicy is a pass-through preference with no diagn
     ['unknown_form'],
   );
 });
+
+// `heldSymbol` — a document being typed. The same pair is pinned in the Rust
+// host (`host_d7_exec.rs`) and in the Zig `Host_tests`: without the option the
+// three refinement axes report; with it the result is empty. Only the pair is
+// the contract — the first half is what keeps the second from being "accept
+// everything".
+
+const heldDoc = `(plugin :name hold :version "1.0.0"
+  (form :name kernel
+    (key :name name :type symbol))
+  (form :name warp
+    (key :name by :type kernel-ref)
+    (key :name amount :type number)
+    (key :name blend :type blend-mode :optional true))
+  (value-kind :name kernel-ref
+    :underlying symbol
+    :cross-ref (cross-ref :target kernel :name-key name))
+  (value-kind :name blend-mode
+    :underlying symbol
+    :members (member-set (member :name over) (member :name add))))
+
+(kernel :name flow)
+(warp :by _ :amount _ :blend _)
+`;
+
+test('validateDocument: without heldSymbol, `_` fails on every refinement axis', async () => {
+  const host = await SjonHost.load(wasmPath);
+  const r = host.validateDocument(heldDoc, { projectRoot: null, projectFile: null });
+  const codes = new Set(r.diagnostics.map((d) => d.code));
+  assert.ok(codes.has('not_cross_ref'));
+  assert.ok(codes.has('wrong_underlying'));
+  assert.ok(codes.has('not_member'));
+});
+
+test('validateDocument: with heldSymbol, the same document is clean', async () => {
+  const host = await SjonHost.load(wasmPath);
+  const r = host.validateDocument(heldDoc, {
+    projectRoot: null,
+    projectFile: null,
+    heldSymbol: '_',
+  });
+  assert.deepEqual(r.diagnostics, []);
+});
+
+test('validateDocument: two held cross-ref names do not collide', async () => {
+  const host = await SjonHost.load(wasmPath);
+  const src = `(plugin :name hold :version "1.0.0"
+  (form :name kernel
+    (key :name name :type symbol))
+  (value-kind :name kernel-ref
+    :underlying symbol
+    :cross-ref (cross-ref :target kernel :name-key name)))
+
+(kernel :name _)
+(kernel :name _)
+`;
+  const r = host.validateDocument(src, {
+    projectRoot: null,
+    projectFile: null,
+    heldSymbol: '_',
+  });
+  assert.deepEqual(r.diagnostics, []);
+});

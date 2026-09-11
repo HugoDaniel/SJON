@@ -174,6 +174,16 @@ The author rule stays the one above: explicit wins, so writing one
 alternative of an exclusive group is never quietly contradicted by a
 sibling's default.
 
+Two edges of the overlay are worth fixing in your head now, because
+both are easy to guess wrong. It reaches *into* the keys of a
+discriminated form's active variant, and it reaches them even when the
+discriminant itself was defaulted; the worked case is in
+[Discriminated and exclusive forms](10-discriminated-and-exclusive-forms.md).
+It does *not* reach into an opaque slot, a key the schema declares as
+typed but unread: nothing in there is defaulted, checked, or registered,
+and [Value kinds: refinements](12-value-kinds-refinements.md) says why
+a schema would want that.
+
 Some schemas also carry **lowering metadata** for surface forms.
 Lowering is host-owned: the manifest names a hook contract, it does not
 contain rewrite code. A hook reads the same effective view you do,

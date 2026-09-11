@@ -54,6 +54,14 @@ const MAX_COMPILE_FRAMES: u32 = MAX_QUERY_DEPTH * 4; // live compile-frame stack
 const MAX_QUERY_STEPS: u32 = 1 << 20; // total interpreter steps per call
 pub const MAX_QUERY_BYTES: usize = 1 << 26; // 64 MiB result-arena ceiling
 const MAX_HAPS: usize = 1 << 16; // emitted-hap ceiling (count amplifier guard)
+/// Ceiling on `(euclid n k …)` steps. `k` is user input cast to `usize`
+/// for `bjorklund` (O(k) gpa memory) and the `k`-slot sequence (8·k arena
+/// bytes) before the first memory-budget poll; on wasm32 `usize` is `u32`,
+/// so an unbounded `k` also truncated — `(euclid 1 4294967297 bd)` became
+/// one hap in the ReleaseSmall artifact and a panic natively. Past the
+/// ceiling the form is silence, the same degradation every other
+/// out-of-domain `euclid` argument gets; the TS parity host mirrors it.
+pub const MAX_EUCLID_STEPS: i64 = 1 << 16;
 
 /// The two size-shaped ceilings a caller may lower, carried together so the
 /// `*WithBudget` entries take one parameter instead of a growing row of
@@ -246,6 +254,7 @@ fn appendSpan(buf: *std.ArrayList(u8), a: Allocator, s: Span) Error!void {
 }
 
 fn appendI64(buf: *std.ArrayList(u8), a: Allocator, n: i64) Error!void {
+    // SAFETY: an i64 prints in at most 20 characters, sign included.
     var tmp: [24]u8 = undefined;
     const s = std.fmt.bufPrint(&tmp, "{d}", .{n}) catch unreachable;
     try buf.appendSlice(a, s);
@@ -262,6 +271,7 @@ fn appendPatValue(buf: *std.ArrayList(u8), a: Allocator, v: PatValue) Error!void
         .number => |x| try appendNumber(buf, a, x),
         .integer_i64 => |x| try appendI64(buf, a, x),
         .integer_u64 => |x| {
+            // SAFETY: a u64 prints in at most 20 digits.
             var tmp: [24]u8 = undefined;
             const s = std.fmt.bufPrint(&tmp, "{d}", .{x}) catch unreachable;
             try buf.appendSlice(a, s);
@@ -803,7 +813,7 @@ fn compileEuclid(
     }
     const n = tree.numberI64Of(n_idx);
     const k = tree.numberI64Of(k_idx);
-    if (k < 1 or n < 1 or n > k) {
+    if (k < 1 or n < 1 or n > k or k > MAX_EUCLID_STEPS) {
         dest.* = try makeNode(arena, .silence);
         return;
     }
@@ -985,6 +995,11 @@ pub fn compileBinary(
     _ = schema;
     _ = diags;
     var cursor = try BinaryCursor.Cursor.init(bytes);
+    // Pool index for the compile walk, on the pattern arena: the decode
+    // below reads a form head per node, which is O(pool entries) per
+    // lookup without one. The arena owns it; no free to pair.
+    const pool_index = try arena.alloc(u32, cursor.poolIndexLen());
+    cursor.indexPools(pool_index);
     var roots = try cursor.rootIter();
     if (roots.remaining == 0) return makeNode(arena, .silence);
     if (roots.remaining > 1) return error.MultipleRoots;
@@ -1209,7 +1224,7 @@ fn binDecodeEuclid(
         dest.* = try makeNode(arena, .silence);
         return;
     };
-    if (k < 1 or n < 1 or n > k) {
+    if (k < 1 or n < 1 or n > k or k > MAX_EUCLID_STEPS) {
         try binDrain(cursor, iter.*);
         dest.* = try makeNode(arena, .silence);
         return;
@@ -1421,6 +1436,10 @@ const QueryCtx = struct {
     seed: i64,
     scratch: *std.heap.FixedBufferAllocator,
     dropped: *usize,
+    /// `Budget.haps`, polled inside the per-cycle leaf loops: the walk's
+    /// own poll runs once per frame, and a `pure` leaf over a 2^53-tick
+    /// window emits 10^10 haps in one frame.
+    haps_budget: usize,
     /// Host-provided outer env chained as the PARENT of every leaf eval's
     /// env: the pattern-locals `cycle`/`tick`/`seed` shadow it (an
     /// `Expr.Env` lookup searches own bindings before the parent), every
@@ -1498,8 +1517,12 @@ pub fn queryWithBudget(
     // The one gate every query entry funnels through, so the walk below can
     // use unchecked tick arithmetic (see `Span.checkTickBounds`). Window
     // endpoints are user input; a window near the `i64` extremes would
-    // otherwise overflow inside `CycleIterator.next`.
+    // otherwise overflow inside `CycleIterator.next`. Orientation is a
+    // `Span` invariant, not user input: every entry that takes raw ticks
+    // (`wasm.zig`, `wasm_binary.zig`, the CLI) rejects `begin > end`
+    // before building the `Span`, and `Span.cycles` asserts it.
     try window.checkTickBounds();
+    std.debug.assert(window.begin <= window.end);
 
     const a = arena_inst.allocator();
     var out: std.ArrayList(Hap) = .empty;
@@ -1513,7 +1536,7 @@ pub fn queryWithBudget(
     const scratch_buf = try gpa.alloc(u8, PATTERN_EXPR_SCRATCH);
     defer gpa.free(scratch_buf);
     var fba = std.heap.FixedBufferAllocator.init(scratch_buf);
-    var ctx: QueryCtx = .{ .tree = tree, .schema = schema, .seed = seed, .scratch = &fba, .dropped = dropped, .outer_env = outer_env };
+    var ctx: QueryCtx = .{ .tree = tree, .schema = schema, .seed = seed, .scratch = &fba, .dropped = dropped, .outer_env = outer_env, .haps_budget = budget.haps };
 
     try stack.append(gpa, .{ .query = .{ .node = node, .span = window } });
 
@@ -1561,6 +1584,7 @@ fn processQuery(
                 const whole = Span.init(whole_begin, whole_end);
                 const part = whole.intersection(piece) orelse continue;
                 try out.append(gpa, .{ .timing = .{ .whole = whole, .part = part }, .value = v });
+                if (out.items.len > ctx.haps_budget) return error.HapBudgetExceeded;
             }
         },
         .pure_expr => |expr_idx| {
@@ -1568,7 +1592,11 @@ fn processQuery(
             // with `cycle`/`tick`/`seed` bound at the cycle onset. A later-
             // cycle eval error or uncoercible result is a domain hole: drop
             // the hap and bump the counter, leaving output a clean (haps …).
-            const tree = ctx.tree orelse unreachable; // tree-path only — binary never emits pure_expr
+            // SAFETY: only `compileTree` emits `pure_expr` (the binary
+            // compiler drains the leaf into `silence`), and every tree entry
+            // sets `ctx.tree`; a caller-built `pure_expr` node under
+            // `query()` with no tree is a contract violation.
+            const tree = ctx.tree orelse unreachable;
             var it = span.cycles();
             while (it.next()) |piece| {
                 const whole_begin = Pattern.cycleStart(piece.begin);
@@ -1576,7 +1604,10 @@ fn processQuery(
                 const whole = Span.init(whole_begin, whole_end);
                 const part = whole.intersection(piece) orelse continue;
                 switch (try evalLeaf(a, ctx, tree, expr_idx, whole_begin)) {
-                    .value => |v| try out.append(gpa, .{ .timing = .{ .whole = whole, .part = part }, .value = v }),
+                    .value => |v| {
+                        try out.append(gpa, .{ .timing = .{ .whole = whole, .part = part }, .value = v });
+                        if (out.items.len > ctx.haps_budget) return error.HapBudgetExceeded;
+                    },
                     .eval_failed, .result_invalid => ctx.dropped.* += 1,
                 }
             }
@@ -1675,7 +1706,7 @@ fn dryRunLeaf(
     defer gpa.free(scratch_buf);
     var fba = std.heap.FixedBufferAllocator.init(scratch_buf);
     var dropped: usize = 0;
-    const ctx: QueryCtx = .{ .tree = tree, .schema = schema, .seed = 0, .scratch = &fba, .dropped = &dropped, .outer_env = outer_env };
+    const ctx: QueryCtx = .{ .tree = tree, .schema = schema, .seed = 0, .scratch = &fba, .dropped = &dropped, .outer_env = outer_env, .haps_budget = MAX_HAPS };
     return evalLeaf(arena, &ctx, tree, expr_idx, 0);
 }
 
@@ -2427,6 +2458,34 @@ test "query: cat of seqs nests fastcat inside one cycle each" {
         .{ .timing = .{ .whole = Span.init(half, PPC), .part = Span.init(half, PPC) }, .value = sym("sn") },
         .{ .timing = .{ .whole = Span.init(PPC, 2 * PPC), .part = Span.init(PPC, 2 * PPC) }, .value = sym("hh") },
     });
+}
+
+test "query: euclid steps past MAX_EUCLID_STEPS are silence, at the ceiling they play" {
+    var r_over = try querySource(testing.allocator, "(euclid 3 65537 bd)", Span.init(0, PPC));
+    defer r_over.deinit();
+    try testing.expectEqual(@as(usize, 0), r_over.haps.len);
+
+    var r_at = try querySource(testing.allocator, "(euclid 1 65536 bd)", Span.init(0, PPC));
+    defer r_at.deinit();
+    try testing.expectEqual(@as(usize, 1), r_at.haps.len);
+}
+
+test "query: a pure leaf over a huge window trips the hap budget inside the cycle loop" {
+    // The walk polls the budget once per frame; a `pure` leaf emits one hap
+    // per cycle *within* a frame, so a 2^53-tick window used to allocate
+    // ~10^10 haps before the poll. A 1 MiB fixed buffer as the gpa makes the
+    // old behaviour OutOfMemory; the in-loop poll returns HapBudgetExceeded
+    // after `budget.haps + 1` haps.
+    const Parser = @import("Parser.zig");
+    const core = @import("plugins/core.zig");
+    const pattern = @import("plugins/pattern.zig");
+    const schema = Schema.Schema.init(&.{ core.plugin, pattern.plugin });
+    var tree = try Parser.parse(testing.allocator, "bd");
+    defer tree.deinit();
+    var buf: [1024 * 1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const window: Span = .{ .begin = 0, .end = 1_000_000 * PPC };
+    try testing.expectError(error.HapBudgetExceeded, queryTreeWithBudget(fba.allocator(), &tree, tree.root[0], schema, window, 0, .{ .haps = 64 }));
 }
 
 test "query: (euclid 3 8 bd) is the tresillo x..x..x." {

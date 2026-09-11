@@ -1,6 +1,6 @@
 {
   "name": "@sjon/web",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "type": "module",
   "description": "SJON validating host for Node and the browser: SjonHost, SjonEncoder, SjonReader over sjon.wasm + sjon-binary.wasm.",
   "license": "CC0-1.0",

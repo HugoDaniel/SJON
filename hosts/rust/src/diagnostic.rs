@@ -313,6 +313,21 @@ pub struct HostOptions {
     /// `HostResult.diagnostics` under `phase: Manifest` so callers see
     /// one merged stream.
     pub project_diagnostics: Vec<HostDiagnostic>,
+    /// The symbol a *held* position is spelled with: a value the author
+    /// has deliberately not filled in yet. When set, a symbol whose text
+    /// matches is accepted wherever a value may appear, without narrowing
+    /// on the slot's declared kind or any of its refinements, and
+    /// registers no cross-ref name. `None` (the default) validates
+    /// exactly as before.
+    ///
+    /// The assertion is about the *run* — "this document is being typed"
+    /// — and is made by whoever calls the host, never by the document: a
+    /// manifest is loaded because the document said `(use-plugin …)`, so a
+    /// document-level opt-in would let a document turn off its own type
+    /// checking.
+    ///
+    /// `_` is the conventional spelling. SJON does not police the name.
+    pub held_symbol: Option<String>,
 }
 
 /// Wire-format options sent into `sjon_host_validate_document`. The
@@ -324,6 +339,7 @@ pub(crate) struct WasmHostOptions<'a> {
     pub project_root: Option<&'a str>,
     pub project_file: Option<&'a str>,
     pub failure_policy: FailurePolicy,
+    pub held_symbol: Option<&'a str>,
     pub has_resolver: bool,
 }
 
@@ -390,4 +406,92 @@ pub(crate) struct WasmExportSchemaOptions<'a> {
     pub target: ExportTarget,
     pub layout: ExportLayoutOption,
     pub draft: &'static str,
+}
+
+/// One step of a §11.2 path: a string names a form's keyword value, an
+/// integer names a positional child of a form or an element of a vector.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PathStep {
+    /// The value of the keyword pair with this key.
+    Key(String),
+    /// The n-th positional child, keyword pairs skipped.
+    Index(u32),
+}
+
+/// Where a node is: which root of the document, and the §11.2 path from
+/// that root down to it, plus the two fields an editor draws with.
+///
+/// `root` and `path` are an edit action's two fields verbatim. An address
+/// is where a node is, not which node it is: insert a sibling before the
+/// target and the same address names a different node, so re-derive
+/// addresses from the document that comes back after a batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Address {
+    /// Which root of the document, indexing the forest left to right.
+    pub root: u32,
+    /// The §11.2 path from that root down to the node.
+    pub path: Vec<PathStep>,
+    /// The node's own bytes, `[start, end)`.
+    pub span: (u32, u32),
+    /// The node's tag: `form`, `number`, `string`, `symbol`, and so on.
+    pub kind: String,
+}
+
+/// One row of a [`NodeTable`]: an addressable node, where it is, and
+/// where its bytes are.
+///
+/// A `:key value` pair gets no row. §11.2 addresses a pair's *value*, so
+/// the pair has no address of its own; its key span rides on the value's
+/// row as [`key_span`](NodeRow::key_span).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeRow {
+    /// This row's index, equal to its position in `nodes`.
+    pub i: u32,
+    /// The row index of the container this node sits in, `-1` for a root.
+    pub parent: i64,
+    /// Which root of the document this node is under.
+    pub root: u32,
+    /// This row's own §11.2 path step from its parent, `None` for a root.
+    pub seg: Option<PathStep>,
+    /// The node's tag: `form`, `number`, `string`, `symbol`, and so on.
+    pub kind: String,
+    /// The node's own bytes, `[start, end)`.
+    pub span: (u32, u32),
+    /// A form's head bytes. Absent on every other kind.
+    #[serde(default)]
+    pub head_span: Option<(u32, u32)>,
+    /// The `:key` bytes of the pair this node is the value of.
+    #[serde(default)]
+    pub key_span: Option<(u32, u32)>,
+}
+
+/// A parse diagnostic as the envelope's `appendDiagnostic` writes it:
+/// span, severity, code, message. Narrower than [`HostDiagnostic`] on
+/// purpose — nothing before validation has a phase, a semantic path, or a
+/// declaration site to report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParseDiagnostic {
+    /// Source span the diagnostic points at.
+    pub span: Span,
+    /// Severity classification.
+    pub severity: Severity,
+    /// Wire-stable `snake_case` code (matches `Ast.Diagnostic.Code`).
+    pub code: String,
+    /// Human-readable message — informational only; do not match on it.
+    pub message: String,
+}
+
+/// Every addressable node of one document, plus the diagnostics from the
+/// same parse.
+///
+/// Rows are pre-order: a parent always precedes its children and siblings
+/// are in source order, so the innermost node containing a byte is the
+/// *last* row whose span contains it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeTable {
+    /// One row per addressable node, pre-order.
+    pub nodes: Vec<NodeRow>,
+    /// What the parser reported about the same bytes.
+    pub diagnostics: Vec<ParseDiagnostic>,
 }

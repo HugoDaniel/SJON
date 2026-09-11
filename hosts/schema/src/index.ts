@@ -59,7 +59,7 @@ export type { Binder, BoolLike, ExprLike, NumLike, Ref, VecLike } from './expr.t
 // edit *methods* live on `FormNode`/`FormDocument` (see `s.form(...).setKey` etc.).
 export * as edit from './edit.ts';
 export { diffToActions, sjonValueEqual } from './edit.ts';
-export type { EditAction, EditPath } from './edit.ts';
+export type { EditAction, EditPath, ForestEditAction, PathedEditAction } from './edit.ts';
 
 // Inference-layer types: node interfaces, brand aliases, helpers.
 export type {

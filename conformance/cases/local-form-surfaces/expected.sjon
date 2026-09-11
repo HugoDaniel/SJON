@@ -1,0 +1,18 @@
+; The first six lines are clean: five resolve through the slot, one
+; around it. Then the three that carry the story.
+;
+; `:radius` inside the slot is `unknown_key` and `:r` is missing — a
+; global `circle` would have accepted `:radius` cleanly, which is what
+; makes this pair the shadow's proof. `:rr` reports the same pair, and
+; is where the LSP's quick fix has to draw its suggestion from the
+; *local's* key set: resolved globally, the nearest key to `rr` is
+; `radius`, a fix into a second diagnostic.
+;
+; `ghost` is `unknown_local_form` at the SLOT path, not `unknown_form` at
+; the head — the slot is what the author has to look at.
+(diagnostics
+  (diagnostic :code unknown_key :path [canvas shape circle radius])
+  (diagnostic :code missing_required_key :path [canvas shape circle])
+  (diagnostic :code unknown_key :path [canvas shape circle rr])
+  (diagnostic :code missing_required_key :path [canvas shape circle])
+  (diagnostic :code unknown_local_form :path [canvas shape]))

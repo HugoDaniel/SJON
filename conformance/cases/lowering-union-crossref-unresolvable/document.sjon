@@ -1,0 +1,32 @@
+; The direction that must NOT change: deferral defers, it does not
+; discard. No `(target …)` is defined anywhere, so `t` names nothing in
+; the whole document either.
+;
+; The union sits on `box`'s own key here rather than on a child's, because
+; that is what `test/identity-v1` carries forward: the hook copies the
+; author's declared kvpairs into `(box-normal …)`. So the value the
+; fragment declined to judge survives into the lowered tree and is judged
+; there, by the pass that can see the whole document.
+;
+; This is the same trade `lowering-surface-form-external-ref` already
+; makes for a plain `:ref` — the report moves from the source form to the
+; lowered one. A container that swallows a child swallows the child's
+; diagnostics too; that is lowering, not deferral, and it is why a hook
+; owns `out.fail` for what its children say.
+(plugin :name probe :version "1.0.0"
+  (value-kind :name target-ref :underlying symbol
+    :cross-ref (cross-ref :target target))
+  (value-kind :name spot :underlying symbol
+    :members (member-set :values [here]))
+  (value-kind :name spot-or-target :underlying union
+    :union (union-shape :alternatives [spot target-ref]))
+
+  (form :name target
+    (key :name name :type symbol :optional false))
+  (form :name box
+    (key :name unioned :type spot-or-target :optional false)
+    :lowering (lowering :hook test/identity-v1 :produces [box-normal]))
+  (form :name box-normal
+    (key :name unioned :type spot-or-target :optional false)))
+
+(box :unioned t)

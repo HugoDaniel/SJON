@@ -216,6 +216,35 @@ doc.sjon` prints the same view as spliced source text; the Rust host's
 [hosts/rust/README.md](../rust/README.md) is this snippet, semantically
 identical.
 
+### Structural edits
+
+`SjonEncoder.applyEdit(source, action)` applies one JSON edit action and
+returns the re-printed source; `applyEdits(source, actions)` applies a
+list in one pass. The action grammar is `docs/LANGUAGE.md` §11: six ops
+over a `path` into the document, plus an optional `root`.
+
+```js
+// Compose a node into a new parent. The node at `path` is cloned into
+// the `hole` inside `value`, so the comments inside it survive; the
+// other five ops build their node from `value` through the JSON bridge,
+// which carries none.
+encoder.applyEdit(source, {
+    op: "wrap",
+    root: 1,                                  // the camera, after (use-plugin …)
+    path: ["alpha"],
+    value: { $expr: ["+", null, 0.1] },       // null marks the hole
+    hole: [0],                                // first positional child of the parent
+});
+```
+
+A file that names a plugin has more than one root, and an action on it
+says which with `root`; omitting it there throws `SjonWasmError`
+(`MultipleRoots`) rather than editing whichever form came first. Layout
+is not preserved by any op (the result is re-printed from the tree, and
+a form carrying a comment always goes multi-line); comments are.
+[`examples/edit-wrap.mjs`](../../examples/edit-wrap.mjs) prints the
+three cases side by side.
+
 ## Wire-protocol notes
 
 The two artifacts share an identical C ABI: each output-returning

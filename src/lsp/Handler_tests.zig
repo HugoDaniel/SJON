@@ -27,6 +27,31 @@ fn findCompletion(items: []const CompletionItem, label: []const u8) CompletionIt
     std.debug.panic("no completion item labelled '{s}' in {d} items", .{ label, items.len });
 }
 
+/// True when some completion item carries `label`. The negative-space
+/// companion to `findCompletion`, which panics rather than reporting.
+fn hasCompletion(items: []const CompletionItem, label: []const u8) bool {
+    for (items) |it| {
+        if (std.mem.eql(u8, it.label, label)) return true;
+    }
+    return false;
+}
+
+/// True when some completion item carries `label` *and* `kind`. Labels
+/// alone are not unique across vocabularies — `core` declares a `dot`
+/// expression function beside the local-forms fixture's slot-local
+/// `(dot)` form — so a test that checks only the label can pass on an
+/// item from the vocabulary it was not asking about.
+fn hasCompletionOfKind(
+    items: []const CompletionItem,
+    label: []const u8,
+    kind: CompletionItem.Kind,
+) bool {
+    for (items) |it| {
+        if (std.mem.eql(u8, it.label, label) and it.kind == kind) return true;
+    }
+    return false;
+}
+
 /// Find the workspace report for `uri`. Asserts presence — the reports
 /// are unordered with respect to the test's expectations, and a missing
 /// URI is a failure worth naming rather than an index out of bounds.
@@ -95,6 +120,75 @@ fn crossRefDirectPlugin() sjon.Plugin.Plugin {
                 .name = "jump",
                 .keys = &.{
                     .{ .name = "target", .value_type = .{ .named = .{ .name = "phrase-name" } }, .optional = false },
+                },
+            },
+        },
+    };
+}
+
+/// Mirror of `examples/plugins/local-forms/plugin.sjon`, the fixture that
+/// exists to pin slot-local resolution. `canvas.:shape` declares local
+/// `circle` (`:r`), `rect` (`:w :h`) and `group` (whose `:child` nests a
+/// local `dot`); a *global* `circle` requiring `:radius` sits beside them
+/// to be shadowed, and a global `line` to be reached by the additive
+/// fallback.
+fn localFormsPlugin() sjon.Plugin.Plugin {
+    return .{
+        .name = "local-forms",
+        .forms = &.{
+            .{
+                .name = "canvas",
+                .description = "A drawing canvas; its :shape slot scopes its own forms.",
+                .keys = &.{
+                    .{
+                        .name = "shape",
+                        .value_type = .form,
+                        .optional = false,
+                        .local_forms = &.{
+                            .{
+                                .name = "circle",
+                                .description = "Slot-local circle; shadows the global circle.",
+                                .keys = &.{
+                                    .{ .name = "r", .value_type = .number, .optional = false },
+                                },
+                            },
+                            .{
+                                .name = "rect",
+                                .description = "Slot-local rectangle (local only, invisible globally).",
+                                .keys = &.{
+                                    .{ .name = "w", .value_type = .number, .optional = false },
+                                    .{ .name = "h", .value_type = .number, .optional = false },
+                                },
+                            },
+                            .{
+                                .name = "group",
+                                .description = "Slot-local group; its :child slot nests a local dot.",
+                                .keys = &.{
+                                    .{
+                                        .name = "child",
+                                        .value_type = .form,
+                                        .optional = false,
+                                        .local_forms = &.{.{ .name = "dot" }},
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            .{
+                .name = "line",
+                .description = "A global form (declared at top level, no local slot).",
+                .keys = &.{
+                    .{ .name = "from", .value_type = .vector, .optional = false },
+                    .{ .name = "to", .value_type = .vector, .optional = false },
+                },
+            },
+            .{
+                .name = "circle",
+                .description = "Global circle, shadowed by the local circle inside canvas.:shape.",
+                .keys = &.{
+                    .{ .name = "radius", .value_type = .number, .optional = false },
                 },
             },
         },
@@ -1574,6 +1668,172 @@ test "hover on a deprecated member value surfaces the deprecation message" {
     try std.testing.expect(std.mem.indexOf(u8, hover.contents, "Use hidden.") != null);
 }
 
+/// The `dimensions` example plugin (`examples/plugins/dimensions/`) written
+/// as a Zig literal: one `:symbol` member set mixing digit-leading
+/// spellings with ordinary ones, which is the realistic WebGPU shape.
+///
+/// `numeric_spelling` is the match key the validator compares against, and
+/// the manifest loader derives it from the declared text; a hand-written
+/// plugin therefore sets it by hand, and `name` still carries the spelling.
+fn dimensionsPlugin() sjon.Plugin.Plugin {
+    return .{
+        .name = "dimensions",
+        .value_kinds = &.{
+            .{
+                .name = "dim",
+                .underlying = .symbol,
+                .members = .{ .members = &.{
+                    .{ .name = "1d", .numeric_spelling = .{ .value = 1, .unit = "d" } },
+                    .{
+                        .name = "2d",
+                        .label = "2D",
+                        .description = "The default view dimension.",
+                        .numeric_spelling = .{ .value = 2, .unit = "d" },
+                    },
+                    .{ .name = "2d-array", .numeric_spelling = .{ .value = 2, .unit = "d-array" } },
+                    .{ .name = "cube" },
+                    .{ .name = "3d", .numeric_spelling = .{ .value = 3, .unit = "d" } },
+                } },
+            },
+            .{ .name = "dim-vec", .underlying = .vector, .vector = .{ .element = .{ .name = "dim" } } },
+        },
+        .forms = &.{
+            .{
+                .name = "tex",
+                .keys = &.{
+                    .{
+                        .name = "dimension",
+                        .value_type = .{ .named = .{ .name = "dim" } },
+                        .optional = true,
+                    },
+                    .{
+                        .name = "views",
+                        .value_type = .{ .named = .{ .name = "dim-vec" } },
+                        .optional = true,
+                    },
+                },
+            },
+        },
+    };
+}
+
+test "hover on a digit-leading member value names the member" {
+    // 16 §4: `2d` lexes as `number_with_unit`, so the symbol-only hover
+    // path never reached it and the card came back null — for a value the
+    // completion list had just offered. The spelling is the validator's
+    // own `canonicalMemberSpelling`, the function that matched it.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{dimensionsPlugin()});
+
+    const src = "(tex :dimension 2d)";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const at: u32 = @intCast(std.mem.indexOf(u8, src, "2d").?);
+    const hover = (try h.getHover(arena, "file:///a.sjon", at)).?;
+    try std.testing.expect(std.mem.indexOf(u8, hover.contents, "**2d**") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hover.contents, "kind `dim`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hover.contents, "2D") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hover.contents, "The default view dimension.") != null);
+    try std.testing.expectEqual(at, hover.span_start);
+    try std.testing.expectEqual(at + 2, hover.span_end);
+}
+
+test "hover on a hyphenated digit-leading member names the whole spelling" {
+    // `2d-array` is one token: a `-` may join two letter runs inside a
+    // unit, so the unit is `d-array` and the canonical spelling is the
+    // member's own name.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{dimensionsPlugin()});
+
+    const src = "(tex :dimension 2d-array)";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const at: u32 = @intCast(std.mem.indexOf(u8, src, "2d-array").?);
+    const hover = (try h.getHover(arena, "file:///a.sjon", at)).?;
+    try std.testing.expect(std.mem.indexOf(u8, hover.contents, "**2d-array**") != null);
+    try std.testing.expectEqual(at + 8, hover.span_end);
+}
+
+test "hover on a word member in a mixed set is unchanged" {
+    // The regression guard for the widened node test: `cube` sits in the
+    // same set and still answers through the symbol path.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{dimensionsPlugin()});
+
+    const src = "(tex :dimension cube)";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const at: u32 = @intCast(std.mem.indexOf(u8, src, "cube").?);
+    const hover = (try h.getHover(arena, "file:///a.sjon", at)).?;
+    try std.testing.expect(std.mem.indexOf(u8, hover.contents, "**cube**") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hover.contents, "kind `dim`") != null);
+}
+
+test "hover on a unit-bearing number that is no member stays null" {
+    // A magnitude the set does not carry, and a fractional one that no
+    // spelling can be: neither names a member, and inventing a card for
+    // them would be worse than the squiggle already there.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{dimensionsPlugin()});
+
+    const src = "(tex :dimension 7d)\n(tex :dimension 2.5d)";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const seven: u32 = @intCast(std.mem.indexOf(u8, src, "7d").?);
+    const frac: u32 = @intCast(std.mem.indexOf(u8, src, "2.5d").?);
+    try std.testing.expect((try h.getHover(arena, "file:///a.sjon", seven)) == null);
+    try std.testing.expect((try h.getHover(arena, "file:///a.sjon", frac)) == null);
+}
+
+test "semantic tokens colour a digit-leading member value" {
+    // 16 §4: the member token is emitted over the number's span, so a
+    // mixed set colours uniformly. Nothing else emits over that span —
+    // `number_with_unit` is not one of the walker's token-bearing tags.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{dimensionsPlugin()});
+
+    const src = "(tex :dimension 2d)\n(tex :dimension cube)\n(tex :dimension 2d-array)";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const toks = (try h.getSemanticTokens(fx.arena(), "file:///a.sjon")).?;
+    try std.testing.expectEqual(Handler.SemanticToken.Type.enum_member, findToken(src, toks, "2d").type);
+    try std.testing.expectEqual(Handler.SemanticToken.Type.enum_member, findToken(src, toks, "cube").type);
+    try std.testing.expectEqual(Handler.SemanticToken.Type.enum_member, findToken(src, toks, "2d-array").type);
+}
+
+test "semantic tokens leave a unit-bearing non-member uncoloured" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{dimensionsPlugin()});
+
+    const src = "(tex :dimension 7d)";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const toks = (try h.getSemanticTokens(fx.arena(), "file:///a.sjon")).?;
+    try std.testing.expect(noToken(src, toks, "7d"));
+}
+
 test "signature help for a form lists every key with active = current kvpair" {
     const a = std.testing.allocator;
     var fx = handlerFixture(a);
@@ -1717,6 +1977,34 @@ test "signature help renders rest type even when params is null (`+` from core)"
     try std.testing.expectEqualStrings("+ ...number → `number`", help.signatures[0].label);
     try std.testing.expectEqual(@as(usize, 1), help.signatures[0].parameters.len);
     try std.testing.expectEqual(@as(?u32, 0), help.active_parameter);
+}
+
+test "signature help on a named-but-untyped expr-func lists its parameter names" {
+    // `clamp`, `lerp`, `dot`, `cross` and their siblings declare
+    // `param_names` and no `params` — names describe slot identity, not
+    // type, so an opaque function may still have them (`Plugin.zig`).
+    // The card used to read them as fully opaque: `clamp …`, no
+    // parameter ranges, and `activeParameter` null at every cursor, so
+    // the four most-used core functions had no highlight at all.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{sjon.plugins.core.plugin});
+
+    //  (clamp 1 2)
+    //  01234567890
+    try h.openDocument("file:///a.sjon", 1, "(clamp 1 2)");
+
+    const arena = fx.arena();
+
+    const help = (try h.getSignatureHelp(arena, "file:///a.sjon", 10)).?;
+    try std.testing.expectEqualStrings("clamp :x :lo :hi", help.signatures[0].label);
+    try std.testing.expectEqual(@as(usize, 3), help.signatures[0].parameters.len);
+    // The ranges cover the names, so a client highlights `:lo` here.
+    const p1 = help.signatures[0].parameters[1];
+    try std.testing.expectEqualStrings(":lo", help.signatures[0].label[p1.label_start..p1.label_end]);
+    try std.testing.expectEqual(@as(?u32, 1), help.active_parameter);
 }
 
 test "signature help on fully-opaque expr-func shows a `…` placeholder" {
@@ -2293,6 +2581,192 @@ test "code action suggests typo fix for unknown_form" {
     try std.testing.expect(saw_clamp);
 }
 
+test "unknown_form quick fix: no expression head the keyword arguments refuse" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+
+    // The note's own case. `rect` is one edit from `fract`, which takes
+    // no labels at all (`expr_kvpair_not_allowed`), and two from `vec2`,
+    // which takes `:x :y` and not `:w :h` (`unknown_label`). Both are a
+    // fix into a different error, so the catalog offers neither and the
+    // core plugin has nothing else near.
+    const src = "(rect :w 1 :h 2)";
+    try fx.h.openDocument("file:///a.sjon", 1, src);
+    try expectUnknownForm(&fx);
+
+    const actions = try actionsOver(&fx, src, "rect");
+    try std.testing.expect(replaceTitle(actions) == null);
+}
+
+test "unknown_form quick fix: a positional call is not filtered on arity" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+
+    // Same head, positionals — and three of them, where `fract` takes
+    // one. `resolveExprArgs` returns `.ok` for a call with no kvpairs
+    // before it consults arity, so `fract` stays a candidate and the
+    // author lands on `arity_mismatch`: an argument list to finish,
+    // not a fault the fix invented.
+    const src = "(rect 1 2 3)";
+    try fx.h.openDocument("file:///a.sjon", 1, src);
+
+    const actions = try actionsOver(&fx, src, "rect");
+    try std.testing.expectEqualStrings("Replace with `fract`", replaceTitle(actions).?);
+}
+
+test "unknown_form quick fix: a labeled expression head survives the kvpair filter" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+
+    // `blend` names its two slots `:a :b`, so `(blend :a 1 :b 2)`
+    // resolves. The filter drops the expression heads a call refuses,
+    // not expression heads.
+    const blend: sjon.Plugin.ExprFunc = .{
+        .name = "blend",
+        .arity = .{ .fixed = 2 },
+        .params = &.{ .number, .number },
+        .param_names = &.{ "a", "b" },
+        .result = .number,
+    };
+    const plugin: sjon.Plugin.Plugin = .{ .name = "mix", .expr_funcs = &.{blend} };
+    fx.h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    const src = "(blond :a 1 :b 2)";
+    try fx.h.openDocument("file:///a.sjon", 1, src);
+
+    const actions = try actionsOver(&fx, src, "blond");
+    try std.testing.expectEqualStrings("Replace with `blend`", replaceTitle(actions).?);
+}
+
+/// A catalog holding one expression function with two named slots
+/// (`:x :y`) and nothing else, so a labeled call's fate against `pair`
+/// is the only variable in the fix. No core plugin: `pair` is the sole
+/// candidate, and "no fix" therefore means "`pair` was refused".
+const labeled_expr_plugins = [_]sjon.Plugin.Plugin{.{
+    .name = "t",
+    .expr_funcs = &.{.{
+        .name = "pair",
+        .arity = .{ .fixed = 2 },
+        .params = &.{ .number, .number },
+        .param_names = &.{ "x", "y" },
+        .result = .number,
+    }},
+}};
+
+fn openLabeledExpr(fx: *Fixture, src: []const u8) !void {
+    fx.h.schema = .init(&labeled_expr_plugins);
+    try fx.h.openDocument("file:///a.sjon", 1, src);
+}
+
+/// The quick fix declining and there being nothing to decline look
+/// identical from `replaceTitle`. Every "offers nothing" test below
+/// asserts the squiggle is there first, so none of them can pass by
+/// the document simply being valid.
+fn expectUnknownForm(fx: *Fixture) !void {
+    const diags = (try fx.h.getDiagnostics(fx.arena(), "file:///a.sjon")).?;
+    for (diags) |d| {
+        if (std.mem.eql(u8, d.code, "unknown_form")) return;
+    }
+    return error.TestExpectedUnknownForm;
+}
+
+test "unknown_form quick fix: a mixed positional-and-labeled call refuses" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+
+    // `mixed` outranks every label fault and is not a label fault at
+    // all, so a filter written around `param_names` alone would miss it.
+    // `resolveExprArgs` decides it before it looks at signatures.
+    const src = "(pai 1 :x 2)";
+    try openLabeledExpr(&fx, src);
+    try expectUnknownForm(&fx);
+
+    try std.testing.expect(replaceTitle(try actionsOver(&fx, src, "pai")) == null);
+}
+
+test "unknown_form quick fix: a duplicated label refuses" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+
+    // Two labels, two slots, right names — and still not a call `pair`
+    // accepts, because `:x` fills the same slot twice.
+    const src = "(pai :x 1 :x 2)";
+    try openLabeledExpr(&fx, src);
+    try expectUnknownForm(&fx);
+
+    try std.testing.expect(replaceTitle(try actionsOver(&fx, src, "pai")) == null);
+}
+
+test "unknown_form quick fix: a labeled call missing a slot refuses" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+
+    // A labeled call must fill every slot, so one right label is not a
+    // partial success — it is `missing_label`.
+    const src = "(pai :x 1)";
+    try openLabeledExpr(&fx, src);
+    try expectUnknownForm(&fx);
+
+    try std.testing.expect(replaceTitle(try actionsOver(&fx, src, "pai")) == null);
+}
+
+test "unknown_form quick fix: the call judged is the one the head heads" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+
+    // Nested, and the two forms disagree: the outer call's labels fill
+    // `pair` exactly, the inner call's `:z` fills nothing. Reading the
+    // enclosing form off the wrong nesting level would offer `pair`
+    // here. It is the inner call that is being fixed, so nothing is.
+    const src = "(pair :x 1 :y (pai :z 2))";
+    try openLabeledExpr(&fx, src);
+    try expectUnknownForm(&fx);
+
+    try std.testing.expect(replaceTitle(try actionsOver(&fx, src, "pai")) == null);
+}
+
+test "unknown_form quick fix: a dangling keyword is a positional, so nothing is refused" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+
+    // `:x` with no value parses as a keyword *positional*, not as a
+    // kvpair — which is why `(lane :name)` reports
+    // `positional_not_allowed` rather than a key fault. The filter
+    // inherits that reading from `resolveExprArgs`: no kvpairs, so the
+    // call is positional and `pair` stays a candidate.
+    const src = "(pai :x)";
+    try openLabeledExpr(&fx, src);
+
+    try std.testing.expectEqualStrings("Replace with `pair`", replaceTitle(try actionsOver(&fx, src, "pai")).?);
+}
+
+test "unknown_form quick fix: a data form is a candidate whatever the form carries" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+
+    // Keywords are how data forms are written, and a key they do not
+    // declare is `unknown_key`, which has its own fix — so the filter
+    // reaches expression functions only. `react` is one edit from
+    // `rect`, as `fract` is; it wins because `fract` is out.
+    const plugin: sjon.Plugin.Plugin = .{ .name = "shapes", .forms = &.{.{ .name = "react" }} };
+    fx.h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    const src = "(rect :w 1)";
+    try fx.h.openDocument("file:///a.sjon", 1, src);
+
+    const actions = try actionsOver(&fx, src, "rect");
+    try std.testing.expectEqualStrings("Replace with `react`", replaceTitle(actions).?);
+}
+
 test "code action typo fix uses Damerau distance and alphabetical tie-break (C.12)" {
     const a = std.testing.allocator;
     var fx = handlerFixture(a);
@@ -2725,6 +3199,152 @@ fn handWrittenUnionPlugin() sjon.Plugin.Plugin {
     };
 }
 
+test "hover on a member value in a union slot names the member" {
+    // 16 §5 made completion offer `smoothstep` in a `union [ease-name
+    // ease-form]` slot; hover then read `members` off the union kind
+    // itself, found none, and answered null for the very value it had
+    // just offered. The value's shape determines the arm
+    // (`Validator.determinedArm`, the rule the quick fix already uses),
+    // so the card reads the arm's member set.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{handWrittenUnionPlugin()});
+
+    const src = "(k :ease smoothstep)";
+    try h.openDocument("file:///a.sjon", 1, src);
+    const arena = fx.arena();
+    const at: u32 = @intCast(std.mem.indexOf(u8, src, "smoothstep").? + 3);
+    const hover = (try h.getHover(arena, "file:///a.sjon", at)).?;
+    try expectContainsAll(hover.contents, &.{ "**smoothstep**", "kind `ease-name`" });
+}
+
+test "hover on a cross-ref value in a union slot names the reference kind" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{handWrittenUnionPlugin()});
+
+    const src = "(define :name d1)\n(k :x d1)";
+    try h.openDocument("file:///a.sjon", 1, src);
+    const arena = fx.arena();
+    const at: u32 = @intCast(std.mem.lastIndexOf(u8, src, "d1").? + 1);
+    const hover = (try h.getHover(arena, "file:///a.sjon", at)).?;
+    try expectContainsAll(hover.contents, &.{ "**d1**", "kind `define-ref`", "Cross-reference to `(define …)`" });
+}
+
+test "semantic tokens colour a member value in a union slot" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{handWrittenUnionPlugin()});
+
+    const src = "(k :ease smoothstep)";
+    try h.openDocument("file:///a.sjon", 1, src);
+    const toks = (try h.getSemanticTokens(fx.arena(), "file:///a.sjon")).?;
+    try std.testing.expectEqual(Handler.SemanticToken.Type.enum_member, findToken(src, toks, "smoothstep").type);
+}
+
+test "hover on a member element of a typed vector names the member" {
+    // Every value-level surface stopped at the vector bracket: hover on
+    // `linear` inside `(k :eases [linear])` was null, for a plain
+    // member, a digit-leading one, and one reached through a union arm
+    // alike — while the completion list had offered it and the quick fix
+    // could correct it. The element is matched against the slot's
+    // element kind, then through the arm its shape determines.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{handWrittenUnionPlugin()});
+
+    const src = "(k :eases [linear (spring) smoothstep])";
+    try h.openDocument("file:///a.sjon", 1, src);
+    const arena = fx.arena();
+    const at: u32 = @intCast(std.mem.indexOf(u8, src, "smoothstep").? + 2);
+    const hover = (try h.getHover(arena, "file:///a.sjon", at)).?;
+    try expectContainsAll(hover.contents, &.{ "**smoothstep**", "kind `ease-name`" });
+    // A non-member element stays quiet — the bracket is not a member set.
+    const paren: u32 = @intCast(std.mem.indexOf(u8, src, "(spring)").? + 3);
+    const head = (try h.getHover(arena, "file:///a.sjon", paren)).?;
+    try expectContainsAll(head.contents, &.{"**(spring)**"});
+}
+
+test "semantic tokens colour member elements of a typed vector" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{handWrittenUnionPlugin()});
+
+    const src = "(k :eases [linear (spring) smoothstep])";
+    try h.openDocument("file:///a.sjon", 1, src);
+    const toks = (try h.getSemanticTokens(fx.arena(), "file:///a.sjon")).?;
+    try std.testing.expectEqual(Handler.SemanticToken.Type.enum_member, findToken(src, toks, "linear").type);
+    try std.testing.expectEqual(Handler.SemanticToken.Type.enum_member, findToken(src, toks, "smoothstep").type);
+}
+
+test "head completion inside a typed vector's element narrows to the element kind's heads" {
+    // `(k :eases [(|)])` offered every expression function and every
+    // form — the vocabulary read the kvpair's kind, found a vector, and
+    // fell back to `.any`. An element is typed by the element kind, whose
+    // form arm carries the head-set. The slot's *own* value is never a
+    // form, so `(k :eases (|))` keeps the open list rather than offering
+    // heads a vector slot rejects.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{ handWrittenUnionPlugin(), sjon.plugins.core.plugin });
+    const arena = fx.arena();
+
+    //  (k :eases [(])
+    //  01234567890123
+    try h.openDocument("file:///a.sjon", 1, "(k :eases [()])");
+    const inside = (try h.getCompletion(arena, "file:///a.sjon", 12)).?;
+    var spring = false;
+    for (inside) |it| {
+        if (std.mem.eql(u8, it.label, "spring")) spring = true;
+        try std.testing.expect(!std.mem.eql(u8, it.label, "+"));
+    }
+    try std.testing.expect(spring);
+
+    //  (k :eases ())
+    //  0123456789012
+    try h.openDocument("file:///b.sjon", 1, "(k :eases ())");
+    const direct = (try h.getCompletion(arena, "file:///b.sjon", 11)).?;
+    var plus = false;
+    for (direct) |it| {
+        if (std.mem.eql(u8, it.label, "+")) plus = true;
+    }
+    try std.testing.expect(plus);
+}
+
+test "hover on a cross-ref value in a union two arms reach lists the arms" {
+    // `:pipeline rp` sits in `union [render-pipeline-ref
+    // compute-pipeline-ref]`. A symbol reaches both, so no arm is
+    // determined and the value-kind card had nothing to read — hover was
+    // null on a value goto-definition resolved and the token walker
+    // coloured. The card lists the arms in the order the validator tries
+    // them, which is the one fact about this slot a reader cannot get
+    // from the manifest's names alone.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{pipelineUnionPlugin()});
+
+    const src = "(render-pipeline :name rp)\n(edge :pipeline rp)";
+    try h.openDocument("file:///a.sjon", 1, src);
+    const arena = fx.arena();
+    const at: u32 = @intCast(std.mem.lastIndexOf(u8, src, "rp").? + 1);
+    const hover = (try h.getHover(arena, "file:///a.sjon", at)).?;
+    try expectContainsAll(hover.contents, &.{ "**rp**", "kind `pipeline-ref`", "`(render-pipeline …)` or `(compute-pipeline …)`", "first that declares the name wins" });
+}
+
 test "code action suggests the closest registered name through a hand-written union" {
     // 15: the reach-through is by the validator's rule, not by the
     // shorthand's flag. A symbol reaches only `define-ref`, so the slot
@@ -2774,8 +3394,8 @@ test "code action suggests the closest member through a hand-written union" {
 
 test "code action reaches a union arm through a vector element" {
     // The other carrier `unionSlotOf` knows: the validator wraps the leaf
-    // failure in `element_at` and emits at the vector, so the arm is decided
-    // per element.
+    // failure in `element_at` but spans the offending element, so the fix is
+    // offered with the cursor on the typo — and not with it on the `[`.
     const a = std.testing.allocator;
     var fx = handlerFixture(a);
     defer fx.deinit();
@@ -2787,22 +3407,26 @@ test "code action reaches a union arm through a vector element" {
     try h.openDocument("file:///a.sjon", 1, src);
 
     const arena = fx.arena();
-    const vec_start: u32 = @intCast(std.mem.indexOf(u8, src, "[").?);
-    const actions = (try h.getCodeActions(arena, "file:///a.sjon", vec_start, vec_start + 1)).?;
+    const bad_start: u32 = @intCast(std.mem.indexOf(u8, src, "smoothstepp").?);
+    const actions = (try h.getCodeActions(arena, "file:///a.sjon", bad_start, bad_start + 11)).?;
     try std.testing.expectEqual(@as(usize, 1), actions.len);
     try std.testing.expectEqualStrings("not_member", actions[0].diagnostics[0].code);
     try std.testing.expectEqualStrings("Replace with `smoothstep`", actions[0].title);
+
+    // The other half of the move: the `[` no longer carries the diagnostic,
+    // so it no longer carries the fix.
+    const vec_start: u32 = @intCast(std.mem.indexOf(u8, src, "[").?);
+    const at_vec = (try h.getCodeActions(arena, "file:///a.sjon", vec_start, vec_start + 1)).?;
+    try std.testing.expectEqual(@as(usize, 0), at_vec.len);
 }
 
-test "code action offers nothing for a union that determines no arm" {
-    // `[ease-name define-ref]` — two symbol arms — collapses to
-    // `union_no_branch_matched`, which carries no leaf set to suggest from.
-    // `unionArmKind` returns the union unchanged and both fixes decline.
-    const a = std.testing.allocator;
-    var fx = handlerFixture(a);
-    defer fx.deinit();
-    const h = &fx.h;
-    const plugin: sjon.Plugin.Plugin = .{
+/// A slot whose kind is `[ease-name define-ref label]`: two symbol arms, so a
+/// symbol determines no arm and the union code is what fires. `label` is the
+/// string arm a symbol never reaches, and it holds the spelling closest to
+/// the probe — so a fix that ignored reachability would be visible. `:bs`
+/// carries the same union as a vector element.
+fn unionTwoSymbolArmsPlugin() sjon.Plugin.Plugin {
+    return .{
         .name = "ov",
         .value_kinds = &.{
             .{
@@ -2812,25 +3436,140 @@ test "code action offers nothing for a union that determines no arm" {
             },
             .{ .name = "define-ref", .underlying = .symbol, .cross_ref = .{ .targets = &.{"define"} } },
             .{
+                .name = "label",
+                .underlying = .string,
+                .members = .{ .members = &.{.{ .name = "red" }} },
+            },
+            .{
                 .name = "both",
                 .underlying = .union_of,
-                .union_of = .{ .alternatives = &.{ .{ .name = "ease-name" }, .{ .name = "define-ref" } } },
+                .union_of = .{ .alternatives = &.{ .{ .name = "ease-name" }, .{ .name = "define-ref" }, .{ .name = "label" } } },
             },
+            .{ .name = "both-vec", .underlying = .vector, .vector = .{ .element = .{ .name = "both" } } },
         },
         .forms = &.{
             .{ .name = "define", .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = false }} },
-            .{ .name = "k", .keys = &.{.{ .name = "b", .value_type = .{ .named = .{ .name = "both" } } }} },
+            .{
+                .name = "k",
+                .keys = &.{
+                    .{ .name = "b", .value_type = .{ .named = .{ .name = "both" } } },
+                    .{ .name = "bs", .value_type = .{ .named = .{ .name = "both-vec" } } },
+                },
+            },
         },
     };
+}
+
+test "code action pools every reachable arm of a union that determines no arm" {
+    // Two symbol arms reach, so `determinedArm` picks none, the slot reports
+    // `union_no_branch_matched`, and both leaf fixes decline — there is no one
+    // arm to read a candidate set from. Pooling the reachable arms puts a
+    // member typo and a reference typo each one edit from their fix, in the
+    // same slot, without either fix having to guess which arm was meant.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const plugin = unionTwoSymbolArmsPlugin();
     h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
 
-    const src = "(define :name smoothstep) (k :b smoothstepp)";
+    const src = "(define :name gloop) (k :b lineer) (k :b gloopp)";
     try h.openDocument("file:///a.sjon", 1, src);
 
     const arena = fx.arena();
-    const bad_start: u32 = @intCast(std.mem.lastIndexOf(u8, src, "smoothstepp").?);
-    const actions = (try h.getCodeActions(arena, "file:///a.sjon", bad_start, bad_start + 11)).?;
+
+    // From the member arm.
+    const member_start: u32 = @intCast(std.mem.indexOf(u8, src, "lineer").?);
+    const member_actions = (try h.getCodeActions(arena, "file:///a.sjon", member_start, member_start + 6)).?;
+    try std.testing.expectEqual(@as(usize, 1), member_actions.len);
+    try std.testing.expectEqualStrings("union_no_branch_matched", member_actions[0].diagnostics[0].code);
+    try std.testing.expectEqualStrings("Replace with `linear`", member_actions[0].title);
+    try std.testing.expectEqualStrings("linear", member_actions[0].edits[0].new_text);
+
+    // From the cross-ref arm, through the same slot.
+    const ref_start: u32 = @intCast(std.mem.indexOf(u8, src, "gloopp").?);
+    const ref_actions = (try h.getCodeActions(arena, "file:///a.sjon", ref_start, ref_start + 6)).?;
+    try std.testing.expectEqual(@as(usize, 1), ref_actions.len);
+    try std.testing.expectEqualStrings("union_no_branch_matched", ref_actions[0].diagnostics[0].code);
+    try std.testing.expectEqualStrings("Replace with `gloop`", ref_actions[0].title);
+    try std.testing.expectEqualStrings("gloop", ref_actions[0].edits[0].new_text);
+}
+
+test "the union fix skips an arm the value's shape cannot reach" {
+    // `label`'s `red` is one edit from `redd` and would win outright, but a
+    // symbol never reaches a string arm. Reachability is asked of
+    // `Validator.alternativeReaches`, the validator's own rule, so the fix
+    // cannot offer a spelling the validator refused on shape.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const plugin = unionTwoSymbolArmsPlugin();
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    const src = "(k :b redd)";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const diags = (try h.getDiagnostics(arena, "file:///a.sjon")).?;
+    try std.testing.expectEqual(@as(usize, 1), diags.len);
+    try std.testing.expectEqualStrings("union_no_branch_matched", diags[0].code);
+
+    const bad_start: u32 = @intCast(std.mem.indexOf(u8, src, "redd").?);
+    const actions = (try h.getCodeActions(arena, "file:///a.sjon", bad_start, bad_start + 4)).?;
     try std.testing.expectEqual(@as(usize, 0), actions.len);
+}
+
+test "the union fix declines when the value reaches no arm at all" {
+    // A string against `[ease-name ease-form]` reaches neither, which is the
+    // union code's other cause. `lineer` is one edit from a member the symbol
+    // arm accepts, so pooling every arm regardless of shape would offer
+    // `linear` here — and rewriting `"lineer"` to `linear` repairs nothing,
+    // because the slot's complaint is the quotes, not the spelling.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const plugin = handWrittenUnionPlugin();
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    const src = "(k :ease \"lineer\")";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const diags = (try h.getDiagnostics(arena, "file:///a.sjon")).?;
+    try std.testing.expectEqual(@as(usize, 1), diags.len);
+    try std.testing.expectEqualStrings("union_no_branch_matched", diags[0].code);
+
+    const bad_start: u32 = @intCast(std.mem.indexOf(u8, src, "\"lineer\"").?);
+    const actions = (try h.getCodeActions(arena, "file:///a.sjon", bad_start, bad_start + 8)).?;
+    try std.testing.expectEqual(@as(usize, 0), actions.len);
+}
+
+test "the union fix reaches through a vector element" {
+    // The carrier `unionOfSlotKind` knows: the slot is a vector of the union,
+    // and the validator spans the offending element, so the fix is offered on
+    // the typo and not on the `[`.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const plugin = unionTwoSymbolArmsPlugin();
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    const src = "(define :name gloop) (k :bs [linear gloopp])";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const bad_start: u32 = @intCast(std.mem.indexOf(u8, src, "gloopp").?);
+    const actions = (try h.getCodeActions(arena, "file:///a.sjon", bad_start, bad_start + 6)).?;
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    try std.testing.expectEqualStrings("union_no_branch_matched", actions[0].diagnostics[0].code);
+    try std.testing.expectEqualStrings("Replace with `gloop`", actions[0].title);
+
+    const vec_start: u32 = @intCast(std.mem.indexOf(u8, src, "[").?);
+    const at_vec = (try h.getCodeActions(arena, "file:///a.sjon", vec_start, vec_start + 1)).?;
+    try std.testing.expectEqual(@as(usize, 0), at_vec.len);
 }
 
 test "code action returns no fix when cross-ref typo is too distant" {
@@ -2935,6 +3674,127 @@ test "code action suggests closest member for not_member typo" {
     try std.testing.expectEqual(bad_start, act.edits[0].span_start);
     try std.testing.expectEqual(bad_start + 5, act.edits[0].span_end);
     try std.testing.expectEqualStrings("rect", act.edits[0].new_text);
+}
+
+test "code action suggests the closest digit-leading member" {
+    // 16 §4: `2dd` is a unit-bearing number, so the fix path — which read
+    // symbol/string text only — found nothing to measure and offered
+    // nothing, for a typo one edit away from a member the completion list
+    // had offered.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{dimensionsPlugin()});
+
+    const src = "(tex :dimension 2dd)";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const bad_start: u32 = @intCast(std.mem.indexOf(u8, src, "2dd").?);
+    const actions = (try h.getCodeActions(arena, "file:///a.sjon", bad_start, bad_start + 3)).?;
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    try std.testing.expectEqualStrings("not_member", actions[0].diagnostics[0].code);
+    try std.testing.expectEqualStrings("Replace with `2d`", actions[0].title);
+    try std.testing.expectEqual(bad_start, actions[0].edits[0].span_start);
+    try std.testing.expectEqual(bad_start + 3, actions[0].edits[0].span_end);
+    // The member name is already the canonical spelling by construction,
+    // so it goes in verbatim and lexes back to the member it names.
+    try std.testing.expectEqualStrings("2d", actions[0].edits[0].new_text);
+}
+
+test "code action suggests a hyphenated digit-leading member" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{dimensionsPlugin()});
+
+    const src = "(tex :dimension 2d-arry)";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const bad_start: u32 = @intCast(std.mem.indexOf(u8, src, "2d-arry").?);
+    const actions = (try h.getCodeActions(arena, "file:///a.sjon", bad_start, bad_start + 7)).?;
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    try std.testing.expectEqualStrings("Replace with `2d-array`", actions[0].title);
+    try std.testing.expectEqualStrings("2d-array", actions[0].edits[0].new_text);
+}
+
+test "code action suggests a digit-leading member for a symbol typo" {
+    // The other direction, and the reason the emittability guard could not
+    // stay `isPlainSymbol` alone: `1d` is not a bare symbol, but it is the
+    // canonical spelling the lexer reads back as the member, so writing it
+    // over `d` produces a document that validates.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{dimensionsPlugin()});
+
+    const src = "(tex :dimension d)";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const bad_start: u32 = @intCast(std.mem.lastIndexOf(u8, src, "d)").?);
+    const actions = (try h.getCodeActions(arena, "file:///a.sjon", bad_start, bad_start + 1)).?;
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    try std.testing.expectEqualStrings("Replace with `1d`", actions[0].title);
+    try std.testing.expectEqualStrings("1d", actions[0].edits[0].new_text);
+}
+
+test "code action reaches a digit-leading member through a vector element" {
+    // The validator wraps the leaf failure in `element_at` and spans the
+    // offending element, so the fix is reached from the element itself —
+    // which measures membership by the digit-leading spelling rule.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{dimensionsPlugin()});
+
+    const src = "(tex :views [cube 2dd])";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const vec_start: u32 = @intCast(std.mem.indexOf(u8, src, "[").?);
+    const bad_start: u32 = @intCast(std.mem.indexOf(u8, src, "2dd").?);
+    const actions = (try h.getCodeActions(arena, "file:///a.sjon", bad_start, bad_start + 3)).?;
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    try std.testing.expectEqualStrings("not_member", actions[0].diagnostics[0].code);
+    try std.testing.expectEqualStrings("Replace with `2d`", actions[0].title);
+    try std.testing.expectEqual(bad_start, actions[0].edits[0].span_start);
+    try std.testing.expectEqual(bad_start + 3, actions[0].edits[0].span_end);
+
+    // And nothing at the `[`, which no longer carries the diagnostic.
+    const at_vec = (try h.getCodeActions(arena, "file:///a.sjon", vec_start, vec_start + 1)).?;
+    try std.testing.expectEqual(@as(usize, 0), at_vec.len);
+}
+
+test "code action declines a digit-leading typo that is too distant" {
+    // The guard that the fix widened its *input*, not the threshold:
+    // `9zzz` is ≥ 3 edits from every member and still gets nothing, the
+    // same answer a distant symbol gets.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{dimensionsPlugin()});
+
+    const src = "(tex :dimension 9zzz)\n(tex :dimension xyzzy)";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const num_start: u32 = @intCast(std.mem.indexOf(u8, src, "9zzz").?);
+    const sym_start: u32 = @intCast(std.mem.indexOf(u8, src, "xyzzy").?);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        (try h.getCodeActions(arena, "file:///a.sjon", num_start, num_start + 4)).?.len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        (try h.getCodeActions(arena, "file:///a.sjon", sym_start, sym_start + 5)).?.len,
+    );
 }
 
 test "code action skips deprecated members when picking the closest" {
@@ -3844,6 +4704,318 @@ test "cross-ref completion: lists registered names in scope" {
         try std.testing.expect(std.mem.indexOf(u8, it.detail, "audio/phrase") != null);
     }
     try std.testing.expect(saw_p0 and saw_p1);
+}
+
+/// The shipped `xref` plugin's ambiguous pair (`examples/plugins/xref/`):
+/// two target forms reachable two ways. `:pipeline` is a union over one
+/// cross-ref kind per target — two registries, declaration order deciding
+/// between them; `:group-pipeline` is one cross-ref over both targets, one
+/// registry. They admit exactly the same names, so completion has to say
+/// the same thing in both slots.
+fn pipelineUnionPlugin() sjon.Plugin.Plugin {
+    return .{
+        .name = "xref",
+        .value_kinds = &.{
+            .{
+                .name = "render-pipeline-ref",
+                .underlying = .symbol,
+                .cross_ref = .{ .targets = &.{"render-pipeline"} },
+            },
+            .{
+                .name = "compute-pipeline-ref",
+                .underlying = .symbol,
+                .cross_ref = .{ .targets = &.{"compute-pipeline"} },
+            },
+            .{
+                .name = "pipeline-ref",
+                .underlying = .union_of,
+                .union_of = .{ .alternatives = &.{
+                    .{ .name = "render-pipeline-ref" },
+                    .{ .name = "compute-pipeline-ref" },
+                } },
+            },
+            .{
+                .name = "pipeline-group-ref",
+                .underlying = .symbol,
+                .cross_ref = .{ .targets = &.{ "render-pipeline", "compute-pipeline" } },
+            },
+        },
+        .forms = &.{
+            .{ .name = "render-pipeline", .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = false }} },
+            .{ .name = "compute-pipeline", .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = false }} },
+            .{
+                .name = "edge",
+                .keys = &.{
+                    .{ .name = "pipeline", .value_type = .{ .named = .{ .name = "pipeline-ref" } }, .optional = true },
+                    .{ .name = "group-pipeline", .value_type = .{ .named = .{ .name = "pipeline-group-ref" } }, .optional = true },
+                },
+            },
+        },
+    };
+}
+
+test "union completion: an empty slot offers every alternative's candidates" {
+    // 16 §5: `completionsForKvpairValue` fell through to
+    // `kind.members orelse return &.{}`, and a union carries none — so the
+    // one slot shape whose hover already prints "one of X, Y" completed to
+    // nothing. Declaration order, arm by arm, because that is the order
+    // union matching resolves in.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{ handWrittenUnionPlugin(), sjon.plugins.core.plugin });
+
+    const src = "(k :ease )";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, ")").?);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expectEqual(@as(usize, 3), items.len);
+    try std.testing.expectEqualStrings("linear", items[0].label);
+    try std.testing.expectEqualStrings("smoothstep", items[1].label);
+    // The head-set arm's contribution: a snippet, not a bare name.
+    try std.testing.expectEqualStrings("spring", items[2].label);
+    try std.testing.expect(items[2].insert_text != null);
+}
+
+test "union completion: a union of cross-refs offers what the group offers" {
+    // The two ways `xref` spells "either pipeline". The group slot has
+    // always completed; the union slot completed to nothing, though hover
+    // on it already named both target kinds.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{ pipelineUnionPlugin(), sjon.plugins.core.plugin });
+
+    const src =
+        "(render-pipeline :name blit)\n" ++
+        "(compute-pipeline :name reduce)\n" ++
+        "(edge :pipeline )\n" ++
+        "(edge :group-pipeline )";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const union_cursor: u32 = @intCast(std.mem.indexOf(u8, src, "(edge :pipeline ").? + "(edge :pipeline ".len);
+    const group_cursor: u32 = @intCast(std.mem.indexOf(u8, src, "(edge :group-pipeline ").? + "(edge :group-pipeline ".len);
+
+    const union_items = (try h.getCompletion(arena, "file:///a.sjon", union_cursor)).?;
+    try std.testing.expectEqual(@as(usize, 2), union_items.len);
+    try std.testing.expect(hasLabel(union_items, "blit"));
+    try std.testing.expect(hasLabel(union_items, "reduce"));
+
+    const group_items = (try h.getCompletion(arena, "file:///a.sjon", group_cursor)).?;
+    try std.testing.expectEqual(@as(usize, 2), group_items.len);
+    try std.testing.expect(hasLabel(group_items, "blit"));
+    try std.testing.expect(hasLabel(group_items, "reduce"));
+}
+
+test "cross-ref completion: a single target's detail is the canonical name, verbatim" {
+    // The byte-identity half of the pair below. Nothing pinned this
+    // string before, so a change to the group's rendering could have moved
+    // the singular one without a test noticing.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{ crossRefDirectPlugin(), sjon.plugins.core.plugin });
+
+    const src = "(phrase :name p0)\n(jump :target )";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, "(jump :target ").? + "(jump :target ".len);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+    try std.testing.expectEqualStrings("ref → audio/phrase", items[0].detail);
+}
+
+test "cross-ref completion: a group's detail reads as a disjunction" {
+    // The detail rendered `Schema.crossRefBucketKey` raw — the registry's
+    // identity string, space-joined — so every item a group slot offered
+    // carried `ref → xref/compute-pipeline xref/render-pipeline`. This is
+    // the most-seen of the four surfaces the bucket key leaked through:
+    // one per candidate, on every keystroke.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{ pipelineUnionPlugin(), sjon.plugins.core.plugin });
+
+    const src =
+        "(render-pipeline :name blit)\n" ++
+        "(compute-pipeline :name reduce)\n" ++
+        "(edge :group-pipeline )";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, "(edge :group-pipeline ").? + "(edge :group-pipeline ".len);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    // Canonical and sorted, the bucket's own order — the same text the
+    // validator's `not_cross_ref` now names, so an author reading the
+    // completion and then the error sees one spelling.
+    for (items) |it| {
+        try std.testing.expectEqualStrings("ref → xref/compute-pipeline | xref/render-pipeline", it.detail);
+    }
+}
+
+test "union completion: a nested union alternative contributes nothing" {
+    // One level of flattening. `determinedArm` cannot see through a nested
+    // union either, and an unbounded walk here would put a
+    // schema-controlled depth on the host stack.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const plugin: sjon.Plugin.Plugin = .{
+        .name = "nest",
+        .value_kinds = &.{
+            .{
+                .name = "ease-name",
+                .underlying = .symbol,
+                .members = .{ .members = &.{ .{ .name = "linear" }, .{ .name = "smoothstep" } } },
+            },
+            .{
+                .name = "shape-name",
+                .underlying = .symbol,
+                .members = .{ .members = &.{.{ .name = "rect" }} },
+            },
+            .{
+                .name = "inner",
+                .underlying = .union_of,
+                .union_of = .{ .alternatives = &.{.{ .name = "shape-name" }} },
+            },
+            .{
+                .name = "outer",
+                .underlying = .union_of,
+                .union_of = .{ .alternatives = &.{ .{ .name = "ease-name" }, .{ .name = "inner" } } },
+            },
+        },
+        .forms = &.{
+            .{ .name = "k", .keys = &.{.{ .name = "e", .value_type = .{ .named = .{ .name = "outer" } } }} },
+        },
+    };
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    const src = "(k :e )";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, ")").?);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expect(hasLabel(items, "linear"));
+    try std.testing.expect(!hasLabel(items, "rect"));
+}
+
+test "union completion: a typed symbol narrows to the member arm" {
+    // 16 §5: once a value exists it has a shape, and the shape determines
+    // one alternative by the validator's own rule — the same rule ask 15
+    // taught the quick fix, so completion and the fix cannot blame
+    // different arms of the same union.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{ handWrittenUnionPlugin(), sjon.plugins.core.plugin });
+
+    const src = "(k :ease smooth)";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, "smooth").? + 6);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expectEqualStrings("linear", items[0].label);
+    try std.testing.expectEqualStrings("smoothstep", items[1].label);
+}
+
+test "union completion: a partial form narrows to the head-set arm" {
+    // `(k :ease (|))` is the form-head path, not the value path: the
+    // vocabulary narrower asked the union for a head-set, a union has
+    // none, and the slot fell back to the whole global catalog — every
+    // entry of which the head-set would reject.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{ handWrittenUnionPlugin(), sjon.plugins.core.plugin });
+
+    const src = "(k :ease ())";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, "()").? + 1);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+    try std.testing.expectEqualStrings("spring", items[0].label);
+}
+
+test "union completion: a vector element slot offers every alternative" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{ handWrittenUnionPlugin(), sjon.plugins.core.plugin });
+
+    const src = "(k :eases [])";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, "[]").? + 1);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expectEqual(@as(usize, 3), items.len);
+    try std.testing.expectEqualStrings("linear", items[0].label);
+    try std.testing.expectEqualStrings("smoothstep", items[1].label);
+    try std.testing.expectEqualStrings("spring", items[2].label);
+}
+
+test "union completion: a typed vector element narrows to its arm" {
+    // The arm is decided per element, the way the quick fix decides it —
+    // the cursor's own element, not the vector.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{ handWrittenUnionPlugin(), sjon.plugins.core.plugin });
+
+    const src = "(k :eases [smooth])";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, "smooth").? + 6);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expectEqualStrings("linear", items[0].label);
+    try std.testing.expectEqualStrings("smoothstep", items[1].label);
+}
+
+test "union completion: a shape reaching two arms keeps the whole list" {
+    // The guard on the narrowing: `determinedArm` returns null when two
+    // alternatives reach the shape, and that is exactly when the author
+    // still needs both. Typing the first letter of a pipeline name must
+    // not empty the list the empty slot had just offered.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{ pipelineUnionPlugin(), sjon.plugins.core.plugin });
+
+    const src =
+        "(render-pipeline :name blit)\n" ++
+        "(compute-pipeline :name reduce)\n" ++
+        "(edge :pipeline bl)";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const arena = fx.arena();
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, ":pipeline bl").? + ":pipeline bl".len);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expect(hasLabel(items, "blit"));
+    try std.testing.expect(hasLabel(items, "reduce"));
 }
 
 test "cross-ref completion: typed prefix still returns the full list" {
@@ -5691,6 +6863,161 @@ fn discriminatedDrumPlugin() sjon.Plugin.Plugin {
     };
 }
 
+test "code action stubs a missing required variant key" {
+    // `appendMissingRequiredKeyFix` walked `hit.form.keys` alone, so a
+    // required key declared under `(variant :when …)` reported
+    // `missing_required_key` with no stub to insert, while the same key
+    // declared on the form got one. The active variant is the one the
+    // written discriminant selects — plan 14's rule, anchored at the
+    // form's end because any discriminant written anywhere counts here.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const kind_kind: sjon.Plugin.ValueKind = .{
+        .name = "drum-kind",
+        .underlying = .symbol,
+        .members = .{ .members = &.{ .{ .name = "kick" }, .{ .name = "snare" } } },
+    };
+    const plugin: sjon.Plugin.Plugin = .{
+        .name = "drum",
+        .value_kinds = &.{kind_kind},
+        .forms = &.{.{
+            .name = "hit",
+            .discriminant_name = "kind",
+            .discriminant_idx = 0,
+            .keys = &.{
+                .{ .name = "kind", .value_type = .{ .named = .{ .name = "drum-kind" } }, .optional = false },
+            },
+            .variants = &.{
+                .{ .when = &.{"kick"}, .keys = &.{.{ .name = "punch", .value_type = .number, .optional = false }} },
+                .{ .when = &.{"snare"}, .keys = &.{.{ .name = "rattle", .value_type = .number, .optional = false }} },
+            },
+        }},
+    };
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    const src = "(hit :kind kick)";
+    try h.openDocument("file:///a.sjon", 1, src);
+    const diags = (try h.getDiagnostics(arena, "file:///a.sjon")).?;
+    try std.testing.expectEqual(@as(usize, 1), diags.len);
+    try std.testing.expectEqualStrings("missing_required_key", diags[0].code);
+
+    const actions = (try h.getCodeActions(arena, "file:///a.sjon", 1, 4)).?;
+    var punch: ?Handler.CodeAction = null;
+    for (actions) |act| {
+        if (std.mem.eql(u8, act.title, "Insert `:punch` with stub")) punch = act;
+        // The other variant's key is not in scope and must not be offered.
+        try std.testing.expect(!std.mem.eql(u8, act.title, "Insert `:rattle` with stub"));
+    }
+    const act = punch orelse return error.TestMissingStubFix;
+    try std.testing.expectEqualStrings(" :punch 0", act.edits[0].new_text);
+}
+
+/// A discriminant supplied by its own `:default` — axis D. `light` reads
+/// as `point` when `:kind` is omitted, which puts `:range` in scope.
+fn defaultedDiscriminantPlugin() sjon.Plugin.Plugin {
+    const kind_kind: sjon.Plugin.ValueKind = .{
+        .name = "light-kind",
+        .underlying = .symbol,
+        .members = .{ .members = &.{ .{ .name = "point" }, .{ .name = "spot" } } },
+    };
+    return .{
+        .name = "lights",
+        .value_kinds = &.{kind_kind},
+        .forms = &.{.{
+            .name = "light",
+            .discriminant_name = "kind",
+            .discriminant_idx = 0,
+            .keys = &.{
+                .{ .name = "kind", .value_type = .{ .named = .{ .name = "light-kind" } }, .optional = true, .default = .{ .symbol = "point" } },
+            },
+            .variants = &.{
+                .{ .when = &.{"point"}, .keys = &.{.{ .name = "range", .value_type = .number, .optional = true }} },
+                .{ .when = &.{"spot"}, .keys = &.{.{ .name = "reach", .value_type = .number, .optional = true }} },
+            },
+        }},
+    };
+}
+
+test "diagnostics agree with sjon check on a discriminant supplied by its default" {
+    // `Host.validateDocument` passes the defaults overlay to the
+    // validator, so `sjon check` and the corpus accept `(light :range 5)`:
+    // `:kind` defaults to `point`, which selects the variant that
+    // declares `:range`. The language server validated without the
+    // overlay and reported two errors on the same line —
+    // `unknown_key` on `:range` and `missing_discriminant_key` on a key
+    // whose manifest says `:optional true :default point`. An editor
+    // that reports errors the build does not is the failure the overlay
+    // comment on `rebuildMaterialized` was written to prevent, and had
+    // come to cause.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{ defaultedDiscriminantPlugin(), sjon.plugins.core.plugin });
+
+    const arena = fx.arena();
+    try h.openDocument("file:///a.sjon", 1, "(light :range 5)");
+    const diags = (try h.getDiagnostics(arena, "file:///a.sjon")).?;
+    for (diags) |d| std.debug.print("unexpected: {s} {s}\n", .{ d.code, d.message });
+    try std.testing.expectEqual(@as(usize, 0), diags.len);
+
+    // The other direction still holds: a variant key the default does
+    // not select is `unknown_key`, exactly as the CLI reports it.
+    try h.openDocument("file:///b.sjon", 1, "(light :reach 5)");
+    const wrong = (try h.getDiagnostics(arena, "file:///b.sjon")).?;
+    try std.testing.expectEqual(@as(usize, 1), wrong.len);
+    try std.testing.expectEqualStrings("unknown_key", wrong[0].code);
+}
+
+test "hover, key completion and tokens follow a discriminant supplied by its default" {
+    // Once diagnostics take the overlay (the test above), `(light :range
+    // 5)` is clean, and the surfaces that describe `:range` have to agree
+    // or the editor accepts a key it cannot name. Measured before this
+    // change: hover null, `range` absent from key completion, no
+    // property token — the LSP was silent where the CLI was not.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{ defaultedDiscriminantPlugin(), sjon.plugins.core.plugin });
+    const arena = fx.arena();
+
+    const src = "(light :range 5)";
+    try h.openDocument("file:///a.sjon", 1, src);
+    const at: u32 = @intCast(std.mem.indexOf(u8, src, ":range").? + 2);
+    const hover = (try h.getHover(arena, "file:///a.sjon", at)).?;
+    try expectContainsAll(hover.contents, &.{ "**:range**", "**(light)**" });
+
+    const toks = (try h.getSemanticTokens(arena, "file:///a.sjon")).?;
+    try std.testing.expectEqual(Handler.SemanticToken.Type.property, findToken(src, toks, ":range").type);
+
+    //  (light :)
+    //  012345678
+    try h.openDocument("file:///b.sjon", 1, "(light :)");
+    const items = (try h.getCompletion(arena, "file:///b.sjon", 8)).?;
+    var range = false;
+    for (items) |it| {
+        if (std.mem.eql(u8, it.label, "range")) range = true;
+        // The variant the default does not select stays out of scope.
+        try std.testing.expect(!std.mem.eql(u8, it.label, "reach"));
+    }
+    try std.testing.expect(range);
+
+    // A written discriminant wins over the default: `spot` puts `:reach`
+    // in scope and `:range` out of it, on every surface at once.
+    const written = "(light :kind spot :range 5)";
+    try h.openDocument("file:///c.sjon", 1, written);
+    const at_c: u32 = @intCast(std.mem.indexOf(u8, written, ":range").? + 2);
+    try std.testing.expect((try h.getHover(arena, "file:///c.sjon", at_c)) == null);
+    const diags = (try h.getDiagnostics(arena, "file:///c.sjon")).?;
+    try std.testing.expectEqual(@as(usize, 1), diags.len);
+    try std.testing.expectEqualStrings("unknown_key", diags[0].code);
+}
+
 test "discriminant narrowing: matching variant's keys join the base keys" {
     const a = std.testing.allocator;
     var fx = handlerFixture(a);
@@ -5758,6 +7085,1296 @@ test "discriminant narrowing: unrecognised discriminant value falls back to base
         try std.testing.expect(!std.mem.eql(u8, it.label, "punch"));
         try std.testing.expect(!std.mem.eql(u8, it.label, "rattle"));
     }
+}
+
+test "key completion does not offer a variant key ahead of the discriminant" {
+    // The validator's position rule: a variant-only key seen *before* the
+    // discriminant is `unknown_key` (`docs/LANGUAGE.md:1126-1130`). Reading
+    // the discriminant from anywhere in the form suggested exactly what the
+    // resulting message forbids.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const plugin = discriminatedDrumPlugin();
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    //  0         1
+    //  0123456789012345678
+    try h.openDocument("file:///a.sjon", 1, "(hit : :kind kick)");
+
+    const arena = fx.arena();
+
+    // Cursor at byte 6 — after the bare `:`, and *before* `:kind kick`.
+    const items = (try h.getCompletion(arena, "file:///a.sjon", 6)).?;
+    var saw_velocity = false;
+    for (items) |it| {
+        if (std.mem.eql(u8, it.label, "velocity")) saw_velocity = true;
+        try std.testing.expect(!std.mem.eql(u8, it.label, "punch"));
+        try std.testing.expect(!std.mem.eql(u8, it.label, "rattle"));
+    }
+    try std.testing.expect(saw_velocity);
+}
+
+// ---------------------------------------------------------------------------
+// Variant keys on the schema-aware surfaces
+// ---------------------------------------------------------------------------
+
+/// One discriminated form declaring every schema-aware slot shape twice:
+/// once common (`c-*`), once inside `(variant :when fancy …)` (`v-*`), the
+/// same type both times. A surface that answers for `:c-fmt` and goes
+/// quiet on `:v-fmt` is the defect plan 14 fixes — the validator resolves
+/// both, so silence there is the LSP falling behind its own validator.
+const variant_surfaces_plugin: sjon.Plugin.Plugin = blk: {
+    break :blk .{
+        .name = "m",
+        .value_kinds = &.{
+            .{
+                .name = "mode",
+                .underlying = .symbol,
+                .members = .{ .members = &.{ .{ .name = "plain" }, .{ .name = "fancy" } } },
+            },
+            .{
+                .name = "fmt",
+                .underlying = .symbol,
+                .members = .{ .members = &.{ .{ .name = "uint16" }, .{ .name = "uint32" } } },
+            },
+            .{ .name = "fmt-vec", .underlying = .vector, .vector = .{ .element = .{ .name = "fmt" } } },
+            .{ .name = "anchor-ref", .underlying = .symbol, .cross_ref = .{ .targets = &.{"anchor"} } },
+            .{
+                .name = "ease-name",
+                .underlying = .symbol,
+                .members = .{ .members = &.{ .{ .name = "linear" }, .{ .name = "smoothstep" } } },
+            },
+            .{ .name = "ease-form", .underlying = .form, .heads = .{ .heads = &.{.{ .name = "spring" }} } },
+            .{
+                .name = "ease-spec",
+                .underlying = .union_of,
+                .union_of = .{ .alternatives = &.{ .{ .name = "ease-name" }, .{ .name = "ease-form" } } },
+            },
+            .{ .name = "ease-vec", .underlying = .vector, .vector = .{ .element = .{ .name = "ease-spec" } } },
+            .{ .name = "anchor-form", .underlying = .form, .heads = .{ .heads = &.{.{ .name = "anchor" }} } },
+            .{
+                .name = "anchor-or-ref",
+                .underlying = .union_of,
+                .union_of = .{ .alternatives = &.{ .{ .name = "anchor-ref" }, .{ .name = "anchor-form" } } },
+            },
+        },
+        .forms = &.{
+            .{ .name = "anchor", .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = true }} },
+            .{ .name = "spring", .positional = .any },
+            .{
+                .name = "w",
+                .discriminant_name = "mode",
+                .discriminant_idx = 0,
+                .keys = &.{
+                    .{ .name = "mode", .value_type = .{ .named = .{ .name = "mode" } }, .optional = true },
+                    .{ .name = "c-fmt", .value_type = .{ .named = .{ .name = "fmt" } }, .optional = true },
+                    .{ .name = "c-ref", .value_type = .{ .named = .{ .name = "anchor-ref" } }, .optional = true },
+                    .{ .name = "c-shape", .value_type = .form, .optional = true },
+                    .{ .name = "c-fmts", .value_type = .{ .named = .{ .name = "fmt-vec" } }, .optional = true },
+                    .{ .name = "c-spring", .value_type = .{ .named = .{ .name = "ease-form" } }, .optional = true },
+                    .{ .name = "c-ease", .value_type = .{ .named = .{ .name = "ease-spec" } }, .optional = true },
+                    .{ .name = "c-eases", .value_type = .{ .named = .{ .name = "ease-vec" } }, .optional = true },
+                    .{ .name = "c-slot", .value_type = .{ .named = .{ .name = "anchor-or-ref" } }, .optional = true },
+                },
+                .variants = &.{.{
+                    .when = &.{"fancy"},
+                    .keys = &.{
+                        .{ .name = "v-fmt", .value_type = .{ .named = .{ .name = "fmt" } }, .optional = true },
+                        .{ .name = "v-ref", .value_type = .{ .named = .{ .name = "anchor-ref" } }, .optional = true },
+                        .{ .name = "v-shape", .value_type = .form, .optional = true },
+                        .{ .name = "v-fmts", .value_type = .{ .named = .{ .name = "fmt-vec" } }, .optional = true },
+                        .{ .name = "v-spring", .value_type = .{ .named = .{ .name = "ease-form" } }, .optional = true },
+                        .{ .name = "v-ease", .value_type = .{ .named = .{ .name = "ease-spec" } }, .optional = true },
+                        .{ .name = "v-eases", .value_type = .{ .named = .{ .name = "ease-vec" } }, .optional = true },
+                        .{ .name = "v-slot", .value_type = .{ .named = .{ .name = "anchor-or-ref" } }, .optional = true },
+                    },
+                }},
+            },
+        },
+    };
+};
+
+/// Container-scoped so `Schema.init` can borrow it: a `&.{ f(), … }`
+/// built inside a helper points at that helper's stack frame, and the
+/// schema outlives the call.
+const variant_surfaces_plugins = [_]sjon.Plugin.Plugin{ variant_surfaces_plugin, sjon.plugins.core.plugin };
+
+/// Point `h` at `variant_surfaces_plugin` and open `src` — every test in
+/// this section asks the same surfaces of a one-line document.
+fn openVariantSurfaces(h: *Handler, src: []const u8) !void {
+    h.schema = .init(&variant_surfaces_plugins);
+    try h.openDocument("file:///a.sjon", 1, src);
+}
+
+fn offsetOf(src: []const u8, needle: []const u8) u32 {
+    return @intCast(std.mem.indexOf(u8, src, needle).?);
+}
+
+test "hover on a variant key renders the same card as a common key" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const src = "(w :mode fancy :c-fmt uint16 :v-fmt uint32)";
+    try openVariantSurfaces(h, src);
+    const arena = fx.arena();
+
+    const common = (try h.getHover(arena, "file:///a.sjon", offsetOf(src, ":c-fmt") + 2)).?;
+    try std.testing.expect(std.mem.startsWith(u8, common.contents, "**:c-fmt** on **(w)** — `fmt`"));
+
+    const variant = (try h.getHover(arena, "file:///a.sjon", offsetOf(src, ":v-fmt") + 2)).?;
+    try std.testing.expect(std.mem.startsWith(u8, variant.contents, "**:v-fmt** on **(w)** — `fmt`"));
+}
+
+test "hover on a variant key's member value renders the member" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const src = "(w :mode fancy :v-fmt uint32)";
+    try openVariantSurfaces(h, src);
+    const arena = fx.arena();
+
+    const hov = (try h.getHover(arena, "file:///a.sjon", offsetOf(src, "uint32") + 1)).?;
+    try std.testing.expect(std.mem.startsWith(u8, hov.contents, "**uint32** (kind `fmt`)"));
+}
+
+test "hover on a variant key stays null under a value that selects no variant" {
+    // `:mode plain` selects nothing, so the validator calls `:v-fmt`
+    // `unknown_key`. Describing it here would be the LSP going from
+    // silent to confidently wrong.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const src = "(w :mode plain :v-fmt uint32)";
+    try openVariantSurfaces(h, src);
+    const arena = fx.arena();
+
+    try std.testing.expect(try h.getHover(arena, "file:///a.sjon", offsetOf(src, ":v-fmt") + 2) == null);
+    try std.testing.expect(try h.getHover(arena, "file:///a.sjon", offsetOf(src, "uint32") + 1) == null);
+}
+
+test "hover on a variant key stays null ahead of the discriminant" {
+    // Same rule from the other side: the discriminant selects `fancy`,
+    // but it is written *after* `:v-fmt`, which the validator reports as
+    // `unknown_key` (`docs/LANGUAGE.md:1126-1130`).
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const src = "(w :v-fmt uint32 :mode fancy)";
+    try openVariantSurfaces(h, src);
+    const arena = fx.arena();
+
+    try std.testing.expect(try h.getHover(arena, "file:///a.sjon", offsetOf(src, ":v-fmt") + 2) == null);
+    try std.testing.expect(try h.getHover(arena, "file:///a.sjon", offsetOf(src, "uint32") + 1) == null);
+}
+
+test "semantic tokens cover a variant key and its member value" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const src = "(w :mode fancy :v-fmt uint32)";
+    try openVariantSurfaces(h, src);
+
+    const toks = (try h.getSemanticTokens(fx.arena(), "file:///a.sjon")).?;
+    try std.testing.expectEqual(
+        Handler.SemanticToken.Type.property,
+        findToken(src, toks, ":v-fmt").type,
+    );
+    try std.testing.expectEqual(
+        Handler.SemanticToken.Type.enum_member,
+        findToken(src, toks, "uint32").type,
+    );
+}
+
+test "semantic tokens leave a variant key untokenised outside its variant" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const wrong = "(w :mode plain :v-fmt uint32)";
+    try openVariantSurfaces(h, wrong);
+    var toks = (try h.getSemanticTokens(fx.arena(), "file:///a.sjon")).?;
+    try std.testing.expect(noToken(wrong, toks, ":v-fmt"));
+    try std.testing.expect(noToken(wrong, toks, "uint32"));
+
+    const ahead = "(w :v-fmt uint32 :mode fancy)";
+    h.closeDocument("file:///a.sjon");
+    try openVariantSurfaces(h, ahead);
+    toks = (try h.getSemanticTokens(fx.arena(), "file:///a.sjon")).?;
+    try std.testing.expect(noToken(ahead, toks, ":v-fmt"));
+    try std.testing.expect(noToken(ahead, toks, "uint32"));
+}
+
+/// True when some completion item is labelled `label`.
+fn hasLabel(items: []const Handler.CompletionItem, label: []const u8) bool {
+    for (items) |it| {
+        if (std.mem.eql(u8, it.label, label)) return true;
+    }
+    return false;
+}
+
+test "value completion fills a variant key's member set" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const src = "(w :mode fancy :v-fmt )";
+    try openVariantSurfaces(h, src);
+
+    const items = (try h.getCompletion(fx.arena(), "file:///a.sjon", @intCast(src.len - 1))).?;
+    try std.testing.expect(hasLabel(items, "uint16"));
+    try std.testing.expect(hasLabel(items, "uint32"));
+}
+
+test "value completion fills a variant key's cross-ref targets" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const src = "(anchor :name alpha) (w :mode fancy :v-ref )";
+    try openVariantSurfaces(h, src);
+
+    const items = (try h.getCompletion(fx.arena(), "file:///a.sjon", @intCast(src.len - 1))).?;
+    try std.testing.expect(hasLabel(items, "alpha"));
+}
+
+test "value completion fills a variant key's form-valued head set" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const src = "(w :mode fancy :v-spring )";
+    try openVariantSurfaces(h, src);
+
+    const items = (try h.getCompletion(fx.arena(), "file:///a.sjon", @intCast(src.len - 1))).?;
+    try std.testing.expect(hasLabel(items, "spring"));
+}
+
+test "vector-element completion fills a variant key's element members" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    //                       0         1         2
+    //                       0123456789012345678901234567
+    const src = "(w :mode fancy :v-fmts [])";
+    try openVariantSurfaces(h, src);
+
+    const items = (try h.getCompletion(fx.arena(), "file:///a.sjon", offsetOf(src, "[") + 1)).?;
+    try std.testing.expect(hasLabel(items, "uint16"));
+    try std.testing.expect(hasLabel(items, "uint32"));
+}
+
+test "head completion in a variant key's form slot drops the expr vocabulary" {
+    // `:v-shape` is `:type form`, so the slot takes data forms only. With
+    // the key unresolved the slot fell through to `.any` and offered every
+    // expr function in the schema alongside them.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const src = "(w :mode fancy :v-shape ())";
+    try openVariantSurfaces(h, src);
+
+    // Cursor inside the empty inner `()`.
+    const items = (try h.getCompletion(fx.arena(), "file:///a.sjon", offsetOf(src, "()") + 1)).?;
+    try std.testing.expect(hasLabel(items, "spring"));
+    try std.testing.expect(!hasLabel(items, "+"));
+    try std.testing.expect(!hasLabel(items, "clamp"));
+}
+
+test "quick fix suggests the closest member for a variant key" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const src = "(w :mode fancy :v-fmt uint166)";
+    try openVariantSurfaces(h, src);
+
+    const bad = offsetOf(src, "uint166");
+    const actions = (try h.getCodeActions(fx.arena(), "file:///a.sjon", bad, bad + 7)).?;
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    try std.testing.expectEqualStrings("not_member", actions[0].diagnostics[0].code);
+    try std.testing.expectEqualStrings("Replace with `uint16`", actions[0].title);
+}
+
+test "quick fix suggests the closest registered name for a variant key" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const src = "(anchor :name alpha) (w :mode fancy :v-ref alpa)";
+    try openVariantSurfaces(h, src);
+
+    const bad = offsetOf(src, "alpa)");
+    const actions = (try h.getCodeActions(fx.arena(), "file:///a.sjon", bad, bad + 4)).?;
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    try std.testing.expectEqualStrings("not_cross_ref", actions[0].diagnostics[0].code);
+    try std.testing.expectEqualStrings("Replace with `alpha`", actions[0].title);
+}
+
+test "quick fix reaches a determined union arm on a variant key" {
+    // Ask 15's rule through plan 14's lookup: a symbol reaches only
+    // `ease-name` in `[ease-name ease-form]`, so the slot reports
+    // `not_member` and the fix reads that arm's member set.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const src = "(w :mode fancy :v-ease smoothstepp)";
+    try openVariantSurfaces(h, src);
+
+    const bad = offsetOf(src, "smoothstepp");
+    const actions = (try h.getCodeActions(fx.arena(), "file:///a.sjon", bad, bad + 11)).?;
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    try std.testing.expectEqualStrings("not_member", actions[0].diagnostics[0].code);
+    try std.testing.expectEqualStrings("Replace with `smoothstep`", actions[0].title);
+}
+
+test "quick fix reaches a variant key's union arm through a vector element" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const src = "(w :mode fancy :v-eases [linear smoothstepp])";
+    try openVariantSurfaces(h, src);
+
+    const bad = offsetOf(src, "smoothstepp");
+    const actions = (try h.getCodeActions(fx.arena(), "file:///a.sjon", bad, bad + 11)).?;
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    try std.testing.expectEqualStrings("not_member", actions[0].diagnostics[0].code);
+    try std.testing.expectEqualStrings("Replace with `smoothstep`", actions[0].title);
+
+    const vec = offsetOf(src, "[");
+    const at_vec = (try h.getCodeActions(fx.arena(), "file:///a.sjon", vec, vec + 1)).?;
+    try std.testing.expectEqual(@as(usize, 0), at_vec.len);
+}
+
+test "quick fix declines on a variant key whose discriminant selects nothing" {
+    // The validator calls `:v-fmt` `unknown_key` here, and an
+    // `unknown_key` has its own fix; what must not appear is a
+    // `not_member` fix for a slot the document does not have.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const src = "(w :mode plain :v-fmt uint166)";
+    try openVariantSurfaces(h, src);
+
+    const bad = offsetOf(src, "uint166");
+    const actions = (try h.getCodeActions(fx.arena(), "file:///a.sjon", bad, bad + 7)).?;
+    for (actions) |act| {
+        try std.testing.expect(!std.mem.eql(u8, act.title, "Replace with `uint16`"));
+    }
+}
+
+test "extract site: a variant key's union slot is a site" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(w :mode fancy :v-slot (anchor))";
+    try openVariantSurfaces(h, src);
+
+    const cursor: u32 = @intCast(std.mem.lastIndexOfScalar(u8, src, '(').? + 1);
+    const site = (try h.findExtractSite(arena, "file:///a.sjon", cursor, cursor)) orelse
+        return error.ExpectedSite;
+    try std.testing.expectEqualStrings("anchor", site.head);
+}
+
+test "extract site: no site for a variant key outside its variant" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(w :mode plain :v-slot (anchor))";
+    try openVariantSurfaces(h, src);
+
+    const cursor: u32 = @intCast(std.mem.lastIndexOfScalar(u8, src, '(').? + 1);
+    try std.testing.expect(try h.findExtractSite(arena, "file:///a.sjon", cursor, cursor) == null);
+}
+
+// ---------------------------------------------------------------------------
+// Slot-local form resolution on the schema-aware surfaces (plan 15).
+//
+// The validator resolves a form head against the slot it arrived in before
+// the global catalog. Every test here pins the LSP to that same answer —
+// the shadowing case first, because answering a local head with the
+// shadowed global's card is worse than answering nothing.
+// ---------------------------------------------------------------------------
+
+/// Mirror of `examples/plugins/headset-locals/plugin.sjon`: a head-set
+/// gating a slot whose *locals* supply the bodies. `bind-group-layout`
+/// accepts exactly `entry` positionally, `entry` accepts exactly
+/// `buffer` / `storage-texture` / `head`, and only `head` is declared
+/// globally — a head-set member needs no global form to be usable.
+fn headsetLocalsPlugin() sjon.Plugin.Plugin {
+    return .{
+        .name = "headset-locals",
+        .value_kinds = &.{
+            .{
+                .name = "bgl-resource",
+                .underlying = .form,
+                .heads = .{ .heads = &.{
+                    .{ .name = "buffer", .max = 1, .description = "A buffer binding. At most one." },
+                    .{ .name = "storage-texture" },
+                    .{ .name = "head" },
+                } },
+            },
+            .{
+                .name = "bgl-entry-item",
+                .underlying = .form,
+                .heads = .{ .heads = &.{
+                    .{ .name = "entry", .min = 1, .description = "A binding entry. At least one." },
+                } },
+            },
+        },
+        .forms = &.{
+            .{
+                .name = "head",
+                .description = "A global form, reachable from the resource slot.",
+                .keys = &.{.{ .name = "text", .value_type = .string, .optional = false }},
+            },
+            .{
+                .name = "bind-group-layout",
+                .positional = .{ .kind = .{ .name = "bgl-entry-item" } },
+                .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = false }},
+                .local_forms = &.{.{
+                    .name = "entry",
+                    .positional = .{ .kind = .{ .name = "bgl-resource" } },
+                    .keys = &.{.{ .name = "binding", .value_type = .number, .optional = false }},
+                    .local_forms = &.{
+                        .{
+                            .name = "buffer",
+                            .keys = &.{.{ .name = "kind", .value_type = .symbol, .optional = false }},
+                        },
+                        .{
+                            .name = "storage-texture",
+                            .keys = &.{.{ .name = "format", .value_type = .symbol, .optional = false }},
+                        },
+                    },
+                }},
+            },
+        },
+    };
+}
+
+/// A closed head-set over forms that all *are* in the global catalog —
+/// the narrowing without the locals. `c` exists and is not a member, so
+/// a slot that still offered the catalog would offer it.
+fn closedHeadSetPlugin() sjon.Plugin.Plugin {
+    return .{
+        .name = "hs",
+        .value_kinds = &.{.{
+            .name = "member",
+            .underlying = .form,
+            .heads = .{ .heads = &.{ .{ .name = "a" }, .{ .name = "b" } } },
+        }},
+        .forms = &.{
+            .{ .name = "holder", .positional = .{ .kind = .{ .name = "member" } } },
+            .{ .name = "a", .keys = &.{.{ .name = "x", .value_type = .number, .optional = false }} },
+            .{ .name = "b" },
+            .{ .name = "c" },
+        },
+    };
+}
+
+/// A local form whose keys carry *value* typing: a member set, a vector
+/// of members, and a form slot behind a head-set whose body is itself a
+/// local. `localFormsPlugin` mirrors its example plugin byte for byte,
+/// so the value-slot surfaces get their own fixture rather than growing
+/// that one.
+fn localValueSlotsPlugin() sjon.Plugin.Plugin {
+    return .{
+        .name = "lvs",
+        .value_kinds = &.{
+            .{
+                .name = "tone",
+                .underlying = .symbol,
+                .members = .{ .members = &.{ .{ .name = "warm" }, .{ .name = "cool" } } },
+            },
+            .{
+                .name = "tones",
+                .underlying = .vector,
+                .vector = .{ .element = .{ .name = "tone" } },
+            },
+            .{
+                .name = "shape-body",
+                .underlying = .form,
+                .heads = .{ .heads = &.{.{ .name = "blob" }} },
+            },
+        },
+        .forms = &.{.{
+            .name = "outer",
+            .keys = &.{.{
+                .name = "slot",
+                .value_type = .form,
+                .optional = false,
+                .local_forms = &.{.{
+                    .name = "inner",
+                    .keys = &.{
+                        .{ .name = "tone", .value_type = .{ .named = .{ .name = "tone" } }, .optional = true },
+                        .{ .name = "palette", .value_type = .{ .named = .{ .name = "tones" } }, .optional = true },
+                        .{
+                            .name = "body",
+                            .value_type = .{ .named = .{ .name = "shape-body" } },
+                            .optional = true,
+                            .local_forms = &.{.{
+                                .name = "blob",
+                                .keys = &.{.{ .name = "r", .value_type = .number, .optional = false }},
+                            }},
+                        },
+                    },
+                }},
+            }},
+        }},
+    };
+}
+
+/// The plugin set every slot-local test installs. A container-level
+/// constant, not an `&.{…}` literal built inside `openLocalForms`: a
+/// composite literal's lifetime is its enclosing *function*, so a helper
+/// that installed one would hand the handler a dangling `schema.plugins`
+/// the moment it returned.
+const local_forms_plugins = [_]sjon.Plugin.Plugin{ localFormsPlugin(), sjon.plugins.core.plugin };
+
+const headset_locals_plugins = [_]sjon.Plugin.Plugin{ headsetLocalsPlugin(), sjon.plugins.core.plugin };
+const closed_head_set_plugins = [_]sjon.Plugin.Plugin{ closedHeadSetPlugin(), sjon.plugins.core.plugin };
+const local_value_slots_plugins = [_]sjon.Plugin.Plugin{ localValueSlotsPlugin(), sjon.plugins.core.plugin };
+
+/// Open `src` against `localFormsPlugin`, the shadowing fixture.
+fn openLocalForms(h: *Handler, src: []const u8) !void {
+    h.schema = .init(&local_forms_plugins);
+    try h.openDocument("file:///a.sjon", 1, src);
+}
+
+/// Open `src` against `headsetLocalsPlugin`, the head-set fixture.
+fn openHeadsetLocals(h: *Handler, src: []const u8) !void {
+    h.schema = .init(&headset_locals_plugins);
+    try h.openDocument("file:///a.sjon", 1, src);
+}
+
+/// Open `src` against `localValueSlotsPlugin`, the value-slot fixture.
+fn openLocalValueSlots(h: *Handler, src: []const u8) !void {
+    h.schema = .init(&local_value_slots_plugins);
+    try h.openDocument("file:///a.sjon", 1, src);
+}
+
+test "slot-local hover: a shadowed local head shows the local, not the global" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(canvas :shape (circle :r 1))";
+    try openLocalForms(h, src);
+
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, "circle").?);
+    const hv = (try h.getHover(arena, "file:///a.sjon", cursor)) orelse
+        return error.NoHover;
+    // Bites on content, not on presence: the global card renders too.
+    try std.testing.expect(std.mem.indexOf(u8, hv.contents, "Slot-local circle") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hv.contents, "`:r`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hv.contents, "radius") == null);
+}
+
+test "slot-local hover: the same head at the top level still shows the global" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(circle :radius 1)";
+    try openLocalForms(h, src);
+
+    const hv = (try h.getHover(arena, "file:///a.sjon", 1)) orelse return error.NoHover;
+    try std.testing.expect(std.mem.indexOf(u8, hv.contents, "Global circle") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hv.contents, "`:radius`") != null);
+}
+
+test "slot-local hover: a local-only head resolves where the catalog has nothing" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(canvas :shape (rect :w 1 :h 2))";
+    try openLocalForms(h, src);
+
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, "rect").?);
+    const hv = (try h.getHover(arena, "file:///a.sjon", cursor)) orelse
+        return error.NoHover;
+    try std.testing.expect(std.mem.indexOf(u8, hv.contents, "Slot-local rectangle") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hv.contents, "`:w`") != null);
+}
+
+test "slot-local hover: a nested local slot resolves through its own local" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(canvas :shape (group :child (dot)))";
+    try openLocalForms(h, src);
+
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, "dot").?);
+    const hv = (try h.getHover(arena, "file:///a.sjon", cursor)) orelse
+        return error.NoHover;
+    try std.testing.expect(std.mem.indexOf(u8, hv.contents, "**(dot)**") != null);
+}
+
+test "slot-local hover: a key of a shadowed local resolves against the local" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(canvas :shape (circle :r 1))";
+    try openLocalForms(h, src);
+
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, ":r ").? + 1);
+    const hv = (try h.getHover(arena, "file:///a.sjon", cursor)) orelse
+        return error.NoHover;
+    try std.testing.expect(std.mem.indexOf(u8, hv.contents, "**:r** on **(circle)**") != null);
+}
+
+test "slot-local hover: the shadowed global's key is not offered inside the slot" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    // The other half of the shadowing: `:radius` belongs to the global
+    // circle, and the validator calls it `unknown_key` here. Hover must
+    // say nothing rather than describe a key this slot rejects.
+    const src = "(canvas :shape (circle :radius 1))";
+    try openLocalForms(h, src);
+
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, ":radius").? + 1);
+    try std.testing.expect(try h.getHover(arena, "file:///a.sjon", cursor) == null);
+}
+
+test "slot-local hover: the additive global fallback still resolves in a local slot" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(canvas :shape (line :from [0 0] :to [1 1]))";
+    try openLocalForms(h, src);
+
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, "line").?);
+    const hv = (try h.getHover(arena, "file:///a.sjon", cursor)) orelse
+        return error.NoHover;
+    try std.testing.expect(std.mem.indexOf(u8, hv.contents, "A global form") != null);
+}
+
+test "slot-local hover: a head matching neither local nor global renders nothing" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(canvas :shape (ghost))";
+    try openLocalForms(h, src);
+
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, "ghost").?);
+    try std.testing.expect(try h.getHover(arena, "file:///a.sjon", cursor) == null);
+}
+
+test "slot-local hover: a qualified head bypasses the local registry" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    // `local-forms/circle` names the *global* circle explicitly; the
+    // validator lets a qualified head skip locals, and so must hover.
+    const src = "(canvas :shape (local-forms/circle :radius 1))";
+    try openLocalForms(h, src);
+
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, "local-forms/circle").?);
+    const hv = (try h.getHover(arena, "file:///a.sjon", cursor)) orelse
+        return error.NoHover;
+    try std.testing.expect(std.mem.indexOf(u8, hv.contents, "Global circle") != null);
+}
+
+test "slot-local key completion: the local circle offers :r, not the global :radius" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(canvas :shape (circle :))";
+    try openLocalForms(h, src);
+
+    const cursor: u32 = @intCast(std.mem.lastIndexOfScalar(u8, src, ':').? + 1);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expect(hasCompletion(items, "r"));
+    try std.testing.expect(!hasCompletion(items, "radius"));
+}
+
+test "slot-local key completion: a local-only form offers its own keys" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(canvas :shape (rect :))";
+    try openLocalForms(h, src);
+
+    const cursor: u32 = @intCast(std.mem.lastIndexOfScalar(u8, src, ':').? + 1);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expect(hasCompletion(items, "w"));
+    try std.testing.expect(hasCompletion(items, "h"));
+}
+
+test "slot-local key completion: a nested local slot reaches its own local's keys" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(canvas :shape (group :))";
+    try openLocalForms(h, src);
+
+    const cursor: u32 = @intCast(std.mem.lastIndexOfScalar(u8, src, ':').? + 1);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expect(hasCompletion(items, "child"));
+}
+
+test "slot-local semantic tokens: a local head and its keys are coloured" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const src = "(canvas :shape (rect :w 1 :h 2))";
+    try openLocalForms(h, src);
+
+    const toks = (try h.getSemanticTokens(fx.arena(), "file:///a.sjon")).?;
+    // The walk used to stop at the slot boundary: `rect` is in no
+    // catalog, so its head and both keys came back grey.
+    try std.testing.expectEqual(
+        Handler.SemanticToken.Type.macro,
+        findToken(src, toks, "rect").type,
+    );
+    try std.testing.expectEqual(
+        Handler.SemanticToken.Type.property,
+        findToken(src, toks, ":w").type,
+    );
+    try std.testing.expectEqual(
+        Handler.SemanticToken.Type.property,
+        findToken(src, toks, ":h").type,
+    );
+}
+
+test "slot-local semantic tokens: the shadowed global's key stays uncoloured" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    // `:radius` is the *global* circle's key; inside the slot the
+    // validator calls it `unknown_key`, and an undeclared key is grey.
+    const src = "(canvas :shape (circle :radius 1))";
+    try openLocalForms(h, src);
+
+    const toks = (try h.getSemanticTokens(fx.arena(), "file:///a.sjon")).?;
+    try std.testing.expect(noToken(src, toks, ":radius"));
+}
+
+test "slot-local head completion: the slot's own forms are offered" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(canvas :shape ())";
+    try openLocalForms(h, src);
+
+    const cursor: u32 = @intCast(std.mem.lastIndexOf(u8, src, "()").? + 1);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    // Local-only heads, invisible to the catalog.
+    try std.testing.expect(hasCompletion(items, "rect"));
+    try std.testing.expect(hasCompletion(items, "group"));
+    // The additive global fallback still reaches the top-level forms.
+    try std.testing.expect(hasCompletion(items, "line"));
+    try std.testing.expect(hasCompletion(items, "canvas"));
+}
+
+test "slot-local head completion: the shadowed head is offered once, as the local" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(canvas :shape ())";
+    try openLocalForms(h, src);
+
+    const cursor: u32 = @intCast(std.mem.lastIndexOf(u8, src, "()").? + 1);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+
+    // The label is identical either way — which is exactly how the
+    // global's snippet shipped here unnoticed — so the assertion is on
+    // what gets *inserted*.
+    var count: usize = 0;
+    for (items) |it| {
+        if (std.mem.eql(u8, it.label, "circle")) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectEqualStrings("circle :r ${1:0}$0", findCompletion(items, "circle").insert_text.?);
+}
+
+test "slot-local head completion: a nested local slot offers its own local" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(canvas :shape (group :child ()))";
+    try openLocalForms(h, src);
+
+    const cursor: u32 = @intCast(std.mem.lastIndexOf(u8, src, "()").? + 1);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expect(hasCompletionOfKind(items, "dot", .constructor));
+}
+
+test "slot-local head completion: a slot with no locals is unchanged" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "()";
+    try openLocalForms(h, src);
+
+    const items = (try h.getCompletion(arena, "file:///a.sjon", 1)).?;
+    try std.testing.expect(hasCompletion(items, "canvas"));
+    try std.testing.expect(!hasCompletion(items, "rect"));
+    // At the top level `circle` is the global, `:radius` and all.
+    try std.testing.expectEqualStrings("circle :radius ${1:0}$0", findCompletion(items, "circle").insert_text.?);
+}
+
+test "head-set completion: a closed positional slot offers its members, not the catalog" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(bind-group-layout :name a ())";
+    try openHeadsetLocals(h, src);
+
+    const cursor: u32 = @intCast(std.mem.lastIndexOf(u8, src, "()").? + 1);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    // `bgl-entry-item` accepts exactly one head; everything else here is
+    // `not_head_member`, including the 67 globals this used to list.
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+    try std.testing.expectEqualStrings("entry", items[0].label);
+    // The body comes from the local `entry`, which no catalog declares.
+    try std.testing.expectEqualStrings("entry :binding ${1:0}$0", items[0].insert_text.?);
+}
+
+test "head-set completion: a nested closed slot mixes local bodies with a global" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(bind-group-layout :name a (entry :binding 0 ()))";
+    try openHeadsetLocals(h, src);
+
+    const cursor: u32 = @intCast(std.mem.lastIndexOf(u8, src, "()").? + 1);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expectEqual(@as(usize, 3), items.len);
+    try std.testing.expect(hasCompletion(items, "buffer"));
+    try std.testing.expect(hasCompletion(items, "storage-texture"));
+    // `head` is the mixed case: in the set *and* declared globally.
+    try std.testing.expectEqualStrings("head :text \"$1\"$0", findCompletion(items, "head").insert_text.?);
+    try std.testing.expectEqualStrings("buffer :kind ${1:symbol}$0", findCompletion(items, "buffer").insert_text.?);
+}
+
+test "head-set completion: a member's :description reaches the item" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(bind-group-layout :name a (entry :binding 0 ()))";
+    try openHeadsetLocals(h, src);
+
+    const cursor: u32 = @intCast(std.mem.lastIndexOf(u8, src, "()").? + 1);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expectEqualStrings(
+        "A buffer binding. At most one.",
+        findCompletion(items, "buffer").documentation,
+    );
+}
+
+test "head-set completion: keys of a twice-nested local resolve" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(bind-group-layout :name a (entry :binding 0 (buffer :)))";
+    try openHeadsetLocals(h, src);
+
+    const cursor: u32 = @intCast(std.mem.lastIndexOfScalar(u8, src, ':').? + 1);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+    try std.testing.expectEqualStrings("kind", items[0].label);
+}
+
+test "head-set completion: narrowing applies with no locals in play" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    h.schema = .init(&closed_head_set_plugins);
+    const src = "(holder ())";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const cursor: u32 = @intCast(std.mem.lastIndexOf(u8, src, "()").? + 1);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expect(hasCompletion(items, "a"));
+    try std.testing.expect(hasCompletion(items, "b"));
+    // `c` is a declared global outside the set — offering it would be
+    // offering `not_head_member`.
+    try std.testing.expect(!hasCompletion(items, "c"));
+}
+
+test "slot-local quick fix: a misspelt key of a local form is one edit away" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(canvas :shape (circle :rr 1))";
+    try openLocalForms(h, src);
+
+    const start: u32 = @intCast(std.mem.indexOf(u8, src, ":rr").?);
+    const actions = (try h.getCodeActions(arena, "file:///a.sjon", start, start + 3)).?;
+    var found = false;
+    for (actions) |act| {
+        if (std.mem.eql(u8, act.title, "Replace with `:r`")) found = true;
+    }
+    // Resolved against the global `circle`, the nearest key to `rr` is
+    // `radius` — which this slot rejects. The fix has to come from the
+    // local's key set or it is a fix into a second diagnostic.
+    try std.testing.expect(found);
+}
+
+test "slot-local quick fix: a local form's missing required key gets a stub" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(canvas :shape (rect))";
+    try openLocalForms(h, src);
+
+    const start: u32 = @intCast(std.mem.indexOf(u8, src, "(rect)").?);
+    const actions = (try h.getCodeActions(arena, "file:///a.sjon", start, start + 6)).?;
+    var titles: usize = 0;
+    for (actions) |act| {
+        if (std.mem.eql(u8, act.title, "Insert `:w` with stub")) titles += 1;
+        if (std.mem.eql(u8, act.title, "Insert `:h` with stub")) titles += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), titles);
+}
+
+/// The single "Replace with `x`" title among `actions`, or null.
+fn replaceTitle(actions: []const Handler.CodeAction) ?[]const u8 {
+    for (actions) |act| {
+        if (std.mem.startsWith(u8, act.title, "Replace with `")) return act.title;
+    }
+    return null;
+}
+
+/// Code actions covering the first occurrence of `needle` in `src`.
+fn actionsOver(fx: *Fixture, src: []const u8, needle: []const u8) ![]const Handler.CodeAction {
+    const start: u32 = @intCast(std.mem.indexOf(u8, src, needle).?);
+    return (try fx.h.getCodeActions(fx.arena(), "file:///a.sjon", start, start + @as(u32, @intCast(needle.len)))).?;
+}
+
+test "unknown_local_form quick fix: a local-only head the catalog cannot see" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+
+    // `rect` exists only inside `canvas.:shape`, so a fix drawn from the
+    // global catalog has nothing to offer here at all.
+    const src = "(canvas :shape (rec))";
+    try openLocalForms(&fx.h, src);
+
+    const actions = try actionsOver(&fx, src, "rec)");
+    try std.testing.expectEqualStrings("unknown_local_form", actions[0].diagnostics[0].code);
+    try std.testing.expectEqualStrings("Replace with `rect`", replaceTitle(actions).?);
+}
+
+test "unknown_local_form quick fix: the additive global fallback is a candidate" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+
+    // A local slot does not close over its own registry — `line` is
+    // reachable here, so it is offerable here.
+    const src = "(canvas :shape (lin))";
+    try openLocalForms(&fx.h, src);
+
+    const actions = try actionsOver(&fx, src, "lin)");
+    try std.testing.expectEqualStrings("Replace with `line`", replaceTitle(actions).?);
+}
+
+test "unknown_local_form quick fix: a distance tie goes to the slot's own form" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+
+    // `rint` is two edits from the local `rect` and two from the global
+    // `line`. Merged into one candidate list the tie breaks
+    // alphabetically and `line` wins; the slot's vocabulary is the set
+    // the author was writing in, so it wins instead.
+    const src = "(canvas :shape (rint))";
+    try openLocalForms(&fx.h, src);
+
+    const actions = try actionsOver(&fx, src, "rint)");
+    try std.testing.expectEqualStrings("Replace with `rect`", replaceTitle(actions).?);
+}
+
+test "unknown_local_form quick fix: an expression function is not a candidate" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+
+    // `clamp` is one edit away, and `unknown_form`'s fix would offer it.
+    // Step 0's fallback is `lookupForm` alone, so writing it here earns
+    // this same diagnostic — a fix into an identical error.
+    const src = "(canvas :shape (clam))";
+    try openLocalForms(&fx.h, src);
+
+    const actions = try actionsOver(&fx, src, "clam)");
+    try std.testing.expect(replaceTitle(actions) == null);
+}
+
+test "unknown_local_form quick fix: the edit replaces only the head" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+
+    // The diagnostic's path points at the slot, not at the head — an
+    // edit anchored on the path would rewrite the wrong bytes.
+    const src = "(canvas :shape (rec :w 1 :h 2))";
+    try openLocalForms(&fx.h, src);
+
+    const actions = try actionsOver(&fx, src, "rec ");
+    const act = for (actions) |x| {
+        if (std.mem.eql(u8, x.title, "Replace with `rect`")) break x;
+    } else return error.TestMissingFix;
+    try std.testing.expectEqual(@as(usize, 1), act.edits.len);
+    const head_start: u32 = @intCast(std.mem.indexOf(u8, src, "rec ").?);
+    try std.testing.expectEqual(head_start, act.edits[0].span_start);
+    try std.testing.expectEqual(head_start + 3, act.edits[0].span_end);
+    try std.testing.expectEqualStrings("rect", act.edits[0].new_text);
+}
+
+test "slot-local value completion: a member-typed key of a local form offers its members" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(outer :slot (inner :tone ))";
+    try openLocalValueSlots(h, src);
+
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, "))").?);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expect(hasCompletion(items, "warm"));
+    try std.testing.expect(hasCompletion(items, "cool"));
+}
+
+test "slot-local value completion: a vector element inside a local form resolves" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(outer :slot (inner :palette []))";
+    try openLocalValueSlots(h, src);
+
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, "[").? + 1);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expect(hasCompletion(items, "warm"));
+}
+
+test "slot-local value completion: a form-valued slot's body comes from the key's own local" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(outer :slot (inner :body ))";
+    try openLocalValueSlots(h, src);
+
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, "))").?);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+    // `blob` is declared only under `:body`; the catalog has no such
+    // form, so a global lookup produced the bare `(blob $0)` fallback.
+    try std.testing.expectEqualStrings("(blob :r ${1:0}$0)", items[0].insert_text.?);
+}
+
+test "slot-local signature help: a local form's keys are the signature" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(canvas :shape (rect :w 1 :h 2))";
+    try openLocalForms(h, src);
+
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, ":w").?);
+    const sig = (try h.getSignatureHelp(arena, "file:///a.sjon", cursor)) orelse
+        return error.NoSignature;
+    try std.testing.expectEqual(@as(usize, 1), sig.signatures.len);
+    try std.testing.expect(std.mem.indexOf(u8, sig.signatures[0].label, "rect") != null);
+    try std.testing.expectEqual(@as(usize, 2), sig.signatures[0].parameters.len);
+}
+
+/// Expand an LSP snippet to the text an editor lands after the author
+/// tabs through it accepting every default: `${1:0}` → `0`, `$0` → "".
+/// Enough for the round-trip assertion below and nothing more — a real
+/// client's expander also handles choices and variables, which no
+/// snippet this server emits uses.
+fn expandSnippet(out: *std.ArrayList(u8), a: std.mem.Allocator, snippet: []const u8) !void {
+    var i: usize = 0;
+    while (i < snippet.len) {
+        if (snippet[i] != '$') {
+            try out.append(a, snippet[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        if (i < snippet.len and snippet[i] == '{') {
+            const close = std.mem.indexOfScalarPos(u8, snippet, i, '}') orelse return error.UnbalancedSnippet;
+            const body = snippet[i + 1 .. close];
+            if (std.mem.indexOfScalar(u8, body, ':')) |colon| {
+                try out.appendSlice(a, body[colon + 1 ..]);
+            }
+            i = close + 1;
+            continue;
+        }
+        while (i < snippet.len and std.ascii.isDigit(snippet[i])) i += 1;
+    }
+}
+
+test "slot-local head completion: the accepted snippet validates clean" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    const src = "(canvas :shape ())";
+    try openLocalForms(h, src);
+
+    const cursor: u32 = @intCast(std.mem.lastIndexOf(u8, src, "()").? + 1);
+    const items = (try h.getCompletion(arena, "file:///a.sjon", cursor)).?;
+
+    // The whole point of the plan, stated as one fact: accepting a
+    // suggestion the server made inside a local slot must not produce
+    // diagnostics. The global `circle` snippet used to produce two.
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(a);
+    try doc.appendSlice(a, "(canvas :shape (");
+    try expandSnippet(&doc, a, findCompletion(items, "circle").insert_text.?);
+    try doc.appendSlice(a, "))");
+    try std.testing.expectEqualStrings("(canvas :shape (circle :r 0))", doc.items);
+
+    try h.openDocument("file:///b.sjon", 1, doc.items);
+    const diags = (try h.getDiagnostics(arena, "file:///b.sjon")).?;
+    try std.testing.expectEqual(@as(usize, 0), diags.len);
+}
+
+test "slot-local resolution: a 1024-deep nest declines without a stack overflow" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const arena = fx.arena();
+
+    // The descent is bounded by `NodeWalker.MAX_WALK_DEPTH`, which is the
+    // parser's own ceiling — so the deepest tree the parser will build is
+    // exactly the deepest the resolver must survive.
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(a);
+    const depth = 1024;
+    for (0..depth) |_| try src.appendSlice(a, "(canvas :shape ");
+    try src.appendSlice(a, "(circle :r 1)");
+    for (0..depth) |_| try src.append(a, ')');
+
+    try openLocalForms(h, src.items);
+    const cursor: u32 = @intCast(std.mem.lastIndexOf(u8, src.items, "circle").?);
+    // Whatever it answers, it answers without recursing.
+    _ = try h.getHover(arena, "file:///a.sjon", cursor);
 }
 
 // ---------------------------------------------------------------------------
@@ -6978,6 +9595,114 @@ test "inlay hints show evaluated expression default value" {
     const hints = (try h.getInlayHints(fx.arena(), "file:///a.sjon", 0, 7)).?;
     try std.testing.expect(findHint(hints, ":fps 32") != null);
     try std.testing.expect(findHintPrefixed(hints, ":fps (") == null);
+}
+
+/// A `canvas.:shape` slot declaring a local `circle` (`:r`, defaulted)
+/// and a local-only `rect` (`:w`, defaulted). Every key here carries a
+/// `:default`, which the shipped `local-forms` fixture deliberately does
+/// not — an overlay only ever sees defaulted keys.
+const slot_local_defaults_schema =
+    \\(plugin :name paint :version "1.0.0"
+    \\  (form :name canvas
+    \\    (key :name shape :type form
+    \\      (form :name circle
+    \\        (key :name r :type number :default 1))
+    \\      (form :name rect
+    \\        (key :name w :type number :default 2)))))
+;
+
+/// The shadow target, in a *different* plugin so the head hint's label
+/// says which of the two the server thinks it resolved.
+const shadowing_global_schema =
+    \\(plugin :name legacy :version "1.0.0"
+    \\  (form :name circle
+    \\    (key :name radius :type number :default 9)))
+;
+
+/// Install both manifests: the slot-local one and the global it shadows.
+fn installShadowedLocals(fx: *Fixture) !void {
+    const sources = [_]Handler.SchemaSource{
+        .{ .uri = "inmemory://schema/1.sjon", .text = slot_local_defaults_schema },
+        .{ .uri = "inmemory://schema/2.sjon", .text = shadowing_global_schema },
+    };
+    _ = try fx.h.setUserSchemas(fx.arena(), &sources);
+}
+
+test "default hints read the slot: a shadowed local's key, not the global's" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    try installShadowedLocals(&fx);
+    const src = "(canvas :shape (circle))";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const hints = (try h.getInlayHints(fx.arena(), "file:///a.sjon", 0, @intCast(src.len))).?;
+    // The local `circle` declares `:r`; the global one declares
+    // `:radius`. Ghosting `:radius` here would advertise — and the
+    // materialize action would then write — a key the validator reports
+    // as `unknown_key` on this very form.
+    try std.testing.expect(findHint(hints, ":r 1") != null);
+    try std.testing.expect(findHintPrefixed(hints, ":radius") == null);
+}
+
+test "head hints read the slot: a shadowed local names its own plugin" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    try installShadowedLocals(&fx);
+    //             0123456789...
+    const src = "(canvas :shape (circle))";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const hints = (try h.getInlayHints(fx.arena(), "file:///a.sjon", 0, @intCast(src.len))).?;
+    // `circle` occupies bytes 16..22, so its head hint sits at 22.
+    const head = for (hints) |hint| {
+        if (hint.offset == 22 and hint.kind == null) break hint;
+    } else return error.TestMissingHeadHint;
+    try std.testing.expectEqualStrings("paint", head.label);
+}
+
+test "head hints read the slot: a local-only head is hinted at all" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    try installShadowedLocals(&fx);
+    // `rect` exists only inside the slot, so the global catalog cannot
+    // see it — and a catalog lookup left it unlabelled.
+    const src = "(canvas :shape (rect))";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const hints = (try h.getInlayHints(fx.arena(), "file:///a.sjon", 0, @intCast(src.len))).?;
+    const head = for (hints) |hint| {
+        if (hint.offset == 20 and hint.kind == null) break hint;
+    } else return error.TestMissingHeadHint;
+    try std.testing.expectEqualStrings("paint", head.label);
+    try std.testing.expect(findHint(hints, ":w 2") != null);
+}
+
+test "the materialize action writes the slot-local form's keys" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    try installShadowedLocals(&fx);
+    const src = "(canvas :shape (circle))";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    // Cursor inside the inner `circle`, so the action targets it.
+    const cursor: u32 = @intCast(std.mem.indexOf(u8, src, "circle").?);
+    const actions = (try h.getCodeActions(fx.arena(), "file:///a.sjon", cursor, cursor)).?;
+    const act = findAction(actions, "Materialize omitted defaults") orelse
+        return error.TestMissingMaterializeAction;
+    try std.testing.expectEqual(@as(usize, 1), act.edits.len);
+    try std.testing.expectEqualStrings(" :r 1", act.edits[0].new_text);
 }
 
 test "no default hint when the key is written" {
@@ -8279,6 +11004,71 @@ test "opening an injected file promotes it instead of duplicating it" {
     try std.testing.expectEqual(@as(usize, 0), reports[0].diagnostics.len);
 }
 
+test "workspace ingestion skips the project file" {
+    // The project file is the resolver's config, not a document in any
+    // plugin's language. Ingesting it validates `(project …)` against a
+    // vocabulary that has no such form, so every correctly-configured
+    // workspace grew one permanent `unknown_form` in its Problems panel
+    // (audit 2026-08-27 §7).
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    try h.loadProject(std.testing.io, "conformance/cases/cross-ref-provider-unavailable");
+    const project_uri = h.getProjectInfo().?.project_uri.?;
+
+    const ingest = try h.ingestWorkspaceFiles(&.{
+        .{ .uri = project_uri, .source = "(project :plugins [\"./manifests/lines.sjon\"])" },
+        // Comment-only, so the assertion below is about the skip rather
+        // than about what this fixture's one plugin has to say — every
+        // `shader` in its vocabulary carries a provider hint.
+        .{ .uri = "file:///a.sjon", .source = "; a real workspace document\n" },
+    });
+    // Skipped, not clipped — `clipped` is what the ceiling refused, and
+    // the project file never asked for a slot.
+    try std.testing.expectEqual(@as(usize, 1), ingest.ingested);
+    try std.testing.expectEqual(@as(usize, 0), ingest.clipped);
+
+    // The one file the workspace does own is there, and clean.
+    const reports = try h.getWorkspaceDiagnostics(fx.arena());
+    try std.testing.expectEqual(@as(usize, 1), reports.len);
+    try std.testing.expectEqualStrings("file:///a.sjon", reports[0].uri);
+    try std.testing.expectEqual(@as(usize, 0), reports[0].diagnostics.len);
+}
+
+test "workspace ingestion skips the project file under a different URI spelling" {
+    // `Host` builds the project URI by concatenation; the workspace
+    // scanner percent-encodes every byte outside RFC 3986's unreserved
+    // set. The two agree only on paths made of unreserved bytes, so a
+    // workspace under `~/My Projects/` would have handed the skip two
+    // different strings for one file. Driven here with a re-encoded
+    // spelling rather than a real path with a space, which would need a
+    // temp tree just to name a file.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    try h.loadProject(std.testing.io, "conformance/cases/cross-ref-provider-unavailable");
+    const project_uri = h.getProjectInfo().?.project_uri.?;
+
+    const arena = fx.arena();
+    var encoded: std.ArrayList(u8) = .empty;
+    for (project_uri) |c| {
+        if (c == '-') try encoded.appendSlice(arena, "%2D") else try encoded.append(arena, c);
+    }
+    // Different bytes, same file.
+    try std.testing.expect(!std.mem.eql(u8, project_uri, encoded.items));
+
+    const ingest = try h.ingestWorkspaceFiles(&.{
+        .{ .uri = encoded.items, .source = "(project :plugins [\"./manifests/lines.sjon\"])" },
+    });
+    try std.testing.expectEqual(@as(usize, 0), ingest.ingested);
+    try std.testing.expectEqual(@as(usize, 0), ingest.clipped);
+    try std.testing.expectEqual(@as(usize, 0), (try h.getWorkspaceDiagnostics(arena)).len);
+}
+
 // ---------------------------------------------------------------------------
 // Refactor actions — extract-site resolution (plan 11, CP1).
 // ---------------------------------------------------------------------------
@@ -9113,4 +11903,462 @@ test "OOM: a Handler schema-install + open + diagnostics chain converges" {
         }
     }
     return error.OomLoopDidNotConverge;
+}
+
+test "rename: refuses a new name that is not a single symbol token" {
+    // The server's edit set is applied verbatim. A candidate that does
+    // not lex as one whole symbol produces a document the validator then
+    // rejects — `)(` closes the form early, `has space` becomes two
+    // positionals, `nil` becomes a literal. Refuse at the source instead
+    // of handing the editor an edit that breaks the file.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const plugin = audioSchemaPlugin();
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    try h.openDocument("file:///a.sjon", 1, "(phrase :name p0)\n(track :sequence [p0])");
+
+    const arena = fx.arena();
+
+    const invalid: []const []const u8 = &.{
+        ")(",
+        "",
+        "has space",
+        ":keyword",
+        "a\nb",
+        "1bad",
+        "nil",
+        "true",
+        "false",
+        "\"quoted\"",
+        "; comment",
+        "p0 p1",
+        "[p0]",
+    };
+    for (invalid) |name| {
+        const result = (try h.rename(arena, "file:///a.sjon", 15, name)).?;
+        switch (result) {
+            .err => |e| try std.testing.expect(std.mem.indexOf(u8, e.message, "not a symbol") != null),
+            .edits => {
+                std.debug.print("rename accepted invalid name: `{s}`\n", .{name});
+                return error.UnexpectedSuccess;
+            },
+        }
+    }
+}
+
+test "rename: accepts an ordinary symbol" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    const plugin = audioSchemaPlugin();
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    try h.openDocument("file:///a.sjon", 1, "(phrase :name p0)\n(track :sequence [p0])");
+
+    const arena = fx.arena();
+
+    // Operator-ish and sigil-prefixed spellings are symbols too — the
+    // check asks the lexer, not a hand-rolled character table, so it
+    // accepts exactly what the parser would read back as one symbol.
+    const valid: []const []const u8 = &.{ "omega", "p-1", "C#4", "$ref", "truefoo" };
+    for (valid) |name| {
+        const result = (try h.rename(arena, "file:///a.sjon", 15, name)).?;
+        switch (result) {
+            .err => |e| {
+                std.debug.print("rename refused valid name `{s}`: {s}\n", .{ name, e.message });
+                return error.UnexpectedError;
+            },
+            .edits => |we| try std.testing.expectEqual(@as(usize, 2), we.changes[0].edits.len),
+        }
+    }
+}
+
+test "signature help: active param survives the trailing edge of a value" {
+    // The cursor sits past the last written kvpair for the whole time the
+    // user is typing that kvpair's value, which is exactly when the
+    // highlight is wanted. `positionalIndex`, the expr-func sibling,
+    // carries the same rule (it did not, when this test was written —
+    // see the expression-argument test below).
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const box: sjon.Plugin.FormSpec = .{
+        .name = "box",
+        .keys = &.{
+            .{ .name = "name", .value_type = .symbol, .optional = true },
+            .{ .name = "w", .value_type = .number, .optional = true },
+        },
+    };
+    const plugin: sjon.Plugin.Plugin = .{ .name = "test", .forms = &.{box} };
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    //  (box :name a :w 1)
+    //  0123456789111111111
+    //            012345678
+    try h.openDocument("file:///a.sjon", 1, "(box :name a :w 1)");
+
+    const arena = fx.arena();
+
+    const Case = struct { cursor: u32, want: ?u32 };
+    const cases: []const Case = &.{
+        .{ .cursor = 7, .want = 0 }, // inside `:na|me`
+        .{ .cursor = 11, .want = 0 }, // on the value `|a`
+        .{ .cursor = 12, .want = 0 }, // trailing edge of `:name a|`
+        .{ .cursor = 13, .want = 1 }, // at `:w`'s start — containment wins
+        .{ .cursor = 17, .want = 1 }, // trailing edge of `:w 1|`
+    };
+    for (cases) |c| {
+        const help = (try h.getSignatureHelp(arena, "file:///a.sjon", c.cursor)).?;
+        std.testing.expectEqual(c.want, help.active_parameter) catch |e| {
+            std.debug.print("cursor {d}: got {?d}, want {?d}\n", .{ c.cursor, help.active_parameter, c.want });
+            return e;
+        };
+    }
+}
+
+test "signature help: active param holds in the gap before the closing paren" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const box: sjon.Plugin.FormSpec = .{
+        .name = "box",
+        .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = true }},
+    };
+    const plugin: sjon.Plugin.Plugin = .{ .name = "test", .forms = &.{box} };
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    //  (box :name a )
+    //  01234567890123
+    try h.openDocument("file:///a.sjon", 1, "(box :name a )");
+
+    const arena = fx.arena();
+
+    const help = (try h.getSignatureHelp(arena, "file:///a.sjon", 13)).?;
+    try std.testing.expectEqual(@as(?u32, 0), help.active_parameter);
+}
+
+test "signature help: a positional after the last kvpair clears the active param" {
+    // The trailing rule answers "which key is the cursor still inside the
+    // tail of". A positional written after the kvpair breaks that: the
+    // cursor is past a child that is not a key at all, so no key is
+    // active.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const box: sjon.Plugin.FormSpec = .{
+        .name = "box",
+        .keys = &.{.{ .name = "name", .value_type = .symbol, .optional = true }},
+    };
+    const plugin: sjon.Plugin.Plugin = .{ .name = "test", .forms = &.{box} };
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    //  (box :name a x)
+    //  012345678901234
+    try h.openDocument("file:///a.sjon", 1, "(box :name a x)");
+
+    const arena = fx.arena();
+
+    const help = (try h.getSignatureHelp(arena, "file:///a.sjon", 14)).?;
+    try std.testing.expectEqual(@as(?u32, null), help.active_parameter);
+}
+
+test "signature help: the argument being typed counts toward overload selection" {
+    // `chooseActiveSignature` counted written children, so the picker
+    // showed the 1-arg overload for the whole time the user was typing
+    // the second argument — the signature card lags one argument behind
+    // the call it is describing.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const plugin: sjon.Plugin.Plugin = .{ .name = "m", .expr_funcs = &.{arityOverloadedFunc()} };
+    h.schema = .init(&.{plugin});
+
+    const arena = fx.arena();
+
+    //  (f 1 )
+    //  012345
+    try h.openDocument("file:///a.sjon", 1, "(f 1 )");
+    const help = (try h.getSignatureHelp(arena, "file:///a.sjon", 5)).?;
+    try std.testing.expectEqual(@as(usize, 2), help.signatures.len);
+    try std.testing.expectEqual(@as(u32, 1), help.active_signature);
+
+    // The cursor at the trailing edge of `1` is still writing `1`, not a
+    // second argument — the boundary that keeps the picker from jumping
+    // a whole overload ahead on every keystroke.
+    try h.openDocument("file:///b.sjon", 1, "(f 1)");
+    const held = (try h.getSignatureHelp(arena, "file:///b.sjon", 4)).?;
+    try std.testing.expectEqual(@as(u32, 0), held.active_signature);
+
+    // Past the last written argument of a full call: nothing accepts
+    // three, so the written-arity rule still answers.
+    try h.openDocument("file:///c.sjon", 1, "(f 1 2 )");
+    const full = (try h.getSignatureHelp(arena, "file:///c.sjon", 7)).?;
+    try std.testing.expectEqual(@as(u32, 1), full.active_signature);
+}
+
+test "signature help: active param survives the trailing edge of an expression argument" {
+    // The kvpair twin of this rule landed with plan 17; the expression
+    // side had the same hole. `positionalIndex` counted a child whose
+    // span *ended* at the cursor as completed, so `(f 1|)` reported
+    // argument 1 — out of range for the 1-arg overload — and the
+    // highlight blinked off on the last keystroke of every argument.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const plugin: sjon.Plugin.Plugin = .{ .name = "m", .expr_funcs = &.{arityOverloadedFunc()} };
+    h.schema = .init(&.{plugin});
+
+    const arena = fx.arena();
+
+    //  (f 1)
+    //  01234
+    try h.openDocument("file:///a.sjon", 1, "(f 1)");
+    const Case = struct { uri: []const u8, cursor: u32, want: ?u32 };
+    try h.openDocument("file:///b.sjon", 1, "(f 1 2)");
+    try h.openDocument("file:///c.sjon", 1, "(f 1 )");
+    const cases: []const Case = &.{
+        .{ .uri = "file:///a.sjon", .cursor = 3, .want = 0 }, // on `|1`
+        .{ .uri = "file:///a.sjon", .cursor = 4, .want = 0 }, // trailing edge of `1|`
+        .{ .uri = "file:///b.sjon", .cursor = 4, .want = 0 }, // `1|` with a second argument written
+        .{ .uri = "file:///b.sjon", .cursor = 5, .want = 1 }, // at `2`'s start — containment wins
+        .{ .uri = "file:///b.sjon", .cursor = 6, .want = 1 }, // trailing edge of `2|`
+        .{ .uri = "file:///c.sjon", .cursor = 5, .want = 1 }, // past `1 `: the second is being written
+    };
+    for (cases) |c| {
+        const help = (try h.getSignatureHelp(arena, c.uri, c.cursor)).?;
+        std.testing.expectEqual(c.want, help.active_parameter) catch |e| {
+            std.debug.print("{s} cursor {d}: got {?d}, want {?d}\n", .{ c.uri, c.cursor, help.active_parameter, c.want });
+            return e;
+        };
+    }
+}
+
+test "completion: a form-head snippet carries filter_text" {
+    // A form-head item's `insert_text` is a `(head :key …)` skeleton. A
+    // client that filters on `insertText` when `filterText` is absent
+    // matches nothing the user typed — the item vanishes the moment a
+    // letter is entered. `CompletionItem.filter_text`'s own doc promises
+    // this is set wherever `insert_text` differs from `label`.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const widget: sjon.Plugin.FormSpec = .{
+        .name = "widget",
+        .keys = &.{.{ .name = "size", .value_type = .number, .optional = false }},
+    };
+    const plugin: sjon.Plugin.Plugin = .{ .name = "test", .forms = &.{widget} };
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    try h.openDocument("file:///a.sjon", 1, "(");
+
+    const arena = fx.arena();
+    const items = (try h.getCompletion(arena, "file:///a.sjon", 1)).?;
+
+    var saw = false;
+    for (items) |item| {
+        if (!std.mem.eql(u8, item.label, "widget")) continue;
+        saw = true;
+        try std.testing.expect(item.insert_text != null);
+        try std.testing.expectEqualStrings("widget", item.filter_text orelse return error.MissingFilterText);
+    }
+    try std.testing.expect(saw);
+}
+
+test "completion: a head-set member snippet carries filter_text" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const shape_kind: sjon.Plugin.ValueKind = .{
+        .name = "shape",
+        .underlying = .form,
+        .heads = .{ .heads = &.{.{ .name = "circle" }} },
+    };
+    const circle: sjon.Plugin.FormSpec = .{
+        .name = "circle",
+        .keys = &.{.{ .name = "r", .value_type = .number, .optional = false }},
+    };
+    const scene: sjon.Plugin.FormSpec = .{
+        .name = "scene",
+        .keys = &.{.{ .name = "body", .value_type = .{ .named = .{ .name = "shape" } }, .optional = false }},
+    };
+    const plugin: sjon.Plugin.Plugin = .{
+        .name = "test",
+        .value_kinds = &.{shape_kind},
+        .forms = &.{ circle, scene },
+    };
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    //  (scene :body ()
+    //  0123456789012345
+    try h.openDocument("file:///a.sjon", 1, "(scene :body (");
+
+    const arena = fx.arena();
+    const items = (try h.getCompletion(arena, "file:///a.sjon", 14)).?;
+
+    var saw = false;
+    for (items) |item| {
+        if (!std.mem.eql(u8, item.label, "circle")) continue;
+        saw = true;
+        try std.testing.expectEqualStrings("circle", item.filter_text orelse return error.MissingFilterText);
+    }
+    try std.testing.expect(saw);
+}
+
+test "completion: a deprecated member sorts after a live one" {
+    // `CompletionItem.sort_text`'s doc promises a non-deprecated bias.
+    // Declaration order puts the deprecated member first here, so the
+    // assertion bites only if the bias is real.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const status_kind: sjon.Plugin.ValueKind = .{
+        .name = "status",
+        .underlying = .symbol,
+        .members = .{ .members = &.{
+            .{ .name = "archived", .deprecated = true },
+            .{ .name = "draft" },
+            .{ .name = "live" },
+        } },
+    };
+    const post: sjon.Plugin.FormSpec = .{
+        .name = "post",
+        .keys = &.{.{ .name = "status", .value_type = .{ .named = .{ .name = "status" } }, .optional = false }},
+    };
+    const plugin: sjon.Plugin.Plugin = .{ .name = "blog", .value_kinds = &.{status_kind}, .forms = &.{post} };
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    //  (post :status )
+    //  012345678901234
+    try h.openDocument("file:///a.sjon", 1, "(post :status )");
+
+    const arena = fx.arena();
+    const items = (try h.getCompletion(arena, "file:///a.sjon", 14)).?;
+    try std.testing.expectEqual(@as(usize, 3), items.len);
+
+    var archived: ?[]const u8 = null;
+    var draft: ?[]const u8 = null;
+    var live: ?[]const u8 = null;
+    for (items) |item| {
+        if (std.mem.eql(u8, item.label, "archived")) archived = item.sort_text;
+        if (std.mem.eql(u8, item.label, "draft")) draft = item.sort_text;
+        if (std.mem.eql(u8, item.label, "live")) live = item.sort_text;
+    }
+    const arch = archived orelse return error.MissingSortText;
+    const dr = draft orelse return error.MissingSortText;
+    const lv = live orelse return error.MissingSortText;
+    // Deprecated last, and the two live members keep declaration order.
+    try std.testing.expect(std.mem.order(u8, dr, arch) == .lt);
+    try std.testing.expect(std.mem.order(u8, lv, arch) == .lt);
+    try std.testing.expect(std.mem.order(u8, dr, lv) == .lt);
+}
+
+test "completion: no sort_text is invented when nothing is deprecated" {
+    // The bias exists to move deprecated items; a list with none keeps
+    // whatever order the schema stated, unsorted by the client.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+
+    const status_kind: sjon.Plugin.ValueKind = .{
+        .name = "status",
+        .underlying = .symbol,
+        .members = .{ .members = &.{ .{ .name = "zebra" }, .{ .name = "draft" } } },
+    };
+    const post: sjon.Plugin.FormSpec = .{
+        .name = "post",
+        .keys = &.{.{ .name = "status", .value_type = .{ .named = .{ .name = "status" } }, .optional = false }},
+    };
+    const plugin: sjon.Plugin.Plugin = .{ .name = "blog", .value_kinds = &.{status_kind}, .forms = &.{post} };
+    h.schema = .init(&.{ plugin, sjon.plugins.core.plugin });
+
+    try h.openDocument("file:///a.sjon", 1, "(post :status )");
+
+    const arena = fx.arena();
+    const items = (try h.getCompletion(arena, "file:///a.sjon", 14)).?;
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expectEqualStrings("zebra", items[0].label);
+    for (items) |item| try std.testing.expect(item.sort_text == null);
+}
+
+/// Schema whose `:parent` key is an acyclic self-referential cross-ref —
+/// the shape that makes the validator emit `cyclic_cross_ref`.
+fn acyclicCrossRefPlugin() sjon.Plugin.Plugin {
+    // Deliberately *not* named for the constraint: a kind called
+    // `node-acyclic` would put the word in the hover header and any
+    // substring assertion would pass without the arm existing.
+    const node_ref: sjon.Plugin.ValueKind = .{
+        .name = "node-ref",
+        .underlying = .symbol,
+        .cross_ref = .{ .targets = &.{"node"}, .name_key = "id", .acyclic = true },
+    };
+    return .{
+        .name = "graph",
+        .value_kinds = &.{node_ref},
+        .forms = &.{
+            .{
+                .name = "node",
+                .keys = &.{
+                    .{ .name = "id", .value_type = .symbol, .optional = false },
+                    .{ .name = "parent", .value_type = .{ .named = .{ .name = "node-ref" } }, .optional = true },
+                },
+            },
+        },
+    };
+}
+
+test "hover on an acyclic cross-ref says so" {
+    // Without the arm, hover on an acyclic cross-ref printed exactly what
+    // a bare one prints and never mentioned the cycle rule — which is the
+    // whole of what distinguishes that kind, and the rule the author will
+    // be told about by `cyclic_cross_ref` if they break it.
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{ acyclicCrossRefPlugin(), sjon.plugins.core.plugin });
+
+    const src = "(node :id a)\n(node :id b :parent a)";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const at: u32 = @intCast(std.mem.indexOf(u8, src, ":parent").? + 2);
+    const hv = (try h.getHover(fx.arena(), "file:///a.sjon", at)).?;
+
+    try expectContainsAll(hv.contents, &.{"cross-ref to `(node …)` by `:id`, acyclic"});
+}
+
+test "hover on a plain cross-ref does not claim acyclic" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{ crossRefDirectPlugin(), sjon.plugins.core.plugin });
+
+    const src = "(phrase :name p0)\n(jump :target p0)";
+    try h.openDocument("file:///a.sjon", 1, src);
+
+    const at: u32 = @intCast(std.mem.indexOf(u8, src, ":target").? + 2);
+    const hv = (try h.getHover(fx.arena(), "file:///a.sjon", at)).?;
+
+    try std.testing.expect(std.mem.indexOf(u8, hv.contents, "acyclic") == null);
 }

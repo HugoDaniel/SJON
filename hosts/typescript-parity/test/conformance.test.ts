@@ -31,6 +31,7 @@ import type { Node, FormNode } from '../src/ast.ts';
 import {
   assertDiagnosticsMatch,
   classifyCase,
+  heldSymbolFor,
   discoverCaseDirs,
   hostCaseName,
   nativeCaseName,
@@ -242,10 +243,17 @@ for (const name of INLINE_CASES) {
       ? resolve(caseDir, 'sjon-project.sjon')
       : null;
 
+    // `held-*` cases are documents being typed: the run sets `heldSymbol`,
+    // so a position spelled `_` is one the author has deliberately not
+    // filled in yet. Read from `classifier.json` through the shared module,
+    // so this host, the web host, `hosts/rust/build.rs` and the Zig
+    // reference runner cannot disagree about which cases opt in.
+    const heldSymbol = heldSymbolFor(name);
     const result = validateDocument(documentSrc, {
       projectRoot: caseDir,
       resolver: null,
       projectFile,
+      ...(heldSymbol === null ? {} : { heldSymbol }),
     });
 
     const diags = result.diagnostics;

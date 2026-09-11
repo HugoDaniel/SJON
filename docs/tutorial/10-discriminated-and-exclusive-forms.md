@@ -189,6 +189,68 @@ variant it quotes the plugin's own spelling, so you will read both
 ``(variant `:when [triangle-strip line-strip]`)``. The bracketed one is
 a multi-value variant, not a different construct.
 
+### Defaults Inside A Variant
+
+A variant key can carry a default like any other key, and the rule for
+when it applies is the one you already have from
+[Reading plugin schemas](09-reading-plugin-schemas.md): a default fills
+an omitted *declared* key, and a variant key is declared exactly while
+its variant is active. Give the track two of them:
+
+```text title="plugin summary"
+(track ...)
+  discriminant: kind
+  :kind track-kind optional (default kick)
+  :name symbol required
+  variant when kick
+    :step number required
+    :volume number optional (default 0.8)
+  variant when groove
+    :pattern symbol required
+    :swing number optional (default 0)
+```
+
+So `(track :kind kick :name k1 :step 4)` has an effective `:volume` of
+`0.8`, and `(track :kind groove :name g1 :pattern p0)` has an effective
+`:swing` of `0` and no `:volume` at all, because under `groove` there
+is no `:volume` column in the table to fill.
+
+The discriminant is a common key, so it can default too, and the order
+the overlay is built in is what makes that work: common keys first,
+then the keys of whichever variant the discriminant, written or
+defaulted, selects. A track that names no kind is therefore a kick, and
+a kick's defaults follow:
+
+```
+written                        effective
+
+(track :name k1 :step 4)       (track :name k1 :step 4 :kind kick :volume 0.8)
+```
+
+`:step` is accepted there even though no `:kind` was written before
+it. The discriminant-first rule is about a *written* discriminant
+arriving after a variant key; a defaulted one has no position to be
+after.
+
+Two things do not change. An author value still wins over a default,
+on a variant key as on a common one, so `(track :kind kick :name k1
+:step 4 :volume 1)` keeps its `1`. And a key under the wrong variant is
+still `unknown_key`, default or no default: `(track :kind groove
+:name g1 :pattern p0 :volume 1)` is rejected, and the message names
+the active variant, ``(variant `:when groove`)``. A default is a
+fallback for an omitted declared key, and a key the validator does not
+accept at that position is not declared there.
+
+And one thing a default cannot hide. A defaulted variant key is
+checked the way a written one is. Had `:volume` been typed as a
+cross-reference to a `(phrase …)` with a default that names no phrase,
+the omission would draw `not_cross_ref` on the path
+`[track volume default]`. The `default` at the end is the tell: the
+value that failed is one you never wrote, so the repair is either to
+declare what the schema's default assumes exists, or to write the key
+yourself. `examples/plugins/variant-defaults/` in the repository is
+that case, run through `sjon effective` line by line.
+
 ## Exclusive Groups
 
 The second pattern counts. A form accepts several keys but allows only

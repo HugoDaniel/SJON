@@ -4,6 +4,566 @@ All notable, breaking, or contract-affecting changes land here, documented
 plainly. The stable surfaces — the binary wire format and the diagnostic-code
 enum — are versioned and corpus-gated; nothing changes them silently.
 
+## 1.4.0 — 2026-09-11
+
+The contract at a glance: no wire-format change (still v5), **no** new
+diagnostic codes, and the conformance corpus at 393 cases (from 374).
+One semantic change on a 1.x surface, pinned by corpus: `:walk-opaque`
+now stops every walk, not only the validator's (see Changed). Ten asks
+landed: eight from a third host, animader, whose product is an editing
+session rather than an artefact (16, 17, 18, 21 to 25), and two from
+PNGine out of a build rather than a plan (19, a defect; 20, a crash).
+Between them `Edit` became something a live editor can drive: it wraps a
+node without re-encoding it, keeps the author's layout, reaches the root
+list, has a CLI verb, and tells a host which node sits under a byte and
+what that node's address is. The validator learned to accept a position
+the author has not filled in yet. The language server's schema-aware
+surfaces caught up with the validator on slot-local forms, variant keys,
+unions, typed-vector elements and digit-leading members (LSP plans 13
+to 22), and a Zig-mastery pass closed fifteen user-reachable crash
+sites. `docs/plans/asks/README.md` and `docs/plans/lsp/README.md` carry
+the ledgers.
+
+### Added
+
+- **`wrap`, the sixth edit operation, and `"root": N` on every
+  action.** `Edit` could replace a node but not compose one into a new
+  parent without re-encoding it: `replace` builds its node from JSON,
+  and the JSON bridge carries no comments, so putting `(* 2 (sin t))`
+  under a new `(+ … 0.1)` destroyed the comments inside it even though
+  nothing about it changed. `wrap` takes a `value` (the new parent, with
+  a placeholder where the wrapped node lands) and a `hole` (a path in
+  the same grammar as `path`, walked against the decoded parent); the
+  wrapped node crosses through `TreeBuilder.cloneNode`, so its comments,
+  spans and internal formatting survive, while the parent around it is
+  the usual trivia-free synthesis. `path` may be empty (wrap the root);
+  `hole` may not (`error.InvalidPath`), since a wrap with nowhere to put
+  its target is a `replace` that discards it. The re-printing apply
+  does not keep layout: `.full` mode re-prints from the tree, so a form
+  carrying a comment cannot stay on one line (the `.preserve` apply
+  further down is the one that keeps it). The second half is what
+  makes the op usable on a real file: `Edit` had refused *every*
+  multi-root document,
+  which is every file that declares or references a plugin. Every action
+  now carries an optional `root`; an omitted `root` on a multi-root tree
+  is still `error.MultipleRoots`, a refusal rather than an implicit `0`,
+  and every other root is cloned through untouched. `@sjon/schema`
+  gains `edit.wrap(path, value, hole)` and the `edit.atRoot(action,
+  index)` combinator. Spec: LANGUAGE.md §11 (§11.3 is now "Which
+  root"). `examples/edit-wrap.mjs` prints the three cases from Node.
+  Filed by animader as 17 (`docs/plans/asks/17-…`).
+
+- **Every staging layer survives into the result, and a chain walks a
+  lowered form back to the authored one.** Lowering is staged: a hook
+  that emits a form which is itself lowerable produces another layer.
+  `HostResult` used to keep only the terminal layer and free the rest,
+  so for two or more layers no earlier hop was recoverable, and the
+  terminal provenance table's `source_form_idx` indexed a *freed*
+  layer's tree: read against `HostResult.tree`, it landed on an
+  unrelated node rather than failing. `HostResult.lowering_stages` now
+  holds one `LoweringStage` (tree, one-hop provenance, defaults overlay)
+  per layer and is the sole owner of the lowered trees; `lowered_tree`,
+  `lowering_provenance` and `lowered_materialized_defaults` are aliases
+  of the last stage. `provenanceChain(terminal_form_idx, &buf)` composes
+  the tables into `Hop`s that carry *both* trees, source-first, without
+  allocating (`buf` is `[Lowering.MAX_LOWERING_STAGES]Hop`);
+  `provenanceChainFrom(stage_index, …)` takes the layer, because
+  "terminal" is per form rather than per document: a hook that emits one
+  form which lowers again and one which does not leaves the second a
+  root of an intermediate layer. What this answers is **eject**
+  (replace a verb's authored span with the text of what the verb wrote),
+  which reads layer 0, so a verb emitting another host's sugar ejects to
+  that sugar and not to the core it becomes. Zig-only, like all of
+  lowering (see the fourth parity boundary in `CLAUDE.md`). Spec:
+  `docs/plugin-model-v1.md`, "The layers are part of the result".
+  `examples/lowering-stages-demo.zig` (`zig build lowering-demo`) runs
+  it. Filed by animader as 16.
+
+- **A lowering hook resolves a cross-reference to the form it names.**
+  A hook could read a reference's symbol and could not get from it to
+  the form. `LoweringInput.resolveRef(key)` is keyed on the hook's own
+  form like the five typed readers: the key's declared value kind
+  supplies the target set, so a hook cannot look in the wrong bucket,
+  and a multi-target `(cross-ref :target [a b])` resolves without the
+  hook knowing there are two. What comes back is a node index the
+  effective view already takes, so a neighbour's defaulted value arrives
+  through the overlay with nothing special in the hook. Behind it is the
+  validator's own index (`Validator.buildCrossRefIndexForLookup`), built
+  lazily once per staging layer and only when a hook asks, which is what
+  keeps scope, the shared multi-target bucket, provider-backed names and
+  slot-local `:name`s in step with the language; a hand-rolled scan over
+  `view.tree.root` gets all four wrong silently. The bound is written
+  into the API: resolution sees **this layer's input forest**, so a name
+  a later layer will define is `null`, which is a miss and not an error
+  (the whole-document pass owns cross-reference reporting; a hook that
+  wants to insist has `out.fail`). A non-symbol value is a miss too, so
+  a `(scalar-or-ref-shape …)` slot can be asked without inspecting the
+  tag; `error.HookFailed` is reserved for a key whose declared type
+  carries no cross-reference at all. A key typed by a union whose
+  alternatives include a cross-ref kind resolves; two cross-ref
+  alternatives answer `null`. Spec: `docs/plugin-model-v1.md`, "Reading
+  a form the hook does not own". Filed by animader as 18.
+
+- **The language server resolves against the slot, not the catalog.**
+  The validator has always resolved a form head local-first (a slot's
+  own `(form …)`s shadow a same-named global, with an additive global
+  fallback) and a key against the variant its discriminant selects. The
+  server did neither: every head went through `Schema.lookupForm` and
+  every key through `FormSpec.keyByName`, which never searches
+  `variants[].keys`. So hover on the local `circle` inside
+  `canvas.:shape` printed the *global* card (`:radius` and all), head
+  completion offered a snippet the validator then rejected with
+  `unknown_key` + `missing_required_key`, the quick fix for `:rr` inside
+  the local suggested the global's `:radius` (a fix into a second
+  diagnostic), inlay hints ghosted the shadowed global's defaults, and a
+  variant key was silent on every surface. Now every schema-aware
+  surface (hover, head / key / value completion, signature help,
+  semantic tokens, inlay hints, the quick fixes, extract) threads the
+  slot: head completion offers the slot's forms first and shadows the
+  catalog by name; a closed head-set narrows head completion to its
+  members, whether or not a global declaration stands behind each
+  (`(bind-group-layout :name a (‸))` offers exactly `entry`); a variant
+  key is live once the discriminant that selects it *precedes* the
+  cursor and silent otherwise, which is the validator's `unknown_key`
+  rule, so key completion no longer offers a variant key the message
+  would then forbid; a union-typed slot completes to every alternative's
+  values and narrows to one arm as soon as the typed text has a shape
+  only that arm accepts (a shape two arms reach keeps the whole list);
+  digit-leading members (`2d`, `2d-array`) hover, colour and quick-fix
+  like any other, the fix measured against the raw text so `2dd` and
+  `2.5d` both offer `2d`; and `unknown_local_form`, the one diagnostic
+  slot-local resolution produces that had no action, gets a quick fix
+  whose candidates are the slot's own forms plus the catalog, never an
+  expression function, with a distance tie going to the slot. The
+  defaults overlay follows the same resolution (below, Fixed). Corpus
+  cases `local-form-surfaces`, `variant-key-surfaces` and
+  `digit-leading-member-near-miss` replay the validator side of each
+  table on all four hosts. The playground gains all of it except
+  semantic tokens, which it does not request. LSP plans 14, 15, 16
+  (`docs/plans/lsp/`).
+
+- **The native server's capability set is validated, and points an
+  editor at Debug.** `zig build lsp` with no `-Doptimize` builds Debug,
+  and Debug is the mode to point an editor at: `initialize` runs
+  lsp-kit's capability validator over the advertised set, so a
+  capability with no handler behind it stops the server there instead of
+  promising a client a method that answers method-not-found. `zig build
+  test` runs the same validator as a test (`lsp-main`) whenever `lsp-kit`
+  is fetched. Before this nothing in the build graph spawned
+  `zig-out/bin/sjon-lsp` at all. LSP plan 13.
+
+- **Examples for each of the above.** `examples/plugins/opaque-slot/`
+  (three documents, the CLI's output in the comments),
+  `examples/plugins/variant-defaults/` (four lights read off `sjon
+  effective`), `examples/lowering-stages-demo.zig`,
+  `examples/edit-wrap.mjs`, and LLM flow 11 (`examples/llm/flows/11-
+  opaque-slot/`, the other place a model loops on `not_cross_ref`). The
+  tutorial (lessons 09, 10, 12, 13, 14), `docs/AUTHORING.md`,
+  `docs/TOOLING.md`, the host READMEs and the primer cover them.
+- **`Lowering.LoweringHook.ctx`.** An opaque host pointer the pass hands
+  back on `LoweringInput.ctx`, the same shape as `Resolver.ctx` and
+  `ProviderExtraction.Invoker.ctx`. Null by default, so a stateless hook
+  registers as before. A stateful hook keeps its state on the host's
+  stack, registered per call, rather than on a module-level global that
+  a second concurrent pass would share.
+
+- **Held positions: a value the author has not filled in yet.** An
+  editing host holds documents that are half-typed on purpose, and the
+  only spelling SJON accepted for "not decided" was `:type any`, which
+  gives up the slot's whole validation layer. `Validator.Options.
+  held_symbol` names the symbol a held position is spelled with (the
+  host that asked uses `_`); it is null by default, so every existing
+  caller validates as before. A held position is legal in any typed slot
+  (kvpair values, positional children, vector elements, union
+  alternatives), and every refinement downstream of the type is skipped
+  for it on both walkers. A held name registers nothing, so two
+  half-written forms that both hold their `:name` do not collide on
+  `duplicate_cross_ref_target`. And a held position reads as absent to
+  the defaults overlay: `(warp :by _)` on a defaulted key resolves to
+  the default, and to nothing when the key declares none, so a consumer
+  never receives `_` as a value (`EffectiveView.isHeld(form, key)`
+  answers the question for a host that asks it). An omitted required key
+  is still `missing_required_key`, and `_` inside an expression is still
+  an unknown binding at evaluation. It is a run option rather than a
+  manifest declaration because a manifest is loaded on the document's
+  say-so, and a declaration would let a document switch off its own type
+  checking by writing one form. `HostOptions.held_symbol` carries it,
+  and it crosses the envelope as `heldSymbol` in the
+  `sjon_host_validate_document` options, so `hosts/web`, `hosts/rust`
+  and `hosts/typescript-parity` all take it. The corpus reaches it
+  through a `held-*` case family that runs with `heldSymbol = "_"`,
+  declared in `conformance/classifier.json` under a new
+  `validatorOptionFamilies` key: five cases, one of them
+  (`underscore-without-held-symbol`) the control without which the other
+  four prove nothing. Spec: `docs/DESIGN.md`, "Held positions". Filed by
+  animader as 21.
+
+- **`Edit` keeps the author's layout, and `sjon edit` applies actions
+  from a shell.** Every edit used to re-print the whole document, so
+  changing one literal changed every line and moved a trailing comment
+  onto the next one. `Edit.Options.layout = .preserve` lowers each
+  action to one `Edit.TextEdit` over the target's span (the node, a
+  form's head, the gap between two children, or the closing delimiter)
+  and splices it into the source, so only that span changes. An inserted
+  child copies the whitespace before its neighbour and never a comment
+  in it; a removed child leaves with its leading gap, comment included.
+  `Edit.textEdit` is exposed on its own for a host that applies edits in
+  its own document model, and `Printer.printNode` prints one node at a
+  column, which the splice needs. `.reprint` stays the default. `sjon
+  edit FILE ACTION...` is the shell verb, shaped like `sjon fmt`: no
+  project, no validation, layout always preserved (`sjon edit … | sjon
+  fmt -` is the refold), `--actions=PATH` to read the actions from a
+  file and `--in-place` to write the result back. `sjon_apply_edits`
+  takes an optional options blob, `{"layout": "reprint" | "preserve"}`,
+  threaded through `hosts/web` and `@sjon/schema`'s
+  `ValidateBackend.applyEdits`. Spec: LANGUAGE.md §11.6. Filed by
+  animader as 23, whose other request, a `splice` action over byte
+  offsets, was declined in favour of this.
+
+- **`insert_root` and `remove_root`: the root list is editable.** Every
+  level of a document was reachable from an edit action except the
+  outermost one. The seventh and eighth operations address the root
+  list by `index` (optional on an insert, where leaving it out appends;
+  required on a remove) and refuse both `path` and `root` rather than
+  ignore them. Removing the last root succeeds and inserting into an
+  empty document works, so `error.EmptyTree` now comes only from an
+  operation that needs a root to exist. Both applies implement them.
+  Under `.preserve` a removed root leaves with the comments that lead
+  it, and an inserted root copies the author's separator run, or writes
+  one newline when a one-root document has no run to copy (ask 26 asked
+  whether that should be a blank line; it stays one newline, which is
+  what the printer and the LSP already write). `@sjon/schema` gains
+  `edit.insertRoot(value, index?)` and `edit.removeRoot(index)`;
+  `EditAction` splits into `PathedEditAction` and `ForestEditAction`,
+  and `atRoot` accepts only the first. Spec: LANGUAGE.md §11.1 to
+  §11.3. Filed by animader as 24.
+
+- **Spans and addresses without the language server.** An editor needs
+  the node under a byte and that node's edit address (the `root` and
+  `path` an action takes). `Edit.nodeTable(gpa, tree)` returns one row
+  per addressable node in pre-order, each carrying its parent row, its
+  own path step, its span, its kind, and its head or key span where it
+  has one. A row's path is the chain of steps up the parent links, so
+  one table per revision answers both directions, and the pointer
+  hit-test is the last row whose span contains the byte, with no call
+  back into WASM per mouse move. `Edit.addressOf` derives an
+  `Edit.Address { root, steps }` for one node, and `Edit.nodeAtSpan` /
+  `Edit.nodeContaining`, lifted out of the LSP, turn a byte coordinate
+  into a node. `sjon.wasm` exports `sjon_node_table(src)` and
+  `sjon_address_of_span(src, start, end)`; `hosts/web` has
+  `SjonEncoder.nodeTable`, `SjonEncoder.addressOfSpan` and the free
+  functions `pathOfRow` and `rowContaining`; `hosts/rust` has
+  `SjonHost::node_table` and `SjonHost::address_of_span`. Offsets are
+  UTF-8 bytes. Both exports answer on a document that does not parse,
+  with its parse diagnostics beside the rows: reading a recovered tree
+  is what an editor needs mid-keystroke, and writing one back is what
+  `Edit` refuses (see Fixed). A kvpair gets no row, because §11.2
+  addresses a pair's value; its key span rides on the value's row.
+  Nothing reaches `sjon-binary.wasm`. Spec: `docs/TOOLING.md`, "Spans
+  and addresses without the server". Filed by animader as 25, which
+  proposed a JSON forest carrying spans; that shape was declined because
+  the JSON bridge cannot represent the documents an editor most needs
+  to address (duplicate keywords collapse, and a keyword inside an
+  expression form, which `(* :x 0.4)` is mid-keystroke, does not encode).
+
+- **An emitted form may carry its own source span.** A lowering hook
+  stamped one span, its container's, on every form it emitted, so a
+  container that lifts a child out of its own subtree reported that
+  child's diagnostics against the whole enclosing block.
+  `EmittedForm.source_span` (null by default, which is the old
+  behaviour) overrides the span for the form and its subtree, and a
+  nested emitted form may narrow it further. Provenance is unchanged:
+  `source_form_idx` still names the container. What ask 22 asked for,
+  a container that holds children of its own head, needed no change:
+  declaring that head as a slot-local form of the container already
+  works, and is now pinned by tests and the corpus case
+  `cross-ref-own-head-local`. Spec: `docs/plugin-model-v1.md`. Filed by
+  animader as 22.
+
+### Fixed
+
+- **A cross-reference reached through a union skipped the lowering hook,
+  and nothing said so.** `lowerOneForm` surface-validates a container's
+  sub-tree before invoking its hook and gates on any error. It excused
+  three cross-ref *codes* by name so a child could name a sibling the
+  sub-tree cannot see; a cross-reference reached through a
+  `(union-shape …)` misses the same way but fails as
+  `union_no_branch_matched`, which was not on the list. The gate closed,
+  the hook never ran, the container emitted nothing, and because the
+  final forest resolved the name anyway the safety net had nothing to
+  report: the document validated clean and nothing happened. The fix is
+  at neither site the ask offered. The *only* thing that differs between
+  validating a form alone and validating it in its document is which
+  names are registered (same schema, same overlay, same axes), so the
+  code list was enumerating one closed class; `Validator.Options.
+  defer_cross_refs` says the thing itself, the fragment pass declines to
+  adjudicate cross-reference identity at all, and `Lowering.
+  hasNonCrossRefError` retires. A container that lowers is *replaced* by
+  what its hook emitted, children included, so a bad value on a child is
+  the hook's to police (`out.fail` / `failAt`). Corpus:
+  `lowering-union-crossref-child` (clean only if the hook ran),
+  `lowering-union-crossref-member` (the arm that always worked),
+  `lowering-union-crossref-unresolvable` (deferral defers, it does not
+  discard: `union_no_branch_matched` at `[box-normal unioned]`). Spec:
+  `docs/plugin-model-v1.md`, "What the container's children may use";
+  LANGUAGE.md §7.8. Filed by PNGine as 19.
+
+- **An expression argument past 255 aborted the process.** The
+  validator's slot union carried the expression-argument ordinal in a
+  `u8`, filled from a document-controlled count through an unguarded
+  `@intCast`: argument 256 with a type mismatch panicked a safety-checked
+  build with no file, line or column, and was undefined behaviour with
+  safety off. The binary walker had its own `u8` with a *saturating*
+  guard, so it did not panic; it reported the path `[* 255]` for
+  ordinals 256 and 300, a wrong answer in the field the corpus asserts.
+  Both widen to `u32`, the guard goes, and no new ceiling row: 255 was
+  an accident, not a defence. Found by PNGine's seeded corpus mutation
+  (an open quote swallowed a document into one form). The plan said the
+  TypeScript port needed nothing; on inspection its `ExprFunc` had **no
+  `:rest` at all**, so every variadic argument on that host went
+  untyped, silently. `hosts/typescript-parity` now reads `:rest` and
+  types positions past `:params` with it. Corpus:
+  `expr-arg-ordinal-past-255` (`expr_type_mismatch` at `[mul 256]`).
+  Filed by PNGine as 20.
+
+- **A default declared on a variant key was never materialized.** The
+  overlay was behind its own consumers: axis C's variant-presence bitset
+  and the axis-B lookup both read a side-table that never had a
+  variant-key entry, so a defaulted variant key with a cross-ref type was
+  never checked while the required-key sweep accepted the omission on
+  the strength of a default nothing then supplied. `materializeForForm`
+  runs the key loop twice, common keys then the active variant's, in
+  that order because the discriminant is a common key: one supplied by
+  its own default (axis D) is already an overlay entry by the time the
+  variant is resolved from it. Presence is position-independent (a
+  variant key written ahead of its discriminant is `unknown_key`, but
+  the author wrote it, so nothing is materialized over their text). Two
+  siblings: the overlay resolved every head through the global catalog,
+  so `(canvas :shape (circle))` materialized the *shadowed* global's
+  `:radius`, a key the validator reports `unknown_key` on the very form
+  `sjon effective` spliced it into, and a local-only `rect` got no
+  defaults; the walk now carries the slot registry. And a variant key
+  colliding with a common key's name (`variant_key_collision` is a
+  diagnostic, not a rejection) would have doubled its slot and turned a
+  bad schema into an effective document rejected for `duplicate_key`;
+  the common key wins. Corpus: `effective-axis-b-variant-key-default-
+  miss`, `effective-axis-d-variant-key-default-miss`. Spec: LANGUAGE.md
+  §7.8 rule 1 ("declared" covers the active variant's keys).
+  `examples/plugins/variant-defaults/` is the fixture.
+
+- **A form's closing paren must be its own.** The effective-document
+  splicer, the LSP inlay hints and the definition-hoist action all
+  tested `source[span.end - 1] == ')'` to decide a form was closed. A
+  *recovered* outer form whose span ends on an inner form's `)` passes,
+  so `(a (b :x 1)` with a default rendered `(a (b :x 1 :k 5)`, splicing
+  `a`'s default into `b`. One shared `formClosingParen`, which also
+  requires the last child to end before the paren.
+
+- **Every correctly configured workspace carried one phantom error.**
+  The native server's workspace walk ingested `sjon-project.sjon` and
+  validated it as a document (`unknown_form: project`). It is skipped by
+  URI now (the resolver's answer, compared decoded, since a root with a
+  space spelled the same file two ways), and only from ingestion: real
+  project errors still reach you on that file's own URI, and an open
+  project file is still a document. And the native server advertised
+  `inlayHintProvider: true`, which lsp-kit reads as "resolve too"; the
+  Debug build died on its first message. It now spells
+  `resolveProvider: false` (the WASM dispatcher, which validates no
+  capabilities, keeps `true`; both mean the same to a client).
+
+- **Fifteen user-reachable crash sites, from the 2026-08-28 Zig-mastery
+  pass.** Each is now a diagnostic, an error, or a defined result. A
+  hook-emitted head with an empty name or namespace half (`x/`) is
+  `lowering_produced_invalid_head` rather than an assert, and the loader
+  refuses such a `:produces` entry. The binary encoder refuses a tree
+  wider than `BinaryFormat.MAX_NODES` (`error.NodeCountExceeded`) instead
+  of asserting on roots or emitting a frame its own decoders refuse; the
+  public wrappers `sjon.validate` / `toJson` / `toJsonRoots` no longer
+  assert on parser output (`error.MultipleRoots`, `error.InvalidEncoding`).
+  An edited tree is measured against `Edit.MAX_EDIT_PATH_DEPTH` (= 1024)
+  after the edit, since `wrap` composes the target's depth with the
+  template's and a batch composes wraps (`error.DepthExceeded`). Euclid
+  steps get a named ceiling, `PatternQuery.MAX_EUCLID_STEPS` (65536), on
+  both compile paths and in the TypeScript host, past which the form is
+  silence (corpus `pattern-euclid-steps-ceiling`); before, `(euclid 1
+  4294967297 bd)` panicked natively and truncated to one hap on wasm32.
+  The printer's and both exporters' number scratch buffers are sized for
+  an f64's full decimal expansion (`1e308` aborted `sjon fmt`). A
+  self-referential named value kind no longer overflows the stack in
+  `sjon export-schema` (`MAX_NAMED_RESOLVE_DEPTH` = 32, an `.err` warning
+  naming the chain). A literal default deeper than `Expr.MAX_VALUE_DEPTH`
+  is `default_eval_failed` rather than a panic in `toExprValue`. Both
+  binary decoders reject an empty unit (`error.InvalidTag`), validate a
+  pool by entry count *and* byte size, and bound a container's declared
+  count by the bytes left before reserving (a 31-byte frame reserved
+  ~312 MiB). The plugin codec's length checks are overflow-safe and it
+  allocates nothing from an unchecked wire count. The glob matcher has a
+  per-call step ceiling (`MAX_MATCH_STEPS` = 2^20; twelve stacked `**`
+  never returned). The pattern-query hap budget is polled inside the
+  per-cycle leaf loops (`--end=9007199254740992` allocated ~10^10 haps
+  before the poll). The binary walkers' step ceiling is per call, not per
+  root. An LSP position outside `u32` is no position (line 4294967296
+  truncated to line 0 in `sjon-lsp.wasm`, so hover answered about the
+  wrong text). `sjon_lsp_recv` allocates the outbound frame before
+  popping the message, so an allocation failure no longer loses a reply
+  the JS pumps then read as "outbox empty". A lockfile `:version` above
+  `u32` is an error, not a panic (in ReleaseFast it wrapped to 0 and
+  passed the format gate). A conformance `:index` above `u32` is
+  `MalformedExpected`. Leak and OOM-path fixes (validator temporaries,
+  the eval arena, `FilesystemResolver.init`, wasmtime `Module.imports`)
+  ride along without a behaviour change.
+
+- **`Edit` edited a document it could not parse.** It never asked
+  whether the parse had errors, so an unclosed `(scene` followed by an
+  unclosed `(camera` came back as one well-formed form with `camera`
+  nested inside `scene`, which is how the parser had recovered, and
+  nothing said so. `Edit.Error` gains `ParseErrors`, raised by every
+  entry (both wasm exports included) before an action is read: the
+  refusal `sjon fmt` and the LSP's formatter already made. Spec:
+  LANGUAGE.md §11.4.
+
+- **`sjon` wrote over a file the shell had opened for appending.** Every
+  verb wrote stdout and stderr positionally from offset 0, which is
+  wrong for a descriptor the shell hands over: `sjon fmt - < doc.sjon >>
+  log` overwrote the start of `log`, and `2>>` did the same to stderr. A
+  pipe hid it, and so did `>` by truncating first. Both channels now
+  stream.
+
+- **The Web and Rust bootstrap parsers misread two constructs.** The
+  small parser each host uses to read project files and conformance
+  expectations lexed `"""raw"""` as three strings and did not treat
+  `#| … |#` as a comment, so a commented-out `:plugins ["disabled.sjon"]`
+  became live configuration. Both constructs are explicit errors now, in
+  both hosts. The checks sit only where the SJON lexer would start a
+  token, so `a#b`, `foo#|bar` and a `#|` inside a string still parse.
+
+- **A typed-vector element failure points at the element.** Both walkers
+  underlined the whole vector: `:views [2d cubee 3d]` squiggled `[2d
+  cubee 3d]`. The diagnostic now spans `cubee` (the innermost failing
+  leaf, for a vector of vectors), with code and path unchanged, so no
+  corpus case moved; the LSP's two vector quick fixes now appear with
+  the cursor on the typo rather than on the `[`. `hosts/typescript-parity`
+  follows, and its message gains the `element [i]:` brackets Zig writes.
+
+- **A multi-target cross-ref reads as a group in messages.** The
+  registry keys a `(cross-ref :target [render-pipeline
+  compute-pipeline])` bucket by the two names joined with a space, and
+  three messages printed that key, so they named a form whose head
+  contained a space. `Schema.describeBucket` renders a group as `a | b`
+  for the `not_cross_ref` and duplicate-name messages and for LSP
+  completion details, and the duplicate message says "across forms" for
+  a group. Single-target text is byte-identical. `hosts/typescript-parity`
+  converges on the same text, including a duplicate-name message that
+  had disagreed with Zig for single targets too.
+
+- **A keyword with no value says so.** `(lane :name)` reports
+  `positional_not_allowed` on `:name`, correctly (a keyword with nothing
+  to pair with is a bare keyword value), but the message only talked
+  about positional children. It now ends with "`:name` has no value, so
+  it is a bare keyword, not a keyword pair", on both walkers and in
+  `hosts/typescript-parity`, and the code gains a long explanation.
+
+- **The language server agrees with `sjon check`, and its surfaces with
+  each other.** Diagnostics were computed without the defaults overlay
+  `sjon check` uses, so `(light :range 5)`, where `:kind` defaults to the
+  variant that declares `:range`, got two errors in the editor and none
+  from the CLI; the overlay is passed now, and hover, key completion,
+  semantic tokens and the quick fixes follow a discriminant supplied by
+  its default. The missing-required-key stub reaches keys declared under
+  a variant. Hover and semantic tokens reach the determined arm of a
+  union slot and the elements of a typed vector; a value no shape narrows
+  to one union arm hovers to the arms it reaches and gets a quick fix
+  drawn from all of them. The `unknown_form` fix no longer suggests an
+  expression function the call would then reject. Rename refuses a name
+  the parser would not read back (`)(`, `has space`, `nil`), and a
+  refused rename tells the client why, as a `window/showMessage` warning
+  on both servers, where the user used to press enter and see nothing.
+  Signature help lists the parameter names of functions that declare
+  names but no types (`clamp`, `lerp`, `dot`, `cross`), picks the
+  overload for the argument being typed, and keeps `activeParameter` lit
+  while the cursor sits at the end of a value or an argument. Hover on
+  an `:acyclic` cross-ref names the cycle rule. Completion items that
+  insert a skeleton carry `filterText`, and deprecated items sort last
+  without reordering a list whose order means something. LSP plans 17 to
+  22.
+
+### Changed
+
+- **`:walk-opaque true` stops every descent, not only the validator's.**
+  The manifest spec used to say the flag "only ever suppresses a
+  diagnostic, so its blast radius is small". That was untrue: only the
+  shape walk stopped at an opaque slot, and the defaults overlay, the
+  cross-reference index pass, provider-extraction discovery and the
+  lowering worklist all walked straight in. So a known data form written
+  into an opaque slot collected the defaults the validator had declined
+  to check, `sjon effective` *spliced* them into the one region the
+  schema was told to leave alone, and a failing expression default in
+  there was reported (`default_eval_failed`) against a slot nothing was
+  going to materialize. Now nothing inside an opaque slot is registered
+  as a cross-ref target, opens a lexical scope, contributes a cycle
+  edge, supplies a provider source, fires a lowering hook, or receives a
+  materialized default. The slot's own `:type` check still runs; opaque
+  is something a *matched* key says, so an unknown key's value is still
+  descended. **This changes what an authored document means, and it is
+  the point of the flag**: `(host :body (phrase :name origin))` used to
+  make `origin` addressable and no longer does. It is the difference
+  between "the validator will not tell you what is in there" and "the
+  validator will not quietly use what is in there", and the one way
+  `:walk-opaque` can *add* a diagnostic (`not_cross_ref` at the
+  reference) rather than suppress one. The binary walkers drain an
+  opaque slot rather than skipping over it, and `hosts/typescript-parity`
+  implements the flag for the first time (it had never had it, a latent
+  parity gap no corpus case had probed). Corpus:
+  `opaque-slot-not-materialized`, `opaque-slot-target-unregistered`,
+  `opaque-slot-default-name-unregistered`. Spec: manifest §5.1 ("Every
+  descent stops there"), LANGUAGE.md §6.3.1 and §7.8.
+  `examples/plugins/opaque-slot/` is the fixture; the tutorial's lesson
+  12 gets an "Opaque Slots" section and lesson 13 the diagnostic it can
+  add.
+
+- **`EffectiveDocument.render` / `formInsertion` / `appendEffectiveValue`
+  drop their `Schema` argument.** No head-based lookup can recover a
+  default's manifest spelling inside a local slot; the overlay entry now
+  records the spelling the walk already had.
+
+- **Two `Edit` refusals give a different reason.** An unknown op that
+  carries no `path` reports `UnknownOp` rather than `InvalidAction`, and
+  an empty document with a malformed action reports what is wrong with
+  the action rather than `EmptyTree`.
+
+- **Binary string lookup is O(1).** `BinaryCursor` resolved every head,
+  key, symbol and unit by walking the string pool from its start, so a
+  document cost O(M × N) varint reads for M strings over N pool entries,
+  reachable by a legal file. The cursor still never allocates; a caller
+  may attach an index it owns (`poolIndexLen` / `indexPools`), and the
+  validator's binary walks, `Expr.evalBinary` and
+  `PatternQuery.compileBinary` all do. On the `Expr` path the index is
+  charged to the byte budget, 4 bytes per pool entry.
+
+### Internals
+
+- `Parser.parseNumberAs` is gone: `pub`, two tests, zero callers. The
+  `:repr` check works from the decoded `NumericValue`.
+- The wasmtime runtime's failure-detail buffer is `threadlocal`, as its
+  comment had claimed; `ProviderExtraction.describeInvokeFailure` takes
+  `Expr.Error` rather than `anyerror`; `Lowering.LayerRefs` stores no
+  allocator, and a layer's reference index builds on the pass arena.
+- `Validator.canonicalMemberSpelling`, `Validator.matchLocalForm`,
+  `Validator.resolveKeyAt` / `activeVariantAt` and `Validator.childSlot`
+  are the shared seams the LSP, the overlay and both walkers now resolve
+  through, so the four cannot disagree about what a slot means.
+- `examples/lowering-stages-demo.zig` runs under `zig build verify`
+  beside the union demo, the one executable consumer of the Zig-only
+  lowering surface.
+- Two more fuzz harnesses, 23 in all: the layout-preserving edit splice,
+  and `nodeTable`'s property that every row's path resolves back to that
+  row on any input. `FailingAllocator` sweeps cover `.preserve` and the
+  forest operations.
+- The plugin invoker's failure detail is `threadlocal` and no longer
+  `pub`; `MaterializedDefaults.emitFailure` takes `Expr.BinaryError`
+  rather than `anyerror`; every bare `catch unreachable` names its bound
+  in a `SAFETY` comment.
+
 ## 1.3.0 — 2026-08-27
 
 The contract at a glance: no wire-format change (still v5), **no** new

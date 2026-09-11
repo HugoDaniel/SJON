@@ -2718,6 +2718,26 @@ test "ManifestLoader: lowering with duplicate :produces emits wrong_underlying" 
     try testing.expect(found);
 }
 
+test "ManifestLoader: a :produces head with an empty half emits wrong_underlying" {
+    const a = testing.allocator;
+    var tree = try parseSource(a,
+        \\(plugin :name p :version "1.0.0"
+        \\  (form :name pass
+        \\    :lowering (lowering :hook pngine/pass-v1
+        \\      :produces [x/ /y ok])
+        \\    (key :name name :type symbol :optional false)))
+    );
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    var found: usize = 0;
+    for (r.diagnostics) |d| {
+        if (d.code == .wrong_underlying and std.mem.indexOf(u8, d.message, "empty name or namespace half") != null) found += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), found);
+}
+
 // ----- Numeric-bounds manifest-load tests ----------------------------------
 
 test "ManifestLoader: (numeric-bounds …) round-trips into ValueKind.numeric" {
@@ -4484,6 +4504,56 @@ test "ManifestLoader: positional-local forms at MAX_LOCAL_FORM_DEPTH load clean"
 test "ManifestLoader: positional-local form past MAX_LOCAL_FORM_DEPTH emits invalid_manifest" {
     const a = testing.allocator;
     const src = try buildNestedPositionalLocalSource(a, Plugin.MAX_LOCAL_FORM_DEPTH + 1);
+    defer a.free(src);
+    var tree = try parseSource(a, src);
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(r.hasErrors());
+    var found: bool = false;
+    for (r.diagnostics) |d| {
+        if (d.code == .invalid_manifest and
+            std.mem.indexOf(u8, d.message, "MAX_LOCAL_FORM_DEPTH") != null) found = true;
+    }
+    try testing.expect(found);
+}
+
+/// Generate a manifest whose single top-level form nests a positional local of
+/// **its own name** `d` levels deep — the container-holds-its-own-head shape
+/// (ask 22). Distinct from `buildNestedPositionalLocalSource`, which renames
+/// every level: the duplicate-local check is per sibling set, so repeating one
+/// name down a chain is legal and the only limit is the depth cap.
+fn buildSelfNestedLocalSource(a: Allocator, d: usize) ![:0]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(a);
+    try buf.appendSlice(a, "(plugin :name p :version \"1.0.0\"\n  ");
+    for (0..d) |_| try buf.appendSlice(a, "(form :name space ");
+    for (0..d) |_| try buf.appendSlice(a, ")");
+    try buf.appendSlice(a, ")"); // close (plugin
+    const z = try a.allocSentinel(u8, buf.items.len, 0);
+    @memcpy(z, buf.items);
+    return z;
+}
+
+test "ManifestLoader: a form nesting its own head at MAX_LOCAL_FORM_DEPTH loads clean" {
+    const a = testing.allocator;
+    const src = try buildSelfNestedLocalSource(a, Plugin.MAX_LOCAL_FORM_DEPTH);
+    defer a.free(src);
+    var tree = try parseSource(a, src);
+    defer tree.deinit();
+    var r = try load(a, tree);
+    defer r.deinit();
+    try testing.expect(!r.hasErrors());
+    try testing.expectEqual(@as(usize, 1), r.plugin.forms.len);
+    try testing.expectEqualStrings("space", r.plugin.forms[0].name);
+    // The local shadowing the global carries the same name, one level down.
+    try testing.expectEqual(@as(usize, 1), r.plugin.forms[0].local_forms.len);
+    try testing.expectEqualStrings("space", r.plugin.forms[0].local_forms[0].name);
+}
+
+test "ManifestLoader: a form nesting its own head past MAX_LOCAL_FORM_DEPTH emits invalid_manifest" {
+    const a = testing.allocator;
+    const src = try buildSelfNestedLocalSource(a, Plugin.MAX_LOCAL_FORM_DEPTH + 1);
     defer a.free(src);
     var tree = try parseSource(a, src);
     defer tree.deinit();

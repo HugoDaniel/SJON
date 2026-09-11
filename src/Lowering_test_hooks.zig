@@ -619,6 +619,73 @@ fn lowerEvalEnv(
     });
 }
 
+// ---------------------------------------------------------------------------
+// Cross-reference resolution — `test/resolve-ref-v1`.
+//
+// The synthetic exerciser for `LoweringInput.resolveRef`. Reads `:from`,
+// resolves it to the form that carries that `:name`, and emits
+// `(resolved :count <the neighbour's :count>)` — or `:count -1` when the name
+// resolves nowhere in this layer.
+//
+// The `-1` is the interesting value. It is what a hook sees when the form it
+// names will be emitted by a *later* staging layer, which is the one sentence
+// `resolveRef` is sold on: resolution sees this layer's input forest and
+// nothing else. A host test drives the same document twice — target authored,
+// target emitted by a sibling in the same layer — and reads the difference
+// off this hook.
+//
+// It deliberately does not walk `input.view.tree.root`. A hand-rolled scan
+// would answer both cases the same way for this fixture, and answer four
+// other things wrong (scope, shared multi-target buckets, provider-backed
+// names, slot-local `:name`s) in general.
+// ---------------------------------------------------------------------------
+
+/// `test/resolve-ref-v1`: resolve `:from` and emit `(resolved :count …)`
+/// carrying the named form's `:count`, or `-1` on a miss. See the section
+/// comment.
+pub const test_resolve_ref_v1: Lowering.LoweringHook = .{
+    .id = "test/resolve-ref-v1",
+    .lower = lowerResolveRef,
+};
+
+fn lowerResolveRef(
+    arena: Allocator,
+    input: *const Lowering.LoweringInput,
+    out: *Lowering.LoweringOutput,
+) Lowering.LoweringError!void {
+    var count: f64 = -1;
+    if (try input.resolveRef("from")) |target| {
+        // The neighbour is read exactly the way the hook reads itself: a
+        // node index and the same view, defaults included.
+        const ev = input.view.getEffectiveValue(target, "count") orelse return error.HookFailed;
+        count = switch (ev) {
+            .author => |idx| input.view.tree.numberOf(idx),
+            .default => |entry| switch (entry.value) {
+                .number => |n| n,
+                .integer_i64 => |i| @floatFromInt(i),
+                .integer_u64 => |u| @floatFromInt(u),
+                else => return error.HookFailed,
+            },
+        };
+    }
+    var kvs: std.ArrayList(Lowering.EmittedKvpair) = .empty;
+    try kvs.append(arena, .{ .key = try arena.dupe(u8, "count"), .value = .{ .number = count } });
+    try out.append(arena, .{
+        .head = try arena.dupe(u8, "resolved"),
+        .kvpairs = try kvs.toOwnedSlice(arena),
+        .source_form_idx = input.form_idx,
+    });
+}
+
+test "test_resolve_ref_v1: registers under its id" {
+    const gpa = std.testing.allocator;
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(gpa);
+    try registry.register(gpa, test_resolve_ref_v1);
+    const hit = registry.lookup("test/resolve-ref-v1") orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("test/resolve-ref-v1", hit.id);
+}
+
 test "test_identity_v1: registers under its id" {
     const gpa = std.testing.allocator;
     var registry: Lowering.LoweringRegistry = .{};

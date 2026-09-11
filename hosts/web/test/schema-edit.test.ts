@@ -104,6 +104,33 @@ test('a bad edit path maps to SjonEditError (throwing + safe variants)', async (
   if (!safe.success) assert.equal(typeof safe.error.code, 'string');
 });
 
+// A document the parser only *recovered*: two unclosed roots come back as one
+// nested form, which the engine used to edit and hand back without a word.
+const BROKEN = '(scene :w 800\n(camera :fov 60\n';
+
+test('both edit exports refuse a document that does not parse', async () => {
+  const be = await getBackend();
+  const action = edit.setKey([], 'h', 600);
+
+  for (const [label, run] of [
+    ['sjon_apply_edit', () => be.applyEdit!(BROKEN, action)],
+    ['sjon_apply_edits', () => be.applyEdits!(BROKEN, [action])],
+    // An empty batch still re-prints, so it still refuses.
+    ['sjon_apply_edits (empty)', () => be.applyEdits!(BROKEN, [])],
+  ] as const) {
+    let thrown: unknown;
+    try {
+      run();
+    } catch (e) {
+      thrown = e;
+    }
+    assert.ok(thrown instanceof Error, `${label} throws`);
+    // The framed name crosses the envelope unchanged, so a host reads
+    // `ParseErrors` with no mapping of its own.
+    assert.match((thrown as Error).message, /ParseErrors/, label);
+  }
+});
+
 // --- Batched edits (sjon_apply_edits) --------------------------------------
 
 test('backend.applyEdits is wired (the batched capability is present)', async () => {
@@ -129,6 +156,28 @@ test('one batched applyEdits call == threading applyEdit per action', async () =
   assert.equal('bio' in parsed, false);
 });
 
+test('layout: preserve moves only the edited span; reprint re-lays the document', async () => {
+  const be = await getBackend();
+  const actions = [edit.setKey([], 'score', 7)];
+
+  const spliced = be.applyEdits!(SRC, actions, { layout: 'preserve' });
+  // Every line but the edited one is byte-identical, comment included.
+  const before = SRC.split('\n');
+  const after = spliced.split('\n');
+  assert.equal(after.length, before.length, 'no line was added or removed');
+  for (const [i, line] of before.entries()) {
+    if (line.includes(':score')) continue;
+    assert.equal(after[i], line, `line ${i} untouched`);
+  }
+  assert.match(spliced, /:score 7/);
+
+  // The default stays the re-print, which is free to move those bytes.
+  const reprinted = be.applyEdits!(SRC, actions);
+  assert.equal(reprinted, be.applyEdits!(SRC, actions, { layout: 'reprint' }));
+  assert.notEqual(reprinted, spliced, 'the two layouts are not the same bytes');
+  assert.equal(Profile.parse(spliced, { backend: be }).score, 7);
+});
+
 test('patch routes a multi-key change through the batched path', async () => {
   const be = await getBackend();
   // Two keys differ → diffToActions yields two actions → applyAll takes the
@@ -151,4 +200,46 @@ test('a bad action inside a batch still surfaces SjonEditError', async () => {
     .set('handle', 'bob')
     .edit(edit.replace(['no-such-key'], 1));
   assert.throws(() => doc.save(), SjonEditError);
+});
+
+// --- The forest ops (insert_root / remove_root) -----------------------------
+
+test('insert_root and remove_root reach the document root list through WASM', async () => {
+  const be = await getBackend();
+  // A two-root document with the author's own blank line between the roots.
+  const forest = '(use-plugin "core")\n\n(profile/profile :handle "ada")';
+
+  const appended = be.applyEdits!(forest, [edit.insertRoot({ $form: 'note', text: 'hi' })], {
+    layout: 'preserve',
+  });
+  assert.equal(
+    appended,
+    '(use-plugin "core")\n\n(profile/profile :handle "ada")\n\n(note :text "hi")',
+    'the blank line the document already uses comes back on the insert',
+  );
+
+  // A removed root takes the run that *precedes* it, so removing the first
+  // one leaves the blank line that followed it — the same shape as removing
+  // a form's first child. `sjon fmt` is the tidy-up.
+  const removed = be.applyEdits!(forest, [edit.removeRoot(0)], { layout: 'preserve' });
+  assert.equal(removed, '\n\n(profile/profile :handle "ada")');
+
+  // Remove-then-insert in one batch is a replace, and it round-trips a
+  // document all the way to none and back.
+  const replaced = be.applyEdits!('(only)\n', [
+    edit.removeRoot(0),
+    edit.insertRoot({ $form: 'fresh' }),
+  ]);
+  assert.equal(replaced, '(fresh)\n');
+});
+
+test('the forest ops refuse a path — the engine says so, not the type alone', async () => {
+  const be = await getBackend();
+  // `edit.insertRoot` cannot spell this, which is the point of the type; a
+  // hand-written action can, and the engine refuses it rather than dropping
+  // the field.
+  assert.throws(
+    () => be.applyEdits!('(a)', [{ op: 'insert_root', path: [], value: 1 } as never]),
+    /InvalidPath/,
+  );
 });

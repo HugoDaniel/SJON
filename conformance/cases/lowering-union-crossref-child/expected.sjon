@@ -1,0 +1,5 @@
+; Clean. `(box …)` lowered, so `(box-normal :name b)` is in the lowered
+; tree and `(origin :ref b)` resolves against it through the forest pass.
+; Before the fix the hook was skipped and this case reported
+; `not_cross_ref` at [origin ref] — nothing named the real cause.
+(diagnostics)

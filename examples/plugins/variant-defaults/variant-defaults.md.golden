@@ -1,0 +1,54 @@
+# lights v1.0.0
+
+## Forms
+
+### `(anchor …)`
+
+A named point a spot light can aim at.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:name` | `symbol` | yes | — | — |
+
+### `(light …)`
+
+One light. `:kind` selects the variant, and defaults to `point`.
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:kind` | `symbol enum` | no | `point` | one of: `point`, `spot`, `sun`<br>Omitted, this reads as `point` and selects that variant. |
+| `:intensity` | `number` | no | `1` | — |
+
+#### Variant `:kind point`
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:range` | `number` | no | `10` | Falloff radius. Materialized whenever the light is a point light, written or defaulted. |
+
+#### Variant `:kind spot`
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:reach` | `number` | no | `20` | — |
+| `:angle` | `number` | no | `45` | — |
+| `:aim` | `ref → (anchor :name …)` | no | `origin` | Where the cone points. The default is a name, and a defaulted name is checked. |
+
+#### Variant `:kind sun`
+
+| Key | Type | Required | Default | Constraints |
+| --- | --- | --- | --- | --- |
+| `:direction` | `vector<any>` | yes | — | No default: a sun with no direction is `missing_required_key`. |
+
+## Value kinds
+
+### light-kind
+
+The three light shapes.
+
+Type: `symbol enum` — one of: `point`, `spot`, `sun`.
+
+### anchor-name
+
+Cross-ref to an `(anchor :name …)` the document declares.
+
+Type: `ref → (anchor :name …)`.

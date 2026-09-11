@@ -133,92 +133,7 @@ pub const Server = struct {
             std.log.warn("loadProject failed: {s}", .{@errorName(err)});
         };
 
-        const server_capabilities: lsp.types.ServerCapabilities = .{
-            .positionEncoding = switch (self.offset_encoding) {
-                .@"utf-8" => .@"utf-8",
-                .@"utf-16" => .@"utf-16",
-                .@"utf-32" => .@"utf-32",
-            },
-            .textDocumentSync = .{
-                .text_document_sync_options = .{
-                    .openClose = true,
-                    // Ranged payloads are spliced via
-                    // `text_sync.applyChanges`; the whole-document form
-                    // stays supported as the spec-required fallback.
-                    .change = .Incremental,
-                },
-            },
-            .diagnosticProvider = .{
-                .diagnostic_options = .{
-                    // True, but *not* because of cross-refs: scope is
-                    // per-tree (the LSP never sets
-                    // `Validator.Options.share_scope`), so a definition in
-                    // one document cannot resolve a reference in another.
-                    // `Handler_tests.zig`'s "cross-doc: per-tree default
-                    // isolates references" pins exactly that.
-                    //
-                    // What genuinely crosses files is the *schema*:
-                    // editing `sjon-project.sjon` or a manifest it names
-                    // re-runs discovery and changes every document's
-                    // diagnostics at once. A client that believes
-                    // otherwise leaves stale errors on screen after the
-                    // edit that fixed them.
-                    .interFileDependencies = true,
-                    // Native only. The handler is filesystem-free by
-                    // design, so workspace enumeration lives here; the
-                    // WASM transport has no filesystem to enumerate and
-                    // leaves this false.
-                    .workspaceDiagnostics = true,
-                },
-            },
-            .hoverProvider = .{ .bool = true },
-            .completionProvider = .{
-                // `(`: form-head, `:`: keyword-key, `[`: vector element.
-                .triggerCharacters = &.{ "(", ":", "[" },
-            },
-            .signatureHelpProvider = .{
-                // `(` opens a fresh signature; ` ` re-targets the active
-                // parameter as the user types successive args.
-                .triggerCharacters = &.{"("},
-                .retriggerCharacters = &.{" "},
-            },
-            .documentSymbolProvider = .{ .bool = true },
-            .documentFormattingProvider = .{ .bool = true },
-            .documentRangeFormattingProvider = .{ .bool = true },
-            .foldingRangeProvider = .{ .bool = true },
-            .inlayHintProvider = .{ .bool = true },
-            .semanticTokensProvider = .{
-                .semantic_tokens_options = .{
-                    // Both lists come from `SemanticToken`'s own legends,
-                    // so the indices and bits this server puts on the wire
-                    // cannot drift from the names the client maps them
-                    // through. Kept in sync with `wasm.zig`'s capability
-                    // JSON, which generates the same object at comptime.
-                    .legend = .{
-                        .tokenTypes = &Handler.SemanticToken.Type.legend,
-                        .tokenModifiers = &Handler.SemanticToken.Mods.legend,
-                    },
-                    // `full` only. SJON documents are small enough that a
-                    // whole-file recompute beats tracking deltas, and
-                    // advertising `range` or `full.delta` would invite
-                    // requests with no handler behind them.
-                    .full = .{ .bool = true },
-                },
-            },
-            .codeActionProvider = .{
-                .code_action_options = .{
-                    .codeActionKinds = &.{ .quickfix, .@"refactor.rewrite", .@"refactor.extract", .@"refactor.inline" },
-                },
-            },
-            .definitionProvider = .{ .bool = true },
-            .documentHighlightProvider = .{ .bool = true },
-            .selectionRangeProvider = .{ .bool = true },
-            .workspaceSymbolProvider = .{ .bool = true },
-            .referencesProvider = .{ .bool = true },
-            .renameProvider = .{
-                .rename_options = .{ .prepareProvider = true },
-            },
-        };
+        const server_capabilities = serverCapabilities(self.offset_encoding);
 
         if (@import("builtin").mode == .Debug) {
             lsp.basic_server.validateServerCapabilities(Server, server_capabilities);
@@ -385,7 +300,11 @@ pub const Server = struct {
         // `sjon-project.sjon`, return the schema-discovery report rather
         // than an empty one (the project file isn't an opened document).
         if (self.handler.getProjectInfo()) |proj| {
-            if (proj.project_uri) |purl| if (std.mem.eql(u8, purl, params.textDocument.uri)) {
+            // Decoded equality, matching the document map and
+            // `ingestWorkspaceFiles`: `Host` builds this URI without
+            // percent-encoding, and a client is free to send another
+            // spelling of the same path.
+            if (proj.project_uri) |purl| if (uri.HashContext.eql(.{}, purl, params.textDocument.uri)) {
                 const proj_source = proj.project_source orelse return empty;
                 const items = try arena.alloc(lsp.types.Diagnostic, proj.diagnostics.len);
                 for (proj.diagnostics, 0..) |d, i| {
@@ -702,11 +621,21 @@ pub const Server = struct {
         const we = switch (result) {
             .err => |e| {
                 // LSP allows a `ResponseError` here, but lsp-kit's typed
-                // dispatcher routes Zig errors to generic "InternalError"
-                // responses. Returning null is the next best thing — most
-                // editors surface "no rename performed" without a stack
-                // trace. Log so server-side tooling can see the reason.
+                // dispatcher maps a returned Zig error to a code and
+                // `@errorName` — there is no way to attach the reason.
+                // So the reason goes out as a `window/showMessage`
+                // warning first, and the result is null, which editors
+                // render as "no rename performed". The log line stays
+                // for server-side tooling.
                 std.log.info("rename rejected: {s}", .{e.message});
+                self.transport.writeNotification(
+                    self.io,
+                    self.gpa,
+                    "window/showMessage",
+                    lsp.types.window.ShowMessageParams,
+                    .{ .type = .Warning, .message = e.message },
+                    .{ .emit_null_optional_fields = false },
+                ) catch |err| std.log.warn("window/showMessage failed: {s}", .{@errorName(err)});
                 return null;
             },
             .edits => |w| w,
@@ -1266,3 +1195,127 @@ pub const Server = struct {
         return null;
     }
 };
+
+/// The capability set the `initialize` response advertises. Lifted out of
+/// `initialize` so it can be handed to lsp-kit's own validator without
+/// standing up a server and driving a request — that is what
+/// `test "advertised capabilities match the implemented methods"` below
+/// does, and it is the only gate on this file.
+///
+/// Everything here is a constant of the build except `positionEncoding`,
+/// which is negotiated per client, so the parameter is the whole of the
+/// per-connection state a caller has to supply.
+///
+/// The shapes matter as much as the values: lsp-kit reads a bare `true`
+/// on `.inlayHintProvider` as a claim that `inlayHint/resolve` exists too
+/// (`basic_server.zig:453-458`), and panics during `initialize` when it
+/// does not. That is exactly what shipped, on the one code path no test
+/// reached (audit 2026-08-27 §1).
+fn serverCapabilities(encoding: lsp.offsets.Encoding) lsp.types.ServerCapabilities {
+    return .{
+        .positionEncoding = switch (encoding) {
+            .@"utf-8" => .@"utf-8",
+            .@"utf-16" => .@"utf-16",
+            .@"utf-32" => .@"utf-32",
+        },
+        .textDocumentSync = .{
+            .text_document_sync_options = .{
+                .openClose = true,
+                // Ranged payloads are spliced via
+                // `text_sync.applyChanges`; the whole-document form
+                // stays supported as the spec-required fallback.
+                .change = .Incremental,
+            },
+        },
+        .diagnosticProvider = .{
+            .diagnostic_options = .{
+                // True, but *not* because of cross-refs: scope is
+                // per-tree (the LSP never sets
+                // `Validator.Options.share_scope`), so a definition in
+                // one document cannot resolve a reference in another.
+                // `Handler_tests.zig`'s "cross-doc: per-tree default
+                // isolates references" pins exactly that.
+                //
+                // What genuinely crosses files is the *schema*:
+                // editing `sjon-project.sjon` or a manifest it names
+                // re-runs discovery and changes every document's
+                // diagnostics at once. A client that believes
+                // otherwise leaves stale errors on screen after the
+                // edit that fixed them.
+                .interFileDependencies = true,
+                // Native only. The handler is filesystem-free by
+                // design, so workspace enumeration lives here; the
+                // WASM transport has no filesystem to enumerate and
+                // leaves this false.
+                .workspaceDiagnostics = true,
+            },
+        },
+        .hoverProvider = .{ .bool = true },
+        .completionProvider = .{
+            // `(`: form-head, `:`: keyword-key, `[`: vector element.
+            .triggerCharacters = &.{ "(", ":", "[" },
+        },
+        .signatureHelpProvider = .{
+            // `(` opens a fresh signature; ` ` re-targets the active
+            // parameter as the user types successive args.
+            .triggerCharacters = &.{"("},
+            .retriggerCharacters = &.{" "},
+        },
+        .documentSymbolProvider = .{ .bool = true },
+        .documentFormattingProvider = .{ .bool = true },
+        .documentRangeFormattingProvider = .{ .bool = true },
+        .foldingRangeProvider = .{ .bool = true },
+        .inlayHintProvider = .{ .inlay_hint_options = .{ .resolveProvider = false } },
+        .semanticTokensProvider = .{
+            .semantic_tokens_options = .{
+                // Both lists come from `SemanticToken`'s own legends,
+                // so the indices and bits this server puts on the wire
+                // cannot drift from the names the client maps them
+                // through. Kept in sync with `wasm.zig`'s capability
+                // JSON, which generates the same object at comptime.
+                .legend = .{
+                    .tokenTypes = &Handler.SemanticToken.Type.legend,
+                    .tokenModifiers = &Handler.SemanticToken.Mods.legend,
+                },
+                // `full` only. SJON documents are small enough that a
+                // whole-file recompute beats tracking deltas, and
+                // advertising `range` or `full.delta` would invite
+                // requests with no handler behind them.
+                .full = .{ .bool = true },
+            },
+        },
+        .codeActionProvider = .{
+            .code_action_options = .{
+                .codeActionKinds = &.{ .quickfix, .@"refactor.rewrite", .@"refactor.extract", .@"refactor.inline" },
+            },
+        },
+        .definitionProvider = .{ .bool = true },
+        .documentHighlightProvider = .{ .bool = true },
+        .selectionRangeProvider = .{ .bool = true },
+        .workspaceSymbolProvider = .{ .bool = true },
+        .referencesProvider = .{ .bool = true },
+        .renameProvider = .{
+            .rename_options = .{ .prepareProvider = true },
+        },
+    };
+}
+
+test "advertised capabilities match the implemented methods" {
+    // lsp-kit's validator is a comptime cross-check between the capability
+    // set and `Server`'s method names: a capability with no handler behind
+    // it, or a handler no capability announces, is a panic. `initialize`
+    // already calls it, which is why the mismatch was reachable at all —
+    // but only in a Debug build, and only on a live connection, and nothing
+    // in the build graph ever opened one (every `lsp-*.test.ts` drives
+    // `sjon-lsp.wasm`, whose dispatcher validates nothing).
+    //
+    // So this is the gate: it runs the same check in `zig build test`,
+    // where a mismatch is red before it is an outage. Restore the
+    // pre-fix `.inlayHintProvider = .{ .bool = true }` and this test
+    // aborts, naming `inlayHint/resolve` (audit 2026-08-27 §1). A panic
+    // in a test is a failing test, which is the red this wants.
+    //
+    // The encoding is the only free parameter and it does not reach the
+    // check, so any of the three does.
+    lsp.basic_server.validateServerCapabilities(Server, serverCapabilities(.@"utf-16"));
+}

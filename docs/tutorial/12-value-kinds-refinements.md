@@ -20,7 +20,14 @@ member sets       a closed list of legal names
 head sets         a closed list of legal form heads (and how many of each)
 unions            several alternatives behind one slot
 slot-local forms  forms a slot declares inline, for its own use
+opaque slots      a slot the schema types and then leaves alone
 ```
+
+The last line is not a narrowing at all. I put it in this lesson
+because it is the mirror image of slot-local forms: one says "this
+slot has a vocabulary of its own", the other says "this slot's
+contents are not mine to read", and you will meet both in the same
+plugin.
 
 The reading habit does not change. Underlying shape first, then
 refinement, then surface value. What does change is that each axis has
@@ -173,6 +180,10 @@ gives: inside a unit, a hyphen joins two letter runs when a letter
 follows it, so the unit here is `d-array` and the whole thing is one
 value. Without that rule this was `2d` plus a stray symbol `-array`: one
 intended value, two diagnostics.
+
+Your editor treats these members like any other: completion offers
+them in the slot, hover on `2d` names the kind it belongs to, and a
+near miss such as `2dd` gets a quick fix to `2d`.
 
 You write the spelling the spec uses. There is no quoting and no numeric
 lookup table to memorise, which is what schemas used to force, with
@@ -428,6 +439,11 @@ form) could only ever have matched one alternative, the diagnostic is
 that alternative's own, exactly as if the slot had been declared with
 it alone. If the shape reaches several alternatives, or none, the
 diagnostic lists the alternatives as a menu of legal shapes.
+
+An editor runs the same shape test the other way round. A union-typed
+slot completes to every alternative's values, and once what you have
+typed has a shape only one alternative accepts (a bare symbol against
+`pitch | event`, say) the list narrows to that arm.
 
 Example music contract:
 
@@ -690,6 +706,15 @@ its slot: writing `(rect :w 1)` at the top level is an ordinary
 a namespace-qualified head skips local resolution entirely; it goes
 straight to the global vocabulary.
 
+Your editor follows the same three rules, and it matters because a
+confident wrong answer is worse than none. Inside `canvas`'s `:shape`
+slot, head completion offers `circle`, `rect` and `group` ahead of the
+global vocabulary and inserts the local `circle`'s `:r`; hover on that
+`circle` describes `:r` and not the global's `:radius`; and the quick
+fix for a misspelled `:rr` says `:r`. When a slot is closed by a head
+set, completion offers the set's members and nothing else, whether or
+not a global declaration stands behind each one.
+
 ## Head Sets and Slot-Local Forms
 
 These two features look like they compete. They do not: they run in
@@ -730,6 +755,76 @@ on its list, and the complaint came entirely from step two having
 nothing to descend into. A head set will never tell you a name is
 undeclared; that is not its job.
 
+## Opaque Slots
+
+Everything so far in this lesson narrows a slot. This last piece does
+the opposite, and it is easy to mistake for a slot-local form's twin
+when it behaves like its inverse.
+
+Take the camera one more time. A camera plugin that lets you save a
+preset wants something like this:
+
+```sjon
+(preset :name wide-shot
+  :body (camera :zoom 2 :alpha (smoothstep 0 1 t)))
+```
+
+The body is a camera, but an unfinished one. `:name` is missing, and
+that is deliberate: a preset is applied to a camera later, and the
+application supplies the name. Now the plugin author has a problem.
+`camera` is a form this schema knows, so the validator will walk into
+the body and report `missing_required_key` on a document that has
+nothing wrong with it. The schema is being asked a question it cannot
+answer yet.
+
+The plugin author's tool for this is one flag on the key, and a
+plugin's docs will show it like so:
+
+```text title="plugin summary"
+(preset ...)
+  :name symbol required
+  :body form required, opaque
+```
+
+An **opaque slot** is a slot the schema types and does not read. The
+boundary is checked: `:body` has to be a form, so `:body 3` is
+`wrong_underlying` at `[preset body]`. Below the boundary every walk
+stops. Not only the validator's: the defaults overlay from
+[Reading plugin schemas](09-reading-plugin-schemas.md), the
+cross-reference index you will meet in the next lesson, and any
+host-side lowering all stop on the same line. Four consequences fall
+out, and I want you to predict the fourth before you read it:
+
+1. **No diagnostics inside.** The unfinished camera above is clean, and
+   so is a body that uses a head this plugin never declared.
+2. **No defaults inside.** `sjon effective` splices `camera`'s defaults
+   into a top-level camera and leaves the one inside `:body` exactly as
+   you wrote it. Same head, same omitted key, one splice.
+3. **No lowering inside.** A form that a host would lower at the top
+   level does nothing in a body.
+4. **No names inside.** A form that would declare a cross-reference
+   target at the top level declares nothing in a body.
+
+The fourth is the one that can surprise you, because it is the one way
+an opaque slot *adds* a diagnostic rather than removing one, and the
+text it complains about is in plain sight. It needs the next lesson's
+machinery to show properly, so I will pay that debt in
+[Cross-references](13-cross-references.md). What to hold onto now is
+the reading: opaque means *the validator will not tell you what is in
+there*, and also *the validator will not quietly use what is in there*.
+A subtree the schema declined to interpret is not a place it harvests
+names out of.
+
+When should a plugin author reach for it? When a slot holds something
+another interpreter will read: a template body, a parameter block
+another tool expands, an expression whose head belongs to a vocabulary
+this schema does not load. The meta-schema that describes plugin
+manifests uses it on exactly one slot, the `(key …)` form's own
+`:default`, which is what lets a default be an expression without the
+expression's head being reported as an unknown form. If you find
+yourself wanting it on a slot whose contents you *do* want checked, the
+tool you want is a slot-local form.
+
 ## Diagnostic Cheat Sheet
 
 When a value kind fails, the diagnostic usually tells you which layer
@@ -753,6 +848,12 @@ of the contract you violated:
 | `string_too_short` / `string_too_long` | The `:min-len` / `:max-len` codepoint bound. |
 | `string_format_mismatch` | The named format checker (email / uri / path / uuid / semver). |
 | `string_pattern_unsupported` | The `:pattern` constraint is informational in this build (no regex engine). |
+
+One thing from this lesson is missing from that table on purpose. An
+opaque slot has no code of its own: it removes diagnostics from inside
+the slot, and the one it can add arrives as an ordinary `not_cross_ref`
+at the reference, which [Cross-references](13-cross-references.md)
+walks through.
 
 This is the repair loop:
 
@@ -994,6 +1095,30 @@ Repair with a head the slot accepts:
 (canvas :shape (circle :r 12))
 ```
 
+### Opaque Slot
+
+Contract:
+
+```text title="plugin summary"
+(preset ...)
+  :name symbol required
+  :body form required, opaque
+```
+
+Predict the diagnostics for each line before reading on:
+
+```sjon
+(preset :name dolly :body (camera :zoom))
+(preset :name dolly :body camera)
+```
+
+The first is clean. `(camera :zoom)` ends in a keyword with nothing
+after it, so `:zoom` is a positional flag, and a camera with a stray
+flag and its required keys missing would be reported at the top level.
+Inside an opaque slot it draws nothing. The second is `wrong_underlying` at
+`[preset body]`: the slot wants a form and got a symbol. The boundary
+is checked; the contents are not.
+
 ## Mastery Check
 
 - What does a member set usually mean for authoring?
@@ -1026,5 +1151,8 @@ Repair with a head the slot accepts:
   diagnostic fires when a value fits no branch?
 - How does a slot-local form set change head resolution, and what
   distinguishes `unknown_local_form` from `unknown_form`?
+
+- A required key is missing on a form that sits inside an opaque slot.
+  What is reported, and why?
 
 Next: [Cross-References](13-cross-references.md).

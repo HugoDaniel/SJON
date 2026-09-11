@@ -1,0 +1,40 @@
+; The clean document. Read the two `(animate …)` forms against each
+; other: the same head, the same keys, and only one of them is checked.
+;
+;   cat examples/plugins/opaque-slot/plugin.sjon \
+;       examples/plugins/opaque-slot/example.sjon | sjon validate - --no-project
+;
+; exits 0 with no diagnostics.
+
+(anchor :name logo)
+
+; At the top level `animate` is a finished form: `:target` is required
+; and has to name an anchor, `:from` and `:to` are numbers, `:ease`
+; defaults to `linear`. Everything here is checked.
+(animate :target logo :from 0 :to 1)
+
+; Inside `:body` the same head is unfinished and nothing is reported.
+; `:target` is missing, and it is not `missing_required_key`, because
+; the slot is opaque and the validator never looks.
+(template :name fade
+  :body (animate :from 0 :to 1))
+
+; A body may use a vocabulary this plugin never declared. `particles`
+; is not a form anywhere, and it is not `unknown_form` here.
+(template :name sparkle
+  :body (particles :count 200 :life 2s))
+
+; Expansion is where the pieces meet, and it is the host's job. The
+; schema checks what it can: both names below have to resolve.
+(apply :template fade :target logo)
+
+; What `sjon effective` prints for this file, in the two places that
+; differ from the source:
+;
+;   (animate :target logo :from 0 :to 1 :ease linear)
+;   (template :name fade
+;     :body (animate :from 0 :to 1))
+;
+; The top-level animate gains its `:ease` default. The one inside the
+; template does not, because the defaults overlay stops where the
+; validator stops. Same head, same omitted key, one splice.

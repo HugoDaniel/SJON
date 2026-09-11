@@ -75,6 +75,7 @@ pub fn append(buf: *std.ArrayList(u8), a: Allocator, v: Expr.Value) Error!void {
 }
 
 fn appendInt(buf: *std.ArrayList(u8), a: Allocator, comptime T: type, x: T) Error!void {
+    // SAFETY: `T` is i64 or u64 (the two callers above): at most 20 characters.
     var tmp: [24]u8 = undefined;
     const s = std.fmt.bufPrint(&tmp, "{d}", .{x}) catch unreachable;
     try buf.appendSlice(a, s);

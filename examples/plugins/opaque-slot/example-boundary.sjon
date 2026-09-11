@@ -1,0 +1,13 @@
+; Opaque is about the contents, not the slot. `:body` is typed `form`,
+; and that check runs before anything is or is not descended into.
+;
+;   wrong_underlying at [template body]
+;   form `template` keyword `:body` expects form, got number
+;
+; The boundary is the whole contract: the schema says what shape the
+; slot takes and says nothing about what is inside that shape.
+;
+;   cat examples/plugins/opaque-slot/plugin.sjon \
+;       examples/plugins/opaque-slot/example-boundary.sjon | sjon validate - --no-project
+
+(template :name broken :body 3)

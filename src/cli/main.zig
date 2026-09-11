@@ -26,13 +26,22 @@ fn reportInternal(stderr: *std.Io.Writer, err: anyerror) u8 {
 }
 
 pub fn main(init: std.process.Init) u8 {
+    // `writerStreaming`, not `writer`, on both channels. `File.writer`
+    // "defaults to positional writing" (std/Io/File.zig:598-601), which
+    // starts at offset 0 — right for a file this process opened and
+    // wrong for one the shell handed us. stdout and stderr are inherited
+    // fds whose offset belongs to the shell, so a positional writer made
+    // `sjon fmt - >> log` write over the head of `log` rather than after
+    // it, and `{ echo A; sjon edit F …; } > f` write over `A`. A pipe
+    // hid it: positional writes are unavailable there, so the writer
+    // fell back to streaming and the output was whole.
     var stdout_buf: [4096]u8 = undefined;
     var stdout_file = std.Io.File.stdout();
-    var stdout_writer = stdout_file.writer(init.io, &stdout_buf);
+    var stdout_writer = stdout_file.writerStreaming(init.io, &stdout_buf);
 
     var stderr_buf: [4096]u8 = undefined;
     var stderr_file = std.Io.File.stderr();
-    var stderr_writer = stderr_file.writer(init.io, &stderr_buf);
+    var stderr_writer = stderr_file.writerStreaming(init.io, &stderr_buf);
     const stderr = &stderr_writer.interface;
 
     const arena = init.arena.allocator();

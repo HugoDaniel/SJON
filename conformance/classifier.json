@@ -1,11 +1,20 @@
 {
-  "about": "Single source of truth for conformance case CLASSIFICATION — how a conformance/cases/<name>/ dir maps to a runner, and which families a wasm host skips. Consumers: hosts/conformance-shared/index.ts (both TS hosts, transitively) and hosts/rust/build.rs (parsed at build time via serde_json). The Zig runner (src/conformance_tests.zig) is the REFERENCE and classifies natively — it mirrors this file rather than reading it. Editing a family/marker/precedence here must keep those three consumers in agreement (the classifier audits + build.rs dead-family check are the drift net).",
+  "about": "Single source of truth for conformance case CLASSIFICATION — how a conformance/cases/<name>/ dir maps to a runner, which families carry a non-default validator option, and which families a wasm host skips. Consumers: hosts/conformance-shared/index.ts (both TS hosts, transitively) and hosts/rust/build.rs (parsed at build time via serde_json). The Zig runner (src/conformance_tests.zig) is the REFERENCE and classifies natively — it mirrors this file rather than reading it. Editing a family/marker/precedence here must keep those three consumers in agreement (the classifier audits + build.rs dead-family check are the drift net).",
   "markers": {
     "legacy": "schema.sjon",
     "query": "query.sjon",
     "inline": "document.sjon"
   },
   "precedence": ["legacy", "query", "inline"],
+  "validatorOptionFamilies": [
+    {
+      "label": "held-*",
+      "match": { "type": "prefix", "value": "held-" },
+      "option": "heldSymbol",
+      "value": "_",
+      "reason": "a document being typed: the case runs with the validator's held_symbol set, so a position spelled `_` is one the author has deliberately not filled in yet. A named option matched by a named prefix, deliberately narrow — there is no general per-case options sibling, and inferring the option from the document would be the document-weakens-its-own-schema hazard arriving through the test suite"
+    }
+  ],
   "wasmHostSkipFamilies": [
     {
       "label": "lowering-*",

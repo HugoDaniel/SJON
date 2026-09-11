@@ -1,0 +1,21 @@
+; A typed POSITIONAL slot holds too, and at the same site — positionals
+; route through the same typed-match entry point kvpair values do, so this
+; falls out of the one gate with no separate rule.
+;
+; The ask asked whether the verdict could be narrow enough to cover kvpair
+; values only. It could not have been, and did not need to be.
+(plugin :name hold2 :version "1.0.0"
+  (value-kind :name kernel-ref :underlying symbol
+    :cross-ref (cross-ref :target kernel :name-key name))
+
+  (form :name kernel
+    (key :name name :type symbol :optional false))
+
+  (form :name curl :positional kernel-ref
+    (key :name scale :type number :optional true)))
+
+(kernel :name flow)
+
+(curl flow :scale 3)   ; filled
+(curl _ :scale 3)      ; held — the wrap-template spelling
+(curl _ _)             ; both slots held: the second is `:scale`'s sibling

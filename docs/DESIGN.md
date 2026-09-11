@@ -125,15 +125,15 @@ walks the buffer with `BinaryCursor` and produces the same
 | `Json`                 | `Tree ↔ std.json.Value` bridge with a tagged-object encoding.                 |
 | `Validator`            | Schema-driven walker producing diagnostics. Tree and Binary paths agree on `(code, path)` for cross-host conformance. `Plugin.ValueKind` grew a `numeric` refinement (range / integrality bounds) wired through `checkNumericBoundsValue`; `MatchExtras` grew a tag-true `numeric: ?NumericValue` so the binary path's exact-int comparison fires too. Later refinements followed the same dual-path pattern: a `repr` GPU-representation tag (`repr_out_of_range`), variable-arity vectors (`VectorShape.min_len`/`max_len` → `vector_too_short`/`vector_too_long`), and a unit `reject` flag (`unit_forbidden`) — each mirrored on the tree + binary walkers and locked by `expect*OnBoth` tests. `scalar-or-ref` needs no validator change at all: the loader desugars it to an ordinary `union_of`, and the arm-naming failure report (`Validator.determinedArm`) is the general union rule, which a scalar-or-ref's shape-disjoint arms simply always satisfy. |
 | `Expr`                 | Closed-v1 safe-expression evaluator with an explicit frame stack.             |
-| `Edit`                 | JSON-encoded structural-edit reducer (functional rebuild on `Tree`).          |
+| `Edit`                 | JSON-encoded structural-edit reducer. Six ops; `wrap` composes a node into a new parent by cloning it rather than rebuilding it from JSON, and is the only one whose target keeps its trivia. An action names its root with `root` when the tree has several, and a document the parser only recovered is refused (`ParseErrors`) rather than edited as recovered. Two applies, chosen by `Options.layout`: `.reprint` is the functional rebuild on `Tree` followed by a whole-document print, and `.preserve` lowers each op to one `TextEdit` over the target's span (`Edit.textEdit`, the shape `Handler.TextEdit` aliases) and splices it, so nothing outside that span moves. |
 | `Binary`               | Wire format encoder / decoder.                                                |
 | `BinaryCursor`         | Zero-allocation read cursor over a Binary IR buffer.                          |
 | `Plugin`, `Schema`     | Comptime descriptor types + multi-plugin aggregator.                          |
 | `ManifestLoader`       | Reads a v1 portable manifest (`docs/portable-manifest-v1.md`) into an in-memory `Plugin` after meta-validation. |
 | `MetaSchema`           | The hardcoded bootstrap meta-plugin. Every conforming impl validates user manifests against this baseline. |
-| `Host`                 | Cross-host contract over the schema pipeline: `validateDocument` (inline-manifest one-shot), `evalExpr`, schema/lowering export, and the two-phase `preloadSchema` + `HostOptions.preloaded` — compile an external schema once, then borrow it additively across many document validations instead of prepending it (and rebasing spans) every time. |
+| `Host`                 | Cross-host contract over the schema pipeline: `validateDocument` (inline-manifest one-shot), `evalExpr`, schema/lowering export, and the two-phase `preloadSchema` + `HostOptions.preloaded` — compile an external schema once, then borrow it additively across many document validations instead of prepending it (and rebasing spans) every time. A staged lowering run returns every layer: `HostResult.lowering_stages` is one `LoweringStage` (tree + one-hop provenance + defaults overlay) per layer and owns the lowered trees, `lowered_tree` and its two siblings alias the last of them, and `provenanceChain` / `provenanceChainFrom` walk the hops back to the authored form as `Hop`s that carry their own trees. |
 | `Pattern`, `PatternQuery` | Deterministic Strudel-style pattern types + windowed query producing `(haps …)` / `(diagnostics …)` over a tree or Binary IR. |
-| `Lowering`, `LoweringGraph` | Host-registered lowering-hook registry + the graph a hook run emits (source forest → lowered forest). |
+| `Lowering`, `LoweringGraph` | Host-registered lowering-hook registry + the graph a hook run emits (source forest → lowered forest). `LoweringProvenance` is per layer and describes one hop: its `source_form_idx` indexes the tree that layer ran over, not the document's. Spans and provenance are separate answers: an emitted form inherits its source form's span unless it sets `EmittedForm.source_span` (a container hook lifting a child out of its own subtree), while `source_form_idx` names the container either way. |
 | `EffectiveView`, `MaterializedDefaults` | Read-only effective-value overlay: resolves schema `:default`s (literal or `(expr …)`) over an author tree without mutating it. |
 | `Resolver`, `FilesystemResolver` | `(use-plugin …)` reference resolution; the default filesystem resolver reads a `sjon-project.sjon` project file. |
 | `PluginRuntime`        | Executable-plugin ABI dispatch (`-Dplugin-exec`): instantiate sidecar wasm, pre-flight the import surface + ABI, invoke exports. |
@@ -310,6 +310,34 @@ while (try roots.next()) |view| {
 See [`examples/binary-ir-demo.zig`](../examples/binary-ir-demo.zig) for a
 runnable end-to-end example (`zig build demo-binary`).
 
+**Pool lookup, and the opt-in offset index.** Pool entries are length-
+prefixed, so resolving index `idx` walks `idx` varints from the pool
+head. Every form head, keyword key, symbol, string, keyword and unit
+resolves that way, which makes a document with `N` pool entries and `M`
+string-bearing nodes cost `O(M x N)` — quadratic, and reachable by a
+legal file, since `MAX_STRING_POOL_ENTRIES` is 65536.
+
+`Cursor.indexPools` removes it without giving up "never allocates": the
+*caller* allocates one `[]u32` of `Cursor.poolIndexLen()` entries (4
+bytes per pool entry, both pools) and owns it, and the cursor borrows it
+for the rest of its life. With the index attached a lookup is a single
+varint read. `init` is unchanged and still allocates nothing; the index
+is built by the same `walkPool` loop `init` already runs to validate the
+pools, in its recording mode, so the offsets cannot disagree with the
+walk that accepted the file.
+
+`Validator` (extraction sweep, cross-index build, `validateOneBinary`),
+`Expr.evalBinary` and `PatternQuery.compileBinary` index every cursor
+they open: the first three on their GPA with a paired free, the last two
+on the arena that already owns their output.
+
+```zig
+var cursor = try sjon.BinaryCursor.Cursor.init(bytes);
+const pool_index = try gpa.alloc(u32, cursor.poolIndexLen());
+defer gpa.free(pool_index);
+cursor.indexPools(pool_index);
+```
+
 ## Unit-suffixed numbers
 
 Numbers can carry an optional unit suffix — `4b`, `90deg`, `50%`,
@@ -344,13 +372,9 @@ does, rather than yielding the number zero with unit `x`. The parser reads
 the digit run in base 16 through the same `i64` → `u64` ladder decimal
 integers take, so a hex literal lands on the existing number tags: no new
 tag, no wire change, and every `:numeric` / `:repr` / `:unit` refinement
-judges it as it judges a decimal. `Parser.parseNumberAs` carries the same
-branch, because it is the `pub` re-read behind `:repr` and works from the
-source lexeme rather than the decoded value; its float arm goes through
-hex-float syntax (`0xFFp0`) so the value is correctly rounded rather than
-accumulated digit-by-digit. The printer has no source access and formats
-from the value, so `sjon fmt` writes a hex literal back as decimal (§4.2
-of LANGUAGE.md): values round-trip, spellings do not.
+judges it as it judges a decimal. The printer has no source access and
+formats from the value, so `sjon fmt` writes a hex literal back as
+decimal (§4.2 of LANGUAGE.md): values round-trip, spellings do not.
 
 **AST representation.** The SoA `Tree` distinguishes the two cases via
 `Tag`: `Tag.number` keeps the existing `Data.immediate = @bitCast(f64)`
@@ -500,7 +524,13 @@ an editor instead.
   is to ship the IR consumer without the parser, printer, or `std.json`.
 - `sjon.wasm` — kitchen-sink: parse / print / validate / toJson /
   fromJson / toBinary / fromBinary / applyEdit / evalExpr /
-  evalExprBinary / exportSchema.
+  evalExprBinary / exportSchema, plus the address surface —
+  `sjon_node_table` (every addressable node, flat, pre-order, with its
+  span and its §11.2 path step) and `sjon_address_of_span` (the innermost
+  node containing a byte range, as `{root, path, span, kind}`). Both
+  parse, so both belong here and neither reaches the read-only artifact:
+  a consumer that starts from the IR already has every span in the bytes
+  it was handed.
 - `sjon-lsp.wasm` — the language server (`src/lsp/`), driven by a
   JSON-RPC byte pump (`sjon_lsp_alloc` / `_send` / `_recv` / `_dealloc`)
   rather than the `[u32 ok][u32 len]` envelope. It declares **zero**
@@ -518,7 +548,12 @@ keyed by node index. Comments survive every round-trip:
 - `parse → toJson → fromJson → print(.canonical)` keeps form structure
   but drops trivia (canonical-only — JSON has no comment encoding).
 - `applyEdit` (any structural-edit op) preserves trivia outside the
-  affected subtree.
+  affected subtree. A node built from an action's `value` comes
+  through the JSON bridge and so arrives trivia-free — including when
+  the action is merely *composing* with a subtree rather than changing
+  it. `wrap` is the op for that case: it clones the node it wraps, so
+  the wrapped subtree keeps its comments. Layout is not preserved by
+  any op; the printer re-derives it from the tree on every run.
 
 ## Vocabulary as data — portable plugin manifests
 
@@ -588,6 +623,50 @@ The **document binary wire format is unchanged**: schemas are in-memory
 document IR, so `local_forms` adds no bytes and no `Binary.FORMAT_VERSION`
 bump. Schema *export* lowers such a slot to an inline anonymous union
 (see SCHEMA_EXPORT.md).
+
+### Held positions — a document being typed
+
+`Validator.Options.held_symbol` (default `null`, `"_"` by convention) names
+the spelling of a position the author has deliberately not filled in yet. A
+symbol whose text matches is accepted wherever a value may appear, without
+narrowing on `underlying`, `cross_ref`, `members`, `numeric`, `unit`, `repr`
+or a union arm. `unknown_key` and `missing_required_key` are untouched: a
+typo is not a hole, and omission is not held — only an explicit atom is.
+
+Four sites, three of them subtractive. `matchValueAgainstType` (tree) and
+`matchAgainstExpected` (binary) each gain one gate at the top, which is
+enough for every axis because both are the single door to typed matching on
+their walker; kvpair values, positional children, vector elements and union
+alternatives all arrive there. `registerSite` gains a third: a held name is
+not a name, so it registers nothing — without that, two half-written forms
+both holding their `:name` collect a spurious `duplicate_cross_ref_target`.
+The fourth is a redirection rather than a relaxation: held reads as *absent*
+to the default overlay (`MaterializedDefaults.Options.held_symbol` +
+`EffectiveView.getAuthorValue`), so a held key resolves to its declared
+`:default` — which is what "a hole resolves to that position's identity
+value" means — and to `null` when there is no default. `EffectiveView.isHeld`
+answers "has the author filled this position" without a tree walk;
+`EffectiveValue` deliberately grows no `.held` arm, because "not decided
+yet" is not a value and could not be converted to one.
+
+The option rides onto `CrossRefIndex` at construction the way
+`defer_cross_refs` does, so the match and registration sites read it back off
+the index and the union probe's shallow copy inherits it.
+
+**A run option, never a declaration.** A manifest is loaded because the
+document said `(use-plugin …)`, so a document- or manifest-level opt-in would
+let a document turn off its own type checking by writing one form — and the
+document is exactly the untrusted artefact the validator exists to check. The
+assertion belongs to whoever invoked the validator, which is why it crosses
+the envelope as `heldSymbol` (`HostOptions.held_symbol` → the
+`sjon_host_validate_document` options JSON → all three host ports) rather
+than staying Zig-side like `effective_axes`.
+
+`docs/LANGUAGE.md` is silent on this deliberately: `_` is an ordinary symbol
+and the grammar does not change. Held-ness is a property of a validation
+run, not a language construct. Corpus coverage is the `held-*` family
+(`conformance/classifier.json`, `validatorOptionFamilies`) plus the
+`underscore-without-held-symbol` control.
 
 ## Testing
 

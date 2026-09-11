@@ -20,7 +20,6 @@ const Allocator = std.mem.Allocator;
 const Ast = @import("Ast.zig");
 const Expr = @import("Expr.zig");
 const Plugin = @import("Plugin.zig");
-const Schema = @import("Schema.zig");
 const MaterializedDefaults = @import("MaterializedDefaults.zig");
 const StringEscape = @import("StringEscape.zig");
 /// Test-only: the re-parse leg of the "output is valid source" contract.
@@ -52,7 +51,6 @@ pub fn render(
     source: []const u8,
     tree: *const Ast.Tree,
     materialized: *const MaterializedDefaults.MaterializedDefaults,
-    schema: *const Schema.Schema,
 ) Error![]const u8 {
     if (materialized.entries.len == 0) return source;
 
@@ -67,7 +65,7 @@ pub fn render(
     while (i < tags.len) : (i += 1) {
         if (tags[i] != .form) continue;
         const idx = Ast.NodeIndex.from(i);
-        const ins = (try formInsertion(arena, source, tree, materialized, schema, idx)) orelse continue;
+        const ins = (try formInsertion(arena, source, tree, materialized, idx)) orelse continue;
         try insertions.append(arena, ins);
     }
     if (insertions.items.len == 0) return source;
@@ -88,6 +86,31 @@ pub fn render(
     return try out.toOwnedSlice(arena);
 }
 
+/// Offset of `form_idx`'s own closing `)`, or null when the parser
+/// recovered the form without one. A recovered form's span ends wherever
+/// recovery stopped: at EOF, or on an *inner* form's `)`, which
+/// `source[span.end - 1] == ')'` alone cannot tell from the form's own —
+/// `(a (b :x 1)` passed that check and spliced `a`'s defaults inside `b`.
+/// The form's own `)` lies past every child, so the last child's span
+/// must end before it. Shared by the splicer, the LSP inlay hints and
+/// the definition-hoist action, which all insert before that byte.
+///
+/// Complexity: O(1). `source` is the text the tree's spans index.
+pub fn formClosingParen(source: []const u8, tree: *const Ast.Tree, form_idx: Ast.NodeIndex) ?u32 {
+    std.debug.assert(tree.tagOf(form_idx) == .form);
+    const span = tree.spanOf(form_idx);
+    if (span.end == 0 or span.end > source.len) return null;
+    const close = span.end - 1;
+    if (source[close] != ')') return null;
+    const hdr = tree.formHeader(form_idx);
+    if (hdr.children.len > 0) {
+        const last = tree.spanOf(hdr.children[hdr.children.len - 1]);
+        if (last.end >= span.end) return null;
+    }
+    std.debug.assert(close >= span.start);
+    return close;
+}
+
 /// Build `form_idx`'s insertion, or null when there is nothing to
 /// insert. Shared by the LSP materialize action (one form, under the
 /// cursor) and the effective document (every form).
@@ -96,24 +119,13 @@ pub fn formInsertion(
     source: []const u8,
     tree: *const Ast.Tree,
     materialized: *const MaterializedDefaults.MaterializedDefaults,
-    schema: *const Schema.Schema,
     form_idx: Ast.NodeIndex,
 ) Error!?Insertion {
     if (materialized.entries.len == 0) return null;
 
-    const span = tree.spanOf(form_idx);
-    // Same guard as the LSP ghost hints: only a form the parser saw
-    // closed has a `)` to insert before. Inserting at EOF inside a form
-    // the user is still typing would land the keys in the wrong place.
-    if (span.end == 0 or span.end > source.len) return null;
-    const close_paren = span.end - 1;
-    if (source[close_paren] != ')') return null;
-
-    const hdr = tree.formHeader(form_idx);
-    const form_spec: ?*const Plugin.FormSpec = switch (schema.lookupForm(hdr.head, hdr.namespace)) {
-        .found => |hit| hit.form,
-        else => null,
-    };
+    // Only a form the parser saw closed has a `)` to insert before; the
+    // LSP ghost hints and the hoist action share the test.
+    const close_paren = formClosingParen(source, tree, form_idx) orelse return null;
 
     var text: std.ArrayList(u8) = .empty;
     for (materialized.entries) |*entry| {
@@ -123,7 +135,7 @@ pub fn formInsertion(
         // written back faithfully is skipped, and appending directly
         // would leave its half-rendered text in the output.
         var value: std.ArrayList(u8) = .empty;
-        if (!try appendEffectiveValue(arena, &value, entry, form_spec)) continue;
+        if (!try appendEffectiveValue(arena, &value, entry)) continue;
 
         try text.appendSlice(arena, " :");
         try text.appendSlice(arena, entry.key);
@@ -137,26 +149,23 @@ pub fn formInsertion(
 }
 
 /// Render one materialized entry's value as source text. Prefers the
-/// manifest's literal default spelling when the entry is a literal
-/// default (it came out of the manifest as source text); computed
-/// values render through `appendExprValue`. Returns false when the
-/// rendering would be a display approximation rather than source.
+/// manifest's literal default spelling when the entry carries one (it
+/// came out of the manifest as source text); computed values render
+/// through `appendExprValue`. Returns false when the rendering would be
+/// a display approximation rather than source.
+///
+/// The spelling is read off the entry rather than looked up from the
+/// schema by head. The head alone is not enough to find the right
+/// `FormSpec` — a slot-local form shadows a same-named global — and
+/// looking it up here is what spliced the global `circle`'s `:radius`
+/// into a local `circle` that declares `:r`.
 pub fn appendEffectiveValue(
     arena: Allocator,
     buf: *std.ArrayList(u8),
     entry: *const MaterializedDefaults.Entry,
-    form_spec: ?*const Plugin.FormSpec,
 ) Error!bool {
-    const literal: ?Plugin.KeySpec.Default = blk: {
-        if (entry.origin != .literal_default) break :blk null;
-        const spec = form_spec orelse break :blk null;
-        for (spec.keys) |*key| {
-            if (std.mem.eql(u8, key.name, entry.key)) break :blk key.default;
-        }
-        break :blk null;
-    };
-
-    if (literal) |d| {
+    if (entry.literal) |d| {
+        std.debug.assert(entry.origin == .literal_default);
         // A literal default is source text by construction — it came
         // out of the manifest that way.
         try appendDefaultLiteral(arena, buf, d, 0);
@@ -433,4 +442,27 @@ pub fn appendDefaultLiteral(
             try buf.append(arena, ')');
         },
     }
+}
+
+test "formClosingParen: an unclosed outer form whose recovered span ends on an inner `)` has no paren of its own" {
+    const a = std.testing.allocator;
+
+    var open = try Parser.parse(a, "(a (b :x 1)");
+    defer open.deinit();
+    const outer = open.root[0];
+    const inner = open.formHeader(outer).children[0];
+    try std.testing.expect(formClosingParen(open.source, &open, outer) == null);
+    try std.testing.expectEqual(@as(?u32, 10), formClosingParen(open.source, &open, inner));
+
+    var closed = try Parser.parse(a, "(a (b :x 1))");
+    defer closed.deinit();
+    try std.testing.expectEqual(@as(?u32, 11), formClosingParen(closed.source, &closed, closed.root[0]));
+
+    var empty = try Parser.parse(a, "(a)");
+    defer empty.deinit();
+    try std.testing.expectEqual(@as(?u32, 2), formClosingParen(empty.source, &empty, empty.root[0]));
+
+    var bare = try Parser.parse(a, "(a");
+    defer bare.deinit();
+    try std.testing.expect(formClosingParen(bare.source, &bare, bare.root[0]) == null);
 }

@@ -59,10 +59,12 @@ pub fn frameError(allocator: Allocator, err: anyerror) Allocator.Error![*]u8 {
 /// Append an `Expr.Value` as JSON. Keywords are encoded as `{"$kw":"…"}`
 /// to disambiguate from strings (matches the strict JSON bridge).
 ///
-/// Recurses on the host stack over vectors / forms. Only ever called on a
-/// `Result.value`, which eval capped to `Expr.MAX_VALUE_DEPTH` via its
-/// final `deepCopyValue` — so the recursion is transitively bounded and
-/// needs no depth parameter of its own.
+/// Recurses on the host stack over vectors / forms. Every value it is
+/// handed is already capped at `Expr.MAX_VALUE_DEPTH`: an eval
+/// `Result.value` by eval's final `deepCopyValue`, and a materialized
+/// literal default (`wasm_host_json`, `cli/Cli` reach it with those too)
+/// by `MaterializedDefaults.literalToValue`'s own cap — so the recursion
+/// is transitively bounded and needs no depth parameter of its own.
 pub fn appendValue(buf: *std.ArrayList(u8), a: Allocator, v: Expr.Value) Allocator.Error!void {
     switch (v) {
         .nil => try buf.appendSlice(a, "null"),
@@ -84,11 +86,13 @@ pub fn appendValue(buf: *std.ArrayList(u8), a: Allocator, v: Expr.Value) Allocat
             }
         },
         .integer_i64 => |x| {
+            // SAFETY: an i64 prints in at most 20 characters, sign included.
             var num_buf: [32]u8 = undefined;
             const s = std.fmt.bufPrint(&num_buf, "{d}", .{x}) catch unreachable;
             try buf.appendSlice(a, s);
         },
         .integer_u64 => |x| {
+            // SAFETY: a u64 prints in at most 20 digits.
             var num_buf: [32]u8 = undefined;
             const s = std.fmt.bufPrint(&num_buf, "{d}", .{x}) catch unreachable;
             try buf.appendSlice(a, s);
@@ -169,6 +173,7 @@ pub fn appendJsonStringBody(buf: *std.ArrayList(u8), a: Allocator, s: []const u8
         '\r' => try buf.appendSlice(a, "\\r"),
         '\t' => try buf.appendSlice(a, "\\t"),
         0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => {
+            // SAFETY: `c` is below 0x20, so the escape is exactly six bytes.
             var esc_buf: [8]u8 = undefined;
             const s2 = std.fmt.bufPrint(&esc_buf, "\\u{x:0>4}", .{c}) catch unreachable;
             try buf.appendSlice(a, s2);
@@ -179,6 +184,7 @@ pub fn appendJsonStringBody(buf: *std.ArrayList(u8), a: Allocator, s: []const u8
 
 /// Append a u32 as decimal text.
 pub fn appendUint(buf: *std.ArrayList(u8), a: Allocator, n: u32) Allocator.Error!void {
+    // SAFETY: a u32 prints in at most 10 digits, exactly the buffer.
     var num_buf: [10]u8 = undefined;
     const s = std.fmt.bufPrint(&num_buf, "{d}", .{n}) catch unreachable;
     try buf.appendSlice(a, s);

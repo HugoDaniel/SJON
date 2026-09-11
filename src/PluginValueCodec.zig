@@ -247,7 +247,10 @@ const Cursor = struct {
     pos: usize = 0,
 
     fn need(self: *Cursor, n: usize) Error!void {
-        if (self.pos + n > self.bytes.len) return error.UnexpectedEof;
+        // Subtract, never add: `pos + n` wraps on wasm32 for a wire
+        // length near 2^32 and the read then runs past the buffer.
+        std.debug.assert(self.pos <= self.bytes.len);
+        if (n > self.bytes.len - self.pos) return error.UnexpectedEof;
     }
 
     fn readByte(self: *Cursor) Error!u8 {
@@ -340,6 +343,10 @@ fn decodeValueDepth(a: Allocator, cur: *Cursor, depth: u8) Error!Expr.Value {
         },
         @intFromEnum(Tag.vector) => blk: {
             const n = try cur.readU32();
+            // Every element costs at least its tag byte, so a count the
+            // remaining bytes cannot carry is truncated — check before the
+            // allocation, or a 6-byte frame reserves 2^30 Values.
+            try cur.need(n);
             const xs = try a.alloc(Expr.Value, n);
             for (0..n) |i| xs[i] = try decodeValueDepth(a, cur, depth + 1);
             break :blk .{ .vector = xs };
@@ -352,9 +359,11 @@ fn decodeValueDepth(a: Allocator, cur: *Cursor, depth: u8) Error!Expr.Value {
             const ns = try cur.readBytes(ns_len);
             const ns_owned = try a.dupe(u8, ns);
             const child_count = try cur.readU32();
+            try cur.need(child_count);
             const children = try a.alloc(Expr.Value, child_count);
             for (0..child_count) |i| children[i] = try decodeValueDepth(a, cur, depth + 1);
             const kv_count = try cur.readU32();
+            try cur.need(kv_count);
             const kvs = try a.alloc(Expr.KvPair, kv_count);
             for (0..kv_count) |i| {
                 const key_len = try cur.readU32();
@@ -379,6 +388,7 @@ fn decodeValueDepth(a: Allocator, cur: *Cursor, depth: u8) Error!Expr.Value {
 pub fn decodeArgs(a: Allocator, bytes: []const u8) Error![]Expr.Value {
     var cur = Cursor{ .bytes = bytes };
     const n = try cur.readU32();
+    try cur.need(n); // one byte per argument at least; see the vector arm
     const xs = try a.alloc(Expr.Value, n);
     for (0..n) |i| xs[i] = try decodeValueDepth(a, &cur, 0);
     return xs;
@@ -405,8 +415,10 @@ pub fn decodeFrame(bytes: []const u8) Error!Frame {
     if (bytes.len < HEADER_SIZE) return error.UnexpectedEof;
     const ok = std.mem.readInt(u32, bytes[0..4], .little);
     const len = std.mem.readInt(u32, bytes[4..8], .little);
-    if (bytes.len < HEADER_SIZE + len) return error.UnexpectedEof;
-    return .{ .ok = ok == 1, .payload = bytes[HEADER_SIZE .. HEADER_SIZE + len] };
+    // `HEADER_SIZE + len` is a u32 sum: a hostile `len` near 2^32 wrapped
+    // it (panic in safe builds, a 4 GiB payload slice on wasm32).
+    if (len > bytes.len - HEADER_SIZE) return error.UnexpectedEof;
+    return .{ .ok = ok == 1, .payload = bytes[HEADER_SIZE..][0..len] };
 }
 
 pub const StructuredError = struct {
@@ -802,4 +814,31 @@ test "decoder: depth limit catches deeply-nested vectors" {
     // Innermost: tag=nil so the byte stream is well-formed apart from depth.
     try buf.append(testing.allocator, @intFromEnum(Tag.nil));
     try testing.expectError(error.DepthExceeded, decodeValue(arena.allocator(), buf.items));
+}
+
+test "decodeFrame: a payload length near u32 max is UnexpectedEof, not a wrapped sum" {
+    // `HEADER_SIZE + len` overflowed u32: a panic in safe builds and a
+    // 4 GiB payload slice past a 16-byte buffer on wasm32.
+    const frame = [_]u8{ 1, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0 };
+    try std.testing.expectError(error.UnexpectedEof, decodeFrame(&frame));
+}
+
+test "decodeArgs: an argument count the bytes cannot carry fails before the allocation" {
+    // Count 2^30 with no payload used to reserve 2^30 Values (16 GiB of
+    // address space) and only then hit UnexpectedEof. A 4 KiB fixed
+    // buffer as the allocator turns that reservation into OutOfMemory,
+    // which the check-before-alloc must never reach.
+    const bytes = [_]u8{ 0, 0, 0, 0x40 };
+    var buf: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    try std.testing.expectError(error.UnexpectedEof, decodeArgs(fba.allocator(), &bytes));
+}
+
+test "decodeValue: a hostile vector count is UnexpectedEof before the allocation" {
+    // vector tag, count 2^30, then nothing.
+    const bytes = [_]u8{ @intFromEnum(Tag.vector), 0, 0, 0, 0x40 };
+    var buf: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    var cur = Cursor{ .bytes = &bytes };
+    try std.testing.expectError(error.UnexpectedEof, decodeValueDepth(fba.allocator(), &cur, 0));
 }

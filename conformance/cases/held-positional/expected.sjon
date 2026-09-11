@@ -1,0 +1,3 @@
+; Silent. A positional held value is the same value in the same match, one
+; path step apart (`curl/0` rather than `curl/scale`).
+(diagnostics)

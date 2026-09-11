@@ -21,6 +21,10 @@
 //! Memory model: `match` is pure; callers pass owned bytes for both
 //! pattern and path. No allocations.
 //!
+//! Work: every `matchInner` entry counts one step against
+//! `MAX_MATCH_STEPS`; past it the match fails closed. Depth alone does not
+//! bound time — see the constant.
+//!
 //! Recursion: `matchInner` recurses on strictly-shorter pattern suffixes
 //! (each `*`/`**`/`{…}` consumes ≥1 pattern byte before recursing), so the
 //! depth is bounded by the number of wildcard/brace constructs, itself
@@ -46,6 +50,16 @@ const std = @import("std");
 /// cosmetic. Over-length patterns fail closed (match nothing).
 pub const MAX_PATTERN_LEN: usize = 512;
 
+/// Ceiling on matcher work per `match` call, counted once per
+/// `matchInner` entry. The depth cap above bounds the *stack*; it does
+/// not bound *time*: every `**` retries the rest of the pattern at every
+/// remaining path offset, so `n` stacked `**` segments cost O(len^n) —
+/// twelve of them against a 100-character path never returned. Past the
+/// ceiling the match fails closed, exactly like an over-length pattern,
+/// so a hostile `:documents` entry costs at most this many steps. A real
+/// pattern (`docs/**/*.sjon` over a long path) is a few thousand.
+pub const MAX_MATCH_STEPS: u32 = 1 << 20;
+
 /// Returns true when `path` matches `pattern` under the dialect above.
 /// `path` is treated as already POSIX-normalized (forward slashes,
 /// no leading `./`). A pattern longer than `MAX_PATTERN_LEN` matches
@@ -55,14 +69,19 @@ pub fn match(pattern: []const u8, path: []const u8) bool {
     // recursion depth (≤ pattern.len ≤ MAX_PATTERN_LEN) so a hostile
     // project-file pattern can't blow the host stack.
     if (pattern.len > MAX_PATTERN_LEN) return false;
-    return matchInner(pattern, path);
+    var steps: u32 = 0;
+    return matchInner(pattern, path, &steps);
 }
 
 /// Recursive matcher. Each recursive call is on a strictly-shorter pattern
 /// suffix (or brace sub-slice), so depth ≤ pattern.len ≤ `MAX_PATTERN_LEN`
 /// once `match`'s entry cap has run. Callers other than `match` must have
 /// already enforced that cap.
-fn matchInner(pattern: []const u8, path: []const u8) bool {
+fn matchInner(pattern: []const u8, path: []const u8, steps: *u32) bool {
+    // Fail closed once the per-call work ceiling is spent (see
+    // `MAX_MATCH_STEPS`); every recursive entry pays one step.
+    if (steps.* >= MAX_MATCH_STEPS) return false;
+    steps.* += 1;
     var pi: usize = 0;
     var si: usize = 0;
     while (pi < pattern.len) {
@@ -79,7 +98,7 @@ fn matchInner(pattern: []const u8, path: []const u8) bool {
             // boundaries between path segments — `**` permits any depth).
             var k: usize = si;
             while (k <= path.len) : (k += 1) {
-                if (matchInner(rest, path[k..])) return true;
+                if (matchInner(rest, path[k..], steps)) return true;
             }
             return false;
         }
@@ -95,7 +114,7 @@ fn matchInner(pattern: []const u8, path: []const u8) bool {
             var k: usize = si;
             while (k <= path.len) : (k += 1) {
                 if (k > si and path[k - 1] == '/') return false;
-                if (matchInner(rest, path[k..])) return true;
+                if (matchInner(rest, path[k..], steps)) return true;
             }
             return false;
         }
@@ -124,7 +143,7 @@ fn matchInner(pattern: []const u8, path: []const u8) bool {
                 const branch = branches[bi..next_comma];
                 // Construct the spliced pattern: branch + rest. Avoid
                 // allocation by matching the branch first, then the rest.
-                if (matchInnerSpliced(branch, rest, path[si..])) return true;
+                if (matchInnerSpliced(branch, rest, path[si..], steps)) return true;
                 if (next_comma == branches.len) break;
                 bi = next_comma + 1;
             }
@@ -141,7 +160,7 @@ fn matchInner(pattern: []const u8, path: []const u8) bool {
 
 /// Match `branch ++ rest` against `path` without allocating. Used by
 /// the alternation handler to splice branch options inline.
-fn matchInnerSpliced(branch: []const u8, rest: []const u8, path: []const u8) bool {
+fn matchInnerSpliced(branch: []const u8, rest: []const u8, path: []const u8, steps: *u32) bool {
     // Match `branch` against path's prefix, then `rest` against the
     // remainder. `branch` itself never contains `**`, `*`, `?`, or `{`
     // (the brace handler is responsible) — but we tolerate them anyway
@@ -152,11 +171,11 @@ fn matchInnerSpliced(branch: []const u8, rest: []const u8, path: []const u8) boo
         // the spec doesn't require it.
         var k: usize = 0;
         while (k <= path.len) : (k += 1) {
-            if (matchInner(branch, path[0..k]) and matchInner(rest, path[k..])) return true;
+            if (matchInner(branch, path[0..k], steps) and matchInner(rest, path[k..], steps)) return true;
         }
         return false;
     }
-    return matchInner(rest, path[branch.len..]);
+    return matchInner(rest, path[branch.len..], steps);
 }
 
 /// Cheap literal-prefix check: returns true when `lit` (containing no
@@ -189,6 +208,17 @@ test "Glob: over-cap **-tower is rejected by the length cap" {
     // so the exponential `**`-tower blowup is never entered.
     const tower = "**/" ** 200;
     try testing.expect(!match(tower, "a/b/c/x"));
+}
+
+test "Glob: a **-tower under the length cap is bounded by the step ceiling" {
+    // Twelve `**/` segments are 36 bytes — well under MAX_PATTERN_LEN — and
+    // each retries the rest at every offset of the path, O(len^12). This
+    // did not return within a minute; now it fails closed at
+    // MAX_MATCH_STEPS. A pattern that does match is unaffected.
+    const tower = "**/" ** 12 ++ "x";
+    const long_path = "a/" ** 50 ++ "y";
+    try testing.expect(!match(tower, long_path));
+    try testing.expect(match("**/" ** 12 ++ "y", "a/b/c/y"));
 }
 
 test "Glob: modest **-tower matches at any depth and terminates" {

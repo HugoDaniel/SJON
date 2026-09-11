@@ -2560,18 +2560,26 @@ and path stay in lock-step. Examples:
     `triangle` — `not_head_member` at path `[canvas, shape]`,
     followed by `unknown_form` at path `[canvas, shape, triangle]`
     once the walker descends into the form.
-  * `(scene :tags ["a" "b"])` — the second element fails at path
-    `[scene, tags, 1]`.
+  * `(scene :loose ["a" (bogus)])` — descending into the second
+    element's form lands at path `[scene, loose, 1]`. Note this is a
+    *descent*: a typed vector slot whose element fails its own type
+    check does not descend, it wraps — see below.
 
 The path is the cross-host anchor for fixtures: `(code, path)`
 identifies *what* failed *where* without committing to host-specific
 span semantics. The parser and both validator paths (Tree and Binary)
 emit semantic paths and agree on `(code, path)` for every parity
-case; the only remaining divergence is the typed-vector element-fusion
-case (Tree fires once at the slot wrapping "element [N]: …", Binary
-fires per element at the leaf), which is a structural difference in
-how the per-element check propagates rather than a path-tracking
-gap.
+case, typed-vector elements included: both fire at the **slot** path
+(`[scene, tags]`) with the offending index in the message
+("element [N]: …"), and both point the **span** at the element that is
+actually wrong rather than at the whole vector. The path says which
+slot is at fault, the message says which element, and the span says
+where to put the caret.
+
+One divergence in this family survives, and it is a *count* rather
+than a path or a span: when more than one element fails, the Tree
+walker stops at the first and the Binary walker emits one diagnostic
+per element. No corpus case exercises it.
 
 Parser diagnostics follow the same path conventions: a bad number or
 escape inside `(parent :k …)` lands at `[parent, k]`; an empty form
@@ -2634,6 +2642,19 @@ The rules:
 
 1. Defaults apply only to omitted declared keys on known data forms.
    Unknown heads are already diagnosed; materialization skips them.
+   *Declared* covers the keys of the form's **active variant** as well
+   as its common keys: a variant key is declared once the discriminant
+   selects the variant it sits in. The discriminant is itself a common
+   key, so one supplied by its own default (axis D) selects the variant
+   whose keys are then materialized in turn.
+   Presence is position-independent here. A variant key written *ahead*
+   of its discriminant is `unknown_key` — the validator does not accept
+   it — but the author did write it, so no default is materialized over
+   the text they wrote.
+   A key declared `:walk-opaque true` (§6.3) stops the materialization
+   walk exactly where it stops the validator's: a form nested in such a
+   slot is never reached, so none of its keys is defaulted. Every other
+   descent stops there as well — see §6.3.
 2. An explicit author kvpair always wins, even if it is invalid. The
    overlay carries no entry for an explicitly written key.
 3. Duplicate explicit keys remain a validation error; materialization
@@ -2694,9 +2715,14 @@ target — and a lowered `:ref` may resolve to a source target — just
 as if the document were authored as one piece. Each tree gets its
 own materialized-defaults overlay (`Validator.Options.overlays`)
 because their `NodeIndex` spaces are disjoint. Surface validation
-inside the lowering pass sees only the one-form sub-tree and would
-miss any external cross-ref; the gate filters those misses and
-defers cross-ref reporting to the final-forest pass.
+inside the lowering pass sees only the one-form sub-tree, so it runs
+with `Validator.Options.defer_cross_refs`: a cross-reference matches
+whatever it names, wherever it is reached from (directly, through a
+`(union-shape …)` alternative, a vector element, or a key's default),
+and cross-ref reporting is left to the final-forest pass, which has
+the document. The only thing that differs between validating a form
+alone and validating it in its document is which names are
+registered; every other check decides identically in both passes.
 
 Consumers walk `Ast.Tree` for author input and ask the overlay for
 effective values. A consumer that wants the effective value of
@@ -3721,10 +3747,11 @@ Real documents are far below every cap.
 
 `applyEdit(source, action_json, opts)` is the substrate's
 canonical structural-mutation operation: parse the source, apply a
-JSON-encoded edit action, print the result. It is a *functional
-rebuild* — the source tree is unchanged; the result is a freshly
-constructed tree with the action applied at the given path. Trivia
-outside the affected sub-tree is preserved.
+JSON-encoded edit action, emit the result. The source is never modified;
+trivia outside the affected sub-tree is preserved (§11.5), and *how* the
+result reaches the bytes — a whole-document re-print, or one spliced span
+per action — is `opts.layout` (§11.6). At a shell it is `sjon edit`
+(TOOLING.md).
 
 ```zig
 const action = try std.json.parseFromSlice(std.json.Value, gpa,
@@ -3740,27 +3767,56 @@ defer edited.deinit();
 
 ### 11.1 Action grammar
 
-An action is a JSON object with three fields:
+An action is a JSON object with three fields, plus an optional fourth:
 
 ```json
 {
   "op":   "<operation>",
   "path": [<segment>, <segment>, ...],
+  "root": <integer>,      // optional; see §11.3
   ...                     // op-specific fields
 }
 ```
 
-The five operations:
+The two **forest** operations are the exception. They act on the
+document's root list rather than on a node inside one root, so they take
+neither `path` nor `root`; see §11.3.
+
+The eight operations:
 
 | `op` | Op-specific fields | Meaning |
 | --- | --- | --- |
 | `set_keyword` | `key: string`, `value: <SJON-as-JSON>` | Set or replace a kvpair on the form at `path`. |
 | `remove_keyword` | `key: string` | Remove a kvpair from the form at `path`. |
 | `replace` | `value: <SJON-as-JSON>` | Replace the node at `path` with a freshly built sub-tree. |
+| `wrap` | `value: <SJON-as-JSON>`, `hole: [<segment>, ...]` | Compose the node at `path` into a new parent built from `value`, landing it in the slot `hole` names inside that parent. |
 | `insert_positional` | `value: <SJON-as-JSON>`, `index: integer?` | Insert a positional child into the form at `path`; appends when `index` is omitted. |
 | `remove_positional` | `index: integer` | Remove the `index`th positional child from the form at `path`. |
+| `insert_root` | `value: <SJON-as-JSON>`, `index: integer?` | Insert a new root before the `index`th one; appends when `index` is omitted. |
+| `remove_root` | `index: integer` | Remove root `index`. |
 
 `<SJON-as-JSON>` is a value in the canonical JSON encoding (§9).
+
+`wrap` is the one operation that composes rather than replaces, and the
+only one that keeps the trivia of the node it acts on — see §11.5. Its
+`hole` is a path in the same grammar as `path` (§11.2), but walked
+against the decoded `value` rather than the document, and it may not be
+empty: with nowhere for the wrapped node to land, a `wrap` is a `replace`
+that discards its target, so an empty `hole` is `error.InvalidPath`.
+Whatever placeholder sits in the hole slot (`null` reads best) is
+discarded.
+
+```json
+{
+  "op":    "wrap",
+  "path":  ["x"],
+  "value": { "$expr": ["+", null, 0.1] },
+  "hole":  [0]
+}
+```
+
+turns `(a :x (* 2 (sin t)))` into `(a :x (+ (* 2 (sin t)) 0.1))`, with
+every comment inside `(* 2 (sin t))` intact.
 
 ### 11.2 Path
 
@@ -3780,22 +3836,170 @@ source tree.
 Mismatched paths (string segment against a non-form, integer out of
 range, walking into an atom) return `error.InvalidPath`.
 
-### 11.3 Single-root scope
+An empty `path` is legal for every operation except `replace`, which
+would then be replacing the root the result is built from.
 
-`applyEdit` operates on **single-root** sources. Zero-root sources
-(empty input) return `error.EmptyTree`; multi-root sources return
-`error.MultipleRoots`. For editing inside a multi-root document,
-parse the source, edit the desired root through `Tree`-level
-helpers, and print the result.
+The two forest operations take no `path` at all, and writing one on
+either is `error.InvalidPath`. `[]` already means "the root form", which
+is the container a new root is a *sibling* of, so an empty path on
+`insert_root` would say the opposite of what it does.
 
-### 11.4 Trivia preservation
+A path plus a root is an **address**, and an address is where a node is,
+not which node it is. Insert a sibling before the target and the same
+address names a different node, with no error: there is nothing in a
+path that could disagree. A host that needs to follow one node across a
+batch of edits keeps its own map and re-derives addresses from the
+document that comes back.
+
+### 11.3 Which root
+
+`path` starts at one root of the document. A document with a single
+root needs no more than that; one that declares or references a plugin
+has several, and names which with `root`:
+
+```json
+{ "op": "set_keyword", "path": [], "root": 1, "key": "bpm", "value": 140 }
+```
+
+Every other root is cloned through untouched. A `root` past the last one
+returns `error.PathNotFound`.
+
+**Omitting `root` on a multi-root document is `error.MultipleRoots`, not
+an implicit `0`.** The refusal is the point: an editor that silently
+edited whichever form came first would be worse than one that asked.
+
+#### The root list is a container too
+
+The top level is a container (§4.1), and `insert_root` / `remove_root`
+are its insert and remove. They address it with `index` alone, and
+refuse both `path` and `root`: `root` says which root a `path` starts
+at, and both of its rules are wrong here. A `root` equal to the number of
+roots is out of range, but that is exactly the index an append needs;
+and an omitted `root` on a multi-root document is a refusal, while an
+omitted index is the append spelling. Writing `root` on either is
+`error.InvalidAction` — refused rather than ignored, for the reason
+`MultipleRoots` exists.
+
+`index` reads the same as it does on the positional pair: optional on the
+insert (omitted appends), required on the remove. `index` past the end of
+the root list is `error.PathNotFound` on both; `index` *equal* to the
+number of roots is the append, so it is legal on `insert_root` alone.
+
+```json
+{ "op": "insert_root", "index": 1, "value": { "$form": "camera", "fov": 60 } }
+```
+
+A new root can be any value, not only a form: `1 2` is a two-root
+document. §4.1's one narrowing needs no restating here, because a kvpair
+has no JSON value of its own (§9) and so cannot be written as a `value`
+at all.
+
+**A zero-root document is refused by every operation that needs a root,
+and by no other.** The six raise `error.EmptyTree` on one because there
+is no root for the `path` to start at, and so does `remove_root`, which
+needs a root to remove. `insert_root` does not: a root list "may be
+empty" is the language's own rule, so emptying a document and refilling
+it are both actions rather than something a host does for itself.
+
+### 11.4 A document that does not parse is not edited
+
+A source carrying any `err`-severity diagnostic returns
+`error.ParseErrors`, before the action is decoded and before any other
+refusal. The parser recovers into a *partial* tree, so an edit applied
+to it lands on the recovery rather than on the document:
+
+```sjon
+(scene :w 800
+(camera :fov 60
+```
+
+recovers as `camera` nested inside `scene`, and
+`{"op":"set_keyword","path":[],"root":0,"key":"h","value":600}` over it
+would return `(scene :w 800 (camera :fov 60) :h 600)` — one well-formed
+form where the author wrote two unclosed ones, with nothing said about
+it. `sjon fmt` and the language server's formatter already decline the
+same input for the same reason: a writer that writes back a recovery
+turns a syntax error into data loss.
+
+Zero actions is not an exemption. An empty batch still re-prints, so it
+still refuses.
+
+### 11.5 Trivia preservation
 
 The functional-rebuild walker uses `TreeBuilder.cloneNode` to
 re-emit every sub-tree the action does not touch. Comments,
 spans, and kvpair trivia ride along unchanged on the cloned
-nodes. Only the action's target sub-tree (and any newly built
-node from the action's `value`) gets trivia that doesn't survive
-JSON encoding — those are by definition trivia-free.
+nodes.
+
+"Does not touch" is exact, and the distinction matters most where it is
+least expected. A node built from an action's `value` is decoded through
+the JSON bridge, which has no comment encoding (§9), so it arrives
+trivia-free — and that is true whether the action is *changing* that
+part of the document or merely *composing* with it. Nesting a subtree
+inside a `replace`'s `value` to put it under a new parent therefore
+loses that subtree's comments, even though nothing about it changed.
+
+`wrap` exists for exactly that case: the node it wraps crosses over
+through `cloneNode`, not through JSON, so it keeps its comments, its
+spans and its internal formatting, while the parent around it is the
+usual trivia-free synthesis.
+
+What none of this settles is *layout*, which is the apply's decision
+rather than the op's. See §11.6.
+
+### 11.6 Layout
+
+An action says which node changes. How the change reaches the bytes is a
+separate choice, and there are two.
+
+**Re-print** prints the whole edited tree. Comments survive (§11.5), but
+line breaks and column alignment are the printer's decision on every run
+— a form carrying a comment cannot stay on one line, for instance — so
+changing one literal can move every byte in the document. This is the
+default, and what a single `applyEdit` has always done.
+
+**Preserve** lowers each action to one text edit over the target's span
+and splices it. Everything outside that span is the author's: comments,
+alignment, and the spelling of numbers the action does not touch. The
+spans, one per operation:
+
+| `op` | What is replaced |
+| --- | --- |
+| `replace` | the target's own span |
+| `set_keyword`, key present | the kvpair's value |
+| `set_keyword`, key absent | nothing, at the form's closing paren — ` :key value` is inserted |
+| `remove_keyword` | the pair, and the whitespace and comments that precede it |
+| `insert_positional` | nothing, before the `index`th child (or at the closing delimiter) |
+| `remove_positional` | the child, and the whitespace and comments that precede it |
+| `wrap` | the target's own span — the new parent is printed around the target's own bytes |
+| `insert_root` | nothing, before the `index`th root (or after the last root, or at offset 0 in a rootless document) |
+| `remove_root` | the root, and the whitespace and comments that precede it |
+
+A removed node leaves with the comments that lead it, because they sit in
+the run of text being deleted. An inserted node copies the *whitespace*
+that separates its neighbour from the one before it, and never a comment
+in that run: a comment is about the node it leads, not about how nodes
+are spaced.
+
+Both sentences hold for the root list unchanged, because the run that
+pairs with a root is always the one *before* it — for root 0 that is the
+document's prologue. **When there is no such run to copy, roots are
+separated by one newline.** Only a one-root document (and a rootless one)
+reaches that fallback; from the second root onward the separator is the
+author's own run, blank lines included. An inserted root is printed from
+column 0, whatever the splice lands after, because a root starts a line.
+
+An appended root lands at the last root's own end, which is *before* any
+comments that trail the document — where a re-print puts one too.
+
+Two things a splice does not tidy. A value built from an action's `value`
+is printed, so `{"op":"replace","value":255}` writes `255` whatever the
+source spelled; and `wrap` embeds its target's bytes verbatim, so a
+multi-line target keeps its old columns inside its new parent. Reformat
+after either if it matters.
+
+`sjon edit` (TOOLING.md) preserves and has no flag to re-print;
+`sjon edit … | sjon fmt -` is the refold.
 
 ---
 
@@ -4064,11 +4268,12 @@ User keys starting with `$` are escaped by doubling: `$foo` → `$$foo`.
 ### 13.8 Edit operations
 
 ```
-set_keyword         path key value
-remove_keyword      path key
-replace             path value
-insert_positional   path value [index]
-remove_positional   path index
+set_keyword         path key value      [root]
+remove_keyword      path key            [root]
+replace             path value          [root]
+wrap                path value hole     [root]
+insert_positional   path value [index]  [root]
+remove_positional   path index          [root]
 ```
 
 ### 13.9 Public API
@@ -4262,8 +4467,9 @@ same shape so editors render parse and validate findings in one
 UI.
 
 **Edit (op)** — a JSON-encoded structural mutation:
-`set_keyword`, `remove_keyword`, `replace`, `insert_positional`,
-`remove_positional`. Applied to a path inside a single-root tree.
+`set_keyword`, `remove_keyword`, `replace`, `wrap`,
+`insert_positional`, `remove_positional`. Applied to a path inside
+one root of a tree, named by `root` when the tree has several.
 
 **Env** — `Expr.Env`, the lexically-scoped binding chain consulted
 by the safe-expression evaluator.

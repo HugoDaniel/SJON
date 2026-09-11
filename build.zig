@@ -388,6 +388,14 @@ pub fn build(b: *std.Build) void {
 
     const union_demo_tool = addSjonTool(b, sjon_mod, target, optimize, "union-demo", "examples/union-demo.zig", "union-demo", "Run the union value-kind demo", false);
 
+    // Lowering demo (examples/lowering-stages-demo.zig): a hook resolving a
+    // cross-reference (`LoweringInput.resolveRef`), a two-layer staging run
+    // kept whole in `HostResult.lowering_stages` + `provenanceChain`, and a
+    // container lowering with a union-typed reference in its child. Runs
+    // under `verify` beside the union demo, so the Zig-only lowering
+    // surface has one executable consumer that rots loudly.
+    const lowering_demo_tool = addSjonTool(b, sjon_mod, target, optimize, "lowering-demo", "examples/lowering-stages-demo.zig", "lowering-demo", "Run the lowering hooks demo (resolveRef, staging layers, provenance chain)", false);
+
     // ---------------------------------------------------------------------
     // Schema-export goldens — exports JSON Schema + TS + IR for `shapes`
     // (static plugin) and `double` (manifest-loaded) into the checked-in
@@ -639,6 +647,12 @@ pub fn build(b: *std.Build) void {
     // on the native LSP install without forcing the lazy dep when it isn't
     // fetched (stays null → verify simply skips it, same as `lsp-all`).
     var native_lsp_install: ?*std.Build.Step = null;
+    // Same reason, for the `lsp-main` test step: it belongs with the other
+    // `lsp-*` test wiring further down, which is where `test_step` and the
+    // kcov steps exist, but its modules can only be built when `lsp_kit`
+    // is fetched. Capturing the exe's own modules rather than rebuilding
+    // them there is what keeps the tested capability set the shipped one.
+    var native_lsp_modules: ?NativeLspModules = null;
     if (b.lazyDependency("lsp_kit", .{ .target = target, .optimize = optimize })) |lsp_kit_dep| {
         const lsp_mod = lsp_kit_dep.module("lsp");
 
@@ -704,6 +718,13 @@ pub fn build(b: *std.Build) void {
         });
         const install_lsp = b.addInstallArtifact(lsp_exe, .{});
         native_lsp_install = &install_lsp.step;
+        native_lsp_modules = .{
+            .lsp = lsp_mod,
+            .handler = handler_mod,
+            .uri = uri_mod,
+            .workspace_scan = workspace_scan_mod,
+            .text_sync = text_sync_mod,
+        };
         const lsp_step = b.step("lsp", "Build the SJON LSP (native)");
         lsp_step.dependOn(&install_lsp.step);
 
@@ -974,6 +995,41 @@ pub fn build(b: *std.Build) void {
             .{ .name = "uri", .module = lsp_uri_mod },
         },
     );
+
+    // The native server itself — its capability set against lsp-kit's own
+    // validator (`serverCapabilities` is lifted out of `initialize` for
+    // exactly this). Conditional on `lsp_kit` being fetched, which is not
+    // a hole: `main.zig` imports it, so an unfetched dep means no native
+    // binary to disagree with.
+    //
+    // Why it took an audit to notice the mismatch: the seven
+    // `hosts/web/test/lsp-*.test.ts` files all drive `sjon-lsp.wasm`,
+    // whose hand-rolled dispatcher validates no capabilities, and nothing
+    // in the build graph ran the native half at all.
+    //
+    // The import list repeats the executable's above, and cannot drift
+    // quietly: an import `main.zig` gains but this list doesn't is a
+    // compile error here, not a silently narrower test.
+    if (native_lsp_modules) |lsp_mods| {
+        _ = addTestStep(
+            b,
+            test_step,
+            cov_clean,
+            cov_merge,
+            "lsp-main",
+            "src/lsp/main.zig",
+            target,
+            optimize,
+            &.{
+                .{ .name = "sjon", .module = sjon_mod },
+                .{ .name = "lsp", .module = lsp_mods.lsp },
+                .{ .name = "Handler", .module = lsp_mods.handler },
+                .{ .name = "uri", .module = lsp_mods.uri },
+                .{ .name = "workspace_scan", .module = lsp_mods.workspace_scan },
+                .{ .name = "text_sync", .module = lsp_mods.text_sync },
+            },
+        );
+    }
 
     // CLI in-source tests — drive `Cli.run` directly and assert on the
     // captured stdout/stderr buffers. Reads the conformance fixtures
@@ -1271,6 +1327,7 @@ pub fn build(b: *std.Build) void {
     verify_step.dependOn(llm_pack_step);
     verify_step.dependOn(web_host_browser_step);
     verify_step.dependOn(&union_demo_tool.run.step);
+    verify_step.dependOn(&lowering_demo_tool.run.step);
     if (native_lsp_install) |s| verify_step.dependOn(s);
 
     // TypeScript hosts (schema / web / typescript-parity) plus the editor
@@ -1376,6 +1433,19 @@ fn addWasmExe(
     exe.rdynamic = true;
     return exe;
 }
+
+/// The modules `src/lsp/main.zig` is compiled against, captured inside the
+/// `lsp_kit` lazy block so the `lsp-main` test step can be built from the
+/// same set the native executable is. Only reachable when the lazy
+/// dependency is fetched — and when it isn't, the native server isn't
+/// built either, so the test covers exactly the builds that exist.
+const NativeLspModules = struct {
+    lsp: *std.Build.Module,
+    handler: *std.Build.Module,
+    uri: *std.Build.Module,
+    workspace_scan: *std.Build.Module,
+    text_sync: *std.Build.Module,
+};
 
 /// A native `sjon`-importing tool: its executable, the run step that
 /// invokes it, and the named build step exposing it. Callers additionally

@@ -1,0 +1,27 @@
+; The overlay's half of the same rule: a cross-ref name supplied by a
+; *default* inside an opaque slot is not registered, because the default
+; is not materialized there.
+;
+; `(phrase)` omits `:name`, whose default is `origin`. In an ordinary slot
+; axis A would consult the overlay and register `origin` — that is
+; `effective-axis-a-register-and-consume`. Here the instance sits in the
+; opaque `:body` slot, so there is no overlay entry to consult and the
+; author's `:anchor origin` finds an empty registry.
+;
+; `opaque-slot-target-unregistered` is the same document with the name
+; written rather than defaulted, and it misses for the same reason: every
+; descent stops at an opaque slot, so neither the overlay nor the index
+; pass reaches inside.
+(plugin :name probe :version "1.0.0"
+  (value-kind :name phrase-name
+    :underlying symbol
+    :cross-ref (cross-ref :target phrase))
+  (form :name phrase
+    (key :name name :type symbol :default origin :optional false))
+  (form :name host
+    (key :name body :type any :walk-opaque true :optional true))
+  (form :name track
+    (key :name anchor :type phrase-name :optional true)))
+
+(host :body (phrase))
+(track :anchor origin)

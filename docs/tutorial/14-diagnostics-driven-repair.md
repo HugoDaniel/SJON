@@ -434,14 +434,15 @@ what it will do; review before applying.
 | Diagnostic | Quickfix title | What it does |
 | --- | --- | --- |
 | `unknown_form` | `Replace with `<head>`` | Substitute the typo with the closest known head (Levenshtein-bounded). |
-| `unknown_key` | `Replace with `:<key>`` | Substitute the typo with the closest declared key on this form. |
+| `unknown_key` | `Replace with `:<key>`` | Substitute the typo with the closest declared key on this form. Inside a slot-local form the candidates are that local's keys; on a discriminated form a variant's keys are candidates once the discriminant that selects it precedes the cursor. |
+| `unknown_local_form` | `Replace with `<head>`` | Substitute the typo with the closest head the *slot* accepts: its own local forms first, then the global vocabulary. Expression functions are never offered (a bare function head in a data slot is this very diagnostic), and a distance tie goes to the slot's own form. |
 | `ambiguous_form` | `Qualify with `<plugin>/<head>`` | One action per claimant plugin. |
 | `missing_required_key` | `Insert `:<key>` with stub` | Insert each missing required key with a typed placeholder value. |
 | `expr_kvpair_not_allowed` | `Drop `:<key>` (keep value)` | Strip the keyword tag, leave the value as a positional argument. |
 | `duplicate_key` | `Remove duplicate `:<key>`` | Delete the later occurrence and its preceding whitespace. |
 | `not_cross_ref` | `Replace with `<name>`` | Replace the symbol with the closest in-scope registered name. |
 | `cross_ref_outside_scope` | `Replace with `<name>`` | Surfaces only when an in-scope alternative exists; otherwise no fix (move the reference instead). |
-| `not_member` | `Replace with `<name>`` | Replace the value with the closest non-deprecated member of the slot's enum. |
+| `not_member` | `Replace with `<name>`` | Replace the value with the closest non-deprecated member of the slot's enum, digit-leading spellings such as `2d` included; the distance is measured against what you typed, so `2dd` and `2.5d` both offer `2d`. |
 
 For typo-style fixes, only the single closest candidate within
 Levenshtein distance 3 is offered; farther typos return no action so

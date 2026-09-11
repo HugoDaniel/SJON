@@ -869,6 +869,7 @@ function buildKeySpec(form: FormNode, diagnostics: Diagnostic[], depth: number):
   let optional: boolean | null = null;
   let defaultValue: KeyDefault | null = null;
   let requires: string[] = [];
+  let walkOpaque = false;
   for (const child of form.children) {
     if (child.tag !== 'kvpair') continue;
     switch (child.key) {
@@ -888,6 +889,12 @@ function buildKeySpec(form: FormNode, diagnostics: Diagnostic[], depth: number):
         // `validateDefaults`/overlay machinery this host does not mirror, so
         // it is out of scope here (see test/conformance.test.ts skip notes).
         defaultValue = parseKeyDefault(child.value);
+        break;
+      case 'walk-opaque':
+        // Mirrors `ManifestLoader.buildKey`'s `:walk-opaque` arm. Suppresses
+        // every descent into a form-shaped value in this slot — see the
+        // field's doc on `KeySpec`.
+        if (child.value.tag === 'boolean') walkOpaque = child.value.value;
         break;
       case 'requires':
         // Mirrors `ManifestLoader.buildKey`'s `:requires` arm. The five
@@ -932,13 +939,19 @@ function buildKeySpec(form: FormNode, diagnostics: Diagnostic[], depth: number):
     }
     if (localForms.length > 0) {
       return withRequires(
-        { name, valueType, optional: effective, default: defaultValue, localForms },
+        withWalkOpaque(
+          { name, valueType, optional: effective, default: defaultValue, localForms },
+          walkOpaque,
+        ),
         requires,
       );
     }
   }
 
-  return withRequires({ name, valueType, optional: effective, default: defaultValue }, requires);
+  return withRequires(
+    withWalkOpaque({ name, valueType, optional: effective, default: defaultValue }, walkOpaque),
+    requires,
+  );
 }
 
 // `exactOptionalPropertyTypes` forbids assigning `undefined` to an optional
@@ -946,6 +959,13 @@ function buildKeySpec(form: FormNode, diagnostics: Diagnostic[], depth: number):
 // setting it to `[]`. Keeps `requires` absent-means-none, as in the Zig model.
 function withRequires(key: KeySpec, requires: readonly string[]): KeySpec {
   return requires.length > 0 ? { ...key, requires } : key;
+}
+
+// Same `exactOptionalPropertyTypes` shape as `withRequires`: an unset flag
+// omits the property rather than assigning `false`, so `walkOpaque` is
+// present only where the manifest asked for it.
+function withWalkOpaque(key: KeySpec, walkOpaque: boolean): KeySpec {
+  return walkOpaque ? { ...key, walkOpaque } : key;
 }
 
 /**
@@ -1603,6 +1623,7 @@ function buildExprFunc(form: FormNode): ExprFunc {
   let name = '';
   let arity: Arity = { kind: 'at_least', n: 0 };
   let params: ValueType[] | null = null;
+  let rest: ValueType | null = null;
   let result: ValueType | null = null;
   for (const child of form.children) {
     if (child.tag !== 'kvpair') continue;
@@ -1620,12 +1641,15 @@ function buildExprFunc(form: FormNode): ExprFunc {
           );
         }
         break;
+      case 'rest':
+        if (child.value.tag === 'symbol') rest = parseValueType(child.value.text);
+        break;
       case 'result':
         if (child.value.tag === 'symbol') result = parseValueType(child.value.text);
         break;
     }
   }
-  return { name, arity, params, result };
+  return { name, arity, params, rest, result };
 }
 
 function readArity(node: Node): Arity | null {

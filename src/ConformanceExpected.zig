@@ -58,6 +58,12 @@ pub fn findRootForm(tree: *const Ast.Tree, head: []const u8) ?Ast.NodeIndex {
 /// `:result` is any SJON literal (number, keyword, string, vector,
 /// form, boolean, nil, date, time). Strings/keywords are duped into `a`
 /// so the caller can drop the source tree.
+///
+/// **`a` must be an arena.** Each `ExpectedValue.value` holds `treeToValue`
+/// allocations (strings, vector and form backings) that `deinit(a)` on the
+/// returned list does not release, and a mid-loop `MalformedExpected`
+/// abandons the values built so far. Same contract as
+/// `parseExpectedDiagnostics`; both in-repo callers pass arenas.
 pub fn parseExpectedValues(
     a: Allocator,
     tree: *const Ast.Tree,
@@ -92,7 +98,11 @@ pub fn parseExpectedValues(
                         const t = tree.tagOf(kv.value);
                         if (t != .number and t != .number_i64 and t != .number_u64) return error.MalformedExpected;
                         const n = tree.numberOf(kv.value);
+                        // Range-check before `@intFromFloat`: an integer-valued
+                        // `n` past u32 (or `inf`) is a malformed fixture, not
+                        // a panic. `forest_index` is a `u32`-sized position.
                         if (n < 0 or @floor(n) != n) return error.MalformedExpected;
+                        if (n > @as(f64, @floatFromInt(std.math.maxInt(u32)))) return error.MalformedExpected;
                         index = @intFromFloat(n);
                     } else if (std.mem.eql(u8, kv.key, "result")) {
                         result = try treeToValue(a, tree, kv.value);
@@ -199,6 +209,21 @@ test "parseExpectedValues: u64 max literal decodes to integer_u64" {
     try std.testing.expectEqual(@as(usize, 1), vals.items.len);
     try std.testing.expectEqual(@as(usize, 0), vals.items[0].forest_index);
     try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), vals.items[0].value.integer_u64);
+}
+
+test "parseExpectedValues: an :index beyond u32 is MalformedExpected, not an @intFromFloat panic" {
+    const Parser = @import("Parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][:0]const u8{
+        "(values (value :index 18446744073709551615 :result 1))",
+        "(values (value :index 4294967296 :result 1))",
+        "(values (value :index 1e999 :result 1))",
+    }) |src| {
+        var tree = try Parser.parse(std.testing.allocator, src);
+        defer tree.deinit();
+        try std.testing.expectError(error.MalformedExpected, parseExpectedValues(arena.allocator(), &tree));
+    }
 }
 
 test "parseExpectedValues: i64 min literal decodes to integer_i64" {
