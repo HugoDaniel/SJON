@@ -1,0 +1,343 @@
+---
+title: Editing SJON from a program
+description: Change one value in a file somebody wrote by hand and keep every other byte as they left it, from a shell or from JavaScript, and find out which node sits under a cursor.
+---
+
+Sooner or later a program has to change a file a person wrote, maybe a
+settings screen saving one slider, or an agent fixing the typo the checker
+found. The usual way to do it is to parse the file, change the value, and
+serialise the whole thing again, and the person who wrote it gets back their
+file in somebody else's layout, with the comment that explained the `250` now
+sitting three lines away from it.
+
+I want a program to be able to change the `2` in a camera and hand back every
+other byte exactly as the author left it. The camera from the
+[home page](/), at the size it reaches by the end of the tutorial, is a good
+file to try that on:
+
+```sjon title="camera.sjon"
+;; The wide shot. 2 keeps the whole 1920 plate on screen.
+(camera :name wide :projection ortho
+  :zoom 2
+  :delay 4b
+  :alpha (smoothstep 0 1 t))
+```
+
+## Changing one number
+
+An edit is a small JSON object that names an operation and the node it applies
+to. This one replaces the value of `:zoom`:
+
+```text frame="terminal"
+$ sjon edit camera.sjon '{"op":"replace","path":["zoom"],"value":3}'
+;; The wide shot. 2 keeps the whole 1920 plate on screen.
+(camera :name wide :projection ortho
+  :zoom 3
+  :delay 4b
+  :alpha (smoothstep 0 1 t))
+```
+
+The `2` became a `3` and nothing else moved: the first two keys still share a
+line, and the comment is still sitting above the camera. It is also now a small
+lie, since a zoom of 3 no longer keeps the plate on screen. `sjon edit` changes
+the node the action names and leaves the prose to whoever wrote it, which is
+about the right amount of ambition for a tool that cannot read English.
+
+The `path` is how an action finds its node. Each step is a string, naming the
+value of a keyword on the form you are standing on, or a number, naming a
+positional child. So `["zoom"]` is the `2`, and `["alpha", 2]` walks into
+`(smoothstep 0 1 t)` and lands on the `t`. A `:key value` pair has no address
+of its own, because a path always lands on the value, and the empty path `[]`
+is the root form itself.
+
+## Eight operations
+
+The CLI, the Zig library and the WebAssembly hosts all take the same eight:
+
+| `op` | What it does |
+| --- | --- |
+| `set_keyword` | Set `:key` on the form at `path`, adding the pair when it is missing. |
+| `remove_keyword` | Remove `:key` from the form at `path`. |
+| `replace` | Replace the node at `path` with a new one. |
+| `wrap` | Put the node at `path` inside a new parent. |
+| `insert_positional` | Insert a positional child into the form at `path`. |
+| `remove_positional` | Remove a positional child from the form at `path`. |
+| `insert_root` | Add a top-level form. |
+| `remove_root` | Remove a top-level form. |
+
+A `value` is written in the JSON encoding SJON's JSON bridge already uses.
+Numbers, booleans and vectors are plain JSON, a form is an object with a
+`$form` key, and a symbol has to say that it is one. The two root operations
+work on the list of top-level forms, so they take an `index` in place of a
+`path`, and an insert without an `index` appends:
+
+```text frame="terminal"
+$ sjon edit camera.sjon '{"op":"insert_root","value":{"$form":"camera","name":{"$sym":"close"},"projection":{"$sym":"perspective"},"zoom":4}}'
+;; The wide shot. 2 keeps the whole 1920 plate on screen.
+(camera :name wide :projection ortho
+  :zoom 2
+  :delay 4b
+  :alpha (smoothstep 0 1 t))
+(camera :name close :projection perspective :zoom 4)
+```
+
+Leave out the `$sym` tags and the same action prints
+`(camera :name "close" :projection "perspective" :zoom 4)`, because a JSON
+string is a perfectly good SJON value of its own. Nothing complains yet,
+because `sjon edit` only looks at the shape of the text. It is the schema from
+the home page that would reject both strings, the next time the file is
+checked. The new camera went on its own line because a one-root file
+has no separator to copy. In a file whose roots already sit a blank line
+apart, the new one gets the blank line too.
+
+## Several changes at once
+
+An array of actions is one batch, applied left to right:
+
+```text frame="terminal"
+$ sjon edit camera.sjon '[{"op":"replace","path":["zoom"],"value":3},{"op":"remove_keyword","path":[],"key":"delay"}]'
+;; The wide shot. 2 keeps the whole 1920 plate on screen.
+(camera :name wide :projection ortho
+  :zoom 3
+  :alpha (smoothstep 0 1 t))
+```
+
+A removed pair takes the whitespace in front of it, along with any comment
+there, so the `:delay` line goes away whole and leaves no empty line behind.
+For a batch that is too long to type, `--actions=PATH` reads it from a file,
+and `--in-place` writes the result back over the document instead of printing
+it.
+
+## Wrapping a value
+
+Say the fade-in is too strong and I want half of it. I could `replace`
+`:alpha` with a whole new `(* 0.5 (smoothstep 0 1 t))`, but `replace` builds
+its node from the JSON in the action, and JSON has nowhere to put a comment,
+so any comment inside the old smoothstep would be gone. `wrap` keeps the node
+that is already there and builds a new parent around it:
+
+```text frame="terminal"
+$ sjon edit camera.sjon '{"op":"wrap","path":["alpha"],"value":{"$expr":["*",0.5,null]},"hole":[1]}'
+;; The wide shot. 2 keeps the whole 1920 plate on screen.
+(camera :name wide :projection ortho
+  :zoom 2
+  :delay 4b
+  :alpha (* 0.5 (smoothstep 0 1 t)))
+```
+
+The `value` is the new parent, with a `null` where the old node is going to
+land, and `hole` is the path to that spot inside the parent: `[1]` is the
+second argument of `*`. The smoothstep moves across as its own bytes, comments
+and all.
+
+## When it says no
+
+`sjon edit` validates nothing, so `sjon edit … && sjon check …` is the pair to
+run when you want both, and `sjon edit … | sjon fmt -` is the pair for when you
+would rather have the printer's layout than the author's. It does refuse two
+things. A path that goes nowhere names the action it came from:
+
+```text frame="terminal"
+$ sjon edit camera.sjon '{"op":"replace","path":["zom"],"value":3}'
+sjon edit: PathNotFound (action 0)
+```
+
+And a document that does not parse is not edited at all:
+
+```text frame="terminal"
+$ cat typing.sjon
+(camera :name wide :zoom (* 2
+$ sjon edit typing.sjon '{"op":"replace","path":["name"],"value":{"$sym":"close"}}'
+typing.sjon:2:1: error: unspecified: unclosed delimiter at end of input
+  at camera/zoom/* (phase: manifest)
+typing.sjon:2:1: error: unspecified: unclosed delimiter at end of input
+  at camera (phase: manifest)
+2 errors
+```
+
+The parser can always recover some tree from half-typed text, and an editor
+leans on reading that tree all the time. Writing it back would save a structure
+the author never wrote, so `edit` stops there.
+
+## The same edits from JavaScript
+
+`@sjon-lang/web` runs the same code through WebAssembly. The module comes from
+the SJON source tree, where `zig build wasm-all` puts `sjon.wasm` under
+`zig-out/bin/`. The snippets from here to the end of the page continue one
+module:
+
+```js
+import { readFileSync } from "node:fs";
+import { SjonEncoder } from "@sjon-lang/web";
+
+const sjon = await SjonEncoder.load("./zig-out/bin/sjon.wasm");
+const source = readFileSync("camera.sjon", "utf8");
+const zoomTo3 = [{ op: "replace", path: ["zoom"], value: 3 }];
+
+console.log(sjon.applyEdits(source, zoomTo3, { layout: "preserve" }));
+console.log(sjon.applyEdits(source, zoomTo3));
+```
+
+The first call prints exactly what `sjon edit` printed. The second one leaves
+out `layout`, and gets the older behaviour, where the edited tree is printed
+from scratch:
+
+```sjon
+;; The wide shot. 2 keeps the whole 1920 plate on screen.
+(camera
+  :name wide
+  :projection ortho
+  :zoom 3
+  :delay 4b
+  :alpha (smoothstep 0 1 t))
+```
+
+The comment survives both ways; what differs is who decides where the lines
+break. Re-printing stays the default because code already compares against its
+output, so keeping the author's layout is something you ask for.
+
+## What is under the cursor
+
+An editor has a different question to answer first. Somebody clicks on the
+`2`, and the program needs to know what they clicked on, in the same terms an
+edit action uses. `addressOfSpan` answers that for a byte range, and a caret is
+a range whose two ends are the same number:
+
+```js
+const caret = source.indexOf(":zoom 2") + ":zoom ".length;
+const here = sjon.addressOfSpan(source, caret, caret);
+// { root: 0, path: ["zoom"], span: [103, 104], kind: "number_i64" }
+
+sjon.applyEdits(
+  source,
+  [{ op: "replace", root: here.root, path: here.path, value: 3 }],
+  { layout: "preserve" },
+); // the camera again, with its 3
+```
+
+`root` and `path` are the two fields an action takes, so the answer goes
+straight back into an edit. Offsets are UTF-8 bytes. This file is plain ASCII,
+so a JavaScript string index happens to be the byte offset as well; for text
+with anything past ASCII in it, count bytes with a `TextEncoder` at the
+editor's boundary.
+
+Calling into WebAssembly on every mouse move is more work than a hover
+deserves, so there is a bulk version. `nodeTable` returns every addressable
+node of the document, once per revision. These are the first four of the
+camera's nine rows:
+
+```json
+{"i":0,"parent":-1,"root":0,"seg":null,"kind":"form","span":[58,145],"head_span":[59,65]}
+{"i":1,"parent":0,"root":0,"seg":"name","kind":"symbol","span":[72,76],"key_span":[66,71]}
+{"i":2,"parent":0,"root":0,"seg":"projection","kind":"symbol","span":[89,94],"key_span":[77,88]}
+{"i":3,"parent":0,"root":0,"seg":"zoom","kind":"number_i64","span":[103,104],"key_span":[97,102]}
+```
+
+Each row knows its parent and its own step of the path, so a row's path is the
+chain of `seg` values up through its parents. The rows come in pre-order, a
+parent before its children, which makes the innermost node under a byte the
+last row whose span contains it. The `:zoom` pair has no row of its own, since
+it has no address, and its key span rides on the `2`'s row instead, so an
+editor can still underline the key. `rowContaining` does the hit-test in plain
+JavaScript and `pathOfRow` walks the parents:
+
+```js
+import { rowContaining, pathOfRow } from "@sjon-lang/web";
+
+const table = sjon.nodeTable(source);
+const row = rowContaining(table, caret);
+pathOfRow(table, row); // ["zoom"]
+```
+
+Both answers keep coming while the file is broken, which in an editor is most
+of the time. Halfway through typing an expression for the zoom:
+
+```js
+const typing = "(camera :name wide :zoom (* 2";
+const two = typing.indexOf("2");
+sjon.addressOfSpan(typing, two, two);
+// { root: 0, path: ["zoom", 0], span: [28, 29], kind: "number_i64" }
+```
+
+The table carries the parse diagnostics beside its rows, so the editor can
+tell it is looking at a recovery. `applyEdits` on the same text throws with
+`errorName` set to `ParseErrors`, for the reason `sjon edit` refused it above.
+
+## A file that is still being typed
+
+Validation has the same half-written problem, and it is louder about it. The
+author has typed a camera and has not decided on a projection yet. With the
+schema from the [home page](/) saved as `scene.sjon`, the placeholder gets
+reported like any other wrong value:
+
+```js
+import { SjonHost } from "@sjon-lang/web/SjonHost";
+
+const host = await SjonHost.load("./zig-out/bin/sjon.wasm");
+const scene = readFileSync("scene.sjon", "utf8");
+const halfDone = scene + "\n(camera :name wide :projection _ :zoom 2)";
+const opts = { projectRoot: null, projectFile: null };
+
+host.validateDocument(halfDone, opts).diagnostics;
+// not_member: form `camera` keyword `:projection` expects `projection`,
+//   got `_` (allowed: `ortho`, `perspective`)
+
+host.validateDocument(halfDone, { ...opts, heldSymbol: "_" }).diagnostics;
+// []
+```
+
+`heldSymbol` names the spelling of a position the author has not filled in
+yet, and `_` is the one I use. A held position is accepted in any slot,
+whatever its type, and everything around it keeps being checked. A typo is
+still a typo, so `(camera :name wide :projection _ :zom 2)` reports
+`unknown_key` on `:zom`. Leaving a key out is still leaving it out, so
+`(camera :name wide :zoom 2)` reports `missing_required_key` for `:projection`.
+Only the `_` somebody typed on purpose gets through.
+
+Two quieter things follow from reading `_` as a hole. A held key counts as
+absent when defaults are applied: give `:zoom` a `:default 1` in the schema,
+and a camera written with `:zoom _` comes back with a zoom of 1 in
+`materializedDefaults`, which is the value the program would have used had
+the key not been written at all. And in a schema with
+[cross-references](/schemas/reading/cross-references), a held `:name`
+registers no name, so two forms that both start life as `:name _` are not
+reported as duplicates of each other.
+
+The option belongs to the program calling the validator, and no document can
+switch it on. A document is checked against whatever plugins it asks for, so if
+a plugin could declare held positions, a document could turn off its own type
+checking by asking for the right plugin.
+
+## From a diagnostic to a fix
+
+A diagnostic carries the span of the thing it is about, `addressOfSpan` turns a
+span into an address, and an address is what an edit takes. Here is the
+`isometric` camera the home page asked you to predict, going all the way
+around:
+
+```js
+const draft = scene + "\n(camera :name wide :projection isometric :zoom 2)\n";
+
+const [problem] = host.validateDocument(draft, opts).diagnostics;
+// not_member, with problem.span = { start: 532, end: 541 }, the `isometric`
+
+const { start, end } = problem.span;
+const spot = sjon.addressOfSpan(draft, start, end);
+// { root: 1, path: ["projection"], span: [532, 541], kind: "symbol" }
+
+const fixed = sjon.applyEdits(
+  draft,
+  [{ op: "replace", root: spot.root, path: spot.path, value: { $sym: "ortho" } }],
+  { layout: "preserve" },
+);
+host.validateDocument(fixed, opts).diagnostics; // []
+```
+
+`root` is 1 this time because the plugin declaration is root 0. Choosing
+`ortho` over `perspective` is the one step here that needs somebody to decide,
+and the message already lists both for whoever that is, person or model.
+
+The full action grammar, including what each operation does to the comments
+and whitespace around it, is section 11 of
+[LANGUAGE.md](https://git.hugodaniel.com/releases/sjon/src/branch/main/docs/LANGUAGE.md#11-structural-editing)
+in the source.

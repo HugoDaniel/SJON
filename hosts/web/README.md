@@ -17,11 +17,17 @@ three-phase pipeline as the Zig CLI (`sjon validate`).
 
 ## Layout
 
-The host is written in TypeScript and runs in Node ≥ 22.6 with
-`--experimental-strip-types` — no build step. For the **browser**, an
-ESM build under `dist/` is emitted by `tsc -p tsconfig.browser.json`
-(run `pnpm build:browser`, or `zig build web-host-browser`); browsers
-can't execute `.ts` directly.
+The host is written in TypeScript. Inside this repository it runs in
+Node ≥ 22.6 with `--experimental-strip-types` and has no build step. For
+the **browser**, an ESM build under `dist/` is emitted by
+`tsc -p tsconfig.browser.json` (run `pnpm build:browser`, or
+`zig build web-host-browser`); browsers can't execute `.ts` directly.
+
+The published package is compiled: `pnpm pack` and `pnpm publish` run
+`prepack`, which builds `dist/` from `tsconfig.build.json` (JavaScript
+plus declarations), and `publishConfig` points the packed `exports` at
+it. Node refuses to strip types from a `.ts` file under `node_modules`,
+so a package that shipped its sources could not be imported.
 
 | File                            | What it is                                              |
 | ------------------------------- | ------------------------------------------------------- |
@@ -33,7 +39,8 @@ can't execute `.ts` directly.
 | `demo.ts`                       | Runnable walkthrough; encode → validate → eval.         |
 | `*.test.ts`, `test/*.test.ts`   | `node:test` suites: wrappers, host, resolver, conformance, schema export. |
 | `tsconfig*.json`                | Type-check config + the browser-ESM emit config.        |
-| `package.json`                  | ESM package descriptor (`exports` map to the `.ts`).    |
+| `package.json`                  | ESM package descriptor (`exports` map to the `.ts`; the packed one maps to `dist/`). |
+| `tsconfig.build.json`           | The `prepack` compile: the four exports to `dist/` as JavaScript plus declarations. |
 
 ## Running it
 
@@ -219,9 +226,23 @@ identical.
 ### Structural edits
 
 `SjonEncoder.applyEdit(source, action)` applies one JSON edit action and
-returns the re-printed source; `applyEdits(source, actions)` applies a
-list in one pass. The action grammar is `docs/LANGUAGE.md` §11: six ops
-over a `path` into the document, plus an optional `root`.
+returns the re-printed source; `applyEdits(source, actions, options?)`
+applies a list in one pass. The action grammar is `docs/LANGUAGE.md` §11:
+eight ops, six of them over a `path` into one root (with an optional
+`root` naming which) and two over the root list itself (`insert_root`
+and `remove_root`, addressed by `index`).
+
+`{ layout: "preserve" }` keeps the author's layout: each action replaces
+one span, and every other byte comes back untouched, comments and column
+alignment included. The default, `"reprint"`, prints the whole edited
+tree, so comments survive but the line breaks are the printer's.
+
+```js
+// Only the `2` changes; the rest of the file is the author's.
+encoder.applyEdits(source, [{ op: "replace", path: ["zoom"], value: 3 }], {
+    layout: "preserve",
+});
+```
 
 ```js
 // Compose a node into a new parent. The node at `path` is cloned into
@@ -239,11 +260,25 @@ encoder.applyEdit(source, {
 
 A file that names a plugin has more than one root, and an action on it
 says which with `root`; omitting it there throws `SjonWasmError`
-(`MultipleRoots`) rather than editing whichever form came first. Layout
-is not preserved by any op (the result is re-printed from the tree, and
-a form carrying a comment always goes multi-line); comments are.
+(`MultipleRoots`) rather than editing whichever form came first. A
+document that does not parse throws `ParseErrors` instead of being
+edited as the parser recovered it.
 [`examples/edit-wrap.mjs`](../../examples/edit-wrap.mjs) prints the
-three cases side by side.
+three `wrap` cases side by side.
+
+### Which node is under a byte
+
+`encoder.addressOfSpan(source, start, end)` answers with the innermost
+node containing a byte range, as `{ root, path, span, kind }`. `root` and
+`path` are an edit action's two fields, so the answer goes straight back
+into `applyEdits`. For more than one question per revision,
+`encoder.nodeTable(source)` returns every addressable node in pre-order,
+and the free functions `rowContaining(table, start, end?)` and
+`pathOfRow(table, row)` hit-test it without calling into WebAssembly.
+Offsets are UTF-8 bytes, and both answer on a document that does not
+parse, with its diagnostics beside the answer.
+[Editing SJON from a program](https://hugodaniel.com/pages/sjon/editing)
+walks through both, and held positions (`heldSymbol`), on one camera.
 
 ## Wire-protocol notes
 
@@ -267,7 +302,18 @@ level `_callRaw` helper.
 
 ## Lifting this into your own project
 
-The wrapper is intentionally dependency-free. Two options:
+Install it from npm:
+
+```sh
+npm install @sjon-lang/web
+```
+
+The package carries the compiled host and its declarations. It does not
+carry the `.wasm` artifacts: build them from the SJON source with
+`zig build wasm-all` (they land in `zig-out/bin/`) and hand their path to
+`load`, or their bytes to `loadFromBytes`.
+
+Two alternatives, if you would rather not depend on the registry:
 
 1. **Vendor it.** Copy `sjon-reader.ts` (plus `parseJsonWithBigInt.ts`
    and `types.ts`) into your repo and ship the two `.wasm` files

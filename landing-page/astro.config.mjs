@@ -68,15 +68,17 @@ export default defineConfig({
         shiki: { langs: [sjonTextMateGrammar] },
       },
       // Ordered as the site reads rather than as a link list: learn, try,
-      // compare, look up. Two labels are load-bearing. `/compare` matches its
-      // own page title so a click never lands somewhere apparently different,
-      // and `/errors` is "Diagnostic codes" rather than "Diagnostics" because
-      // the tutorial already owns a part called "Schemas and Diagnostics" and
-      // one sidebar cannot say the same word about two different things.
+      // compare, build, look up. Two labels are load-bearing. `/compare` and
+      // `/editing` match their own page titles so a click never lands
+      // somewhere apparently different, and `/errors` is "Diagnostic codes"
+      // rather than "Diagnostics" because the tutorial already owns a part
+      // called "Schemas and Diagnostics" and one sidebar cannot say the same
+      // word about two different things.
       sidebar: [
         ...tutorialSidebar,
         { label: 'Playground', link: '/playground' },
         { label: 'SJON next to JSON and EDN', link: '/compare' },
+        { label: 'Editing SJON from a program', link: '/editing' },
         { label: 'Diagnostic codes', link: '/errors' },
       ],
     }),

@@ -48,8 +48,12 @@ landing-page/.astro/
 examples/web-todo/sjon.wasm
 examples/web-todo/todo-plugin.wasm
 
-# Browser-ESM build of the web host (emitted by `zig build web-host-browser`)
+# Browser-ESM build of the web host (emitted by `zig build web-host-browser`),
+# and the compiled JavaScript + declarations each published package packs
+# (`prepack`, `tsconfig.build.json`)
 hosts/web/dist/
+hosts/schema/dist/
+hosts/highlight/dist/
 
 # Playground WASM + its staleness sidecar (staged by `zig build landing-page-assets`)
 landing-page/public/sjon-lsp.wasm

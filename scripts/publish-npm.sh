@@ -15,6 +15,13 @@
 # by the time @sjon-lang/web goes out, the version its rewritten dependency
 # names is actually resolvable on the registry.
 #
+# Each package compiles itself on the way out. `pnpm publish` (and the
+# dry-run) runs the package's `prepack`, which builds dist/ as JavaScript plus
+# declarations from its tsconfig.build.json, and `publishConfig` repoints the
+# packed `main`, `types` and `exports` there. The workspace keeps importing the
+# `.ts` sources. 1.4.1 shipped those sources and could not be imported at all,
+# because Node refuses to strip types from a `.ts` file under node_modules.
+#
 # Each package's own package.json is the version truth here (kept in sync
 # with src/version.zig by `zig build audit-format-versions`); this script
 # only cross-checks the three agree with each other before publishing.
@@ -74,6 +81,27 @@ for pkg in "${PACKAGES[@]}"; do
     fi
 done
 echo "==> Every package agrees on version $TRUTH"
+
+# --- The packed manifest must export what the workspace one does ---
+# `exports` is what the workspace resolves (the `.ts` sources) and
+# `publishConfig.exports` is what the registry serves (dist/). A subpath added
+# to one and not the other passes every local test and is missing from the
+# published package, so the two key sets must match before anything is packed.
+for pkg in "${PACKAGES[@]}"; do
+    if ! node -e '
+        const p = require(process.argv[1]);
+        const dev = Object.keys(p.exports ?? {}).sort().join(" ");
+        const pub = Object.keys(p.publishConfig?.exports ?? {}).sort().join(" ");
+        if (dev !== pub) {
+            console.error(`  exports:               ${dev}\n  publishConfig.exports: ${pub}`);
+            process.exit(1);
+        }
+    ' "$PROJECT_DIR/$pkg/package.json"; then
+        echo "error: $pkg/package.json: exports and publishConfig.exports name different subpaths" >&2
+        exit 1
+    fi
+done
+echo "==> Every package publishes the subpaths it exports"
 
 # --- Auth: only checked before a real publish; a dry-run needs none ---
 if $PUBLISH; then

@@ -32,6 +32,7 @@ import {
   type LanguageRegistration,
 } from 'shiki';
 import { sjonToken, type SjonStreamState } from '../src/codemirror.ts';
+import { sjonTextMateGrammar } from '../src/index.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -150,6 +151,19 @@ const getHighlighter = (): Promise<Highlighter> => {
   highlighterPromise ??= createHighlighter({ themes: ['min-light'], langs: [loadGrammar()] });
   return highlighterPromise;
 };
+
+// The harness above casts the grammar file itself, so nothing else here would
+// notice if the *export* stopped fitting Shiki. `sjonTextMateGrammar` is typed
+// by its JSON shape (src/index.ts says why), and this call is what holds it to
+// Shiki's `langs`: the typecheck fails if the shape stops being assignable, and
+// the load fails if Shiki stops accepting it.
+describe('sjonTextMateGrammar, as exported', () => {
+  it('is accepted by createHighlighter without a cast', async () => {
+    const hl = await createHighlighter({ themes: ['min-light'], langs: [sjonTextMateGrammar] });
+    assert.ok(hl.getLoadedLanguages().includes('sjon'));
+    hl.dispose();
+  });
+});
 
 function tmCoarse(scopes: string[]): Coarse {
   // innermost-wins: the most specific `.sjon` scope on this span

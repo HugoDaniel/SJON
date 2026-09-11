@@ -1,6 +1,6 @@
 [package]
 name = "sjon-host"
-version = "1.4.1"
+version = "1.4.2"
 edition = "2024"
 rust-version = "1.92"
 resolver = "3"

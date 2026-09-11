@@ -1,0 +1,24 @@
+{
+  // The compile `pnpm pack` and `pnpm publish` run as `prepack`: the four
+  // exported modules and everything they import, to dist/ as JavaScript plus
+  // declarations, because Node does not strip types from a `.ts` file under
+  // node_modules, so a published package that points at its sources cannot be
+  // imported. The workspace keeps importing the `.ts` sources through
+  // `exports`; only the packed manifest points at dist/, through
+  // `publishConfig`.
+  //
+  // It shares dist/ with `tsconfig.browser.json`, whose output is a subset of
+  // this one's (same modules, same JavaScript, no declarations), so the
+  // browser examples that load `dist/*.js` are unaffected by either build
+  // running last.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": ".",
+    "outDir": "./dist",
+    "rewriteRelativeImportExtensions": true,
+    "declaration": true
+  },
+  "include": ["sjon-reader.ts", "SjonHost.ts", "SjonSchemaBackend.ts", "createNodeFsResolver.ts"],
+  "exclude": ["node_modules", "dist", "test", "demo.ts", "*.test.ts"]
+}

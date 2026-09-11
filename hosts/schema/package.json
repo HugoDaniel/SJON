@@ -1,6 +1,6 @@
 {
   "name": "@sjon-lang/schema",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "type": "module",
   "description": "Fluent, host-independent schema authoring + Zod-style inference for SJON. Pure TS, zero runtime deps.",
   "license": "CC0-1.0",
@@ -11,15 +11,22 @@
   },
   "homepage": "https://hugodaniel.com/pages/sjon",
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+      ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+    }
   },
-  "files": ["src"],
+  "files": ["dist"],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types 'test/*.test.ts'"
+    "test": "node --test --experimental-strip-types 'test/*.test.ts'",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "prepack": "rm -rf dist && tsc -p tsconfig.build.json"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

@@ -4,6 +4,47 @@ All notable, breaking, or contract-affecting changes land here, documented
 plainly. The stable surfaces — the binary wire format and the diagnostic-code
 enum — are versioned and corpus-gated; nothing changes them silently.
 
+## 1.4.2 — 2026-09-11
+
+The npm packages can be imported. 1.4.1 shipped `@sjon-lang/schema`,
+`@sjon-lang/web` and `@sjon-lang/highlight` as their TypeScript sources,
+and Node refuses to strip types from a `.ts` file under `node_modules`, so
+`import "@sjon-lang/web"` failed with
+`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING` in every project that
+installed it. Nothing on the language side changed: no wire-format change
+(still v5), no new diagnostic codes, and the conformance corpus still at
+393 cases.
+
+### Fixed
+
+- **Each package publishes compiled JavaScript and declarations.** `pnpm
+  pack` and `pnpm publish` run a `prepack` that builds `dist/` from the
+  package's `tsconfig.build.json`, `publishConfig` points the packed
+  `main`, `types` and `exports` at it, and `files` ships `dist/` alone.
+  Inside the repository the workspace keeps importing the `.ts` sources,
+  so developing SJON works as before. Checked by installing the three
+  packed tarballs into an empty project: plain Node imports every export
+  and runs an edit, and a consumer file type-checks under `nodenext` with
+  `skipLibCheck` off.
+
+- **`@sjon-lang/highlight` imports its grammar with `with { type: 'json'
+  }`.** Node's ESM loader rejects a `.json` import without the attribute,
+  which only showed once the package ran compiled. The package's tsconfig
+  moves to `module: ESNext`, which the attribute needs.
+
+- **`sjonTextMateGrammar` is typed by its JSON shape.** It was cast to
+  Shiki's `LanguageRegistration`, which put `import type … from 'shiki'`
+  into the published declarations, and `shiki` is not a dependency, so a
+  TypeScript project that only wanted the CodeMirror half failed with
+  TS2307. Shiki still accepts the grammar, and a new test passes the
+  export to a real `createHighlighter` to keep it that way.
+
+- **The READMEs say how to install.** The web and highlight READMEs cover
+  `npm install` (the web package does not carry the `.wasm` artifacts,
+  which come from `zig build wasm-all`), and the web README's edit section
+  describes the eight operations and the `layout` option, where it still
+  said six operations and that no operation preserved layout.
+
 ## 1.4.1 — 2026-09-11
 
 The npm packages move to the `@sjon-lang` scope: `@sjon-lang/schema`,

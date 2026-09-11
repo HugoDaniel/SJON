@@ -12,12 +12,18 @@ semantic tokens; see [docs/TOOLING.md](../../docs/TOOLING.md).
 
 ## Install
 
-Consumed as a workspace or path dependency. It is **source-only**: there is
-no build step — bundlers (Astro/Vite/esbuild) transpile the `.ts` and
-resolve the `.json` directly.
+```sh
+npm install @sjon-lang/highlight
+```
+
+The published package is compiled JavaScript plus declarations, built into
+`dist/` by `prepack` (`tsconfig.build.json`). Inside this repository the
+workspace imports the `.ts` sources directly, and bundlers (Astro/Vite/esbuild)
+transpile them and resolve the `.json`.
 
 - `@codemirror/language` is a **peer** dependency (the CodeMirror path).
-- `shiki` is needed only for the Shiki path.
+- `shiki` is needed only for the Shiki path, and the package's types do not
+  mention it, so a CodeMirror-only project type-checks without it.
 
 ## CodeMirror 6
 
