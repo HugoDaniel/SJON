@@ -7,7 +7,7 @@
 // optionals, symbol/string enums, untyped + typed + fixed vectors,
 // cross-ref, expr, and form-any.
 
-import { s } from '@sjon/schema';
+import { s } from '@sjon-lang/schema';
 
 export const Profile = s.form(
   'profile',

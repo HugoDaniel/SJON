@@ -27,7 +27,7 @@ import { tags } from '@lezer/highlight';
 import { lintGutter } from '@codemirror/lint';
 import { autocompletion } from '@codemirror/autocomplete';
 import type { CompletionSource } from '@codemirror/autocomplete';
-import { sjonLanguage } from '@sjon/highlight';
+import { sjonLanguage } from '@sjon-lang/highlight';
 import { sjonFoldingExtension } from './lsp-folding';
 import { sjonInlayHintsExtension } from './lsp-inlays';
 import { sjonHoverExtension } from './lsp-hover';

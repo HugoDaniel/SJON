@@ -1,7 +1,7 @@
-// @sjon/highlight — reusable `.sjon` syntax-highlighting grammars.
+// @sjon-lang/highlight — reusable `.sjon` syntax-highlighting grammars.
 //
-//   import { sjonLanguage } from '@sjon/highlight';        // CodeMirror 6
-//   import { sjonTextMateGrammar } from '@sjon/highlight';  // Shiki / TextMate
+//   import { sjonLanguage } from '@sjon-lang/highlight';        // CodeMirror 6
+//   import { sjonTextMateGrammar } from '@sjon-lang/highlight';  // Shiki / TextMate
 //
 //   // CodeMirror playground:
 //   EditorState.create({ extensions: [sjonLanguage, …] });

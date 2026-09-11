@@ -2,7 +2,7 @@
 //
 // The constructor surface is GENERATED from src/plugins/core.zig's `expr_funcs`
 // table (the single source of truth) into ./expr.gen.ts by tools/gen_expr_ops.zig.
-// This module re-exports it so `@sjon/schema`'s public `e` namespace and the
+// This module re-exports it so `@sjon-lang/schema`'s public `e` namespace and the
 // shared arg-type aliases (NumLike, BoolLike, VecLike, Binder, …) keep a stable
 // import path while the op set tracks the Zig core 1:1 (a drift check in
 // `zig build test` fails CI if they diverge — regenerate with

@@ -1,7 +1,7 @@
-// @sjon/schema — fluent, host-independent schema authoring + Zod-style
+// @sjon-lang/schema — fluent, host-independent schema authoring + Zod-style
 // inference for SJON.
 //
-//   import { s } from '@sjon/schema';
+//   import { s } from '@sjon-lang/schema';
 //
 //   const Profile = s.form('profile', {
 //     handle: s.slug(),

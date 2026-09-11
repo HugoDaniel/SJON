@@ -60,7 +60,7 @@ importers:
 
   hosts/typescript-parity:
     dependencies:
-      '@sjon/schema':
+      '@sjon-lang/schema':
         specifier: workspace:*
         version: link:../schema
     devDependencies:
@@ -73,7 +73,7 @@ importers:
 
   hosts/web:
     dependencies:
-      '@sjon/schema':
+      '@sjon-lang/schema':
         specifier: workspace:*
         version: link:../schema
     devDependencies:
@@ -119,7 +119,7 @@ importers:
       '@lezer/highlight':
         specifier: ^1.2.3
         version: 1.2.3
-      '@sjon/highlight':
+      '@sjon-lang/highlight':
         specifier: workspace:*
         version: link:../hosts/highlight
       astro:

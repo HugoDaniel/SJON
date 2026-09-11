@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { SjonHost } from '../SjonHost.ts';
-import { e, serializeValue } from '@sjon/schema';
+import { e, serializeValue } from '@sjon-lang/schema';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..', '..', '..');

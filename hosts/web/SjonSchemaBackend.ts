@@ -1,4 +1,4 @@
-// WASM `ValidateBackend` adapter for `@sjon/schema`.
+// WASM `ValidateBackend` adapter for `@sjon-lang/schema`.
 //
 // Bridges the host-independent fluent builder to `sjon.wasm`: validation
 // runs through `SjonHost.validateDocument`, JSON projection through the
@@ -11,7 +11,7 @@
 //   s.use(createWasmBackend(host));
 //   const data = Profile.parse('(bounds/profile :handle "ada" :email "a@b.c")');
 
-import type { BackendDiagnostic, ValidateBackend, ValidateOutcome } from '@sjon/schema';
+import type { BackendDiagnostic, ValidateBackend, ValidateOutcome } from '@sjon-lang/schema';
 import type { SjonHost } from './SjonHost.ts';
 import type { HostDiagnostic, HostOptions } from './types.ts';
 

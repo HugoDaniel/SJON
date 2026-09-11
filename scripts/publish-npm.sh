@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Publish the three publishable npm packages (@sjon/schema, @sjon/web,
-# @sjon/highlight) to the public npm registry.
+# Publish the three publishable npm packages (@sjon-lang/schema, @sjon-lang/web,
+# @sjon-lang/highlight) to the public npm registry.
 #
-# Uses `pnpm publish`, not `npm publish`, on purpose: @sjon/web depends on
-# @sjon/schema via `"workspace:*"` in its package.json. `npm publish` ships
+# Uses `pnpm publish`, not `npm publish`, on purpose: @sjon-lang/web depends on
+# @sjon-lang/schema via `"workspace:*"` in its package.json. `npm publish` ships
 # that literal string — an invalid version range for anyone installing
 # outside this workspace. `pnpm publish` rewrites it to the dependency's
 # current version (`1.2.0`) before packing, which is the only one of the
 # two that produces an installable tarball. Verified by hand before this
-# script existed: `npm pack` on hosts/web put `"@sjon/schema": "workspace:*"`
+# script existed: `npm pack` on hosts/web put `"@sjon-lang/schema": "workspace:*"`
 # into the tarball's package.json; `pnpm pack` put `"1.2.0"`.
 #
-# Order matters for the same reason: @sjon/schema publishes first so that
-# by the time @sjon/web goes out, the version its rewritten dependency
+# Order matters for the same reason: @sjon-lang/schema publishes first so that
+# by the time @sjon-lang/web goes out, the version its rewritten dependency
 # names is actually resolvable on the registry.
 #
 # Each package's own package.json is the version truth here (kept in sync
@@ -26,7 +26,7 @@
 #
 # A package already present at its current version on the registry is
 # skipped rather than re-attempted, so a re-run after a partial failure
-# (e.g. @sjon/web rejected after @sjon/schema succeeded) only publishes
+# (e.g. @sjon-lang/web rejected after @sjon-lang/schema succeeded) only publishes
 # what is still missing.
 
 set -euo pipefail
@@ -47,8 +47,8 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Dependency order: @sjon/schema before @sjon/web (which depends on it).
-# @sjon/highlight has no workspace dependency; kept last, not for
+# Dependency order: @sjon-lang/schema before @sjon-lang/web (which depends on it).
+# @sjon-lang/highlight has no workspace dependency; kept last, not for
 # correctness, just to group it with the others already published.
 PACKAGES=("hosts/schema" "hosts/web" "hosts/highlight")
 
@@ -102,7 +102,7 @@ for pkg in "${PACKAGES[@]}"; do
 done
 
 if $PUBLISH; then
-    echo "==> Done. https://www.npmjs.com/org/sjon"
+    echo "==> Done. https://www.npmjs.com/org/sjon-lang"
 else
     echo "==> Dry-run complete. Re-run with --publish to publish for real."
 fi

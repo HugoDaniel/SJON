@@ -34,7 +34,7 @@ function singletonDeps(): string[] {
  * The `dedupe` array, read out of the config as text.
  *
  * Importing the config would drag in Astro, the markdown processor and
- * `@sjon/highlight`; reading it is also the stricter check, because a deleted
+ * `@sjon-lang/highlight`; reading it is also the stricter check, because a deleted
  * array reports as a missing block rather than as `undefined`.
  */
 function dedupeList(): string[] {

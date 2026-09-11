@@ -1,6 +1,6 @@
 {
-  "name": "@sjon/schema",
-  "version": "1.4.0",
+  "name": "@sjon-lang/schema",
+  "version": "1.4.1",
   "type": "module",
   "description": "Fluent, host-independent schema authoring + Zod-style inference for SJON. Pure TS, zero runtime deps.",
   "license": "CC0-1.0",

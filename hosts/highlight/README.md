@@ -1,4 +1,4 @@
-# @sjon/highlight
+# @sjon-lang/highlight
 
 Reusable `.sjon` syntax-highlighting grammars: a **CodeMirror 6**
 `StreamLanguage` and a **TextMate** grammar for Shiki (and any other TextMate
@@ -22,7 +22,7 @@ resolve the `.json` directly.
 ## CodeMirror 6
 
 ```ts
-import { sjonLanguage } from '@sjon/highlight';
+import { sjonLanguage } from '@sjon-lang/highlight';
 import { EditorState } from '@codemirror/state';
 
 EditorState.create({ extensions: [sjonLanguage, /* … */] });
@@ -34,7 +34,7 @@ Lower-level exports for embedding in an existing `StreamParser`:
 ## Shiki / TextMate
 
 ```ts
-import { sjonTextMateGrammar } from '@sjon/highlight';
+import { sjonTextMateGrammar } from '@sjon-lang/highlight';
 import { createHighlighter } from 'shiki';
 
 const hl = await createHighlighter({

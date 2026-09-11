@@ -9,7 +9,7 @@
  * *and* opens search.
  *
  * Split out from `codemirror-setup.ts` so it can be tested: that module
- * reaches `@sjon/highlight`, which imports its TextMate grammar as JSON, and a
+ * reaches `@sjon-lang/highlight`, which imports its TextMate grammar as JSON, and a
  * bare `node --test` cannot load that without an import attribute.
  */
 

@@ -1,4 +1,4 @@
-// End-to-end: the @sjon/schema fluent builder over the WASM backend.
+// End-to-end: the @sjon-lang/schema fluent builder over the WASM backend.
 // Author a form in TS, validate real SJON text + JS objects, and get
 // typed data (or SjonValidationError) back — all through sjon.wasm.
 
@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import { SjonHost } from '../SjonHost.ts';
 import { createWasmBackend } from '../SjonSchemaBackend.ts';
-import { s, v, SjonValidationError } from '@sjon/schema';
+import { s, v, SjonValidationError } from '@sjon-lang/schema';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..', '..', '..');

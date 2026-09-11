@@ -4,6 +4,25 @@ All notable, breaking, or contract-affecting changes land here, documented
 plainly. The stable surfaces — the binary wire format and the diagnostic-code
 enum — are versioned and corpus-gated; nothing changes them silently.
 
+## 1.4.1 — 2026-09-11
+
+The npm packages move to the `@sjon-lang` scope: `@sjon-lang/schema`,
+`@sjon-lang/web` and `@sjon-lang/highlight`. The `@sjon` scope on npm
+belongs to an account this project does not control, so 1.4.0 could not
+be published under the names its documentation gave, and no `@sjon/*`
+package exists on npm at any version. Nothing else changed: no
+wire-format change (still v5), no new diagnostic codes, and the
+conformance corpus still at 393 cases.
+
+### Changed
+
+- **`@sjon/*` is now `@sjon-lang/*`.** The package names, the workspace
+  dependencies between them, every import specifier, the READMEs and
+  `scripts/publish-npm.sh` follow. A consumer that depends on these
+  packages by path replaces `@sjon/` with `@sjon-lang/` in its
+  `package.json` and its imports; the code is otherwise the code 1.4.0
+  shipped.
+
 ## 1.4.0 — 2026-09-11
 
 The contract at a glance: no wire-format change (still v5), **no** new

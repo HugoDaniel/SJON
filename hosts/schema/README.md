@@ -1,4 +1,4 @@
-# @sjon/schema — fluent schema authoring + Zod-style inference
+# @sjon-lang/schema — fluent schema authoring + Zod-style inference
 
 Host-independent TypeScript front-end for SJON plugin schemas. You write
 a schema with a fluent builder, get a precise static type for free
@@ -6,7 +6,7 @@ a schema with a fluent builder, get a precise static type for free
 that every SJON host understands. Pure TypeScript, **zero runtime deps**.
 
 ```ts
-import { s } from '@sjon/schema';
+import { s } from '@sjon-lang/schema';
 
 const Profile = s.form('profile', {
   handle: s.slug(),
@@ -32,7 +32,7 @@ helpers resolve off one import.
 
 | Namespace      | Source            | What it gives you |
 | -------------- | ----------------- | ----------------- |
-| `s`            | `builder.ts`      | Schema factories — `s.form` / `s.plugin`, leaves (`s.string`, `s.number`, `s.symbol`, `s.expr`, …), string presets (`s.slug`, `s.email`, `s.url`, `s.uuid`, `s.semver`, `s.path`), `s.vector`, `s.crossRef`, `s.kind`, plus the `s.infer<T>` / `s.input<T>` type helpers and `s.use` (backend registration). Also re-exported flat (`import { form, string } from '@sjon/schema'`). |
+| `s`            | `builder.ts`      | Schema factories — `s.form` / `s.plugin`, leaves (`s.string`, `s.number`, `s.symbol`, `s.expr`, …), string presets (`s.slug`, `s.email`, `s.url`, `s.uuid`, `s.semver`, `s.path`), `s.vector`, `s.crossRef`, `s.kind`, plus the `s.infer<T>` / `s.input<T>` type helpers and `s.use` (backend registration). Also re-exported flat (`import { form, string } from '@sjon-lang/schema'`). |
 | `v`            | `value-ctor.ts`   | Atom value constructors (`v.sym(…)`, …) for building concrete SJON values. |
 | `e`            | `expr.ts`         | Expression constructors (`e.add(…)`, …) for `(expr …)` trees. The typed surface is generated from the Zig core op table (`expr.gen.ts`, via `zig build gen-expr-ops`). |
 | `sjon`         | `template.ts`     | The `` sjon`…` `` tagged template for inline SJON literals. |
@@ -47,7 +47,7 @@ can see in the types, and it is not a quirk of this package: it is what
 the document actually carries.
 
 ```ts
-import { s, v } from '@sjon/schema';
+import { s, v } from '@sjon-lang/schema';
 
 const Texture = s.form('texture', {
   dimension: s.symbolMembers(['1d', '2d', '3d'] as const),
@@ -109,7 +109,7 @@ The typed edit methods on a node (`Form.setKey` / `removeKey` /
 what they cannot.
 
 ```ts
-import { edit } from '@sjon/schema';
+import { edit } from '@sjon-lang/schema';
 
 // (a :x (* 2 (sin t)))  →  (a :x (+ (* 2 (sin t)) 0.1)), comments kept
 edit.wrap(['x'], { $form: '+', $children: [null, 0.1] }, [0]);

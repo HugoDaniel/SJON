@@ -1,6 +1,6 @@
 // Internal utility for the parity host — a compile-time exhaustiveness guard.
 // Package-root so both the schema exporter and patternQuery share one copy;
-// not re-exported (no `src/index.ts`). Mirrors `@sjon/schema`'s `assertNever`.
+// not re-exported (no `src/index.ts`). Mirrors `@sjon-lang/schema`'s `assertNever`.
 
 /**
  * Compile-time exhaustiveness: ending a `switch` over a discriminated union
@@ -17,7 +17,7 @@ export function assertNever(x: never): never {
  * Inferred type guard: narrows an `unknown` to a plain object map,
  * excluding `null` and arrays. Preferred to an inline
  * `typeof x === 'object' && x !== null` + `as Record` cast — it narrows,
- * so a following `x['key']` needs no cast. Mirrors `@sjon/schema`'s
+ * so a following `x['key']` needs no cast. Mirrors `@sjon-lang/schema`'s
  * `isRecord`.
  */
 export function isRecord(x: unknown): x is Record<string, unknown> {

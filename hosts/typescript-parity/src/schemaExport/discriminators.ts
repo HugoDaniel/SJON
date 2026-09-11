@@ -1,5 +1,5 @@
 // Discriminator constants for the canonical JSON shape — a thin re-export of
-// the single source in `@sjon/schema` (`hosts/schema/src/discriminators.ts`),
+// the single source in `@sjon-lang/schema` (`hosts/schema/src/discriminators.ts`),
 // which mirrors `src/SchemaExport/Discriminators.zig` and `src/Json.zig`.
 //
 // Re-exporting (rather than re-declaring) makes the two TS packages share one
@@ -20,4 +20,4 @@ export {
   ROOTS_KEY,
   SYM_KEY,
   TIME_KEY,
-} from '@sjon/schema';
+} from '@sjon-lang/schema';

@@ -1,4 +1,4 @@
-// @sjon/schema over the native TypeScript validator. Proves the builder's
+// @sjon-lang/schema over the native TypeScript validator. Proves the builder's
 // serialized manifest validates identically through a second, non-WASM
 // backend, and that `.validate` / `.toDts` work without a value codec.
 // The data-materializing methods (`.parse` / `.parseValue`) need
@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { s, SjonValidationError } from '@sjon/schema';
+import { s, SjonValidationError } from '@sjon-lang/schema';
 import { nativeBackend } from '../src/SjonSchemaBackend.ts';
 
 s.use(nativeBackend());

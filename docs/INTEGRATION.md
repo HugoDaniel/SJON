@@ -82,7 +82,7 @@ a TypeScript test harness. See
 Two ways to keep host-language types and the SJON schema in lockstep —
 pick by where the source of truth lives:
 
-- **Builder-first** (`hosts/schema`, `@sjon/schema`) — you own the
+- **Builder-first** (`hosts/schema`, `@sjon-lang/schema`) — you own the
   schema in TypeScript. Build it with the fluent builder, take static
   types via `s.infer<typeof Form>`, and serialize the canonical
   manifest with `.manifest()` when a host needs it. Zero codegen: the

@@ -15,8 +15,8 @@ import { fileURLToPath } from 'node:url';
 
 import { SjonHost } from '../SjonHost.ts';
 import { createWasmBackend } from '../SjonSchemaBackend.ts';
-import { e, s, serializeValue, v } from '@sjon/schema';
-import type { SjonValue } from '@sjon/schema';
+import { e, s, serializeValue, v } from '@sjon-lang/schema';
+import type { SjonValue } from '@sjon-lang/schema';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..', '..', '..');

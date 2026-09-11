@@ -1,7 +1,7 @@
 //! Generator for `hosts/schema/src/expr.gen.ts`.
 //!
 //! `src/plugins/core.zig`'s `expr_funcs` table is the single source of truth
-//! for the typed `e.*` constructor surface in `@sjon/schema`. This tool
+//! for the typed `e.*` constructor surface in `@sjon-lang/schema`. This tool
 //! iterates that table and emits one `export const <ident> = …` per op, so
 //! adding/removing/renaming a core op surfaces in TypeScript automatically.
 //!

@@ -1,8 +1,8 @@
 {
   "name": "sjon-workspace",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "private": true,
-  "description": "SJON repo workspace root — hosts/schema (@sjon/schema builder), hosts/highlight (@sjon/highlight CodeMirror + TextMate), hosts/web (Node WASM consumer), hosts/typescript-parity (TS port), landing-page (Astro).",
+  "description": "SJON repo workspace root — hosts/schema (@sjon-lang/schema builder), hosts/highlight (@sjon-lang/highlight CodeMirror + TextMate), hosts/web (Node WASM consumer), hosts/typescript-parity (TS port), landing-page (Astro).",
   "packageManager": "pnpm@10.31.0",
   "engines": {
     "node": ">=20"

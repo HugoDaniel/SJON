@@ -1,4 +1,4 @@
-# `@sjon/web` — SJON validating host (Node.js + browser)
+# `@sjon-lang/web` — SJON validating host (Node.js + browser)
 
 The production wrapper around the SJON WASM artifacts, and one of the
 four parity hosts the conformance corpus runs against:
@@ -279,7 +279,7 @@ The wrapper is intentionally dependency-free. Two options:
 
    ```json
    "dependencies": {
-     "@sjon/web": "file:../sjon/hosts/web"
+     "@sjon-lang/web": "file:../sjon/hosts/web"
    }
    ```
 

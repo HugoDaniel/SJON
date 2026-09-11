@@ -302,7 +302,7 @@ pair has no address of its own, and its key span rides on the value's row.
 Rows are pre-order — a parent always precedes its children, siblings are
 in source order — so the innermost node containing a byte is the **last**
 row whose span contains it. That makes hit-testing a scan on your side,
-with no call back in per pointer move. `@sjon/web` ships that scan as
+with no call back in per pointer move. `@sjon-lang/web` ships that scan as
 `rowContaining(table, start, end?)` and the path walk as
 `pathOfRow(table, row)`.
 
@@ -322,7 +322,7 @@ A range covering a whole `:key value` pair answers the **enclosing form**,
 because §11.2 addresses a pair's value and an edit over the pair itself is
 a `set_keyword` on the form.
 
-Both are wrapped on `@sjon/web`'s `SjonEncoder` (`nodeTable`,
+Both are wrapped on `@sjon-lang/web`'s `SjonEncoder` (`nodeTable`,
 `addressOfSpan`) and on the Rust host (`SjonHost::node_table`,
 `SjonHost::address_of_span`). Offsets are UTF-8 bytes in every case: a
 document past ASCII counts differently in UTF-16, so convert at your

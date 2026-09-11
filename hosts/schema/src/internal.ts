@@ -1,4 +1,4 @@
-// Internal utilities — deliberately NOT part of the public `@sjon/schema`
+// Internal utilities — deliberately NOT part of the public `@sjon-lang/schema`
 // surface (`index.ts` never re-exports this module). Small, zero-dependency
 // helpers the builder and serializer share.
 

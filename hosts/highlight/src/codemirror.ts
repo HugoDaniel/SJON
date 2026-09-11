@@ -1,4 +1,4 @@
-// @sjon/highlight — CodeMirror grammar for `.sjon`.
+// @sjon-lang/highlight — CodeMirror grammar for `.sjon`.
 //
 // A faithful `.sjon` (S-expression) tokenizer for a CodeMirror 6
 // `StreamLanguage`, seeded from PNGine's `sjonToken`

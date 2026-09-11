@@ -2253,7 +2253,7 @@ fn runFmt(gpa: Allocator, io: Io, opts: FmtOpts, stdout: *Writer, stderr: *Write
 //   * Actions are threaded one at a time rather than handed to
 //     `Edit.applyEdits` as a batch. Under `.preserve` the two are the same
 //     fold, and threading is what lets a failure name *which* action
-//     failed — the batched entry returns only an error. `@sjon/schema`'s
+//     failed — the batched entry returns only an error. `@sjon-lang/schema`'s
 //     `applyAll` falls back to the same fold for the same reason.
 // ---------------------------------------------------------------------
 

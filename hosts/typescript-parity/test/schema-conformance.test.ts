@@ -14,7 +14,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { s } from '@sjon/schema';
+import { s } from '@sjon-lang/schema';
 import { nativeBackend } from '../src/SjonSchemaBackend.ts';
 import { Profile } from './conformanceFixtures.ts';
 

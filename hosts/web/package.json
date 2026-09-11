@@ -1,6 +1,6 @@
 {
-  "name": "@sjon/web",
-  "version": "1.4.0",
+  "name": "@sjon-lang/web",
+  "version": "1.4.1",
   "type": "module",
   "description": "SJON validating host for Node and the browser: SjonHost, SjonEncoder, SjonReader over sjon.wasm + sjon-binary.wasm.",
   "license": "CC0-1.0",
@@ -24,7 +24,7 @@
     "build:browser": "tsc -p tsconfig.browser.json"
   },
   "dependencies": {
-    "@sjon/schema": "workspace:*"
+    "@sjon-lang/schema": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

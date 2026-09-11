@@ -10,7 +10,7 @@
 
 import { Profile } from './conformanceFixtures.ts';
 import type { Bounds_Profile } from './golden/bounds.d.ts';
-import type { infer as Infer } from '@sjon/schema';
+import type { infer as Infer } from '@sjon-lang/schema';
 
 type Built = Infer<typeof Profile>;
 

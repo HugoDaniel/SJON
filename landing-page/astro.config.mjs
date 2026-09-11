@@ -1,7 +1,7 @@
 import { defineConfig } from 'astro/config';
 import { unified } from '@astrojs/markdown-remark';
 import starlight from '@astrojs/starlight';
-import { sjonTextMateGrammar } from '@sjon/highlight';
+import { sjonTextMateGrammar } from '@sjon-lang/highlight';
 import sjonLinkRewriter from './plugins/sjon-link-rewriter.mjs';
 import { FIRST_LESSON, groupedLessons } from './src/lib/lessons.ts';
 
@@ -101,7 +101,7 @@ export default defineConfig({
       // `EditorState.create` throws *"Unrecognized extension value in
       // extension set"* before the playground draws anything.
       //
-      // Which is what happened: `@sjon/highlight` is consumed as
+      // Which is what happened: `@sjon-lang/highlight` is consumed as
       // TypeScript source (`exports: './src/index.ts'`), so Vite
       // resolves its `@codemirror/language` import from
       // `hosts/highlight/node_modules` — where a `^6.10.6` range had
@@ -114,7 +114,7 @@ export default defineConfig({
       // durable one: aligning the two ranges would fix today's skew and
       // leave the next one free to come back silently.
       // Listed: every `@codemirror`/`@lezer` package this app depends on,
-      // not only the three `@sjon/highlight` imports today. A package that
+      // not only the three `@sjon-lang/highlight` imports today. A package that
       // is not shared costs nothing here, and the entry has to exist
       // *before* the import that would duplicate it — the day the grammar
       // starts pulling `@codemirror/autocomplete` is not the day to

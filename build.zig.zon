@@ -1,6 +1,6 @@
 .{
     .name = .sjon,
-    .version = "1.4.0",
+    .version = "1.4.1",
     .fingerprint = 0x55e1a5afcbd94641,
     .minimum_zig_version = "0.16.0",
     .paths = .{

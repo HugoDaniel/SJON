@@ -1,4 +1,4 @@
-// Native `ValidateBackend` adapter for `@sjon/schema`.
+// Native `ValidateBackend` adapter for `@sjon-lang/schema`.
 //
 // Bridges the host-independent fluent builder to the pure-TS validator +
 // schema exporter in this package. There is no SJON value codec here
@@ -7,12 +7,12 @@
 // `Form.toDts()` work; the data-materializing `.parse` / `.parseValue`
 // stay WASM-backend features (they need `toJson` / `fromValue`).
 //
-//   import { s } from '@sjon/schema';
+//   import { s } from '@sjon-lang/schema';
 //   import { nativeBackend } from 'sjon-host-ts/SjonSchemaBackend';
 //   s.use(nativeBackend());
 //   const diags = Form.validate('(ns/head …)').diagnostics;
 
-import type { BackendDiagnostic, ValidateBackend, ValidateOutcome } from '@sjon/schema';
+import type { BackendDiagnostic, ValidateBackend, ValidateOutcome } from '@sjon-lang/schema';
 import { exportSchema, validateDocument, type HostDiagnostic, type HostOptions } from './Host.ts';
 
 function toBackendDiagnostic(d: HostDiagnostic): BackendDiagnostic {

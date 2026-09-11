@@ -2,7 +2,7 @@
   "name": "sjon-vscode",
   "displayName": "SJON",
   "description": "SJON language support: TextMate highlighting plus the sjon-lsp language server (diagnostics, hover, goto-definition, semantic tokens).",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "private": true,
   "license": "SEE ../../LICENSE",
   "type": "module",

@@ -128,7 +128,7 @@ See [`examples/quickstart-rust.rs`](examples/quickstart-rust.rs) and
 [hosts/rust/README.md](hosts/rust/README.md).
 
 **TypeScript** — `hosts/typescript-parity/` is a hand-ported reference
-for conformance verification, not for production; `@sjon/schema`
+for conformance verification, not for production; `@sjon-lang/schema`
 (`hosts/schema/`) is the typed schema builder for TS-first projects.
 See [hosts/schema/README.md](hosts/schema/README.md).
 
@@ -163,7 +163,7 @@ lands updated in the same change.
 
 Every package in this repo carries the one version declared in
 `src/version.zig`; `zig build audit-format-versions` names any
-manifest that falls out of step. The `@sjon/*` packages carry full
+manifest that falls out of step. The `@sjon-lang/*` packages carry full
 registry metadata and pack cleanly with `npm pack`; today they are
 consumed as path or workspace dependencies. What each release changed
 is in [CHANGELOG.md](CHANGELOG.md).

@@ -2,7 +2,7 @@
 //
 // These assert the static contribution surface without importing `vscode`
 // (only available inside the extension host at runtime):
-//   1. the bundled TextMate grammar is byte-identical to @sjon/highlight's
+//   1. the bundled TextMate grammar is byte-identical to @sjon-lang/highlight's
 //      source of truth — the drift gate. VS Code needs the grammar file inside
 //      the extension, so it is copied; this test is what keeps the copy honest.
 //   2. the language contribution declares the `.sjon` extension and the `;`

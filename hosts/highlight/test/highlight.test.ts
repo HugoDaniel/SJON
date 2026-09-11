@@ -1,4 +1,4 @@
-// @sjon/highlight — exhaustive grammar tests across BOTH engines.
+// @sjon-lang/highlight — exhaustive grammar tests across BOTH engines.
 //
 // Layers, narrowest → broadest:
 //   1. `sjonToken` (CodeMirror) — the ported-seed regression net, driven over a

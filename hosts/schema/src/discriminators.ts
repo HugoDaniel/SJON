@@ -2,7 +2,7 @@
 // — the TypeScript source of truth shared across the two TS packages. Mirrors
 // `src/SchemaExport/Discriminators.zig` and `src/Json.zig`'s canonical bridge;
 // plugin-declared keys that begin with `$` are doubled at the wire (`$foo` →
-// `$$foo`) per `Json.zig`. `@sjon/typescript-parity` re-exports these (its
+// `$$foo`) per `Json.zig`. `@sjon-lang/typescript-parity` re-exports these (its
 // `schemaExport/discriminators.ts` is a thin re-export) so a future addition to
 // the JSON bridge surfaces as a missing constant, not as silent drift between
 // the construction library and the validator port.
