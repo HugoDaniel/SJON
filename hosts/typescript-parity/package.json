@@ -1,6 +1,6 @@
 {
   "name": "sjon-host-ts",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "description": "Reference second-host implementation of the SJON validator (TypeScript).",
   "private": true,
   "type": "module",

@@ -43,9 +43,10 @@ without that check. `zig build test` runs the same validator as a test
 (`lsp-main`) whenever `lsp-kit` is fetched, so a mismatch is a red build
 before it is anyone's dead editor.
 
-The native build depends on `lsp-kit`, a **lazy** dependency — the first
-`zig build lsp` fetches it (network required once), later builds are offline.
-The WASM build has no such dependency.
+The native build depends on `lsp-kit`, which `build.zig.zon` pins by url and
+hash. The first `zig build` on a machine downloads it, whatever step was
+asked for (network required once), and unpacks it into `zig-pkg/`. Later
+builds are offline. The WASM server does not link it.
 
 Put `zig-out/bin` on your `PATH`, or reference the absolute path to
 `sjon-lsp` in your editor config below. The server takes no arguments; it

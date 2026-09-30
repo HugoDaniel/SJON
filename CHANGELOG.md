@@ -4,6 +4,34 @@ All notable, breaking, or contract-affecting changes land here, documented
 plainly. The stable surfaces — the binary wire format and the diagnostic-code
 enum — are versioned and corpus-gated; nothing changes them silently.
 
+## 1.4.3 — 2026-09-30
+
+A checkout of SJON builds on a machine that is not the author's. Nothing on
+the language side changed: no wire-format change (still v5), no new
+diagnostic codes, and the conformance corpus still at 393 cases.
+
+### Fixed
+
+- **`zig build` runs outside the author's machine.** `build.zig.zon`
+  declared `lsp-kit` as a path into a sibling checkout of another project
+  (`../wgslender/external/lsp-kit`). The build runner opens every declared
+  path before it looks at the requested step, so in any clone without that
+  directory every command failed with `FileNotFound`, `zig build --help`
+  included. The path predates 1.0.0, so that covers every public snapshot
+  up to 1.4.2. The dependency is now fetched by url and pinned by hash to
+  an upstream `zigtools/lsp-kit` commit, so the first `zig build` on a
+  machine downloads it once and unpacks it into `zig-pkg/`. Checked by
+  exporting the tree into an empty directory and building the native
+  server against an empty package cache.
+
+- **The native language server builds against unpatched `lsp-kit`.** The
+  sibling checkout carried a local commit that raised the comptime branch
+  quota inside `lsp-kit`'s `basic_server`, and upstream has no such line, so
+  pinning upstream alone failed with "evaluation exceeded 1000 backwards
+  branches". `src/lsp/main.zig` now makes the same method-name lookups
+  under its own raised quota before it calls `basic_server.run`, which
+  finds them memoized.
+
 ## 1.4.2 — 2026-09-11
 
 The npm packages can be imported. 1.4.1 shipped `@sjon-lang/schema`,

@@ -51,6 +51,28 @@ pub fn main(init: std.process.Init) !void {
     var server: Server = .init(init.gpa, init.io, transport);
     defer server.deinit();
 
+    // `run` builds its message type by looking every declaration of
+    // `Server` up in lsp-kit's two method-name tables, and at comptime each
+    // candidate key and each byte compared is a backward branch. `Server`
+    // has enough declarations that the lookups pass the 1000 branches an
+    // evaluation gets by default, and the quota cannot be raised from
+    // here, because `run` is analysed as its own function body with its own
+    // count. A comptime call is memoized on its arguments, though, so the
+    // same lookups are made here first under a raised quota, and `run` then
+    // finds every answer cached and spends nothing on it.
+    //
+    // This stands in for a `@setEvalBranchQuota` inside lsp-kit's
+    // `MessageType`, which upstream does not have. If it ever stops
+    // covering the lookups, the build fails with "evaluation exceeded 1000
+    // backwards branches" pointing into `basic_server.zig`.
+    comptime {
+        @setEvalBranchQuota(20_000);
+        for (std.meta.declarations(Server)) |decl| {
+            _ = lsp.isRequestMethod(decl.name);
+            _ = lsp.isNotificationMethod(decl.name);
+        }
+    }
+
     try lsp.basic_server.run(init.io, init.gpa, transport, &server, std.log.err);
 }
 

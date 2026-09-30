@@ -639,9 +639,11 @@ pub fn build(b: *std.Build) void {
     // which is pure SJON logic (no lsp-kit imports), so the language-aware
     // bits are written once.
     //
-    // `lsp_kit` is `.lazy = true` in build.zig.zon — we only resolve it
-    // when an LSP step is in the build graph. If the dep isn't fetched
-    // yet, skip the wiring (Zig re-invokes build() after the fetch).
+    // `lsp_kit` is `.lazy = true` in build.zig.zon, which does not tie the
+    // fetch to the step asked for: the `b.lazyDependency` call below runs
+    // on every `zig build`, so the first one on a machine downloads the
+    // tarball whatever the step. Until then the call returns null, so skip
+    // the wiring (Zig re-invokes build() after the fetch).
     // ---------------------------------------------------------------------
     // Captured out of the lazy block below so `zig build verify` can depend
     // on the native LSP install without forcing the lazy dep when it isn't

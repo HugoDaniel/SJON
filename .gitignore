@@ -1,6 +1,9 @@
 # Build artifacts
 zig-out/
 .zig-cache/
+# Where `zig build` unpacks the fetched lsp_kit dependency. The tarball is
+# cached globally, so this is reproducible from build.zig.zon's url + hash.
+zig-pkg/
 
 # Test artifacts
 *.test
