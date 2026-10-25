@@ -1287,3 +1287,143 @@ export function validateForms(schema: Schema): Diagnostic[] {
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// Schema-aggregate kind-reference walk.
+//
+// Mirrors `Schema.validateKindRefs` in `src/Schema.zig`. Every kind
+// reference a manifest spells — a key's `:type`, a form's `:positional`
+// kind, a value-kind's vector-shape `:element` — is resolved against the
+// aggregated catalog, so two plugins sharing one bare-referenced kind name
+// are named at schema-build time, before any document. Union
+// `:alternatives` are `validateUnions`'s and stay there; flag-set flags
+// carry no type, so there is nothing to resolve for them.
+// ---------------------------------------------------------------------------
+
+export function validateKindRefs(schema: Schema): Diagnostic[] {
+  const out: Diagnostic[] = [];
+  for (const plugin of schema.plugins) {
+    for (const form of plugin.forms) {
+      checkFormKindRefs(schema, plugin, form, out);
+    }
+    for (const kind of plugin.valueKinds) {
+      if (!kind.vector) continue;
+      checkKindRef(
+        schema,
+        plugin,
+        kind.name,
+        'element',
+        [`value-kind \`${kind.name}\` \`:element\``],
+        kind.vector.element,
+        out,
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * Resolve one manifest-spelled kind reference against the aggregated
+ * catalog, emitting the honest code on a miss or a cross-plugin collision.
+ * `subject` is the prose naming the reference site; `slot` is the
+ * diagnostic path's leaf (a key's name, `positional`, or `element`).
+ * Primitive shortcuts never consult the catalog. Mirrors `checkKindRef` in
+ * `src/Schema.zig`.
+ */
+function checkKindRef(
+  schema: Schema,
+  plugin: Plugin,
+  ownerName: string,
+  slot: string,
+  subject: readonly string[],
+  ref: QualifiedRef,
+  out: Diagnostic[],
+): void {
+  if (PRIMITIVE_TYPE_NAMES.has(ref.name)) return;
+  const found = lookupValueKind(schema, ref.name, ref.namespace);
+  if (found.kind === 'found') return;
+  const path = formAggregatePath(plugin.name, ownerName, slot);
+  if (found.kind === 'not_found') {
+    out.push({
+      code: 'unknown_element_kind',
+      message: `${subject.join('')} references value-kind \`${ref.name}\` that does not resolve to any value-kind`,
+      path,
+      span: ZERO_SPAN,
+      severity: 'err',
+    });
+    return;
+  }
+  // Same hint rule as `checkUnion`: name the first claimant's qualified
+  // spelling, and drop the hint entirely when the collision list is empty.
+  const claimants = found.plugins;
+  const list = claimants.map((p) => p.name).join(', ');
+  const suffix = claimants.length > 0 ? `; qualify with \`${claimants[0]!.name}/${ref.name}\`` : '';
+  out.push({
+    code: 'ambiguous_element_kind',
+    message: `${subject.join('')} references value-kind \`${ref.name}\` — defined by [${list}]${suffix}`,
+    path,
+    span: ZERO_SPAN,
+    severity: 'err',
+  });
+}
+
+/**
+ * Walk one form's kind references: every key's `:type`, the `:positional`
+ * kind, and the same two inside slot-local forms (both carriers) and
+ * per-`:when` variant keys. Mirrors `checkFormKindRefs` in `src/Schema.zig`.
+ */
+function checkFormKindRefs(
+  schema: Schema,
+  plugin: Plugin,
+  form: FormSpec,
+  out: Diagnostic[],
+): void {
+  for (const key of form.keys) {
+    if (key.valueType.kind === 'named') {
+      checkKindRef(
+        schema,
+        plugin,
+        form.name,
+        key.name,
+        [`form \`${form.name}\` key \`${key.name}\` \`:type\``],
+        key.valueType,
+        out,
+      );
+    }
+    for (const local of key.localForms ?? []) {
+      checkFormKindRefs(schema, plugin, local, out);
+    }
+  }
+  if (form.positional.kind === 'kind') {
+    checkKindRef(
+      schema,
+      plugin,
+      form.name,
+      'positional',
+      [`form \`${form.name}\` \`:positional\``],
+      form.positional,
+      out,
+    );
+  }
+  for (const local of form.localForms ?? []) {
+    checkFormKindRefs(schema, plugin, local, out);
+  }
+  for (const variant of form.variants ?? []) {
+    for (const key of variant.keys) {
+      if (key.valueType.kind === 'named') {
+        checkKindRef(
+          schema,
+          plugin,
+          form.name,
+          key.name,
+          [`form \`${form.name}\` key \`${key.name}\` \`:type\``],
+          key.valueType,
+          out,
+        );
+      }
+      for (const local of key.localForms ?? []) {
+        checkFormKindRefs(schema, plugin, local, out);
+      }
+    }
+  }
+}

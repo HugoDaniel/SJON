@@ -121,6 +121,8 @@ pub const Edit = @import("Edit.zig");
 pub const Binary = @import("Binary.zig");
 /// Zero-allocation read cursor over a Binary IR file.
 pub const BinaryCursor = @import("BinaryCursor.zig");
+/// Read-only Binary IR tree decoder (leaf: std + Ast + BinaryFormat).
+pub const BinaryDecoder = @import("BinaryDecoder.zig");
 /// Bootstrap meta-plugin descriptor — describes v1 portable manifests.
 pub const MetaSchema = @import("MetaSchema.zig");
 /// Reads a v1 portable manifest into an in-memory `Plugin`.
@@ -503,6 +505,21 @@ pub fn fromBinary(gpa: Allocator, bytes: []const u8, opts: Binary.FromBinaryOpti
     return Binary.fromBinary(gpa, bytes, opts);
 }
 
+/// Decode a Binary IR payload ONCE into an owned, self-contained
+/// `PatternQuery.PreparedBinary` for repeated tree-path queries
+/// (`PatternQuery.queryPreparedBinary*`). Bytes need not outlive the call
+/// (the decoder dups all string content into the tree's arena). O(n) decode.
+/// Errors: the decoder's typed set (`Binary.Error` — incl. DepthExceeded /
+/// StringTooLong / InvalidNamespace, `BinaryFormat.zig:261-272`) plus
+/// `MultipleRoots` for a payload with more than one root; a zero-root payload
+/// prepares successfully and queries as silence (the prepared entries'
+/// specified behavior — no tree correspondent exists). Garbage bytes after a
+/// complete frame are accepted and ignored — the shipped decoder's pinned
+/// tail-leniency, unchanged.
+pub fn prepareBinary(gpa: Allocator, bytes: []const u8) (Binary.Error || error{MultipleRoots})!PatternQuery.PreparedBinary {
+    return PatternQuery.PreparedBinary.fromTree(try BinaryDecoder.fromBinary(gpa, bytes, .{}));
+}
+
 /// Validate a binary IR buffer against a schema. Streams `bytes` directly
 /// via `BinaryCursor` — no intermediate `Tree` is built, which keeps the
 /// `sjon-binary.wasm` artifact free of `Binary.fromBinary` and the
@@ -826,6 +843,97 @@ test "WASM in-process round-trip: text → toBinary → fromBinary → print" {
     defer direct.deinit();
 
     try std.testing.expectEqualStrings(direct.data, printed.data);
+}
+
+// ---------------------------------------------------------------------------
+// prepareBinary — the composed read-side facade (ask 30 / M4 D5).
+// Pins the facade's own ownership and error forwarding: these are actual
+// `prepareBinary` calls, not the D2 `fromTree` pins.
+// ---------------------------------------------------------------------------
+
+test "prepareBinary: prepares an owned single-root pattern; bytes need not outlive the call" {
+    const a = std.testing.allocator;
+    var tree = try parse(a, "[bd sn]");
+    defer tree.deinit();
+
+    const bin = try toBinary(a, tree, Binary.ToBinaryOptions.forMode(.compact));
+    var prepared = try prepareBinary(a, bin.data);
+    defer prepared.deinit();
+    // The decoder dups all string content into the tree's arena, so the
+    // wire bytes are releasable the moment prepareBinary returned — the
+    // prepared object must not borrow them.
+    bin.deinit();
+
+    const schema = Schema.Schema.init(&.{ plugins.core.plugin, plugins.pattern.plugin });
+    var r = try PatternQuery.queryPreparedBinary(a, &prepared, schema, Pattern.Span.init(0, Pattern.PPC), 0);
+    defer r.deinit();
+
+    // Literal oracle: the same outcome pinned independently at
+    // PatternQuery.zig ("[bd sn] tiles a cycle into two equal slots").
+    const half = Pattern.PPC / 2;
+    try std.testing.expectEqual(@as(usize, 2), r.haps.len);
+    try std.testing.expectEqual(@as(i64, 0), r.haps[0].timing.part.begin);
+    try std.testing.expectEqual(half, r.haps[0].timing.part.end);
+    try std.testing.expect(r.haps[0].value.eql(.{ .symbol = "bd" }));
+    try std.testing.expectEqual(half, r.haps[1].timing.part.begin);
+    try std.testing.expectEqual(Pattern.PPC, r.haps[1].timing.part.end);
+    try std.testing.expect(r.haps[1].value.eql(.{ .symbol = "sn" }));
+    try std.testing.expectEqual(@as(usize, 0), r.dropped);
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+}
+
+test "prepareBinary: root discipline — zero-root silence, multi-root typed refusal" {
+    const a = std.testing.allocator;
+    // zero-root payload: prepares with root == null; queries as the
+    // prepared entries' specified silence.
+    {
+        var tree = try parse(a, "");
+        defer tree.deinit();
+        const bin = try toBinary(a, tree, Binary.ToBinaryOptions.forMode(.compact));
+        defer bin.deinit();
+        var prepared = try prepareBinary(a, bin.data);
+        defer prepared.deinit();
+        try std.testing.expect(prepared.root == null);
+
+        const schema = Schema.Schema.init(&.{ plugins.core.plugin, plugins.pattern.plugin });
+        var r = try PatternQuery.queryPreparedBinary(a, &prepared, schema, Pattern.Span.init(0, Pattern.PPC), 0);
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 0), r.haps.len);
+        try std.testing.expectEqual(@as(usize, 0), r.dropped);
+        try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    }
+    // multi-root payload: typed refusal (the shipped binary compile's root
+    // discipline); the consumed tree is freed inside, leak-checked by the
+    // testing allocator.
+    {
+        var tree = try parse(a, "1 2");
+        defer tree.deinit();
+        const bin = try toBinary(a, tree, Binary.ToBinaryOptions.forMode(.compact));
+        defer bin.deinit();
+        try std.testing.expectError(error.MultipleRoots, prepareBinary(a, bin.data));
+    }
+}
+
+test "prepareBinary: malformed wire refuses typed; valid frame with garbage tail is accepted (pinned tail-leniency)" {
+    const a = std.testing.allocator;
+    // Malformed payload: the decoder's typed error set forwards through the
+    // facade — a typed refusal, never a panic.
+    try std.testing.expectError(error.InvalidMagic, prepareBinary(a, "not a sjon binary"));
+
+    // Valid frame followed by garbage: the shipped decoder's pinned
+    // tail-leniency — accepted, tail ignored, unchanged by the facade.
+    var tree = try parse(a, "[bd sn]");
+    defer tree.deinit();
+    const bin = try toBinary(a, tree, Binary.ToBinaryOptions.forMode(.compact));
+    defer bin.deinit();
+    const tailed = try a.alloc(u8, bin.data.len + 16);
+    defer a.free(tailed);
+    @memcpy(tailed[0..bin.data.len], bin.data);
+    @memset(tailed[bin.data.len..], 0xAA);
+    var prepared = try prepareBinary(a, tailed);
+    defer prepared.deinit();
+    try std.testing.expectEqual(@as(usize, 1), prepared.tree.root.len);
+    try std.testing.expect(prepared.root != null);
 }
 
 // ---------------------------------------------------------------------------

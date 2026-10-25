@@ -257,7 +257,12 @@ agree on what a head is:
   declared, at any depth and through either carrier (a `(key …)`'s inline
   locals or a form's positional locals, variant keys included), inside a
   form the same list resolves — or a **global form** across the loaded
-  plugins, where a bare collision is `ambiguous_form` as before. A
+  plugins, where a bare collision is `ambiguous_form` as before.
+  Declaring the colliding name confers no priority: a plugin's own
+  declaration is one claimant among peers, so a bare entry colliding
+  across loaded plugins is `ambiguous_form` even when the declarant is a
+  claimant, and the fixes are the qualified spelling (entry and emitted
+  head together), a slot-local, or a distinct name. A
   *qualified* entry (`<plugin>/<form>`) targets that plugin's global
   catalog and bypasses locals, exactly as a qualified head does at the
   site.
@@ -315,6 +320,95 @@ Two corollaries keep the list honest:
   nested-lowerable lint (`lowering_nested_lowerable`) follows the same
   resolution.
 
+### What a value-kind reference may name
+
+A manifest's kind references (a form's `:positional <kind>`, a key's
+`:type <kind>`, a vector shape's `:element`, a union's `:alternatives`)
+are bare-or-qualified under the one rule of LANGUAGE.md §6.7, and the
+ownership rule above holds for them unchanged: a bare name claimed by
+two loaded plugins is `.ambiguous`, and declaring the colliding name
+confers no priority, even for a reference inside the declarant's own
+manifest. The fixes are the qualified spelling or a distinct name. A
+slot-local cannot answer here; kinds have no slot scope.
+
+Two consequences are contract, not implementation detail. At document
+time, a value in a slot whose kind reference does not resolve cleanly
+fails as `ambiguous_element_kind` (or `unknown_element_kind`), never as
+`wrong_underlying`: a narrowing that cannot resolve is not a value that
+failed. And the ambiguity is the composition's property, not any one
+document's: the schema-aggregate phase resolves every kind reference in
+every manifest at preload, alongside the union and `:produces` walks, so
+two plugins declaring one bare-referenced name are named at schema-build
+time, before any document, in every host that composes them.
+
+#### 2026-10-06, second note: the seat of a collision is the name, and the walk's obligations
+
+The rule above is one change in the validator and one in the aggregate
+phase, and the second carries obligations the rule alone does not state.
+The validator half landed 2026-10-06 (`e2fb2add`: a form child in a slot
+whose reference does not resolve reports `ambiguous_element_kind` or
+`unknown_element_kind` at the child's span, on both walkers, never
+`wrong_underlying`). The aggregate half is the sixth validator,
+`Schema.validateKindRefs`: walk every plugin's forms (recursing into
+slot-local forms and variant keys) and every plugin's value-kinds, and
+resolve a key's `:type`, a form's `:positional` kind and a value-kind's
+vector-shape `:element` against the aggregate, emitting
+`unknown_element_kind` for a miss and `ambiguous_element_kind` for a
+cross-plugin collision, span `{0, 0}`, path `[<plugin>, <form>, <slot>]`,
+stamped `.aggregate` like the other five. It is appended LAST in
+`Host.runAggregateValidators`, so the aggregate phase's
+diagnostic-stream sequence does not move for anything the five existing
+validators emit. Union `:alternatives` stay `validateUnions`'s, and
+flag-set flags carry no type, so there is nothing to resolve for them.
+
+Three consequences are contract.
+
+**The seat of a collision is the kind's name, not the spelling of one
+reference.** A bare reference is ambiguous exactly while two loaded
+plugins declare the name, so qualifying the referencing manifest fixes
+the documents of the qualifying plugin and leaves every other manifest
+that spells the name bare unresolved. The seat is plugin scope: in the
+family's live collision both kinds are declared at plugin scope while
+their bodies differ (one global, one slot-local), and the walk reads
+neither a head-set's shape nor where a body sits, so no slot-scope
+answer exists for that class and a "compatible heads, so harmless"
+exemption would be a new lookup rule, refused with plugin-local-first.
+Discharging a collision therefore
+takes one of the two fixes the rule names, and which one is available is
+decided by which side may move: the qualified spelling where the
+reference is editable, or, where it is not (a manifest carried verbatim
+by a composing sibling, whose own checkout takes no edit in the
+composition's release), the other claimant's declaration moving to a
+distinct name. A composition is clean only when the name has one
+claimant.
+
+**The corpus moves with it, by review, and only as far as it must.**
+Two fixtures witness this class at document time
+(`conformance/cases/ambiguous-element-kind`, whose bare `:type color`
+has two claimants, and `conformance/cases/unknown-element-kind`, whose
+`:element missing` resolves to nothing). Their `expected.sjon` gains the
+aggregate diagnostic, ahead of the document's, because the runner
+concatenates the phases in that order and those bytes were written
+before any preload walk existed: they pin one phase of a two-phase
+class. The diff is the prepended diagnostic and the note that carries it,
+and no other byte; the case count (393) and the legacy ratchet (136) are
+unmoved, and no allow-list changes: both codes were already
+corpus-covered. A sweep of the 393 case dirs at this date finds these two
+and no others.
+
+**A composing host reaches parity in the same change.** The corpus is
+the cross-host axis, so a fixture's new expectation binds every host
+that implements the aggregate phase natively. `hosts/typescript-parity`
+is the only one: its port gains `validateKindRefs`, called after
+`validateForms` in `Host.validateDocument`'s aggregate loop and after
+`validateCrossRefs` in the conformance runner's native legacy path.
+`hosts/web` and `hosts/rust` drive the Zig artifact and inherit it. The
+port's own conformance leg runs with no package install
+(`node --test --experimental-strip-types test/conformance.test.ts`);
+its typecheck and the biome pass need `pnpm`, and the Rust host needs
+`cargo`, so a box without them names those legs as gaps rather than
+calling the change verified.
+
 ### Group (container) lowering
 
 A hook is attached to a form, but that form can be a *container* whose
@@ -339,7 +433,11 @@ would use on the container. One invocation therefore sees *every* child
 at once, which is what lets it decide things no per-child hook could:
 assigning ids that are coherent across the whole set, ordering the
 children, threading a resource produced by one child into the child that
-consumes it next.
+consumes it next. A container hook that wants to *move* one of those
+children into its output rather than read its values carries it: walking
+`view` and the child's node index is the affirmed read (it is how every
+container hook reads its children today), and that index is exactly what
+`EmittedValue.carry` takes.
 
 The children stay plain data forms with no `:lowering`. The container
 consumes them, so the single container invocation does all the work —
@@ -590,10 +688,90 @@ shape an author writes in `(module shader)` or
 
 A nested `.form` child, by contrast, carries a head and **is**
 `:produces`-checked at every depth, including inside vectors. The two
-arms differ in exactly that: whether there is a head to check.
+arms differ in exactly that: whether there is a head to check. A carried
+subtree is not `:produces`-checked either, for the same reason a scalar
+atom is not: it has no hook-chosen head, and whatever heads it holds were
+already in this layer's input tree, so the final forest pass validates
+them in context.
 
 Reference: `Lowering.EmittedValue` for the union, and
 `conformance/cases/lowering-positional-atom/` for the end-to-end shape.
+
+### Carrying an author subtree
+
+A hook may **relocate** an expression the author already wrote instead of
+building one. `EmittedValue.carry` names a node of this layer's input tree
+(`LoweringInput.view.tree`); `buildLoweredTree` copies it verbatim with
+`Ast.TreeBuilder.cloneNode`: source tags, source spans, strings
+re-interned, comments included. `number_with_unit`, `date`, `time` and
+every expression shape survive lowering that way, and the final forest
+pass validates the copy in its new context like any hand-written node. The
+read side is `LoweringInput.subtree(key)`: the author node index of the
+key's value in this layer's input tree, or null when the key is absent or
+holds a materialized default (a default is data, not author bytes; a hook
+that wants it in the output emits it as a value).
+
+**The rule, restated.** A carry can never originate a node: it moves one
+already present in its layer's input tree, and layer 0's input is the
+author's tree. Every node a layer-0 carry moves is the author's, spans
+included. Later layers read trees their predecessors emitted, so a later
+carry can move hook-emitted nodes; what bounds those is not provenance but
+the two checks that already gate every emitted form, declared-form
+resolution at load and the hook's `:produces` at emit. Reads stay
+literal-only, with `numberEval` as the sanctioned crossing that evaluates;
+writes gain exactly one unevaluated crossing, and it originates nothing.
+
+**Carry-only, and what `toggle` does instead.** There is no construction
+arm on `EmittedValue`. A head-plus-children arm would let a hook assemble
+expression shapes with no declaration anywhere, which is the syntax
+rewriting this model refuses; an arm that can write `(not I)` can write
+anything. Construction stays where it already lives, on the `.form` arm,
+bounded by declared-form resolution and `:produces`. `toggle`'s fixed
+wrapper is an ordinary nested `.form` emission around a carry of the
+author's `I`: declare the emitted-only `set`'s `:to` key `:type form`, add
+one slot-local `not` body under it, and list `not` in the hook's
+`:produces`. Local-first `:produces` resolution accepts the list because
+`set` is on it and `not` is reachable under `set`; validation resolves the
+bare head local-first and form-first, and evaluation resolves `not`
+through the expression-function catalog and computes it. That
+validator/evaluator head-resolution asymmetry predates this arm and is the
+accepted residual, not a hole the carry opens.
+
+**Which tree the copy lives in.** At emit time the arm names a tree
+implicitly (this layer's input) and a node index explicitly; after
+materialization, node identity is in the layer's output tree, owned by
+`HostResult.lowering_stages[i]`. A consumer learns which tree from the
+stage that owns the emitted root, the same answer `Hop` already gives for
+the forms hooks write. Each `Invocation` records the tree it was built
+against, and `buildLoweredTree` asserts its argument matches before any
+clone, so a mismatched caller aborts in debug instead of copying unrelated
+nodes.
+
+**Spans and provenance.** Carried nodes keep the spans they hold in this
+layer's input tree: the author's at layer 0, and the span an earlier layer
+stamped or a hook chose later. Stamping does not reach them, and
+`EmittedForm.source_span` overrides do not either. A diagnostic on a
+carried author subtree lands on the bytes the author typed for it, not on
+the verb that moved it. The provenance table is unchanged, one entry per
+emitted root: a carry adds no entry, because "which verb moved this" is
+the containing root's entry and "which bytes" is the node's own span.
+
+**Staging and budget.** A later layer's hook reads the copy through its
+view and may carry it again. Each carry is charged per invocation by the
+carried subtree's own size: a pre-order walk charges `max(1, node span
+length)` for every node plus the bytes of every comment `cloneNode` copies
+with it, so a staged node whose descendants share one narrow hook-chosen
+span still costs one unit per node. The charge joins the per-invocation
+byte estimate (`Plugin.MAX_LOWERED_BYTES`) and the cumulative staging
+counter, so a document-sized carry trips the first and a document's worth
+of invocations carrying the same large subtree trips the second. No new
+constant; a carried subtree is still not an emitted form, and
+`cloneNode`'s recursion is bounded by the parser's own depth ceiling.
+
+**Copy, not move.** The same author node may be carried into any number of
+emitted forms; each is an independent copy. A `:name` it carries registers
+once per copy, so carrying one named subtree twice is
+`duplicate_cross_ref_target` on the final pass.
 
 ### Reading input values (eval-capable reads, host env)
 
@@ -605,6 +783,11 @@ defaults are visible). The typed read helpers — `symbol` / `string` /
 `numberEval`, which *evaluates* an author expression in value position
 (`:count (* workgroup-size 1)`) instead of rejecting it, taking a literal
 fast path for a plain number.
+
+A keyed reader for the value itself, `subtree`, returns the author node
+index of a key's value in this layer's input tree, or null when the key is
+absent or holds a materialized default, so a hook can carry the author's
+own subtree instead of evaluating or re-spelling it.
 
 `numberEval` resolves any free variable in that expression against a
 **host-supplied environment** the embedder injects at the Zig API boundary

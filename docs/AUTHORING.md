@@ -473,9 +473,9 @@ JSON bridge, which has no comment encoding — so a subtree you
 re-encode loses its comments even if you were only *composing* with
 it rather than changing it. The `wrap` op exists for that case: it
 clones the node it wraps instead of rebuilding it, so the wrapped
-subtree keeps everything. What no op preserves is layout: full mode
-re-prints from the tree, so the line breaks are the printer's on
-every run. And since a file that names a plugin has more than one
+subtree keeps its comments. The library defaults to reprint mode, which
+re-derives line breaks. Preserve mode splices the named spans and leaves
+other bytes untouched; the CLI uses preserve mode. And since a file that names a plugin has more than one
 root, an edit on such a file says which root it starts at (`"root":
 N`); an edit that omits it is refused rather than applied to whichever
 form came first. `examples/edit-wrap.mjs` shows both from Node.

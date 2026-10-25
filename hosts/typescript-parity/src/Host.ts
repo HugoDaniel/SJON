@@ -17,7 +17,7 @@ import type { Plugin, Schema } from './plugin.ts';
 import { parse } from './parser.ts';
 import { loadManifest } from './loader.ts';
 import { validate } from './validator.ts';
-import { validateCrossRefs, validateForms, validateUnions } from './plugin.ts';
+import { validateCrossRefs, validateForms, validateKindRefs, validateUnions } from './plugin.ts';
 import { FilesystemResolver } from './FilesystemResolver.ts';
 import { parseReference, type Reference, type Resolution, type ResolverFn } from './Resolver.ts';
 import { assertNever } from './internal.ts';
@@ -250,11 +250,11 @@ export function validateDocument(source: string, options: HostOptions): HostResu
   // Aggregate pass — schema-wide validation runs over the loaded plugins
   // (not the partial declarations). Diagnostics carry `phase = 'aggregate'`.
   //
-  // Zig's `Host.runAggregateValidators` runs five: these three plus
+  // Zig's `Host.runAggregateValidators` runs six: these four plus
   // `validateLowering` and `validateDefaults`, both of which need machinery
   // this declarative-only port does not have (a lowering hook registry, the
-  // default-materialization overlay) and is not gaining. So three of five
-  // total, three of three in scope.
+  // default-materialization overlay) and is not gaining. So four of six
+  // total, four of four in scope.
   const schema: Schema = { plugins: loadedPlugins };
   for (const d of validateCrossRefs(schema)) {
     diagnostics.push(wrapDiagnostic(d, 'aggregate', null));
@@ -263,6 +263,9 @@ export function validateDocument(source: string, options: HostOptions): HostResu
     diagnostics.push(wrapDiagnostic(d, 'aggregate', null));
   }
   for (const d of validateForms(schema)) {
+    diagnostics.push(wrapDiagnostic(d, 'aggregate', null));
+  }
+  for (const d of validateKindRefs(schema)) {
     diagnostics.push(wrapDiagnostic(d, 'aggregate', null));
   }
 

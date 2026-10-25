@@ -337,6 +337,161 @@ test "OOM: fromBinary converges over a pre-encoded buffer" {
 }
 
 // ---------------------------------------------------------------------------
+// 10a. BinaryDecoder.fromBinary — the direct leaf module (ask 30 / M4 D1).
+// Same shape as the `sjon.fromBinary` pin above, plus an explicit resize
+// channel sweep: a clean run first OBSERVES the decode's resize count
+// (never derived), then the sweep runs observed-count + 2 rows of
+// resize-only failures. Per row the outcome must be typed — success or
+// `error.OutOfMemory`, never a panic — and leak-checked by the
+// testing.allocator underneath.
+// ---------------------------------------------------------------------------
+
+test "OOM: BinaryDecoder.fromBinary converges over a pre-encoded buffer (alloc + resize channels)" {
+    const BinaryDecoder = @import("BinaryDecoder.zig");
+    var tree = try parseSample();
+    defer tree.deinit();
+    const bin = try Binary.toBinary(testing.allocator, tree, .{});
+    defer bin.deinit();
+
+    // Clean pass — observe the decode's channel counts (spike discipline:
+    // measured, never derived), leak-checked on success.
+    var observer = FailingAllocator.init(testing.allocator, .{});
+    {
+        const a = observer.allocator();
+        var decoded = try BinaryDecoder.fromBinary(a, bin.data, .{});
+        decoded.deinit();
+    }
+    const n_resizes = observer.resize_index;
+
+    // Alloc channel: walk fail_index upward until a clean decode.
+    var fail_index: usize = 0;
+    while (fail_index < MAX_FAIL_INDEX) : (fail_index += 1) {
+        var failing = makeFailing(fail_index);
+        const a = failing.allocator();
+
+        const result = BinaryDecoder.fromBinary(a, bin.data, .{});
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var t = try result;
+            t.deinit();
+            break;
+        }
+    }
+    if (fail_index == MAX_FAIL_INDEX) return error.OomLoopDidNotConverge;
+
+    // Resize channel: fail the n-th resize, allocations unconstrained.
+    var ri: usize = 0;
+    while (ri <= n_resizes + 1) : (ri += 1) {
+        var failing = FailingAllocator.init(testing.allocator, .{ .resize_fail_index = ri });
+        const a = failing.allocator();
+
+        const result = BinaryDecoder.fromBinary(a, bin.data, .{});
+        if (result) |t| {
+            var decoded = t;
+            decoded.deinit();
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 10b. sjon.prepareBinary — the composed facade (ask 30 / M4 D5). The sweep
+//      covers the FULL composition (BinaryDecoder.fromBinary →
+//      PreparedBinary.fromTree), not the leaf decoder, so the pin owns the
+//      wiring. The fixture is a real pattern (`[bd sn]`): post-sweep, a
+//      clean-allocator prepared object must answer a correct NONEMPTY query
+//      against the literal oracle pinned independently at
+//      PatternQuery.zig ("[bd sn] tiles a cycle into two equal slots") —
+//      not the vacuous silence an unsupported-pattern fixture would give.
+// ---------------------------------------------------------------------------
+
+test "OOM: sjon.prepareBinary converges (decode + root discipline)" {
+    var tree = try Parser.parse(testing.allocator, "[bd sn]");
+    defer tree.deinit();
+    const bin = try Binary.toBinary(testing.allocator, tree, Binary.ToBinaryOptions.forMode(.compact));
+    defer bin.deinit();
+
+    // Alloc channel: walk fail_index upward until a clean prepare. Every
+    // induced-failure row must be classified exactly — `error.OutOfMemory`,
+    // never a panic, never a silently swallowed result — and the testing
+    // allocator underneath fails on any leak (success AND refusal cleanup).
+    var fail_index: usize = 0;
+    while (fail_index < MAX_FAIL_INDEX) : (fail_index += 1) {
+        var failing = makeFailing(fail_index);
+        const a = failing.allocator();
+
+        const result = sjon.prepareBinary(a, bin.data);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var p = try result;
+            p.deinit();
+            break;
+        }
+    }
+    if (fail_index == MAX_FAIL_INDEX) return error.OomLoopDidNotConverge;
+
+    // Root discipline through the facade, leak-checked both ways.
+    {
+        // zero-root payload: prepares with root == null (queries as silence).
+        var empty_tree = try Parser.parse(testing.allocator, "");
+        defer empty_tree.deinit();
+        const empty_bin = try Binary.toBinary(testing.allocator, empty_tree, Binary.ToBinaryOptions.forMode(.compact));
+        defer empty_bin.deinit();
+        var p0 = try sjon.prepareBinary(testing.allocator, empty_bin.data);
+        defer p0.deinit();
+        try testing.expect(p0.root == null);
+    }
+    {
+        // multi-root payload: typed refusal; the consumed tree is freed
+        // inside `fromTree`, so the testing allocator would flag a leak
+        // if the refusal path dropped it.
+        var multi_tree = try Parser.parse(testing.allocator, "1 2");
+        defer multi_tree.deinit();
+        const multi_bin = try Binary.toBinary(testing.allocator, multi_tree, Binary.ToBinaryOptions.forMode(.compact));
+        defer multi_bin.deinit();
+        try testing.expectError(error.MultipleRoots, sjon.prepareBinary(testing.allocator, multi_bin.data));
+    }
+
+    // Post-sweep correctness: a CLEAN testing.allocator end-to-end (no
+    // failing allocator still armed), a clean prepared object answering a
+    // real nonempty query with independent literal expected values.
+    // `clean` owns its allocator context and must outlive `r`.
+    var clean = try sjon.prepareBinary(testing.allocator, bin.data);
+    defer clean.deinit();
+    var r = try sjon.PatternQuery.queryPreparedBinary(
+        testing.allocator,
+        &clean,
+        pattern_oom_schema,
+        .{ .begin = 0, .end = sjon.Pattern.PPC },
+        0,
+    );
+    defer r.deinit();
+
+    const half = sjon.Pattern.PPC / 2;
+    try testing.expectEqual(@as(usize, 2), r.haps.len);
+    // hap 0: bd over the first half-cycle
+    try testing.expectEqual(@as(i64, 0), r.haps[0].timing.part.begin);
+    try testing.expectEqual(half, r.haps[0].timing.part.end);
+    try testing.expect(r.haps[0].timing.whole != null);
+    try testing.expectEqual(@as(i64, 0), r.haps[0].timing.whole.?.begin);
+    try testing.expectEqual(half, r.haps[0].timing.whole.?.end);
+    try testing.expect(r.haps[0].value.eql(.{ .symbol = "bd" }));
+    // hap 1: sn over the second half-cycle
+    try testing.expectEqual(half, r.haps[1].timing.part.begin);
+    try testing.expectEqual(sjon.Pattern.PPC, r.haps[1].timing.part.end);
+    try testing.expect(r.haps[1].timing.whole != null);
+    try testing.expectEqual(half, r.haps[1].timing.whole.?.begin);
+    try testing.expectEqual(sjon.Pattern.PPC, r.haps[1].timing.whole.?.end);
+    try testing.expect(r.haps[1].value.eql(.{ .symbol = "sn" }));
+    // nothing dropped, nothing diagnosed
+    try testing.expectEqual(@as(usize, 0), r.dropped);
+    try testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+}
+
+// ---------------------------------------------------------------------------
 // 11. validateBinary
 // ---------------------------------------------------------------------------
 

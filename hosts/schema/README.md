@@ -124,22 +124,28 @@ node lands, and `hole` is the path to that placeholder *inside the
 decoded parent* (`[0]` is its first positional child; `$children` is
 not a step). It is the one op that keeps the wrapped subtree's
 comments: the engine clones the node instead of rebuilding it from
-JSON, which is what the other five `value`-taking ops do, and the JSON
+JSON, which is what the four other `value`-taking ops do, and the JSON
 bridge carries no comments. Spelling the same shape as a `replace`
 whose value nests the old subtree loses them. `path` may be empty
 (wrap the whole root); `hole` may not, and the builder throws before
 the round-trip, since a wrap with no hole is a `replace` that discards
-its target. Layout is not preserved by any op: the result is re-printed
-from the tree.
+its target. Single-action `applyEdit` reprints; the backend's optional
+`applyEdits(source, actions, { layout: 'preserve' })` can preserve bytes
+outside edited spans. `applyAll` and form helpers use backend defaults;
+the schema options expose layout, not every Zig engine option.
 
 `atRoot` points an action at root `index`. A SJON file that declares or
-references a plugin has several roots, and every builder produces a
+references a plugin has several roots, and each of the six pathed builders produces a
 root-less action, which the engine accepts only on a single-root
 document; on a multi-root one an omitted root is `MultipleRoots`, a
 refusal rather than an implicit `0`. It is a combinator rather than a
 parameter on all six builders because `root` answers "which fragment"
 and `path` answers "where inside it", and only the second is worth
 repeating six times.
+
+`edit.insertRoot(value, index?)` inserts before `index` (omitted means append);
+`edit.removeRoot(index)` removes that root. These two actions take neither
+`path` nor `root`: `index` addresses the document's root list.
 
 ## The `ValidateBackend` seam
 

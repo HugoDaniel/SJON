@@ -1448,3 +1448,433 @@ test "test_synth_positional_v1: emits (module shader) as a bare positional symbo
     try std.testing.expectEqual(@as(usize, 1), out[0].children.len);
     try std.testing.expectEqualStrings("shader", out[0].children[0].symbol);
 }
+
+// ---------------------------------------------------------------------------
+// The keyed author-node reader: `test/subtree-v1` + `LoweringInput.subtree`.
+//
+// The probe reports the raw node index of the author's `:value` in this
+// layer's input tree as `(echo :node <index>)`, or `-1` when the reader
+// answered null. A test reads that number back, reinterprets it as a
+// `NodeIndex`, and asserts which node it names through `tree.tagOf` /
+// `tree.formHeader`; the reader's whole contract is "the index of the node
+// the author wrote, or null", so the index is the honest report.
+// ---------------------------------------------------------------------------
+
+/// `test/subtree-v1`: read `:value` through `LoweringInput.subtree` and echo
+/// the raw index (or `-1` for a miss). See the section comment.
+pub const test_subtree_v1: Lowering.LoweringHook = .{
+    .id = "test/subtree-v1",
+    .lower = lowerSubtree,
+};
+
+fn lowerSubtree(
+    arena: Allocator,
+    input: *const Lowering.LoweringInput,
+    out: *Lowering.LoweringOutput,
+) Lowering.LoweringError!void {
+    const node = try input.subtree("value");
+    const mark: f64 = if (node) |idx| @floatFromInt(idx.raw()) else -1;
+    var kvs: std.ArrayList(Lowering.EmittedKvpair) = .empty;
+    try kvs.append(arena, .{ .key = try arena.dupe(u8, "node"), .value = .{ .number = mark } });
+    try out.append(arena, .{
+        .head = try arena.dupe(u8, "echo"),
+        .kvpairs = try kvs.toOwnedSlice(arena),
+        .source_form_idx = input.form_idx,
+    });
+}
+
+/// Schema for the `subtree` tests: a `(sugar :value <number>)` form lowering
+/// through `test/subtree-v1` to an open `(echo …)` terminal. Core is
+/// prepended so an author expression in the number slot (`(* 2 (+ 3 4))`)
+/// resolves its operators at the surface-validation gate. A non-null
+/// `default_value` adds a schema default on `:value`, the reader's
+/// `.default` arm.
+fn subtreeSchema(a: Allocator, default_value: ?f64) Allocator.Error!Schema.Schema {
+    const sugar_keys = try a.alloc(Plugin.KeySpec, 1);
+    sugar_keys[0] = .{
+        .name = "value",
+        .value_type = .number,
+        .optional = true,
+        .default = if (default_value) |n| .{ .number = n } else null,
+    };
+    const produces = try a.alloc([]const u8, 1);
+    produces[0] = "echo";
+    const forms = try a.alloc(Plugin.FormSpec, 2);
+    forms[0] = .{
+        .name = "sugar",
+        .keys = sugar_keys,
+        .lowering = .{ .hook = "test/subtree-v1", .produces = produces },
+    };
+    forms[1] = .{ .name = "echo", .open = true };
+    const plugins_slice = try a.alloc(Plugin.Plugin, 2);
+    plugins_slice[0] = core.plugin;
+    plugins_slice[1] = .{ .name = "test", .forms = forms };
+    return .{ .plugins = plugins_slice };
+}
+
+/// Drive `test/subtree-v1` over `src` and report the echoed index as a raw
+/// `u32` (null for the `-1` miss marker) plus the pass counts. Every arena
+/// is freed before returning; the raw index is only meaningful against a
+/// tree parsed from the same source, which the tests that need one parse
+/// themselves.
+const SubtreeOutcome = struct {
+    index: ?u32 = null,
+    invocations: usize = 0,
+    diagnostics: usize = 0,
+};
+
+fn runSubtree(
+    gpa: Allocator,
+    schema: Schema.Schema,
+    src: [:0]const u8,
+) !SubtreeOutcome {
+    var tree = try Parser.parse(gpa, src);
+    defer tree.deinit();
+
+    var overlay_arena = std.heap.ArenaAllocator.init(gpa);
+    defer overlay_arena.deinit();
+    var mat = try MaterializedDefaults.materializeDefaults(gpa, overlay_arena.allocator(), &tree, tree.root, schema);
+    defer mat.deinit(gpa);
+
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(gpa);
+    try registry.register(gpa, test_subtree_v1);
+
+    var pass_arena = std.heap.ArenaAllocator.init(gpa);
+    defer pass_arena.deinit();
+
+    var pr = try Lowering.runLoweringPass(gpa, pass_arena.allocator(), &tree, tree.root, schema, &mat.materialized, &registry, .{});
+    defer pr.deinit(gpa);
+
+    var out: SubtreeOutcome = .{ .invocations = pr.invocations.len, .diagnostics = pr.diagnostics.len };
+    if (pr.invocations.len > 0 and pr.invocations[0].forms.len > 0) {
+        const mark = pr.invocations[0].forms[0].kvpairs[0].value.number;
+        if (mark >= 0) out.index = @intFromFloat(mark);
+    }
+    return out;
+}
+
+test "subtree: an author expression comes back as its node index" {
+    const gpa = std.testing.allocator;
+    var plugin_arena = std.heap.ArenaAllocator.init(gpa);
+    defer plugin_arena.deinit();
+    const schema = try subtreeSchema(plugin_arena.allocator(), null);
+
+    const src: [:0]const u8 = "(sugar :value (* 2 (+ 3 4)))";
+    var tree = try Parser.parse(gpa, src);
+    defer tree.deinit();
+
+    var overlay_arena = std.heap.ArenaAllocator.init(gpa);
+    defer overlay_arena.deinit();
+    var mat = try MaterializedDefaults.materializeDefaults(gpa, overlay_arena.allocator(), &tree, tree.root, schema);
+    defer mat.deinit(gpa);
+
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(gpa);
+    try registry.register(gpa, test_subtree_v1);
+
+    var pass_arena = std.heap.ArenaAllocator.init(gpa);
+    defer pass_arena.deinit();
+
+    var pr = try Lowering.runLoweringPass(gpa, pass_arena.allocator(), &tree, tree.root, schema, &mat.materialized, &registry, .{});
+    defer pr.deinit(gpa);
+
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), pr.invocations.len);
+
+    // The echoed index names the `(* …)` form the author wrote, and the
+    // form's span covers exactly its source bytes.
+    const mark = pr.invocations[0].forms[0].kvpairs[0].value.number;
+    const idx = Ast.NodeIndex.from(@intFromFloat(mark));
+    try std.testing.expectEqual(Ast.Tag.form, tree.tagOf(idx));
+    try std.testing.expectEqualStrings("*", tree.formHeader(idx).head);
+    const span = tree.spanOf(idx);
+    try std.testing.expectEqualStrings("(* 2 (+ 3 4))", src[span.start..span.end]);
+}
+
+test "subtree: an absent key is null and a defaulted slot is null" {
+    const gpa = std.testing.allocator;
+    var plugin_arena = std.heap.ArenaAllocator.init(gpa);
+    defer plugin_arena.deinit();
+    const a = plugin_arena.allocator();
+
+    // No `:value` kvpair and no declared default: the reader is a miss.
+    {
+        const schema = try subtreeSchema(a, null);
+        const out = try runSubtree(gpa, schema, "(sugar)");
+        try std.testing.expectEqual(@as(usize, 0), out.diagnostics);
+        try std.testing.expectEqual(@as(usize, 1), out.invocations);
+        try std.testing.expect(out.index == null);
+    }
+
+    // A declared default materializes into the overlay; the reader still
+    // answers null, because a default is data, not author bytes.
+    {
+        const schema = try subtreeSchema(a, 7);
+        const out = try runSubtree(gpa, schema, "(sugar)");
+        try std.testing.expectEqual(@as(usize, 0), out.diagnostics);
+        try std.testing.expectEqual(@as(usize, 1), out.invocations);
+        try std.testing.expect(out.index == null);
+    }
+}
+
+test "subtree: a literal number comes back as its node too" {
+    const gpa = std.testing.allocator;
+    var plugin_arena = std.heap.ArenaAllocator.init(gpa);
+    defer plugin_arena.deinit();
+    const schema = try subtreeSchema(plugin_arena.allocator(), null);
+
+    const src: [:0]const u8 = "(sugar :value 7)";
+    var tree = try Parser.parse(gpa, src);
+    defer tree.deinit();
+
+    var overlay_arena = std.heap.ArenaAllocator.init(gpa);
+    defer overlay_arena.deinit();
+    var mat = try MaterializedDefaults.materializeDefaults(gpa, overlay_arena.allocator(), &tree, tree.root, schema);
+    defer mat.deinit(gpa);
+
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(gpa);
+    try registry.register(gpa, test_subtree_v1);
+
+    var pass_arena = std.heap.ArenaAllocator.init(gpa);
+    defer pass_arena.deinit();
+
+    var pr = try Lowering.runLoweringPass(gpa, pass_arena.allocator(), &tree, tree.root, schema, &mat.materialized, &registry, .{});
+    defer pr.deinit(gpa);
+
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), pr.invocations.len);
+
+    // Shape-agnostic: a literal comes back as the literal's own node. The
+    // parser stores a bare integer as `number_i64`, not `number`, which is
+    // exactly why the reader hands back a node rather than a value.
+    const mark = pr.invocations[0].forms[0].kvpairs[0].value.number;
+    const idx = Ast.NodeIndex.from(@intFromFloat(mark));
+    const tag = tree.tagOf(idx);
+    try std.testing.expect(tag == .number or tag == .number_i64 or tag == .number_u64);
+    try std.testing.expectEqual(@as(f64, 7), tree.numberOf(idx));
+}
+
+// ---------------------------------------------------------------------------
+// `EmittedValue.carry`: the hook side.
+//
+// `test/carry-v1` is the minimal carry producer: it reads `:value` through
+// `LoweringInput.subtree` and carries it, plus an optional `:unit`, into an
+// open `(out …)` terminal. It is the fixture the Host tests drive end to end
+// and the one place the arm's materialization is checked against a real
+// parsed document; the pass and budget mechanics live in `src/Lowering.zig`.
+// ---------------------------------------------------------------------------
+
+/// `test/carry-v1`: carry the author's `:value` subtree into `(out :value
+/// <carry>)`, and the author's `:unit` subtree into a second `:unit` kvpair
+/// when the key is present. See the section comment.
+pub const test_carry_v1: Lowering.LoweringHook = .{
+    .id = "test/carry-v1",
+    .lower = lowerCarry,
+};
+
+fn lowerCarry(
+    arena: Allocator,
+    input: *const Lowering.LoweringInput,
+    out: *Lowering.LoweringOutput,
+) Lowering.LoweringError!void {
+    const value = (try input.subtree("value")) orelse return error.HookFailed;
+    var kvs: std.ArrayList(Lowering.EmittedKvpair) = .empty;
+    try kvs.append(arena, .{ .key = try arena.dupe(u8, "value"), .value = .{ .carry = value } });
+    if (try input.subtree("unit")) |unit| {
+        try kvs.append(arena, .{ .key = try arena.dupe(u8, "unit"), .value = .{ .carry = unit } });
+    }
+    try out.append(arena, .{
+        .head = try arena.dupe(u8, "out"),
+        .kvpairs = try kvs.toOwnedSlice(arena),
+        .source_form_idx = input.form_idx,
+    });
+}
+
+/// Schema for the carry materialization test: `(sugar :value <number> :unit
+/// <any>)` lowers through `test/carry-v1` to an open `(out …)` terminal.
+/// Core is prepended so the author expression in the number slot resolves
+/// its operators at the surface-validation gate.
+fn carrySchema(a: Allocator) Allocator.Error!Schema.Schema {
+    const sugar_keys = try a.alloc(Plugin.KeySpec, 2);
+    sugar_keys[0] = .{ .name = "value", .value_type = .number, .optional = false };
+    sugar_keys[1] = .{ .name = "unit", .value_type = .any, .optional = true };
+    const produces = try a.alloc([]const u8, 1);
+    produces[0] = "out";
+    const forms = try a.alloc(Plugin.FormSpec, 2);
+    forms[0] = .{
+        .name = "sugar",
+        .keys = sugar_keys,
+        .lowering = .{ .hook = "test/carry-v1", .produces = produces },
+    };
+    forms[1] = .{ .name = "out", .open = true };
+    const plugins_slice = try a.alloc(Plugin.Plugin, 2);
+    plugins_slice[0] = core.plugin;
+    plugins_slice[1] = .{ .name = "test", .forms = forms };
+    return .{ .plugins = plugins_slice };
+}
+
+test "carry: a carried subtree materializes with its own tags and spans" {
+    const gpa = std.testing.allocator;
+    var plugin_arena = std.heap.ArenaAllocator.init(gpa);
+    defer plugin_arena.deinit();
+    const schema = try carrySchema(plugin_arena.allocator());
+
+    const src: [:0]const u8 = "(sugar :value (* 2 (+ 3 4)) :unit 4b)";
+    var tree = try Parser.parse(gpa, src);
+    defer tree.deinit();
+
+    var overlay_arena = std.heap.ArenaAllocator.init(gpa);
+    defer overlay_arena.deinit();
+    var mat = try MaterializedDefaults.materializeDefaults(gpa, overlay_arena.allocator(), &tree, tree.root, schema);
+    defer mat.deinit(gpa);
+
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(gpa);
+    try registry.register(gpa, test_carry_v1);
+
+    var pass_arena = std.heap.ArenaAllocator.init(gpa);
+    defer pass_arena.deinit();
+
+    var pr = try Lowering.runLoweringPass(gpa, pass_arena.allocator(), &tree, tree.root, schema, &mat.materialized, &registry, .{});
+    defer pr.deinit(gpa);
+
+    try std.testing.expectEqual(@as(usize, 0), pr.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), pr.invocations.len);
+
+    // The authored nodes, found in the source tree so the copies' spans can
+    // be compared against them.
+    const sugar = tree.root[0];
+    var value_src: Ast.NodeIndex = .invalid;
+    var unit_src: Ast.NodeIndex = .invalid;
+    for (tree.formHeader(sugar).children) |child| {
+        const kv = tree.kvpairHeader(child);
+        if (std.mem.eql(u8, kv.key, "value")) value_src = kv.value;
+        if (std.mem.eql(u8, kv.key, "unit")) unit_src = kv.value;
+    }
+    try std.testing.expect(value_src.isValid());
+    try std.testing.expect(unit_src.isValid());
+
+    var lowered = try Lowering.buildLoweredTree(gpa, pr.invocations, &tree);
+    defer lowered.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), lowered.tree.root.len);
+    const root = lowered.tree.formHeader(lowered.tree.root[0]);
+    try std.testing.expectEqualStrings("out", root.head);
+
+    var lowered_value: ?Ast.NodeIndex = null;
+    var lowered_unit: ?Ast.NodeIndex = null;
+    for (root.children) |child| {
+        const kv = lowered.tree.kvpairHeader(child);
+        if (std.mem.eql(u8, kv.key, "value")) lowered_value = kv.value;
+        if (std.mem.eql(u8, kv.key, "unit")) lowered_unit = kv.value;
+    }
+
+    // The carried expression is a real `*` form whose span is the author's,
+    // not the verb's.
+    const v = lowered_value orelse return error.TestNoValue;
+    try std.testing.expectEqual(Ast.Tag.form, lowered.tree.tagOf(v));
+    try std.testing.expectEqualStrings("*", lowered.tree.formHeader(v).head);
+    const src_span = tree.spanOf(value_src);
+    const dst_span = lowered.tree.spanOf(v);
+    try std.testing.expectEqual(src_span.start, dst_span.start);
+    try std.testing.expectEqual(src_span.end, dst_span.end);
+
+    // The `4b` node lands as number_with_unit, a tag no literal arm can
+    // express.
+    const u = lowered_unit orelse return error.TestNoUnit;
+    try std.testing.expectEqual(Ast.Tag.number_with_unit, lowered.tree.tagOf(u));
+    const nu = lowered.tree.numberWithUnitOf(u);
+    try std.testing.expectEqual(@as(f64, 4), nu.value);
+    try std.testing.expectEqualStrings("b", nu.unit);
+    const usrc = tree.spanOf(unit_src);
+    const udst = lowered.tree.spanOf(u);
+    try std.testing.expectEqual(usrc.start, udst.start);
+    try std.testing.expectEqual(usrc.end, udst.end);
+}
+
+// ---------------------------------------------------------------------------
+// The staged and Host fixtures for `.carry`.
+//
+// `test/carry-forward-v1` is the second layer of the Host chain: the node it
+// reads was itself carried by layer 0, so re-carrying it is the span-preserving
+// staged case. `test/carry-twice-v1` carries one `:name`-bearing node into two
+// emitted forms, the copy-not-move consequence. `test/fuzz-carry-v1` is the
+// fuzz harness's producer: it carries the form it was invoked on, or that
+// form's first positional child when it has one, so form, kvpair and vector
+// roots all reach `cloneNode` over arbitrary trees.
+// ---------------------------------------------------------------------------
+
+/// `test/carry-forward-v1`: carry `:value` into `(done :value <carry>)`. The
+/// second-layer fixture: the node it reads was carried (or emitted) by layer
+/// 0, so the copy's spans still index the original author bytes.
+pub const test_carry_forward_v1: Lowering.LoweringHook = .{
+    .id = "test/carry-forward-v1",
+    .lower = lowerCarryForward,
+};
+
+fn lowerCarryForward(
+    arena: Allocator,
+    input: *const Lowering.LoweringInput,
+    out: *Lowering.LoweringOutput,
+) Lowering.LoweringError!void {
+    const value = (try input.subtree("value")) orelse return error.HookFailed;
+    var kvs: std.ArrayList(Lowering.EmittedKvpair) = .empty;
+    try kvs.append(arena, .{ .key = try arena.dupe(u8, "value"), .value = .{ .carry = value } });
+    try out.append(arena, .{
+        .head = try arena.dupe(u8, "done"),
+        .kvpairs = try kvs.toOwnedSlice(arena),
+        .source_form_idx = input.form_idx,
+    });
+}
+
+/// `test/carry-twice-v1`: carry `:item` into two emitted `(out :item
+/// <carry>)` forms. One author node becomes two copies, so a `:name` it
+/// carries registers twice in the final forest pass.
+pub const test_carry_twice_v1: Lowering.LoweringHook = .{
+    .id = "test/carry-twice-v1",
+    .lower = lowerCarryTwice,
+};
+
+fn lowerCarryTwice(
+    arena: Allocator,
+    input: *const Lowering.LoweringInput,
+    out: *Lowering.LoweringOutput,
+) Lowering.LoweringError!void {
+    const item = (try input.subtree("item")) orelse return error.HookFailed;
+    var i: usize = 0;
+    while (i < 2) : (i += 1) {
+        const kvs = try arena.alloc(Lowering.EmittedKvpair, 1);
+        kvs[0] = .{ .key = try arena.dupe(u8, "item"), .value = .{ .carry = item } };
+        try out.append(arena, .{
+            .head = try arena.dupe(u8, "out"),
+            .kvpairs = kvs,
+            .source_form_idx = input.form_idx,
+        });
+    }
+}
+
+/// `test/fuzz-carry-v1`: carry the invoked form itself, or its first
+/// positional child when it has one, into `(carried :value <carry>)`. See
+/// the section comment.
+pub const test_fuzz_carry_v1: Lowering.LoweringHook = .{
+    .id = "test/fuzz-carry-v1",
+    .lower = lowerFuzzCarry,
+};
+
+fn lowerFuzzCarry(
+    arena: Allocator,
+    input: *const Lowering.LoweringInput,
+    out: *Lowering.LoweringOutput,
+) Lowering.LoweringError!void {
+    const hdr = input.view.tree.formHeader(input.form_idx);
+    const target: Ast.NodeIndex = if (hdr.children.len > 0) hdr.children[0] else input.form_idx;
+    const kvs = try arena.alloc(Lowering.EmittedKvpair, 1);
+    kvs[0] = .{ .key = try arena.dupe(u8, "value"), .value = .{ .carry = target } };
+    try out.append(arena, .{
+        .head = try arena.dupe(u8, "carried"),
+        .kvpairs = kvs,
+        .source_form_idx = input.form_idx,
+    });
+}

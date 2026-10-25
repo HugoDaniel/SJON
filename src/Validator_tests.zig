@@ -7734,6 +7734,74 @@ test "code: ambiguous_element_kind when two plugins claim same kind" {
     try expectCodeOnBoth("(paint :tint 1)", Schema.Schema.init(&.{ p1, p2 }), .ambiguous_element_kind);
 }
 
+test "code: ambiguous_element_kind on a form child whose positional kind two plugins claim" {
+    // The stage-section collision class, minimized. Alpha declares a
+    // form-underlying kind `section` with a head-set; beta declares a
+    // same-named kind, and beta's `holder` references it BARE in its
+    // positional slot. The child's head resolves (alpha, one claimant),
+    // but the slot's kind reference does not: the honest report names the
+    // pair, never `wrong_underlying` — the child did not fail, the
+    // narrowing could not run. Both walkers must agree.
+    const k1: Plugin.ValueKind = .{
+        .name = "section",
+        .underlying = .form,
+        .heads = .{ .heads = &.{.{ .name = "widget" }} },
+    };
+    const k2: Plugin.ValueKind = .{ .name = "section", .underlying = .form };
+    const alpha: Plugin.Plugin = .{
+        .name = "alpha",
+        .value_kinds = &.{k1},
+        .forms = &.{.{ .name = "widget" }},
+    };
+    const beta: Plugin.Plugin = .{
+        .name = "beta",
+        .value_kinds = &.{k2},
+        .forms = &.{.{
+            .name = "holder",
+            .positional = .{ .kind = .{ .name = "section" } },
+        }},
+    };
+    const schema = Schema.Schema.init(&.{ alpha, beta });
+    try expectCodeOnBoth("(holder (widget))", schema, .ambiguous_element_kind);
+    try expectNoCodeOnBoth("(holder (widget))", schema, .wrong_underlying);
+}
+
+test "code: one claimant — a bare positional kind narrows and the form child is a member" {
+    // Single-plugin invariant: with one claimant the bare reference
+    // resolves, the head-set narrowing runs, and the child is accepted —
+    // no ambiguity and no misreported mismatch on either walker.
+    const p: Plugin.Plugin = .{
+        .name = "alpha",
+        .value_kinds = &.{.{
+            .name = "section",
+            .underlying = .form,
+            .heads = .{ .heads = &.{.{ .name = "widget" }} },
+        }},
+        .forms = &.{
+            .{ .name = "widget" },
+            .{ .name = "holder", .positional = .{ .kind = .{ .name = "section" } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    try expectNoCodeOnBoth("(holder (widget))", schema, .ambiguous_element_kind);
+    try expectNoCodeOnBoth("(holder (widget))", schema, .wrong_underlying);
+}
+
+test "code: unknown_element_kind on a form child whose positional kind nobody declares" {
+    // The dangling twin of the ambiguity case: the slot names a kind no
+    // plugin declares. Both walkers must report the reference itself,
+    // `unknown_element_kind` — today each misreports `wrong_underlying`
+    // by classifying the child's expression instead.
+    const p: Plugin.Plugin = .{
+        .name = "alpha",
+        .forms = &.{
+            .{ .name = "widget" },
+            .{ .name = "holder", .positional = .{ .kind = .{ .name = "section" } } },
+        },
+    };
+    try expectCodeOnBoth("(holder (widget))", Schema.Schema.init(&.{p}), .unknown_element_kind);
+}
+
 test "code: unknown_element_kind when vector element references undeclared kind" {
     // The :k slot's value-kind is a vector whose element resolves to
     // `.named "missing"`. The matcher hits an undeclared kind name on

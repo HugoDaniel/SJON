@@ -199,7 +199,7 @@ pub const Schema = struct {
     /// mid-walk OOM frees every partial allocation atomically — only a clean
     /// run reaches `dupeAggregateDiagnostics`, which copies out into `a`.
     /// `body` receives `(self, scratch_allocator, diags_list_to_append_into)`.
-    /// Shared by all five aggregate validators (`validateCrossRefs` …
+    /// Shared by all six aggregate validators (`validateCrossRefs` …
     /// `validateDefaults`), so the arena/dupe envelope lives in one place and
     /// each validator supplies only its walk.
     ///
@@ -367,6 +367,45 @@ pub const Schema = struct {
                             if (dflt != .expression) continue;
                             try checkDefaultExpression(s, sa, diags, plugin, form, key, dflt.expression);
                         }
+                    }
+                }
+            }
+        }.body);
+    }
+
+    /// Walk every plugin's forms — recursing into slot-local `local_forms`
+    /// on both carriers and into per-`:when` `variants` — and every
+    /// plugin's value-kinds, resolving every value-kind reference the
+    /// manifest spells: a key's `:type`, a form's `:positional` kind, a
+    /// value-kind's vector-shape `:element`. Union `:alternatives` are
+    /// `validateUnions`'s and stay there; flag-set flags carry no type,
+    /// so there is nothing to resolve for them. Emits
+    /// `unknown_element_kind` for a miss and `ambiguous_element_kind`
+    /// for a cross-plugin collision — declaring the colliding name
+    /// confers no priority, so a bare reference inside the declarant's
+    /// own manifest is named too. Run alongside the other aggregate
+    /// validators at schema-build time, so two plugins sharing one
+    /// bare-referenced kind name fail every composing host at preload,
+    /// before any document.
+    ///
+    /// Caller owns the returned slice and every string within (allocated
+    /// from `a`). Diagnostic `.span` is `{0, 0}`; the path
+    /// `[<plugin>, <form>, <slot>]` identifies the offender (the
+    /// declaring kind's name takes the middle slot for a vector-shape
+    /// `:element`, as `validateUnions` does for `:union`).
+    pub fn validateKindRefs(
+        self: Schema,
+        a: Allocator,
+    ) Allocator.Error![]const Ast.Diagnostic {
+        return self.runInScratch(a, struct {
+            fn body(s: Schema, sa: Allocator, diags: *std.ArrayList(Ast.Diagnostic)) Allocator.Error!void {
+                for (s.plugins) |*plugin| {
+                    for (plugin.forms) |*form| {
+                        try checkFormKindRefs(s, sa, diags, plugin, form);
+                    }
+                    for (plugin.value_kinds) |*kind| {
+                        const vs = kind.vector orelse continue;
+                        try checkKindRef(s, sa, diags, plugin, kind.name, "element", &.{ "value-kind `", kind.name, "` `:element`" }, vs.element);
                     }
                 }
             }
@@ -1377,6 +1416,140 @@ fn formAggregatePath(
     out[1] = try a.dupe(u8, form_name);
     out[2] = try a.dupe(u8, leaf);
     return out;
+}
+
+/// Resolve one manifest-spelled value-kind reference against the
+/// aggregate, emitting the honest code on a miss or a cross-plugin
+/// collision. `subject` is the caller's borrowed prose fragments naming
+/// the reference site; `slot` is the diagnostic path's leaf (a key's
+/// name, `positional`, or `element`). Primitive shortcuts
+/// ("number", "string", …) never consult the catalog, mirroring
+/// `checkUnion`'s alternative skip.
+fn checkKindRef(
+    schema: Schema,
+    a: Allocator,
+    diags: *std.ArrayList(Ast.Diagnostic),
+    plugin: *const Plugin.Plugin,
+    owner_name: []const u8,
+    slot: []const u8,
+    subject: []const []const u8,
+    ref: Plugin.QualifiedRef,
+) Allocator.Error!void {
+    if (isPrimitiveTypeName(ref.name)) return;
+    switch (schema.lookupValueKind(ref.name, ref.namespace)) {
+        .found => {},
+        .not_found => {
+            var buf: std.ArrayList(u8) = .empty;
+            for (subject) |part| try buf.appendSlice(a, part);
+            try buf.appendSlice(a, " references value-kind `");
+            try buf.appendSlice(a, ref.name);
+            try buf.appendSlice(a, "` that does not resolve to any value-kind");
+            try diags.append(a, .{
+                .span = .{ .start = 0, .end = 0 },
+                .message = try buf.toOwnedSlice(a),
+                .severity = .err,
+                .code = .unknown_element_kind,
+                .path = try formAggregatePath(a, plugin.name, owner_name, slot),
+            });
+        },
+        .ambiguous => |amb| {
+            const claimants = amb.slice();
+            // Same hint rule as `checkUnion`: name the first claimant's
+            // qualified spelling, and drop the hint entirely when the
+            // collision list is empty.
+            const suffix: []const []const u8 = if (claimants.len > 0)
+                &.{ "; qualify with `", claimants[0].name, "/", ref.name, "`" }
+            else
+                &.{};
+            var prefix: std.ArrayList([]const u8) = .empty;
+            defer prefix.deinit(a);
+            try prefix.appendSlice(a, subject);
+            try prefix.append(a, " references value-kind `");
+            try prefix.append(a, ref.name);
+            try prefix.append(a, "`");
+            try diags.append(a, .{
+                .span = .{ .start = 0, .end = 0 },
+                .message = try ambiguityMessage(a, prefix.items, claimants, suffix),
+                .severity = .err,
+                .code = .ambiguous_element_kind,
+                .path = try formAggregatePath(a, plugin.name, owner_name, slot),
+            });
+        },
+    }
+}
+
+/// Walk one form's kind references: every key's `:type`, the
+/// `:positional` kind, and the same two inside slot-local forms (both
+/// carriers) and per-`:when` variant keys. Nesting is bounded by
+/// `Plugin.MAX_LOCAL_FORM_DEPTH` at load, the same bound the loader's
+/// own recursion honors.
+fn checkFormKindRefs(
+    schema: Schema,
+    a: Allocator,
+    diags: *std.ArrayList(Ast.Diagnostic),
+    plugin: *const Plugin.Plugin,
+    form: *const Plugin.FormSpec,
+) Allocator.Error!void {
+    for (form.keys) |*key| {
+        try checkKeyTypeRef(schema, a, diags, plugin, form.name, key.name, key.value_type);
+        for (key.local_forms) |*local| {
+            try checkFormKindRefs(schema, a, diags, plugin, local);
+        }
+    }
+    switch (form.positional) {
+        .kind => |ref| try checkKindRef(
+            schema,
+            a,
+            diags,
+            plugin,
+            form.name,
+            "positional",
+            &.{ "form `", form.name, "` `:positional`" },
+            ref,
+        ),
+        else => {},
+    }
+    for (form.local_forms) |*local| {
+        try checkFormKindRefs(schema, a, diags, plugin, local);
+    }
+    if (form.variants) |variants| {
+        for (variants) |*variant| {
+            for (variant.keys) |*key| {
+                try checkKeyTypeRef(schema, a, diags, plugin, form.name, key.name, key.value_type);
+                for (key.local_forms) |*local| {
+                    try checkFormKindRefs(schema, a, diags, plugin, local);
+                }
+            }
+        }
+    }
+}
+
+/// `checkKindRef` for a keyed slot: only `.named` value types are kind
+/// references — primitives spelled as `ValueType` tags never consult the
+/// catalog.
+fn checkKeyTypeRef(
+    schema: Schema,
+    a: Allocator,
+    diags: *std.ArrayList(Ast.Diagnostic),
+    plugin: *const Plugin.Plugin,
+    form_name: []const u8,
+    key_name: []const u8,
+    vt: Plugin.ValueType,
+) Allocator.Error!void {
+    const ref = switch (vt) {
+        .named => |r| r,
+        else => return,
+    };
+    try checkKindRef(
+        schema,
+        a,
+        diags,
+        plugin,
+        form_name,
+        key_name,
+        &.{ "form `", form_name, "` key `", key_name, "` `:type`" },
+        ref,
+    );
 }
 
 /// Resolve the discriminant key's `value_type` to a value-kind with
@@ -2761,7 +2934,7 @@ test "validateCrossRefs: OOM mid-walk leaves no partial diagnostic behind" {
     // every allocation point proves the scratch-arena + atomic copy-out path
     // never leaks: an induced failure returns OutOfMemory with nothing left
     // behind (std.testing.allocator underneath flags any leak). This is the
-    // path all five aggregate validators share via `dupeAggregateDiagnostics`.
+    // path all six aggregate validators share via `dupeAggregateDiagnostics`.
     const p: Plugin.Plugin = .{
         .name = "p",
         .value_kinds = &.{
@@ -3909,6 +4082,181 @@ test "validateUnions: nested union emits nested_union" {
 }
 
 // ---------------------------------------------------------------------------
+// validateKindRefs — schema-aggregate phase tests.
+// ---------------------------------------------------------------------------
+
+test "validateKindRefs: a bare positional kind two plugins declare emits ambiguous_element_kind" {
+    // The stage-section collision class at preload: beta both declares
+    // `section` and references it bare, alpha declares it too, and
+    // declaring the colliding name confers no priority — the pair is
+    // named against beta's own reference, so the composition's fault is
+    // reported at schema-build time, before any document.
+    const alpha: Plugin.Plugin = .{
+        .name = "alpha",
+        .value_kinds = &.{.{ .name = "section", .underlying = .form }},
+    };
+    const beta: Plugin.Plugin = .{
+        .name = "beta",
+        .value_kinds = &.{.{ .name = "section", .underlying = .form }},
+        .forms = &.{.{ .name = "holder", .positional = .{ .kind = .{ .name = "section" } } }},
+    };
+    const schema = Schema.init(&.{ alpha, beta });
+    const diags = try schema.validateKindRefs(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 1), diags.len);
+    try testing.expectEqual(Ast.Diagnostic.Code.ambiguous_element_kind, diags[0].code);
+    try testing.expectEqual(@as(usize, 3), diags[0].path.len);
+    try testing.expectEqualStrings("beta", diags[0].path[0]);
+    try testing.expectEqualStrings("holder", diags[0].path[1]);
+    try testing.expectEqualStrings("positional", diags[0].path[2]);
+}
+
+test "validateKindRefs: a dangling :type reference emits unknown_element_kind" {
+    const p: Plugin.Plugin = .{
+        .name = "p",
+        .forms = &.{.{
+            .name = "paint",
+            .keys = &.{.{ .name = "tint", .value_type = .{ .named = .{ .name = "missing" } } }},
+        }},
+    };
+    const schema = Schema.init(&.{p});
+    const diags = try schema.validateKindRefs(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 1), diags.len);
+    try testing.expectEqual(Ast.Diagnostic.Code.unknown_element_kind, diags[0].code);
+    try testing.expectEqual(@as(usize, 3), diags[0].path.len);
+    try testing.expectEqualStrings("p", diags[0].path[0]);
+    try testing.expectEqualStrings("paint", diags[0].path[1]);
+    try testing.expectEqualStrings("tint", diags[0].path[2]);
+}
+
+test "validateKindRefs: one claimant and primitive shortcuts emit nothing" {
+    // Clean control: a bare reference with exactly one claimant resolves,
+    // and primitive shortcuts ("number") never consult the catalog, so
+    // the walk stays quiet — a document loading this plugin alone is
+    // untouched by the alarm.
+    const p: Plugin.Plugin = .{
+        .name = "p",
+        .value_kinds = &.{.{ .name = "section", .underlying = .form }},
+        .forms = &.{
+            .{ .name = "holder", .positional = .{ .kind = .{ .name = "section" } } },
+            .{ .name = "paint", .keys = &.{
+                .{ .name = "tint", .value_type = .{ .named = .{ .name = "section" } } },
+                .{ .name = "n", .value_type = .{ .named = .{ .name = "number" } } },
+            } },
+        },
+    };
+    const schema = Schema.init(&.{p});
+    const diags = try schema.validateKindRefs(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 0), diags.len);
+}
+
+test "validateKindRefs: a dangling vector-shape :element emits unknown_element_kind" {
+    // The value-kind branch: the declaring kind owns the reference, so the
+    // path's middle segment is the kind's own name and the leaf `element`
+    // (the same convention `validateUnions` uses for a `:union` key). The
+    // corpus's `unk-elem-test` fixture covers this end to end; this pin is
+    // the suite's own, the branch being otherwise untested.
+    const p: Plugin.Plugin = .{
+        .name = "p",
+        .value_kinds = &.{.{
+            .name = "bag",
+            .underlying = .vector,
+            .vector = .{ .element = .{ .name = "missing" } },
+        }},
+    };
+    const schema = Schema.init(&.{p});
+    const diags = try schema.validateKindRefs(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 1), diags.len);
+    try testing.expectEqual(Ast.Diagnostic.Code.unknown_element_kind, diags[0].code);
+    try testing.expectEqual(@as(usize, 3), diags[0].path.len);
+    try testing.expectEqualStrings("p", diags[0].path[0]);
+    try testing.expectEqualStrings("bag", diags[0].path[1]);
+    try testing.expectEqualStrings("element", diags[0].path[2]);
+}
+
+test "validateKindRefs: slot-local and variant references are named by the recursion" {
+    // The recursion into `local_forms` (a key's and a form's own) and into
+    // per-`:when` variant keys, pinned by name: each miss is reported
+    // against the local form that carries it, so the path names `inner`
+    // and `row` (the locals) and `holder` (the variant's parent form),
+    // never merely the walk's shape. Walk order: the key's locals, then
+    // the form's, then the variants.
+    const p: Plugin.Plugin = .{
+        .name = "p",
+        .forms = &.{.{
+            .name = "holder",
+            .keys = &.{.{
+                .name = "wrap",
+                .value_type = .symbol,
+                .optional = false,
+                .local_forms = &.{.{ .name = "inner", .keys = &.{
+                    .{ .name = "tint", .value_type = .{ .named = .{ .name = "missing" } } },
+                } }},
+            }},
+            .local_forms = &.{.{
+                .name = "row",
+                .positional = .{ .kind = .{ .name = "also-missing" } },
+            }},
+            .variants = &.{.{ .when = &.{"a"}, .keys = &.{
+                .{ .name = "vk", .value_type = .{ .named = .{ .name = "variant-missing" } } },
+            } }},
+        }},
+    };
+    const schema = Schema.init(&.{p});
+    const diags = try schema.validateKindRefs(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 3), diags.len);
+    try testing.expectEqual(Ast.Diagnostic.Code.unknown_element_kind, diags[0].code);
+    try testing.expectEqual(@as(usize, 3), diags[0].path.len);
+    try testing.expectEqualStrings("inner", diags[0].path[1]);
+    try testing.expectEqualStrings("tint", diags[0].path[2]);
+    try testing.expectEqual(Ast.Diagnostic.Code.unknown_element_kind, diags[1].code);
+    try testing.expectEqualStrings("row", diags[1].path[1]);
+    try testing.expectEqualStrings("positional", diags[1].path[2]);
+    try testing.expectEqual(Ast.Diagnostic.Code.unknown_element_kind, diags[2].code);
+    try testing.expectEqualStrings("holder", diags[2].path[1]);
+    try testing.expectEqualStrings("vk", diags[2].path[2]);
+}
+
+test "validateKindRefs: OOM mid-walk leaves no partial diagnostic behind" {
+    // The rule for every allocating entry point, here for the sixth
+    // validator: a FailingAllocator walked across every allocation index
+    // returns OutOfMemory with nothing left behind (std.testing.allocator
+    // underneath flags any leak), and the sweep converges on a clean run
+    // through the shared `dupeAggregateDiagnostics` copy-out.
+    const p: Plugin.Plugin = .{
+        .name = "p",
+        .forms = &.{.{
+            .name = "paint",
+            .keys = &.{.{ .name = "tint", .value_type = .{ .named = .{ .name = "missing" } } }},
+        }},
+    };
+    const schema = Schema.init(&.{p});
+
+    const MAX_FAIL_INDEX: usize = 4096;
+    var fail_index: usize = 0;
+    while (fail_index < MAX_FAIL_INDEX) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        const a = failing.allocator();
+
+        const result = schema.validateKindRefs(a);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            const diags = try result;
+            defer freeDiagnostics(a, diags);
+            try testing.expectEqual(@as(usize, 1), diags.len);
+            try testing.expectEqual(Ast.Diagnostic.Code.unknown_element_kind, diags[0].code);
+            return;
+        }
+    }
+    return error.OomLoopDidNotConverge;
+}
+
+// ---------------------------------------------------------------------------
 // validateForms — schema-aggregate phase tests for discriminated forms.
 // ---------------------------------------------------------------------------
 
@@ -4482,6 +4830,56 @@ test "validateLowering: ambiguous bare produces head emits ambiguous_form" {
         "form `pass` `:lowering` produces head `shader` is ambiguous — defined by [a, b]; qualify with `<ns>/shader`",
         diags[0].message,
     );
+}
+
+test "validateLowering: a produces head the declaring plugin also declares is still ambiguous beside a sibling's" {
+    // The claimant-producer pin. A plugin's own declaration is one claimant
+    // among peers: `b` declaring `target` gives its bare `:produces [target]`
+    // no priority over `a`'s same-named global. The retained rule: collision
+    // is a property of the bare name in the aggregated scope, not of who asks.
+    const a_plug: Plugin.Plugin = .{ .name = "a", .forms = &.{.{ .name = "target" }} };
+    const b_plug: Plugin.Plugin = .{
+        .name = "b",
+        .forms = &.{
+            .{ .name = "target" },
+            .{
+                .name = "draw-graph",
+                .lowering = .{ .hook = "b/draw-graph-v1", .produces = &.{"target"} },
+            },
+        },
+    };
+    const schema = Schema.init(&.{ a_plug, b_plug });
+    const diags = try schema.validateLowering(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 1), diags.len);
+    try testing.expectEqual(Ast.Diagnostic.Code.ambiguous_form, diags[0].code);
+    try testing.expectEqual(@as(usize, 3), diags[0].path.len);
+    try testing.expectEqualStrings("b", diags[0].path[0]);
+    try testing.expectEqualStrings("draw-graph", diags[0].path[1]);
+    try testing.expectEqualStrings("lowering", diags[0].path[2]);
+    try testing.expect(std.mem.indexOf(u8, diags[0].message, "defined by [a, b]") != null);
+    try testing.expect(std.mem.indexOf(u8, diags[0].message, "qualify with `<ns>/target`") != null);
+}
+
+test "validateLowering: a qualified produces head the declaring plugin also declares is clean beside a sibling's" {
+    // Companion to the pin above: the qualified spelling is the unambiguous
+    // one when the declarant is a claimant. Qualified entries bypass locals
+    // and resolve in the named plugin only.
+    const a_plug: Plugin.Plugin = .{ .name = "a", .forms = &.{.{ .name = "target" }} };
+    const b_plug: Plugin.Plugin = .{
+        .name = "b",
+        .forms = &.{
+            .{ .name = "target" },
+            .{
+                .name = "draw-graph",
+                .lowering = .{ .hook = "b/draw-graph-v1", .produces = &.{"b/target"} },
+            },
+        },
+    };
+    const schema = Schema.init(&.{ a_plug, b_plug });
+    const diags = try schema.validateLowering(testing.allocator);
+    defer freeDiagnostics(testing.allocator, diags);
+    try testing.expectEqual(@as(usize, 0), diags.len);
 }
 
 test "validateLowering: qualified produces head resolves to one specific plugin" {

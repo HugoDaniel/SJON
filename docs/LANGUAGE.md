@@ -3996,7 +3996,11 @@ Two things a splice does not tidy. A value built from an action's `value`
 is printed, so `{"op":"replace","value":255}` writes `255` whatever the
 source spelled; and `wrap` embeds its target's bytes verbatim, so a
 multi-line target keeps its old columns inside its new parent. Reformat
-after either if it matters.
+after either if it matters. A string's delimiter is the same story when
+the value is printed: a `"""` block an action rewrites comes back
+escape-quoted, while a block outside the edited span keeps its bytes
+under preserve, the one exception to §4.2's "only form any SJON tool
+hands back".
 
 `sjon edit` (TOOLING.md) preserves and has no flag to re-print;
 `sjon edit … | sjon fmt -` is the refold.

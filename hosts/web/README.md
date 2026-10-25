@@ -53,8 +53,7 @@ node --test --experimental-strip-types hosts/web/test/*.test.ts hosts/web/*.test
 node --experimental-strip-types hosts/web/demo.ts
 ```
 
-`zig build wasm-consumer-test` requires Node ≥ 20 (for built-in
-`node:test`). It is **not** part of `zig build test` so the Zig suite
+`zig build wasm-consumer-test` requires Node ≥ 22.6 for source type stripping. It is **not** part of `zig build test` so the Zig suite
 stays runnable in toolchains without Node.
 
 ## Usage
@@ -85,8 +84,10 @@ console.log(value);                // 15
 top-level forms into `(plugin …)` declarations / `(use-plugin …)`
 references / data → load each manifest → resolve each reference →
 schema-aggregate → validate the data forest. The diagnostic stream is
-byte-identical (`(code, path)`) to the Zig CLI and the
-`hosts/typescript-parity` reference.
+checked at `(code, path)` against Zig on supported fixtures. The WASM
+runners replay 354 of 393 fixtures (38 `lowering-*` and `too-many-keys`
+excluded by `conformance/classifier.json`); the TS reference has further
+exclusions. See the [capability matrix](../../docs/INTEGRATION.md#capability-matrix).
 
 #### Node — using the bundled `fs` resolver
 

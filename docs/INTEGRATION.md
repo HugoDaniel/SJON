@@ -7,8 +7,8 @@
 SJON ships as a Zig library with three reference host wrappers that
 re-expose the same engine in other ecosystems. Pick the row that
 matches your runtime; every host shares the diagnostic vocabulary, the
-binary IR wire format, and the conformance corpus, so behavior is
-byte-identical across rows.
+binary IR wire format where implemented, and the conformance corpus.
+Agreement is checked on each host's supported surfaces and replayed fixtures.
 
 | Host                       | When to use                                                                       | Entrypoint                                                  | Examples                                                                       |
 | -------------------------- | --------------------------------------------------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------ |
@@ -17,9 +17,48 @@ byte-identical across rows.
 | **Rust (wasmtime)**        | Rust services, CLIs, build tools. Wraps the same `sjon.wasm` via `wasmtime`.      | `sjon_host::SjonHost::load(...)` in `hosts/rust/`           | [`examples/quickstart-rust.rs`](../examples/quickstart-rust.rs) (start here), [`hosts/rust/tests/smoke.rs`](../hosts/rust/tests/smoke.rs) |
 | **TypeScript (reference)** | Second-source conformance verification or porting. **Not for production.**        | `import { Host } from '…/typescript-parity/src/index.ts'`   | [`hosts/typescript-parity/test/conformance.test.ts`](../hosts/typescript-parity/test/conformance.test.ts) |
 
-All four hosts walk `conformance/cases/` and emit the same `(code,
-path)` diagnostics. If a behavior differs across rows, that's a
-conformance bug — open it as such.
+All four hosts discover `conformance/cases/` and emit the same `(code,
+path)` diagnostics. Differences on supported shared contracts are conformance bugs; intentional
+boundaries and skip registries are described below.
+
+## Capability matrix
+
+The WASM columns describe exported engine capabilities; wrapper method names
+and available artifact combinations are listed in each host README.
+
+| Capability | Zig library | Kitchen-sink WASM (Web/Rust) | Read-only WASM (`SjonReader`) | Native TS reference |
+|---|---|---|---|---|
+| Validation | Full tree/binary | Text and binary | Binary | Declarative subset |
+| Expressions | Tree, binary, binary views | Text and binary | Binary | No evaluator |
+| Patterns | Tree, legacy/eval binary, prepared | Existing exported query surface | Legacy binary query | Literal leaves |
+| Defaults | Validation and materialization | Host pipeline options | Binary validation surface | No runtime overlay |
+| Edits and addresses | Yes | Yes | No parser/edit surface | No |
+| Schema export | JSON Schema, TS, intermediate; CLI Markdown | JSON Schema, TS, both, intermediate | No | Native export subset |
+| Executable plugins | Runtime/invoker | Host/runtime bridge | No runtime bridge | No |
+| Lowering hooks | Zig function-pointer registry | No hook execution | No | No |
+
+The additive native binary-pattern APIs do not add WASM exports or wrapper
+methods. See [BINARY_PATTERNS.md](BINARY_PATTERNS.md) for choosing a native entry.
+
+The wire version and diagnostic-code vocabulary remain shared contracts.
+Lowering hooks and their provenance are Zig-only. Markdown schema export and
+structured hints are CLI-only. `sjon-project.sjon` vocabulary belongs to the
+filesystem resolver; a resolver claiming support must read its complete entry
+shape. Document plugin pins remain a host-level check.
+
+Conformance coverage is fixture coverage, not the number of test registrations:
+the current WASM runners replay 354 of 393 fixtures, excluding 38 `lowering-*`
+cases and `too-many-keys`. The reasons and matching rules are maintained in
+[`conformance/classifier.json`](../conformance/classifier.json). The native TS
+reference has additional exclusions in its
+[`SKIP_FAMILIES`](../hosts/typescript-parity/test/conformance.test.ts), including
+expression-valued patterns, runtime provider extraction, expression defaults,
+materialization, effective validation, higher-order/value expressions and
+exclusive-group runtime checks. Aggregate-only provider cases still run.
+These exclusions describe existing boundaries, not permission for a new
+shared-contract divergence. [The TS README](../hosts/typescript-parity/README.md)
+details the supported subset.
+
 
 ## Zig — the reference path
 

@@ -914,6 +914,122 @@ test "D8-lower: every :produces head resolves cleanly → no aggregate diagnosti
     try std.testing.expectEqual(@as(usize, 0), aggregate_errors);
 }
 
+// Claimant-producer pin fixtures: each hook emits one contentless form with a
+// fixed head, so the bare and the qualified spelling of the filed shape can
+// both be driven through `Host.validateDocument`.
+fn lowerProducesTarget(
+    arena: std.mem.Allocator,
+    input: *const Lowering.LoweringInput,
+    out: *Lowering.LoweringOutput,
+) Lowering.LoweringError!void {
+    try out.append(arena, .{
+        .head = try arena.dupe(u8, "target"),
+        .source_form_idx = input.form_idx,
+    });
+}
+
+const produces_target_v1: Lowering.LoweringHook = .{
+    .id = "test/produces-target-v1",
+    .lower = lowerProducesTarget,
+};
+
+fn lowerProducesQualifiedTarget(
+    arena: std.mem.Allocator,
+    input: *const Lowering.LoweringInput,
+    out: *Lowering.LoweringOutput,
+) Lowering.LoweringError!void {
+    try out.append(arena, .{
+        .head = try arena.dupe(u8, "b/target"),
+        .source_form_idx = input.form_idx,
+    });
+}
+
+const produces_qualified_target_v1: Lowering.LoweringHook = .{
+    .id = "test/produces-qualified-target-v1",
+    .lower = lowerProducesQualifiedTarget,
+};
+
+test "D8-lower: the manifest check and the final forest pass agree on the filed shape" {
+    const a = std.testing.allocator;
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(a);
+    try registry.register(a, produces_target_v1);
+
+    // Plugins `a` and `b` both declare a global `target`; `b` declares
+    // `draw-graph`, whose hook emits a bare `(target)`. `b`'s own declaration
+    // gives its bare entry no priority: the aggregate check reports the
+    // collision on the manifest entry (collected, not fatal) and the final
+    // forest pass reports it again on the emitted head. A drift where either
+    // phase stops agreeing with the other fails one of the two assertions.
+    const src: [:0]const u8 =
+        \\(plugin :name a :version "1.0.0"
+        \\  (form :name target :open true))
+        \\(plugin :name b :version "1.0.0"
+        \\  (form :name target :open true)
+        \\  (form :name draw-graph :open true
+        \\    :lowering (lowering :hook test/produces-target-v1 :produces [target])))
+        \\(draw-graph)
+        \\
+    ;
+    var r = try Host.validateDocument(a, src, .{ .lowering_registry = &registry });
+    defer r.deinit();
+
+    var aggregate: usize = 0;
+    var validation: usize = 0;
+    for (r.diagnostics) |d| {
+        if (d.severity != .err or d.code != .ambiguous_form) continue;
+        if (d.phase == .aggregate) {
+            if (d.path.len == 3 and
+                std.mem.eql(u8, d.path[0], "b") and
+                std.mem.eql(u8, d.path[1], "draw-graph") and
+                std.mem.eql(u8, d.path[2], "lowering"))
+            {
+                aggregate += 1;
+            }
+        } else if (d.phase == .validation) {
+            try std.testing.expect(std.mem.indexOf(u8, d.message, "target") != null);
+            try std.testing.expect(std.mem.indexOf(u8, d.message, "[a, b]") != null);
+            validation += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), aggregate);
+    try std.testing.expectEqual(@as(usize, 1), validation);
+}
+
+test "D8-lower: the qualified spelling of the filed shape validates clean end to end" {
+    const a = std.testing.allocator;
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(a);
+    try registry.register(a, produces_qualified_target_v1);
+
+    // Companion: `b` lists the qualified spelling and the hook emits the
+    // matching head byte for byte. Nothing collides: the aggregate check
+    // resolves the entry in `b` alone, and the emitted `(b/target)` resolves
+    // just as cleanly in the final forest pass.
+    const src: [:0]const u8 =
+        \\(plugin :name a :version "1.0.0"
+        \\  (form :name target :open true))
+        \\(plugin :name b :version "1.0.0"
+        \\  (form :name target :open true)
+        \\  (form :name draw-graph :open true
+        \\    :lowering (lowering :hook test/produces-qualified-target-v1 :produces [b/target])))
+        \\(draw-graph)
+        \\
+    ;
+    var r = try Host.validateDocument(a, src, .{ .lowering_registry = &registry });
+    defer r.deinit();
+    try std.testing.expect(!r.hasErrors());
+
+    const lt = r.lowered_tree orelse return error.TestNoLoweredTree;
+    try std.testing.expectEqual(@as(usize, 1), lt.root.len);
+    // `emitFormIntoTree` splits the qualified head at the slash, so the
+    // materialized form carries `target` in `b`'s namespace.
+    const hdr = lt.formHeader(lt.root[0]);
+    try std.testing.expectEqualStrings("target", hdr.head);
+    try std.testing.expect(hdr.namespace != null);
+    try std.testing.expectEqualStrings("b", hdr.namespace.?);
+}
+
 // ---------------------------------------------------------------------------
 // D8-defaults: validateDefaults runs as part of the aggregate phase.
 // Expression-shaped defaults retain both cheap head metadata and a
@@ -3563,4 +3679,183 @@ test "held: the overlay the host hands back resolves a held key to its default" 
     try std.testing.expect(ev == .default);
     try std.testing.expectEqual(@as(f64, 60), ev.default.value.number);
     try std.testing.expect(view.isHeld(form_idx.?, "fps"));
+}
+
+// ---------------------------------------------------------------------------
+// Carrying an author subtree through the staged pipeline (ask 28, verdict
+// ruling 3). `test/carry-v1` reads `:value` through `LoweringInput.subtree`
+// and carries the author's node into `(out :value <carry>)`; the four tests
+// below are the end-to-end proof the pass-level tests cannot give: the copy
+// lands in `lowering_stages[0].tree` at the author's own span, the final
+// forest pass is clean, `Expr.eval` resolves it against that stage tree,
+// eject prints the pinned core text, a second layer can carry the copy
+// again without losing the original span, and carrying one `:name`-bearing
+// node into two forms is the copy-not-move consequence.
+// ---------------------------------------------------------------------------
+
+/// The value node paired with `key` on `form`, or null when the form does
+/// not carry that key.
+fn kvpairValueOf(tree: *const Ast.Tree, form: Ast.NodeIndex, key: []const u8) ?Ast.NodeIndex {
+    if (tree.tagOf(form) != .form) return null;
+    for (tree.formHeader(form).children) |child| {
+        if (tree.tagOf(child) != .kvpair) continue;
+        const kv = tree.kvpairHeader(child);
+        if (std.mem.eql(u8, kv.key, key)) return kv.value;
+    }
+    return null;
+}
+
+const CARRY_STAGE_MANIFEST =
+    \\(plugin :name carry :version "1.0.0"
+    \\  (form :name verb
+    \\    (key :name value :type number :optional false)
+    \\    :lowering (lowering :hook test/carry-v1 :produces [out]))
+    \\  (form :name out
+    \\    (key :name value :type number :optional false)))
+    \\(verb :value (clamp (/ elapsed 2) 0 1))
+    \\
+;
+
+test "D8-carry: the staged pipeline carries the author expression, and it evaluates in the stage tree" {
+    const a = std.testing.allocator;
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(a);
+    try registry.register(a, Lowering_test_hooks.test_carry_v1);
+
+    var r = try Host.validateDocument(a, CARRY_STAGE_MANIFEST, .{ .lowering_registry = &registry });
+    defer r.deinit();
+    try std.testing.expect(!r.hasErrors());
+    try std.testing.expectEqual(@as(usize, 1), r.lowering_stages.len);
+
+    const verb = r.data_forest[0];
+    const source_value = kvpairValueOf(&r.tree, verb, "value") orelse return error.TestNoSourceValue;
+    const source_span = r.tree.spanOf(source_value);
+
+    const stage = r.lowering_stages[0];
+    try std.testing.expectEqual(@as(usize, 1), stage.tree.root.len);
+    const root = stage.tree.root[0];
+    try std.testing.expectEqualStrings("out", stage.tree.formHeader(root).head);
+
+    // The copy lands at the author's own span, in the stage's tree.
+    const copied = kvpairValueOf(&stage.tree, root, "value") orelse return error.TestNoCopiedValue;
+    try std.testing.expectEqual(Ast.Tag.form, stage.tree.tagOf(copied));
+    try std.testing.expectEqualStrings("clamp", stage.tree.formHeader(copied).head);
+    const copied_span = stage.tree.spanOf(copied);
+    try std.testing.expectEqual(source_span.start, copied_span.start);
+    try std.testing.expectEqual(source_span.end, copied_span.end);
+
+    // Machine integration: the copy is a real node in the stage tree, so
+    // `Expr.eval` over that tree resolves `elapsed` from the env and
+    // computes `(clamp (/ 1 2) 0 1)` = 0.5.
+    const eval_schema = sjon.Schema.Schema.init(&.{sjon.plugins.core.plugin});
+    const bindings = [_]Expr.Env.Binding{.{ .name = "elapsed", .value = .{ .number = 1 } }};
+    const env: Expr.Env = .{ .bindings = &bindings };
+    var res = try Expr.eval(a, &stage.tree, copied, &env, eval_schema);
+    defer res.deinit();
+    const got: f64 = switch (res.value) {
+        .number => |n| n,
+        .integer_i64 => |i| @floatFromInt(i),
+        .integer_u64 => |u| @floatFromInt(u),
+        else => return error.TestNotNumber,
+    };
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), got, 1e-12);
+}
+
+test "D8-carry: ejecting layer 0 prints the carried expression as pinned core text" {
+    const a = std.testing.allocator;
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(a);
+    try registry.register(a, Lowering_test_hooks.test_carry_v1);
+
+    var r = try Host.validateDocument(a, CARRY_STAGE_MANIFEST, .{ .lowering_registry = &registry });
+    defer r.deinit();
+    try std.testing.expect(!r.hasErrors());
+
+    const ejected = try ejectEmittedText(a, r.lowering_stages[0], r.data_forest[0]);
+    defer ejected.deinit();
+    try std.testing.expectEqualStrings("(out :value (clamp (/ elapsed 2) 0 1))\n", ejected.data);
+}
+
+const CARRY_FORWARD_MANIFEST =
+    \\(plugin :name carry2 :version "1.0.0"
+    \\  (form :name verb
+    \\    (key :name value :type number :optional false)
+    \\    :lowering (lowering :hook test/carry-v1 :produces [out]))
+    \\  (form :name out
+    \\    (key :name value :type number :optional false)
+    \\    :lowering (lowering :hook test/carry-forward-v1 :produces [done]))
+    \\  (form :name done
+    \\    (key :name value :type number :optional false)))
+    \\(verb :value (clamp (/ elapsed 2) 0 1))
+    \\
+;
+
+test "D8-carry: a second-layer carry preserves the original author spans" {
+    const a = std.testing.allocator;
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(a);
+    try registry.register(a, Lowering_test_hooks.test_carry_v1);
+    try registry.register(a, Lowering_test_hooks.test_carry_forward_v1);
+
+    var r = try Host.validateDocument(a, CARRY_FORWARD_MANIFEST, .{ .lowering_registry = &registry });
+    defer r.deinit();
+    try std.testing.expect(!r.hasErrors());
+    try std.testing.expectEqual(@as(usize, 2), r.lowering_stages.len);
+
+    const source_value = kvpairValueOf(&r.tree, r.data_forest[0], "value") orelse return error.TestNoSourceValue;
+    const source_span = r.tree.spanOf(source_value);
+
+    // Layer 0's copy keeps the author's span.
+    const stage0 = r.lowering_stages[0];
+    const out_root = stage0.tree.root[0];
+    try std.testing.expectEqualStrings("out", stage0.tree.formHeader(out_root).head);
+    const out_value = kvpairValueOf(&stage0.tree, out_root, "value") orelse return error.TestNoOutValue;
+    const out_span = stage0.tree.spanOf(out_value);
+    try std.testing.expectEqual(source_span.start, out_span.start);
+    try std.testing.expectEqual(source_span.end, out_span.end);
+
+    // Layer 1 carries the copy again; the span still indexes the original
+    // author bytes, not the layer-0 form.
+    const stage1 = r.lowering_stages[1];
+    const done_root = stage1.tree.root[0];
+    try std.testing.expectEqualStrings("done", stage1.tree.formHeader(done_root).head);
+    const done_value = kvpairValueOf(&stage1.tree, done_root, "value") orelse return error.TestNoDoneValue;
+    try std.testing.expectEqual(Ast.Tag.form, stage1.tree.tagOf(done_value));
+    try std.testing.expectEqualStrings("clamp", stage1.tree.formHeader(done_value).head);
+    const done_span = stage1.tree.spanOf(done_value);
+    try std.testing.expectEqual(source_span.start, done_span.start);
+    try std.testing.expectEqual(source_span.end, done_span.end);
+}
+
+const CARRY_TWICE_MANIFEST =
+    \\(plugin :name dup :version "1.0.0"
+    \\  (value-kind :name named-ref :underlying symbol
+    \\    :cross-ref (cross-ref :target named))
+    \\  (form :name named
+    \\    (key :name name :type symbol :optional false))
+    \\  (form :name verb
+    \\    (key :name item :type form :optional false)
+    \\    :lowering (lowering :hook test/carry-twice-v1 :produces [out]))
+    \\  (form :name out
+    \\    (key :name item :type form :optional false)))
+    \\(verb :item (named :name x))
+    \\
+;
+
+test "D8-carry: carrying the same named subtree twice is duplicate_cross_ref_target" {
+    const a = std.testing.allocator;
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(a);
+    try registry.register(a, Lowering_test_hooks.test_carry_twice_v1);
+
+    var r = try Host.validateDocument(a, CARRY_TWICE_MANIFEST, .{ .lowering_registry = &registry });
+    defer r.deinit();
+
+    // Copy, not move: the same `(named :name x)` node becomes two forms, so
+    // the final forest pass registers `x` twice in one bucket.
+    var duplicates: usize = 0;
+    for (r.diagnostics) |d| {
+        if (d.code == .duplicate_cross_ref_target) duplicates += 1;
+    }
+    try std.testing.expect(duplicates > 0);
 }

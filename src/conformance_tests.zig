@@ -628,15 +628,16 @@ fn runLegacyCase(a: Allocator, case_name: []const u8) !void {
     }
     if (!any_load_errors) {
         // Mirror Host.validateDocument's aggregate phase: cross-refs,
-        // unions, forms, lowering, defaults. Each validator owns its own
-        // diagnostic slice; copy each err into the per-case arena before
-        // releasing.
-        const runners: [5]*const fn (Schema.Schema, std.mem.Allocator) std.mem.Allocator.Error![]const Ast.Diagnostic = .{
+        // unions, forms, lowering, defaults, kind refs. Each validator owns
+        // its own diagnostic slice; copy each err into the per-case arena
+        // before releasing.
+        const runners: [6]*const fn (Schema.Schema, std.mem.Allocator) std.mem.Allocator.Error![]const Ast.Diagnostic = .{
             &Schema.Schema.validateCrossRefs,
             &Schema.Schema.validateUnions,
             &Schema.Schema.validateForms,
             &Schema.Schema.validateLowering,
             &Schema.Schema.validateDefaults,
+            &Schema.Schema.validateKindRefs,
         };
         for (runners) |run| {
             const agg_diags = try run(schema, a);

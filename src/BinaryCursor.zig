@@ -47,7 +47,13 @@
 //! at the next sibling without further bookkeeping. The same is true
 //! for `VectorIter.next()`: from wire v5 on, vectors carry a trailing-
 //! comment field symmetric with forms, and the iterator consumes it on
-//! exhaustion.
+//! exhaustion. `RootIter` mirrors both at the tree level: when
+//! `with_tree_trailing_comments` is set, its null-producing call consumes
+//! the block the encoder appends after the roots. Exact end is therefore
+//! *reachable* by draining `RootIter` and then comparing `cursor.pos` with
+//! `bytes.len`; the comparison is caller policy (the cursor reports no
+//! post-block slack), and a null observed after an ignored drain error is
+//! not clean exhaustion.
 
 const std = @import("std");
 const Ast = @import("Ast.zig");
@@ -398,11 +404,25 @@ fn skipNComments(c: *Cursor, n: u32) Error!void {
 pub const RootIter = struct {
     cursor: *Cursor,
     remaining: u32,
+    /// Number of tree-trailing comments observed; written when the
+    /// iterator is exhausted (0 until then). Tree-level mirror of
+    /// `ChildIter.trailing_count` / `VectorIter.trailing_count`.
+    trailing_count: u32 = 0,
+    trailing_consumed: bool = false,
 
     pub fn next(self: *RootIter) Error!?NodeView {
-        if (self.remaining == 0) return null;
+        if (self.remaining == 0) {
+            try self.consumeTreeTrailing();
+            return null;
+        }
         self.remaining -= 1;
         return try nextNodeView(self.cursor);
+    }
+
+    fn consumeTreeTrailing(self: *RootIter) Error!void {
+        if (self.trailing_consumed) return;
+        self.trailing_consumed = true;
+        self.trailing_count = try consumeTreeTrailingComments(self.cursor);
     }
 };
 
@@ -464,6 +484,23 @@ pub const ChildIter = struct {
 /// three end-of-body reads can't drift.
 fn consumeTrailingComments(c: *Cursor) Error!u32 {
     if (!c.flags.with_node_comments) return 0;
+    const n = try fmt.readVarint(c.bytes, &c.pos);
+    if (n > fmt.MAX_COMMENTS_PER_NODE) return error.NodeCountExceeded;
+    try skipNComments(c, n);
+    return n;
+}
+
+/// Read the tree-trailing comment count and skip its entries, advancing
+/// `c.pos` past the block. Returns 0 (consuming nothing) when
+/// `with_tree_trailing_comments` is unset. Tree-level mirror of
+/// `consumeTrailingComments` for the block the encoder appends after the
+/// roots: same entry shape (`skipNComments`), same `MAX_COMMENTS_PER_NODE`
+/// cap `emitCommentsByRange` enforces on encode, gated on the block's own
+/// flag rather than `with_node_comments`. Entry text indices are skipped,
+/// not pool-validated — the cursor's count-only stance, shared with the
+/// other three comment sites.
+fn consumeTreeTrailingComments(c: *Cursor) Error!u32 {
+    if (!c.flags.with_tree_trailing_comments) return 0;
     const n = try fmt.readVarint(c.bytes, &c.pos);
     if (n > fmt.MAX_COMMENTS_PER_NODE) return error.NodeCountExceeded;
     try skipNComments(c, n);
@@ -884,6 +921,29 @@ fn encodeWithStripped(src: [:0]const u8) !Ast.Bytes {
     var tree = try Parser.parse(testing.allocator, src);
     defer tree.deinit();
     return try Binary.toBinary(testing.allocator, tree, Binary.ToBinaryOptions.forMode(.compact));
+}
+
+/// Encode `src` with the tree-trailing-comment site on (`stripped`) or with
+/// the lossless `.full` preset. `Parser` / `Binary` stay function-local, same
+/// as `encodeWithStripped`, so the tests do not pull the write-side module
+/// into the read-only artifact's import closure.
+const EncodeProfile = enum { stripped_with_tree_trailing, full };
+
+fn encodeProfile(src: [:0]const u8, profile: EncodeProfile) !Ast.Bytes {
+    const Parser = @import("Parser.zig");
+    const Binary = @import("Binary.zig");
+    var tree = try Parser.parse(testing.allocator, src);
+    defer tree.deinit();
+    const opts: Binary.ToBinaryOptions = switch (profile) {
+        .stripped_with_tree_trailing => .{
+            .with_spans = false,
+            .with_head_spans = false,
+            .with_kvpair_key_spans = false,
+            .with_tree_trailing_comments = true,
+        },
+        .full => Binary.ToBinaryOptions.forMode(.full),
+    };
+    return try Binary.toBinary(testing.allocator, tree, opts);
 }
 
 test "cursor: header parsing fails on bad magic" {
@@ -1595,6 +1655,209 @@ test "cursor: empty roots — rootIter yields zero" {
     var cursor = try Cursor.init(bin.data);
     var iter = try cursor.rootIter();
     try testing.expect(try iter.next() == null);
+}
+
+test "cursor: root exhaustion consumes a zero-count tree-trailing block" {
+    // The encoder writes the tree-trailing count even when the block is empty.
+    // Driving RootIter to its null return must land exactly at the end of the
+    // frame, not one byte short.
+    const bin = try encodeProfile("(+ 1 t)", .stripped_with_tree_trailing);
+    defer bin.deinit();
+    var cursor = try Cursor.init(bin.data);
+    var iter = try cursor.rootIter();
+    const view = (try iter.next()) orelse unreachable;
+    try skipBody(&cursor, view);
+    try testing.expect(try iter.next() == null);
+    try testing.expectEqual(@as(u32, 0), iter.trailing_count);
+    try testing.expectEqual(@as(u32, @intCast(bin.data.len)), cursor.pos);
+}
+
+test "cursor: root exhaustion consumes one tree-trailing comment (spans off)" {
+    const bin = try encodeProfile("(+ 1 t) ; tail", .stripped_with_tree_trailing);
+    defer bin.deinit();
+    var cursor = try Cursor.init(bin.data);
+    var iter = try cursor.rootIter();
+    const view = (try iter.next()) orelse unreachable;
+    try skipBody(&cursor, view);
+    try testing.expect(try iter.next() == null);
+    try testing.expectEqual(@as(u32, 1), iter.trailing_count);
+    try testing.expectEqual(@as(u32, @intCast(bin.data.len)), cursor.pos);
+}
+
+test "cursor: full-preset form root drains spans-on tree-trailing block" {
+    const bin = try encodeProfile("(+ 1 t) ; tail", .full);
+    defer bin.deinit();
+    var cursor = try Cursor.init(bin.data);
+    var roots = try cursor.rootIter();
+    const view = (try roots.next()) orelse unreachable;
+    var form = try readForm(&cursor, view);
+    while (try form.children.next()) |entry| try skipBody(&cursor, entry.value);
+    try testing.expect(try roots.next() == null);
+    try testing.expectEqual(@as(u32, 1), roots.trailing_count);
+    try testing.expectEqual(@as(u32, @intCast(bin.data.len)), cursor.pos);
+}
+
+test "cursor: full-preset vector root drains spans-on tree-trailing block" {
+    const bin = try encodeProfile("[1 2] ; tail", .full);
+    defer bin.deinit();
+    var cursor = try Cursor.init(bin.data);
+    const pool_index = try testing.allocator.alloc(u32, cursor.poolIndexLen());
+    defer testing.allocator.free(pool_index);
+    cursor.indexPools(pool_index);
+    var roots = try cursor.rootIter();
+    const view = (try roots.next()) orelse unreachable;
+    var vec = try readVector(&cursor, view);
+    while (try vec.next()) |sub| try skipBody(&cursor, sub);
+    // The vector's own trailing-comment field is a distinct iterator field;
+    // the one comment here is tree-level, so only RootIter sees it.
+    try testing.expectEqual(@as(u32, 0), vec.trailing_count);
+    try testing.expect(try roots.next() == null);
+    try testing.expectEqual(@as(u32, 1), roots.trailing_count);
+    try testing.expectEqual(@as(u32, @intCast(bin.data.len)), cursor.pos);
+}
+
+test "cursor: empty roots consume the tree-trailing block" {
+    const bin = try encodeProfile("", .stripped_with_tree_trailing);
+    defer bin.deinit();
+    var cursor = try Cursor.init(bin.data);
+    var iter = try cursor.rootIter();
+    try testing.expect(try iter.next() == null);
+    try testing.expectEqual(@as(u32, 0), iter.trailing_count);
+    try testing.expectEqual(@as(u32, @intCast(bin.data.len)), cursor.pos);
+}
+
+test "cursor: comment-only document drains a zero-root tree-trailing block" {
+    const bin = try encodeProfile("; hi\n", .stripped_with_tree_trailing);
+    defer bin.deinit();
+    var cursor = try Cursor.init(bin.data);
+    var iter = try cursor.rootIter();
+    try testing.expect(try iter.next() == null);
+    try testing.expectEqual(@as(u32, 1), iter.trailing_count);
+    try testing.expectEqual(@as(u32, @intCast(bin.data.len)), cursor.pos);
+}
+
+test "cursor: stop after first root leaves the tree-trailing block unread" {
+    const bin = try encodeProfile("1 2 ; tail", .stripped_with_tree_trailing);
+    defer bin.deinit();
+    var cursor = try Cursor.init(bin.data);
+    var iter = try cursor.rootIter();
+    const first = (try iter.next()) orelse unreachable;
+    // Before resuming, the cursor sits at the first root's payload: the
+    // trailing block has not been touched.
+    try testing.expect(cursor.pos < bin.data.len);
+    try skipBody(&cursor, first);
+    const second = (try iter.next()) orelse unreachable;
+    try skipBody(&cursor, second);
+    try testing.expect(try iter.next() == null);
+    try testing.expectEqual(@as(u32, 1), iter.trailing_count);
+    try testing.expectEqual(@as(u32, @intCast(bin.data.len)), cursor.pos);
+}
+
+test "cursor: repeated exhaustion is idempotent" {
+    const bin = try encodeProfile("1 ; tail", .stripped_with_tree_trailing);
+    defer bin.deinit();
+    var cursor = try Cursor.init(bin.data);
+    var iter = try cursor.rootIter();
+    const view = (try iter.next()) orelse unreachable;
+    try skipBody(&cursor, view);
+    try testing.expect(try iter.next() == null);
+    const end_pos = cursor.pos;
+    try testing.expectEqual(@as(u32, 1), iter.trailing_count);
+    try testing.expectEqual(@as(u32, @intCast(bin.data.len)), end_pos);
+    try testing.expect(try iter.next() == null);
+    try testing.expect(try iter.next() == null);
+    try testing.expectEqual(end_pos, cursor.pos);
+}
+
+test "cursor: rootIter rewind re-reads and re-consumes the tree-trailing block" {
+    const bin = try encodeProfile("1 2 ; tail", .stripped_with_tree_trailing);
+    defer bin.deinit();
+    var cursor = try Cursor.init(bin.data);
+    var pass: u32 = 0;
+    while (pass < 2) : (pass += 1) {
+        var iter = try cursor.rootIter();
+        var count: u32 = 0;
+        while (try iter.next()) |view| {
+            try skipBody(&cursor, view);
+            count += 1;
+        }
+        try testing.expectEqual(@as(u32, 2), count);
+        try testing.expectEqual(@as(u32, 1), iter.trailing_count);
+        try testing.expectEqual(@as(u32, @intCast(bin.data.len)), cursor.pos);
+    }
+}
+
+test "cursor: tree-trailing drain leaves post-block slack untouched" {
+    const bin = try encodeProfile("1 ; tail", .stripped_with_tree_trailing);
+    defer bin.deinit();
+    var padded: [256]u8 = undefined;
+    try testing.expect(bin.data.len + 1 <= padded.len);
+    @memcpy(padded[0..bin.data.len], bin.data);
+    padded[bin.data.len] = 0;
+    const frame = padded[0 .. bin.data.len + 1];
+
+    var cursor = try Cursor.init(frame);
+    var iter = try cursor.rootIter();
+    const view = (try iter.next()) orelse unreachable;
+    try skipBody(&cursor, view);
+    try testing.expect(try iter.next() == null);
+    try testing.expectEqual(@as(u32, 1), iter.trailing_count);
+    try testing.expectEqual(@as(u32, @intCast(bin.data.len)), cursor.pos);
+    try testing.expect(cursor.pos < frame.len);
+}
+
+test "cursor: malformed tree-trailing count 257 is NodeCountExceeded" {
+    // The empty block's one-byte count (0x00) is replaced by the two-byte
+    // LEB128 for 257, growing the frame by one byte.
+    const bin = try encodeProfile("(+ 1 t)", .stripped_with_tree_trailing);
+    defer bin.deinit();
+    var frame: [256]u8 = undefined;
+    try testing.expect(bin.data.len + 1 <= frame.len);
+    @memcpy(frame[0 .. bin.data.len - 1], bin.data[0 .. bin.data.len - 1]);
+    frame[bin.data.len - 1] = 0x81;
+    frame[bin.data.len] = 0x02;
+
+    var cursor = try Cursor.init(frame[0 .. bin.data.len + 1]);
+    var iter = try cursor.rootIter();
+    const view = (try iter.next()) orelse unreachable;
+    try skipBody(&cursor, view);
+    try testing.expectError(error.NodeCountExceeded, iter.next());
+}
+
+test "cursor: malformed tree-trailing kind is InvalidTag" {
+    // Spans-off entry layout is [count][kind][text_idx]; rewrite the kind
+    // byte. The cursor does not pool-resolve text_idx, so `kind` is the
+    // first rejectable byte after the count.
+    const bin = try encodeProfile("(+ 1 t) ; tail", .stripped_with_tree_trailing);
+    defer bin.deinit();
+    var frame: [256]u8 = undefined;
+    try testing.expect(bin.data.len <= frame.len);
+    @memcpy(frame[0..bin.data.len], bin.data);
+    frame[bin.data.len - 2] = 0x02;
+
+    var cursor = try Cursor.init(frame[0..bin.data.len]);
+    var iter = try cursor.rootIter();
+    const view = (try iter.next()) orelse unreachable;
+    try skipBody(&cursor, view);
+    try testing.expectError(error.InvalidTag, iter.next());
+    // Family retry state: trailing_consumed is set before the fallible read.
+    // This null is NOT clean exhaustion and NOT a validation success: the prior
+    // error is the caller's signal, and exact-end/validation conclusions are
+    // valid only on the error-free drain path.
+    try testing.expect(try iter.next() == null);
+    try testing.expectEqual(@as(u32, 0), iter.trailing_count);
+}
+
+test "cursor: truncated tree-trailing entry is Truncated" {
+    // Drop the entry's final text_idx varint. The header and pools are still
+    // valid, so init succeeds; the drain is what notices the short read.
+    const bin = try encodeProfile("(+ 1 t) ; tail", .stripped_with_tree_trailing);
+    defer bin.deinit();
+    var cursor = try Cursor.init(bin.data[0 .. bin.data.len - 1]);
+    var iter = try cursor.rootIter();
+    const view = (try iter.next()) orelse unreachable;
+    try skipBody(&cursor, view);
+    try testing.expectError(error.Truncated, iter.next());
 }
 
 test "cursor: walks a deeply nested form structure without overflow" {

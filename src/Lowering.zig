@@ -63,6 +63,9 @@ const MaterializedDefaults = @import("MaterializedDefaults.zig");
 const Validator = @import("Validator.zig");
 const Parser = @import("Parser.zig");
 const Expr = @import("Expr.zig");
+// Test-only: the carry tests prepend core so author expressions in a typed
+// slot resolve their operators at the surface-validation gate.
+const core = @import("plugins/core.zig");
 
 /// Hook failure surface. `HookFailed` is the catch-all signal from a
 /// hook that decided not to produce a result (input was unusable, an
@@ -337,6 +340,26 @@ pub const LoweringInput = struct {
         // `Site.node_idx` is the *form* index at registration, not the
         // `:name` value, so this needs no second lookup to be usable.
         return site.node_idx;
+    }
+
+    /// The author node `key`'s value in this layer's input tree, or null
+    /// when the key is absent or its slot holds a materialized default (a
+    /// default is data, not author bytes; a hook that wants it in the
+    /// output emits it as a value). Shape-agnostic on purpose: a literal,
+    /// a vector, a form, or an expression comes back as the index of the
+    /// node the author wrote, ready to be handed to `EmittedValue.carry`.
+    ///
+    /// There is no `HookFailed` arm, because there is no type to be wrong
+    /// about: any author value is a carriable subtree. This is the same
+    /// key-scoped shape as the five typed readers and `resolveRef`, and
+    /// the index is meaningful only against `self.view.tree`, this
+    /// layer's input tree and the tree `buildLoweredTree` copies from.
+    pub fn subtree(self: *const LoweringInput, key: []const u8) LoweringError!?Ast.NodeIndex {
+        const ev = self.view.getEffectiveValue(self.form_idx, key) orelse return null;
+        return switch (ev) {
+            .author => |idx| idx,
+            .default => null,
+        };
     }
 
     /// The symbol text in `key`'s slot, or null when the key is absent or
@@ -698,10 +721,12 @@ pub const EmittedKvpair = struct {
     value: EmittedValue,
 };
 
-/// Value shapes a hook may emit. Mirrors the kvpair-value shapes that
-/// appear in a source tree — no number-with-unit (use `number`; the
-/// lowered tree models `Tag.number`) and no expression form (lowering
-/// produces data, never recursive computation).
+/// Value shapes a hook may emit. The literal arms mirror the kvpair-value
+/// shapes that appear in a source tree, with no number-with-unit (use
+/// `number`). A carry never originates a node: it copies one already
+/// present in the layer's input tree, verbatim, through `.carry`, while a
+/// hook-emitted form stays bound by declared-form resolution and
+/// `:produces`.
 pub const EmittedValue = union(enum) {
     number: f64,
     string: []const u8,
@@ -710,6 +735,15 @@ pub const EmittedValue = union(enum) {
     boolean: bool,
     nil,
     vector: []const EmittedValue,
+    /// A subtree of this layer's input tree (`LoweringInput.view.tree`),
+    /// copied verbatim into the lowered tree by `buildLoweredTree`
+    /// (`Ast.TreeBuilder.cloneNode`): source tags, source spans, strings
+    /// re-interned. Not `:produces`-checked; the final forest pass validates
+    /// the copy in its new context like any hand-written node. The index is
+    /// meaningful only against the tree the pass ran over; each `Invocation`
+    /// records that tree and `buildLoweredTree` asserts the caller passed the
+    /// same one.
+    carry: Ast.NodeIndex,
     /// A nested form. Wherever an `EmittedValue.form` appears — a positional
     /// child, a kvpair value, or a vector element — its head is checked
     /// against the hook's `:produces` and its nesting counts toward
@@ -777,6 +811,13 @@ pub const Invocation = struct {
     source_form_idx: Ast.NodeIndex,
     hook_id: []const u8,
     forms: []const EmittedForm,
+    /// The tree the pass that produced this invocation ran over: layer 0's
+    /// author tree, or the previous layer's emitted tree. Recorded so
+    /// `buildLoweredTree` can assert the caller hands back the same tree
+    /// before a `.carry` clones an index against it; a mismatch would
+    /// silently copy unrelated nodes, the `u32` misread
+    /// `LoweringProvenance.Entry` warns about.
+    source_tree: *const Ast.Tree,
 };
 
 /// Outcome of `runLoweringPass`. Mirrors the aggregate-validator
@@ -1311,7 +1352,7 @@ fn lowerOneForm(
     var seen_violation = false;
     var totals: Totals = .{};
     for (output.forms.items) |*ef| {
-        try validateEmittedForm(gpa, ef, lowering_spec, hdr.head_span, &totals, diags, &seen_violation);
+        try validateEmittedForm(gpa, ef, lowering_spec, tree, hdr.head_span, &totals, diags, &seen_violation);
     }
 
     // Step 5 — per-invocation bounds. Per-form nesting depth is checked
@@ -1325,10 +1366,12 @@ fn lowerOneForm(
 
     // Step 6 — cumulative staging budget (the fan-out backstop). `emitted`
     // carries the running total across every staging layer; crossing
-    // `budget` (normally `MAX_LOWERING_STEPS`) drops the invocation. The
-    // over-count on an already-violating invocation is harmless — it only
-    // trips the backstop marginally sooner.
-    emitted.* += totals.form_count;
+    // `budget` (normally `MAX_LOWERING_STEPS`) drops the invocation. A
+    // carried subtree joins the count at its own charge, so the backstop
+    // sees carries and not only emitted forms. The over-count on an
+    // already-violating invocation is harmless; it only trips the backstop
+    // marginally sooner.
+    emitted.* += totals.form_count + totals.carried_charge;
     if (emitted.* > budget) {
         try emitDiag(gpa, diags, .lowering_output_too_large, hdr.head_span, &.{ hdr.head, "lowering" }, "lowering exceeded the cumulative staging budget of {d} emitted form(s)", .{budget});
         seen_violation = true;
@@ -1340,12 +1383,18 @@ fn lowerOneForm(
         .source_form_idx = form_idx,
         .hook_id = try arena.dupe(u8, lowering_spec.hook),
         .forms = output.forms.items,
+        .source_tree = tree,
     });
 }
 
 const Totals = struct {
     form_count: usize = 0,
     byte_estimate: usize = 0,
+    /// Charge units from `.carry` arms (one per carried node, floored at
+    /// one, plus the comment bytes `cloneNode` copies). Counted into the
+    /// cumulative staging budget beside `form_count`; a carried subtree is
+    /// still not an emitted form.
+    carried_charge: usize = 0,
 };
 
 /// True iff `diags` holds any err-severity diagnostic. The whole gate,
@@ -1368,8 +1417,10 @@ fn hasError(diags: []const Ast.Diagnostic) bool {
 /// staging-layer depth) — *wherever* the form is attached (positional
 /// child, kvpair value, or vector element; kvpairs and vectors are
 /// transparent to the depth count). The running form/byte totals feed
-/// the per-invocation bounds check. Iterative (one explicit stack over
-/// forms and their nested values) — no host-stack recursion.
+/// the per-invocation bounds check, and a `.carry` is range-checked
+/// against `input_tree` and charged into `totals.carried_charge` and
+/// `totals.byte_estimate`. Iterative (one explicit stack over forms and
+/// their nested values), no host-stack recursion.
 ///
 /// An emitted form whose own `FormSpec` is lowerable is NOT a violation:
 /// staging lowers it in the next layer. (The retired
@@ -1378,6 +1429,7 @@ fn validateEmittedForm(
     gpa: Allocator,
     ef_root: *const EmittedForm,
     lowering_spec: *const Plugin.LoweringSpec,
+    input_tree: *const Ast.Tree,
     source_span: Ast.Span,
     totals: *Totals,
     diags: *std.ArrayList(Ast.Diagnostic),
@@ -1477,8 +1529,63 @@ fn validateEmittedForm(
             // checked exactly like a positional-child form — the whole point
             // of the unified stack.
             .form => |*child_form| try stack.append(gpa, .{ .form = .{ .ef = child_form, .depth = vf.depth } }),
+            // A carried subtree is charged by its own size, never by one
+            // span length: a pre-order walk charges `max(1, span length)`
+            // per node plus the bytes of every comment `cloneNode` copies
+            // with it, so a staged node whose descendants share one narrow
+            // hook-chosen span still costs one unit per node. The index is
+            // range-checked first; an out-of-range index is a hook bug, not
+            // a document condition, so it reuses `lowering_hook_failed`
+            // rather than earning a new wire-stable code.
+            .carry => |src_idx| {
+                if (src_idx.raw() >= input_tree.nodes.len) {
+                    try emitDiag(gpa, diags, .lowering_hook_failed, source_span, &.{ ef_root.head, "lowering" }, "lowering hook `{s}` on `({s} ...)` carried node index {d} outside this layer's input tree", .{ lowering_spec.hook, ef_root.head, src_idx.raw() });
+                    seen_violation.* = true;
+                    continue;
+                }
+                const charge = carriedCharge(input_tree, src_idx);
+                totals.carried_charge += charge;
+                totals.byte_estimate += charge;
+            },
         },
     };
+}
+
+/// The charge a `.carry` of `idx` adds: `max(1, node span length)` for
+/// every node `cloneNode` will copy, plus the text length of every comment
+/// it copies with them. Pre-order, mirroring `Ast.TreeBuilder.cloneNode`'s
+/// traversal (form children, vector elements, a kvpair's value); recursion
+/// is bounded by the parser's own `Parser.MAX_PARSE_DEPTH` ceiling, the
+/// same bound `cloneNode` cites.
+fn carriedCharge(tree: *const Ast.Tree, idx: Ast.NodeIndex) usize {
+    const span = tree.spanOf(idx);
+    var charge: usize = @max(@as(usize, 1), @as(usize, span.end - span.start));
+    charge += commentTextBytes(tree, tree.leading_comments_index[idx.raw()]);
+    switch (tree.tagOf(idx)) {
+        .form => {
+            const hdr = tree.formHeader(idx);
+            for (hdr.children) |child| charge += carriedCharge(tree, child);
+            charge += commentTextBytes(tree, tree.trailing_comments_index[idx.raw()]);
+        },
+        .vector => {
+            for (tree.vectorElements(idx)) |elem| charge += carriedCharge(tree, elem);
+            charge += commentTextBytes(tree, tree.trailing_comments_index[idx.raw()]);
+        },
+        .kvpair => charge += carriedCharge(tree, tree.kvpairHeader(idx).value),
+        else => {},
+    }
+    return charge;
+}
+
+/// Total `.text` length over a comment range, the bytes
+/// `Ast.TreeBuilder.cloneCommentRange` dupes.
+fn commentTextBytes(tree: *const Ast.Tree, range: Ast.CommentRange) usize {
+    var total: usize = 0;
+    var i: u32 = range.start;
+    while (i < range.end) : (i += 1) {
+        total += tree.comments.items(.text)[i].len;
+    }
+    return total;
 }
 
 fn headInProduces(head: []const u8, produces: []const []const u8) bool {
@@ -1550,11 +1657,17 @@ pub fn buildLoweredTree(
     var prov_entries: std.ArrayList(LoweringProvenance.Entry) = .empty;
 
     for (invocations) |inv| {
+        // A `.carry` index is meaningful only against the tree the pass
+        // that produced this invocation ran over. A mismatched caller would
+        // silently clone unrelated nodes (the `u32` misread
+        // `LoweringProvenance.Entry` warns about), so abort in debug before
+        // any clone rather than produce a plausible wrong tree.
+        std.debug.assert(inv.source_tree == source_tree);
         const src_span = source_tree.spanOf(inv.source_form_idx);
         const hook_id_dup = try arena.allocator().dupe(u8, inv.hook_id);
 
         for (inv.forms) |*ef| {
-            const idx = try emitFormIntoTree(&b, ef, src_span);
+            const idx = try emitFormIntoTree(&b, ef, source_tree, src_span);
             try roots.append(arena.allocator(), idx);
             try prov_entries.append(arena.allocator(), .{
                 .lowered_form_idx = idx,
@@ -1579,15 +1692,18 @@ pub fn buildLoweredTree(
 ///
 /// Mutually recursive with `emitValueIntoTree` on the host stack. Bounded
 /// recursion (the `docs/zig-discipline.md` carve-out), not a frame-stack
-/// walk: both axes are capped before this runs. `validateEmittedForm` is
+/// walk: the axes are capped before this runs. `validateEmittedForm` is
 /// the gate — `seen_violation` short-circuits the invocation before it can
 /// reach `invocations`, so anything materialized here has already passed
 /// `Plugin.MAX_LOWERED_DEPTH` on the form axis and
 /// `Plugin.MAX_LOWERED_VECTOR_DEPTH` on the vector axis. Worst-case depth is
-/// their product.
+/// their product; a `.carry` clones a subtree whose own depth the parser
+/// already capped at `Parser.MAX_PARSE_DEPTH`, so it adds no unbounded
+/// recursion.
 fn emitFormIntoTree(
     b: *Ast.TreeBuilder,
     ef: *const EmittedForm,
+    source_tree: *const Ast.Tree,
     src_span: Ast.Span,
 ) Allocator.Error!Ast.NodeIndex {
     // Hook contract: every emitted form carries a non-empty head.
@@ -1615,7 +1731,7 @@ fn emitFormIntoTree(
     var children: std.ArrayList(Ast.NodeIndex) = .empty;
 
     for (ef.kvpairs) |kv| {
-        const value_idx = try emitValueIntoTree(b, kv.value, span, ef);
+        const value_idx = try emitValueIntoTree(b, kv.value, source_tree, span, ef);
         const kv_idx = try b.appendKvpair(kv.key, value_idx, span, span);
         try children.append(b.a, kv_idx);
     }
@@ -1625,7 +1741,7 @@ fn emitFormIntoTree(
     // `emitValueIntoTree` already materializes every `EmittedValue` shape
     // (including `.form`), so positionals and kvpair values share one path.
     for (ef.children) |child| {
-        const cidx = try emitValueIntoTree(b, child, span, ef);
+        const cidx = try emitValueIntoTree(b, child, source_tree, span, ef);
         try children.append(b.a, cidx);
     }
 
@@ -1635,10 +1751,13 @@ fn emitFormIntoTree(
 /// Materialize one emitted value. See `emitFormIntoTree` for the recursion
 /// bound the two share: the `.vector` arm below descends the axis capped by
 /// `Plugin.MAX_LOWERED_VECTOR_DEPTH`, the `.form` arm the one capped by
-/// `Plugin.MAX_LOWERED_DEPTH`.
+/// `Plugin.MAX_LOWERED_DEPTH`, and the `.carry` arm delegates to
+/// `Ast.TreeBuilder.cloneNode`, whose recursion is bounded by the parser's
+/// own `Parser.MAX_PARSE_DEPTH` ceiling.
 fn emitValueIntoTree(
     b: *Ast.TreeBuilder,
     v: EmittedValue,
+    source_tree: *const Ast.Tree,
     src_span: Ast.Span,
     parent: *const EmittedForm,
 ) Allocator.Error!Ast.NodeIndex {
@@ -1652,12 +1771,16 @@ fn emitValueIntoTree(
         .vector => |xs| blk: {
             var elems: std.ArrayList(Ast.NodeIndex) = .empty;
             for (xs) |x| {
-                const ei = try emitValueIntoTree(b, x, src_span, parent);
+                const ei = try emitValueIntoTree(b, x, source_tree, src_span, parent);
                 try elems.append(b.a, ei);
             }
             break :blk try b.appendVector(elems.items, src_span);
         },
-        .form => |ef| try emitFormIntoTree(b, &ef, src_span),
+        // Verbatim: source tags, source spans, re-interned strings, and the
+        // comments cloneNode carries with the subtree. The range check ran
+        // in `validateEmittedForm`.
+        .carry => |src_idx| try b.cloneNode(source_tree, src_idx),
+        .form => |ef| try emitFormIntoTree(b, &ef, source_tree, src_span),
     };
 }
 
@@ -3045,6 +3168,7 @@ test "buildLoweredTree: positional atom materializes as a bare symbol child" {
         .source_form_idx = src.root[0],
         .hook_id = "test/synth-positional-v1",
         .forms = &emitted,
+        .source_tree = &src,
     }};
 
     var lowered = try buildLoweredTree(gpa, &invocations, &src);
@@ -3193,6 +3317,7 @@ test "buildLoweredTree: a null source_span keeps the container's span" {
         .source_form_idx = src.root[0],
         .hook_id = "test/space-v1",
         .forms = &emitted,
+        .source_tree = &src,
     }};
 
     var lowered = try buildLoweredTree(gpa, &invocations, &src);
@@ -3224,6 +3349,7 @@ test "buildLoweredTree: an emitted form may name its own source span" {
         .source_form_idx = src.root[0],
         .hook_id = "test/space-v1",
         .forms = &emitted,
+        .source_tree = &src,
     }};
 
     var lowered = try buildLoweredTree(gpa, &invocations, &src);
@@ -3277,6 +3403,7 @@ test "buildLoweredTree: a nested emitted form narrows the override further" {
         .source_form_idx = src.root[0],
         .hook_id = "test/space-v1",
         .forms = &emitted,
+        .source_tree = &src,
     }};
 
     var lowered = try buildLoweredTree(gpa, &invocations, &src);
@@ -3311,6 +3438,7 @@ test "revalidateLowered: a set source_span reaches the diagnostic" {
         .source_form_idx = src.root[0],
         .hook_id = "test/space-v1",
         .forms = &emitted,
+        .source_tree = &src,
     }};
 
     var lowered = try buildLoweredTree(gpa, &invocations, &src);
@@ -4388,4 +4516,416 @@ test "runLoweringPass: a walk_opaque slot's contents are not lowered" {
     try runVariantShadow(testing.allocator, "(thing :sealed (entry))", .{}, 0);
     // Control, one key over: the same value in a slot the schema reads.
     try runVariantShadow(testing.allocator, "(thing :kind b :extra (entry))", .{}, 1);
+}
+
+// ---------------------------------------------------------------------------
+// `EmittedValue.carry`: an author subtree copied verbatim (ask 28, verdict
+// ruling 3). The arm names a node of this layer's input tree; `buildLoweredTree`
+// clones it with `Ast.TreeBuilder.cloneNode` (tags, spans, comments, string
+// re-interning), and `validateEmittedForm` range-checks the index and charges
+// the subtree against the per-invocation byte estimate and the cumulative
+// staging counter. These tests drive the pass and the builder directly; the
+// end-to-end Host proof lives in `src/Host_tests.zig`.
+// ---------------------------------------------------------------------------
+
+/// Carry the author's `:value` subtree into `(out :value <carry>)`. The
+/// minimal carry producer: one `LoweringInput.subtree` read, no evaluation.
+fn carryValueHook(
+    arena: Allocator,
+    input: *const LoweringInput,
+    out: *LoweringOutput,
+) LoweringError!void {
+    const value = (try input.subtree("value")) orelse return LoweringError.HookFailed;
+    const kvpairs = try arena.alloc(EmittedKvpair, 1);
+    kvpairs[0] = .{ .key = "value", .value = .{ .carry = value } };
+    try out.append(arena, .{
+        .head = "out",
+        .kvpairs = kvpairs,
+        .source_form_idx = input.form_idx,
+    });
+}
+
+/// Carry an index no document can produce: `0x7fff_ffff`, inside the `u32`
+/// range `NodeIndex` allows but past the end of any real tree. The hook-bug
+/// arm the range check exists for.
+fn outOfRangeCarryHook(
+    arena: Allocator,
+    input: *const LoweringInput,
+    out: *LoweringOutput,
+) LoweringError!void {
+    const kvpairs = try arena.alloc(EmittedKvpair, 1);
+    kvpairs[0] = .{ .key = "value", .value = .{ .carry = Ast.NodeIndex.from(0x7fff_ffff) } };
+    try out.append(arena, .{
+        .head = "out",
+        .kvpairs = kvpairs,
+        .source_form_idx = input.form_idx,
+    });
+}
+
+/// Emit `(mid (leaf :b 1))` with every node stamped 0..1: the narrow
+/// hook-chosen span a staged node's descendants share, which makes the
+/// per-node charge the only size signal left.
+fn narrowSpanTreeHook(
+    arena: Allocator,
+    input: *const LoweringInput,
+    out: *LoweringOutput,
+) LoweringError!void {
+    const child = try arena.alloc(EmittedValue, 1);
+    child[0] = .{ .form = .{
+        .head = "leaf",
+        .kvpairs = &.{.{ .key = "b", .value = .{ .number = 1 } }},
+        .source_form_idx = input.form_idx,
+    } };
+    try out.append(arena, .{
+        .head = "mid",
+        .children = child,
+        .source_form_idx = input.form_idx,
+        .source_span = .{ .start = 0, .end = 1 },
+    });
+}
+
+/// Carry the form the hook was invoked on: the staged-node case, where the
+/// carried subtree is hook-emitted and every node shares its narrow span.
+fn carrySelfHook(
+    arena: Allocator,
+    input: *const LoweringInput,
+    out: *LoweringOutput,
+) LoweringError!void {
+    const kvpairs = try arena.alloc(EmittedKvpair, 1);
+    kvpairs[0] = .{ .key = "value", .value = .{ .carry = input.form_idx } };
+    try out.append(arena, .{
+        .head = "out",
+        .kvpairs = kvpairs,
+        .source_form_idx = input.form_idx,
+    });
+}
+
+/// Schema for the carry tests: `(sugar :value <value_type>)` lowers through
+/// `hook_id` to the open terminal `out`. Core is prepended so an author
+/// expression in a `:type number` slot resolves its operators at the
+/// surface-validation gate.
+fn carryTestSchema(
+    plugin_arena: *std.heap.ArenaAllocator,
+    hook_id: []const u8,
+    value_type: Plugin.ValueType,
+) !Schema.Schema {
+    const a = plugin_arena.allocator();
+    const sugar_keys = try a.alloc(Plugin.KeySpec, 1);
+    sugar_keys[0] = .{ .name = "value", .value_type = value_type, .optional = true };
+    const produces = try a.alloc([]const u8, 1);
+    produces[0] = "out";
+    const forms = try a.alloc(Plugin.FormSpec, 2);
+    forms[0] = .{
+        .name = "sugar",
+        .keys = sugar_keys,
+        .lowering = .{ .hook = try a.dupe(u8, hook_id), .produces = produces },
+    };
+    forms[1] = .{ .name = "out", .open = true };
+    const plugins_slice = try a.alloc(Plugin.Plugin, 2);
+    plugins_slice[0] = core.plugin;
+    plugins_slice[1] = .{ .name = "test", .forms = forms };
+    return .{ .plugins = plugins_slice };
+}
+
+test "carry: an index outside the input tree is lowering_hook_failed and drops the invocation" {
+    const gpa = testing.allocator;
+    var plugin_arena = std.heap.ArenaAllocator.init(gpa);
+    defer plugin_arena.deinit();
+    const schema = try carryTestSchema(&plugin_arena, "test/carry-oob-v1", .any);
+
+    var tree = try Parser.parse(gpa, "(sugar)");
+    defer tree.deinit();
+
+    const overlay = MaterializedDefaults.MaterializedDefaults{};
+    var registry: LoweringRegistry = .{};
+    defer registry.deinit(gpa);
+    try registry.register(gpa, .{ .id = "test/carry-oob-v1", .lower = outOfRangeCarryHook });
+
+    var pass_arena = std.heap.ArenaAllocator.init(gpa);
+    defer pass_arena.deinit();
+
+    var pr = try runLoweringPass(gpa, pass_arena.allocator(), &tree, tree.root, schema, &overlay, &registry, .{});
+    defer pr.deinit(gpa);
+
+    try testing.expectEqual(@as(usize, 0), pr.invocations.len);
+    try testing.expectEqual(@as(usize, 1), pr.diagnostics.len);
+
+    const d = pr.diagnostics[0];
+    try testing.expectEqual(Ast.Diagnostic.Code.lowering_hook_failed, d.code);
+    const head_span = tree.formHeader(tree.root[0]).head_span;
+    try testing.expectEqual(head_span.start, d.span.start);
+    try testing.expectEqual(head_span.end, d.span.end);
+    try testing.expectEqual(@as(usize, 2), d.path.len);
+    try testing.expectEqualStrings("out", d.path[0]);
+    try testing.expectEqualStrings("lowering", d.path[1]);
+    // The message names the carried index and this layer's input tree.
+    try testing.expect(std.mem.indexOf(u8, d.message, "2147483647") != null);
+    try testing.expect(std.mem.indexOf(u8, d.message, "outside this layer's input tree") != null);
+}
+
+test "carry: a carried subtree is charged per node and per span" {
+    const gpa = testing.allocator;
+
+    // (a) A document-sized carry trips the per-invocation byte estimate: the
+    // carried expression's root span alone is past `MAX_LOWERED_BYTES`.
+    {
+        var plugin_arena = std.heap.ArenaAllocator.init(gpa);
+        defer plugin_arena.deinit();
+        const schema = try carryTestSchema(&plugin_arena, "test/carry-value-v1", .number);
+
+        var src_buf: std.ArrayList(u8) = .empty;
+        defer src_buf.deinit(gpa);
+        try src_buf.appendSlice(gpa, "(sugar :value (*");
+        var i: usize = 0;
+        while (i < 140_000) : (i += 1) try src_buf.appendSlice(gpa, " 1");
+        try src_buf.appendSlice(gpa, "))");
+        try src_buf.append(gpa, 0);
+        const src: [:0]const u8 = src_buf.items[0 .. src_buf.items.len - 1 :0];
+
+        var tree = try Parser.parse(gpa, src);
+        defer tree.deinit();
+
+        const overlay = MaterializedDefaults.MaterializedDefaults{};
+        var registry: LoweringRegistry = .{};
+        defer registry.deinit(gpa);
+        try registry.register(gpa, .{ .id = "test/carry-value-v1", .lower = carryValueHook });
+
+        var pass_arena = std.heap.ArenaAllocator.init(gpa);
+        defer pass_arena.deinit();
+
+        var pr = try runLoweringPass(gpa, pass_arena.allocator(), &tree, tree.root, schema, &overlay, &registry, .{});
+        defer pr.deinit(gpa);
+
+        try testing.expectEqual(@as(usize, 0), pr.invocations.len);
+        var saw_too_large = false;
+        for (pr.diagnostics) |d| {
+            if (d.code == .lowering_output_too_large) saw_too_large = true;
+        }
+        try testing.expect(saw_too_large);
+    }
+
+    // (b) A carried staged node is charged its own node count even when every
+    // descendant shares one narrow hook-chosen span. `mid` and its three
+    // descendants each span 0..1, so the charge is 4, and one emitted `out`
+    // form brings the cumulative step to 5; a budget of 3 drops it. A
+    // root-span-once charge (1) would have admitted it at 2.
+    {
+        var plugin_arena = std.heap.ArenaAllocator.init(gpa);
+        defer plugin_arena.deinit();
+        const a = plugin_arena.allocator();
+
+        const forms1 = try a.alloc(Plugin.FormSpec, 2);
+        forms1[0] = .{
+            .name = "sugar",
+            .open = true,
+            .lowering = .{ .hook = "test/narrow-span-v1", .produces = &.{ "mid", "leaf" } },
+        };
+        forms1[1] = .{ .name = "mid", .open = true };
+        const plugins1 = try a.alloc(Plugin.Plugin, 1);
+        plugins1[0] = .{ .name = "tp", .forms = forms1 };
+        const schema1: Schema.Schema = .{ .plugins = plugins1 };
+
+        var tree = try Parser.parse(gpa, "(sugar)");
+        defer tree.deinit();
+
+        const overlay = MaterializedDefaults.MaterializedDefaults{};
+        var registry1: LoweringRegistry = .{};
+        defer registry1.deinit(gpa);
+        try registry1.register(gpa, .{ .id = "test/narrow-span-v1", .lower = narrowSpanTreeHook });
+
+        var pass_arena1 = std.heap.ArenaAllocator.init(gpa);
+        defer pass_arena1.deinit();
+
+        var pr1 = try runLoweringPass(gpa, pass_arena1.allocator(), &tree, tree.root, schema1, &overlay, &registry1, .{});
+        defer pr1.deinit(gpa);
+        try testing.expectEqual(@as(usize, 1), pr1.invocations.len);
+
+        var lowered = try buildLoweredTree(gpa, pr1.invocations, &tree);
+        defer lowered.deinit();
+        try testing.expectEqualStrings("mid", lowered.tree.formHeader(lowered.tree.root[0]).head);
+
+        const forms2 = try a.alloc(Plugin.FormSpec, 3);
+        forms2[0] = .{
+            .name = "mid",
+            .open = true,
+            .lowering = .{ .hook = "test/carry-self-v1", .produces = &.{"out"} },
+        };
+        forms2[1] = .{ .name = "out", .open = true };
+        forms2[2] = .{ .name = "leaf", .open = true };
+        const plugins2 = try a.alloc(Plugin.Plugin, 1);
+        plugins2[0] = .{ .name = "tp", .forms = forms2 };
+        const schema2: Schema.Schema = .{ .plugins = plugins2 };
+
+        var registry2: LoweringRegistry = .{};
+        defer registry2.deinit(gpa);
+        try registry2.register(gpa, .{ .id = "test/carry-self-v1", .lower = carrySelfHook });
+
+        var pass_arena2 = std.heap.ArenaAllocator.init(gpa);
+        defer pass_arena2.deinit();
+
+        const empty_env: Expr.Env = .{};
+        var emitted: usize = 0;
+        var pr2 = try runLoweringPassBudgeted(gpa, pass_arena2.allocator(), &lowered.tree, lowered.tree.root, schema2, &overlay, &registry2, .{}, &empty_env, &emitted, 3);
+        defer pr2.deinit(gpa);
+
+        try testing.expectEqual(@as(usize, 0), pr2.invocations.len);
+        try testing.expectEqual(@as(usize, 5), emitted);
+        var saw_too_large = false;
+        for (pr2.diagnostics) |d| {
+            if (d.code == .lowering_output_too_large) saw_too_large = true;
+        }
+        try testing.expect(saw_too_large);
+    }
+}
+
+test "carry: carrying the same large subtree across invocations trips the cumulative counter" {
+    const gpa = testing.allocator;
+    var plugin_arena = std.heap.ArenaAllocator.init(gpa);
+    defer plugin_arena.deinit();
+    const schema = try carryTestSchema(&plugin_arena, "test/carry-value-v1", .number);
+
+    // Each `(* 2 3)` charges 9 (root span 7 + two one-byte children; the
+    // head is the form's head, not a child) and one emitted form brings an
+    // invocation to 10.
+    var tree = try Parser.parse(gpa, "(sugar :value (* 2 3)) (sugar :value (* 4 5))");
+    defer tree.deinit();
+
+    const overlay = MaterializedDefaults.MaterializedDefaults{};
+    var registry: LoweringRegistry = .{};
+    defer registry.deinit(gpa);
+    try registry.register(gpa, .{ .id = "test/carry-value-v1", .lower = carryValueHook });
+
+    var pass_arena = std.heap.ArenaAllocator.init(gpa);
+    defer pass_arena.deinit();
+
+    const empty_env: Expr.Env = .{};
+    var emitted: usize = 0;
+    var pr = try runLoweringPassBudgeted(gpa, pass_arena.allocator(), &tree, tree.root, schema, &overlay, &registry, .{}, &empty_env, &emitted, 15);
+    defer pr.deinit(gpa);
+
+    // The first invocation's 10 fits; the second would reach 20, so it is
+    // dropped with the cumulative message.
+    try testing.expectEqual(@as(usize, 1), pr.invocations.len);
+    var saw_cumulative = false;
+    for (pr.diagnostics) |d| {
+        if (d.code == .lowering_output_too_large and std.mem.indexOf(u8, d.message, "cumulative") != null) saw_cumulative = true;
+    }
+    try testing.expect(saw_cumulative);
+
+    // A budget at the exact total admits both, and the counter lands on 20.
+    var emitted_ok: usize = 0;
+    var pr_ok = try runLoweringPassBudgeted(gpa, pass_arena.allocator(), &tree, tree.root, schema, &overlay, &registry, .{}, &empty_env, &emitted_ok, 20);
+    defer pr_ok.deinit(gpa);
+    try testing.expectEqual(@as(usize, 2), pr_ok.invocations.len);
+    try testing.expectEqual(@as(usize, 0), pr_ok.diagnostics.len);
+    try testing.expectEqual(@as(usize, 20), emitted_ok);
+}
+
+test "carry: a carry-less emission's byte estimate is unchanged" {
+    const gpa = testing.allocator;
+    var tree = try Parser.parse(gpa, "(sugar)");
+    defer tree.deinit();
+
+    const spec: Plugin.LoweringSpec = .{ .hook = "test/identity-v1", .produces = &.{"out"} };
+    const kvpairs = [_]EmittedKvpair{
+        .{ .key = "slot", .value = .{ .string = "abcd" } },
+        .{ .key = "n", .value = .{ .number = 1 } },
+        .{ .key = "sym", .value = .{ .symbol = "xyz" } },
+    };
+    const children = [_]EmittedValue{.{ .string = "ef" }};
+    const ef: EmittedForm = .{
+        .head = "out",
+        .kvpairs = &kvpairs,
+        .children = &children,
+        .source_form_idx = tree.root[0],
+    };
+
+    var totals: Totals = .{};
+    var diags: std.ArrayList(Ast.Diagnostic) = .empty;
+    defer {
+        Ast.Diagnostic.freeOwnedContents(gpa, diags.items);
+        diags.deinit(gpa);
+    }
+    var seen = false;
+    try validateEmittedForm(gpa, &ef, &spec, &tree, tree.spanOf(tree.root[0]), &totals, &diags, &seen);
+
+    try testing.expectEqual(@as(usize, 0), diags.items.len);
+    try testing.expect(!seen);
+    try testing.expectEqual(@as(usize, 1), totals.form_count);
+    // Heads plus keys plus string payloads, exactly: nothing added for the
+    // arms that carry no bytes, and nothing charged for a carry that is absent.
+    try testing.expectEqual(@as(usize, "out".len + "slot".len + "abcd".len + "n".len + "sym".len + "xyz".len + "ef".len), totals.byte_estimate);
+    try testing.expectEqual(@as(usize, 0), totals.carried_charge);
+}
+
+test "carry: a carried expression validates in its destination slot, and a mistyped one lands on the author's own span" {
+    const gpa = testing.allocator;
+    var plugin_arena = std.heap.ArenaAllocator.init(gpa);
+    defer plugin_arena.deinit();
+    const a = plugin_arena.allocator();
+
+    var tree = try Parser.parse(gpa, "(sugar :value (* 2 (+ 3 4)))");
+    defer tree.deinit();
+
+    const sugar = tree.root[0];
+    var value_idx: Ast.NodeIndex = .invalid;
+    for (tree.formHeader(sugar).children) |child| {
+        const kv = tree.kvpairHeader(child);
+        if (std.mem.eql(u8, kv.key, "value")) value_idx = kv.value;
+    }
+    const value_span = tree.spanOf(value_idx);
+
+    const kvpairs = [_]EmittedKvpair{.{ .key = "value", .value = .{ .carry = value_idx } }};
+    const forms = [_]EmittedForm{.{
+        .head = "out",
+        .kvpairs = &kvpairs,
+        .source_form_idx = sugar,
+    }};
+    const invocations = [_]Invocation{.{
+        .source_form_idx = sugar,
+        .hook_id = "test/carry-v1",
+        .forms = &forms,
+        .source_tree = &tree,
+    }};
+
+    var lowered = try buildLoweredTree(gpa, &invocations, &tree);
+    defer lowered.deinit();
+
+    const overlay = MaterializedDefaults.MaterializedDefaults{};
+    // The same carried `*` form in a number slot revalidates clean.
+    {
+        const out_keys = try a.alloc(Plugin.KeySpec, 1);
+        out_keys[0] = .{ .name = "value", .value_type = .number, .optional = false };
+        const forms_a = try a.alloc(Plugin.FormSpec, 1);
+        forms_a[0] = .{ .name = "out", .keys = out_keys };
+        const plugins_a = try a.alloc(Plugin.Plugin, 2);
+        plugins_a[0] = core.plugin;
+        plugins_a[1] = .{ .name = "test", .forms = forms_a };
+        const schema_a: Schema.Schema = .{ .plugins = plugins_a };
+
+        var res = try revalidateLowered(gpa, lowered.tree, schema_a, &overlay, .{});
+        defer res.deinit();
+        try testing.expectEqual(@as(usize, 0), res.diagnostics.len);
+    }
+
+    // Retyped `:type string`, the mismatch is `wrong_underlying` on the
+    // carried expression's own source span, not on the verb's.
+    {
+        const out_keys = try a.alloc(Plugin.KeySpec, 1);
+        out_keys[0] = .{ .name = "value", .value_type = .string, .optional = false };
+        const forms_b = try a.alloc(Plugin.FormSpec, 1);
+        forms_b[0] = .{ .name = "out", .keys = out_keys };
+        const plugins_b = try a.alloc(Plugin.Plugin, 2);
+        plugins_b[0] = core.plugin;
+        plugins_b[1] = .{ .name = "test", .forms = forms_b };
+        const schema_b: Schema.Schema = .{ .plugins = plugins_b };
+
+        var res = try revalidateLowered(gpa, lowered.tree, schema_b, &overlay, .{});
+        defer res.deinit();
+        try testing.expectEqual(@as(usize, 1), res.diagnostics.len);
+        const d = res.diagnostics[0];
+        try testing.expectEqual(Ast.Diagnostic.Code.wrong_underlying, d.code);
+        try testing.expectEqual(value_span.start, d.span.start);
+        try testing.expectEqual(value_span.end, d.span.end);
+    }
 }

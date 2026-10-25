@@ -18,6 +18,7 @@ const Schema = @import("Schema.zig");
 const Binary = @import("Binary.zig");
 const Parser = @import("Parser.zig");
 const Expr = @import("Expr.zig");
+const BinaryCursor = @import("BinaryCursor.zig");
 const core = @import("plugins/core.zig");
 
 // Local aliases — keep test bodies readable without churning every callsite.
@@ -5316,4 +5317,400 @@ test "date: evalBinary parity for atom" {
     var r2 = try evalSourceBinary("2026-07-03");
     defer r2.deinit();
     try testing.expect(r1.value.date.eql(r2.value.date));
+}
+
+// ---------------------------------------------------------------------------
+// evalBinaryView — captured-view evaluation under a borrowed, already-indexed
+// cursor (ask29 main plan §2.4 dependency slice). The entry's inputs are
+// BinaryCursor products, so the capture walks below use BinaryCursor's pub
+// read API — the same surface the production caller (the pattern query) will
+// use; everything under test on the Expr side is `pub` in `Expr.zig`.
+// ---------------------------------------------------------------------------
+
+/// Parse + encode `src`, and capture the FIRST root: the encoded bytes
+/// (caller-owned), an already-indexed cursor over them, and the root view +
+/// payload position — exactly the state a `RootIter.next()` leaves behind.
+const RootCapture = struct {
+    bytes: []u8,
+    cursor: BinaryCursor.Cursor,
+    pool_index: []u32,
+    view: BinaryCursor.NodeView,
+    payload_pos: u32,
+
+    /// Frees the owned allocations. The cursor only borrows, so it is not
+    /// (and must not be) used after this.
+    fn deinit(self: *RootCapture) void {
+        testing.allocator.free(self.pool_index);
+        testing.allocator.free(self.bytes);
+    }
+};
+
+fn captureRoot(src: [:0]const u8) !RootCapture {
+    var tree2 = try Parser.parse(testing.allocator, src);
+    defer tree2.deinit();
+    const bin = try Binary.toBinary(testing.allocator, tree2, .{});
+    defer bin.deinit();
+    const bytes = try testing.allocator.dupe(u8, bin.data);
+    errdefer testing.allocator.free(bytes);
+    var cursor = try BinaryCursor.Cursor.init(bytes);
+    const pool_index = try testing.allocator.alloc(u32, cursor.poolIndexLen());
+    errdefer testing.allocator.free(pool_index);
+    cursor.indexPools(pool_index);
+    var roots = try cursor.rootIter();
+    const view = (try roots.next()).?;
+    return .{ .bytes = bytes, .cursor = cursor, .pool_index = pool_index, .view = view, .payload_pos = cursor.pos };
+}
+
+test "evalBinaryView: evaluates a nested captured form, not the root" {
+    const schema = Schema.Schema.init(&.{core.plugin});
+    const empty_env: Env = .{};
+    var cap = try captureRoot("(+ 1 (* 2 10))");
+    defer cap.deinit();
+
+    // Control (whole-buffer behavior, unchanged): the root evaluates to 21.
+    var whole = try evalBinary(testing.allocator, cap.bytes, &empty_env, schema);
+    defer whole.deinit();
+    try testing.expectEqual(@as(f64, 21), whole.value.number);
+
+    // Descend to the inner form `(* 2 10)`: skip child 0, capture child 1.
+    const fv = try BinaryCursor.readForm(&cap.cursor, cap.view);
+    var iter = fv.children;
+    const first = (try iter.next()).?;
+    try BinaryCursor.skipBody(&cap.cursor, first.value);
+    const second = (try iter.next()).?;
+    try testing.expect(second.value.kind == .form);
+    try testing.expect(cap.cursor.pos > cap.payload_pos); // nonzero, nested payload
+
+    var r = try Expr.evalBinaryView(testing.allocator, &cap.cursor, second.value, cap.cursor.pos, &empty_env, schema, .{}, null);
+    defer r.deinit();
+    try testing.expectEqual(@as(f64, 20), r.value.number);
+}
+
+test "evalBinaryView: evaluates a captured root with other roots present, view-only" {
+    const schema = Schema.Schema.init(&.{core.plugin});
+    const empty_env: Env = .{};
+    var cap = try captureRoot("(+ 1 2) 42");
+    defer cap.deinit();
+
+    // Red parity (pinned, unchanged): the whole-buffer entry refuses the
+    // buffer wholesale even though the captured root is perfectly evaluable.
+    try testing.expectError(error.MultipleRoots, evalBinary(testing.allocator, cap.bytes, &empty_env, schema));
+
+    // The view entry evaluates the capture. The caller keeps its own
+    // iteration state by passing a value copy — the entry repositions only
+    // the copy's `pos`.
+    var copy = cap.cursor;
+    const saved_pos = cap.cursor.pos;
+    var r = try Expr.evalBinaryView(testing.allocator, &copy, cap.view, cap.payload_pos, &empty_env, schema, .{}, null);
+    defer r.deinit();
+    try testing.expectEqual(@as(f64, 3), r.value.number);
+    try testing.expectEqual(saved_pos, cap.cursor.pos); // original undisturbed
+    try testing.expect(copy.pos != saved_pos); // the copy was walked
+
+    // The other root is untouched: a fresh cursor drains both roots and the
+    // second still reads 42.
+    var cursor2 = try BinaryCursor.Cursor.init(cap.bytes);
+    const pool2 = try testing.allocator.alloc(u32, cursor2.poolIndexLen());
+    defer testing.allocator.free(pool2);
+    cursor2.indexPools(pool2);
+    var roots2 = try cursor2.rootIter();
+    try testing.expect(roots2.remaining == 2);
+    const r0 = (try roots2.next()).?;
+    try BinaryCursor.skipBody(&cursor2, r0);
+    const r1 = (try roots2.next()).?;
+    try testing.expect(r1.kind == .number);
+    try testing.expectEqual(@as(f64, 42), try BinaryCursor.readNumber(&cursor2, r1));
+}
+
+test "evalBinaryView: host env bindings reach the captured view" {
+    const schema = Schema.Schema.init(&.{core.plugin});
+    const empty_env: Env = .{};
+    var cap = try captureRoot("(+ x 1)");
+    defer cap.deinit();
+
+    // Without the binding: a static eval outcome, not a structural failure.
+    // The out-param carries the channel the classifier would name anyway —
+    // agreement is the point (producer-side provenance and the name-based
+    // fallback never disagree on an unambiguous name).
+    var source: Expr.BinaryFailureSource = .multiple_roots; // sentinel: unreachable from this entry
+    var r = Expr.evalBinaryView(testing.allocator, &cap.cursor, cap.view, cap.payload_pos, &empty_env, schema, .{}, &source) catch |err| {
+        try testing.expectEqual(error.UnknownBinding, err);
+        try testing.expectEqual(Expr.BinaryFailureSource.eval, source);
+        return;
+    };
+    r.deinit();
+    return error.TestUnexpectedResult;
+}
+
+test "evalBinaryView: a bound host env reaches the captured view (success path)" {
+    const schema = Schema.Schema.init(&.{core.plugin});
+    var cap = try captureRoot("(+ x 1)");
+    defer cap.deinit();
+    const env: Env = .{ .bindings = &.{.{ .name = "x", .value = .{ .number = 41 } }} };
+    var source: Expr.BinaryFailureSource = .multiple_roots; // sentinel: success must leave it untouched
+    var r = try Expr.evalBinaryView(testing.allocator, &cap.cursor, cap.view, cap.payload_pos, &env, schema, .{}, &source);
+    defer r.deinit();
+    try testing.expectEqual(@as(f64, 42), r.value.number);
+    try testing.expectEqual(Expr.BinaryFailureSource.multiple_roots, source);
+}
+
+test "evalBinaryView: malformed data under the captured view surfaces a structural cursor error" {
+    const schema = Schema.Schema.init(&.{core.plugin});
+    const empty_env: Env = .{};
+    var cap = try captureRoot("(+ 1 (* 2 10))");
+    defer cap.deinit();
+
+    // Capture the inner form `(* 2 10)` from the intact wire, stopping
+    // before its children.
+    const fv = try BinaryCursor.readForm(&cap.cursor, cap.view);
+    var iter = fv.children;
+    const first = (try iter.next()).?;
+    try BinaryCursor.skipBody(&cap.cursor, first.value);
+    const leaf = (try iter.next()).?;
+    const leaf_pos = cap.cursor.pos;
+    try testing.expect(leaf.value.kind == .form);
+    const lf = try BinaryCursor.readForm(&cap.cursor, leaf.value);
+    _ = lf; // header consumed only — the corruption point is the next byte
+    const corrupt_pos = cap.cursor.pos; // the leaf's first child-tag byte
+
+    // Corrupt the wire under the capture point: 0xFE is not a child tag.
+    cap.bytes[corrupt_pos] = 0xFE;
+
+    // The eval walk into the captured view hits the corruption and surfaces
+    // the typed structural name — the channel the pattern dry-run must
+    // propagate as `BinaryError` even at cycle 0 (plan §2.6). It is never
+    // converted to an eval-outcome shape. The out-param names the same
+    // channel as the classifier: unambiguous names agree by construction.
+    var source: Expr.BinaryFailureSource = .multiple_roots; // sentinel: unreachable from this entry
+    var r = Expr.evalBinaryView(testing.allocator, &cap.cursor, leaf.value, leaf_pos, &empty_env, schema, .{}, &source) catch |err| {
+        try testing.expectEqual(error.InvalidTag, err);
+        try testing.expectEqual(Expr.BinaryFailureSource.structural, Expr.classifyBinaryFailure(err));
+        try testing.expectEqual(Expr.BinaryFailureSource.structural, source);
+        return;
+    };
+    r.deinit();
+    return error.TestUnexpectedResult;
+}
+
+test "evalBinaryView: DepthExceeded from the step ceiling is the eval channel" {
+    const schema = Schema.Schema.init(&.{core.plugin});
+    const empty_env: Env = .{};
+    var cap = try captureRoot("(+ 1 (* 2 10))");
+    defer cap.deinit();
+    // One step cannot finish a 3-leaf form. The shared `DepthExceeded` name
+    // has producers in BOTH channels — skipBody's skip-stack cap on a
+    // >1024-deep skipped branch is structural (the pinned 1100-fixture
+    // test below), while the engine's own ceilings are eval — so the
+    // name alone cannot route it: the `failure_source` out-param is the
+    // authority, and the classifier is the fallback for callers without
+    // it (plan §2.6). Frame-depth exhaustion is unreachable from legal
+    // wire here: MAX_TREE_DEPTH (1024) bounds nesting to ~1 frame per
+    // form level for this shape, so the step ceiling is the deterministic
+    // runtime trip; the equality ceiling has its own pinned test below.
+    var source: Expr.BinaryFailureSource = .multiple_roots; // sentinel: unreachable from this entry
+    var r = Expr.evalBinaryView(testing.allocator, &cap.cursor, cap.view, cap.payload_pos, &empty_env, schema, .{ .steps = 1 }, &source) catch |err| {
+        try testing.expectEqual(error.DepthExceeded, err);
+        try testing.expectEqual(Expr.BinaryFailureSource.eval, Expr.classifyBinaryFailure(err));
+        try testing.expectEqual(Expr.BinaryFailureSource.eval, source);
+        return;
+    };
+    r.deinit();
+    return error.TestUnexpectedResult;
+}
+
+test "evalBinaryView: skipBody DepthExceeded on a 1100-deep skipped chain is the structural channel" {
+    // §2.6 pair, member 1 — hostile wire (hand-built; encoder-produced wire
+    // cannot exceed the skip stack: parser nesting ≤ MAX_TREE_DEPTH = 1024
+    // admits exactly SKIP_STACK_CAP = 2048 skip frames, 2 per level). A
+    // dead >1024-deep branch never pushes eval frames, so MAX_FRAMES never
+    // bounds it; skipBody's own cap is what trips. Same error NAME as the
+    // equality-ceiling test below, opposite channel: this is exactly the
+    // dry-run case the pattern query must propagate as a hard BinaryError.
+    const a = testing.allocator;
+    const bin = try buildIfFalsyWithDeepFormThen(a, 1100);
+    defer a.free(bin);
+    const schema = Schema.Schema.init(&.{core.plugin});
+    const empty_env: Env = .{};
+    var cursor = try BinaryCursor.Cursor.init(bin);
+    const pool_index = try a.alloc(u32, cursor.poolIndexLen());
+    defer a.free(pool_index);
+    cursor.indexPools(pool_index);
+    var roots = try cursor.rootIter();
+    const view = (try roots.next()).?;
+    const payload_pos = cursor.pos;
+
+    var source: Expr.BinaryFailureSource = .multiple_roots; // sentinel: unreachable from this entry
+    var r = Expr.evalBinaryView(a, &cursor, view, payload_pos, &empty_env, schema, .{}, &source) catch |err| {
+        try testing.expectEqual(error.DepthExceeded, err);
+        // The name-based classifier cannot see the producer — this is the
+        // misroute this out-param exists to fix:
+        try testing.expectEqual(Expr.BinaryFailureSource.eval, Expr.classifyBinaryFailure(err));
+        try testing.expectEqual(Expr.BinaryFailureSource.structural, source);
+        return;
+    };
+    r.deinit();
+    return error.TestUnexpectedResult;
+}
+
+/// `(= F F)` where F is an N-deep unknown-head data form:
+/// F_1 = "(f 1 2)", F_k = "(f F_{k-1} 1 2)". No special form is involved,
+/// so `skipBody` is never called — the deep mid-eval Values are built by
+/// the walk, and core `=` compares them via `Value.equalsBounded`, whose
+/// `MAX_VALUE_DEPTH = 256` recursion cap is what trips at exactly N = 256.
+fn deepEqualPairSource(a: Allocator, n: u32) ![:0]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(a);
+    try buf.appendSlice(a, "(f 1 2)");
+    var i: u32 = 1;
+    while (i < n) : (i += 1) {
+        var wrapped: std.ArrayList(u8) = .empty;
+        errdefer wrapped.deinit(a);
+        try wrapped.appendSlice(a, "(f ");
+        try wrapped.appendSlice(a, buf.items);
+        try wrapped.appendSlice(a, " 1 2)");
+        buf.deinit(a);
+        buf = wrapped;
+    }
+    var full: std.ArrayList(u8) = .empty;
+    errdefer full.deinit(a);
+    try full.appendSlice(a, "(= ");
+    try full.appendSlice(a, buf.items);
+    try full.appendSlice(a, " ");
+    try full.appendSlice(a, buf.items);
+    try full.appendSlice(a, ")");
+    buf.deinit(a);
+    return full.toOwnedSliceSentinel(a, 0);
+}
+
+test "evalBinaryView: equality-ceiling DepthExceeded on a legal 256-deep (= F F) pair is the eval channel" {
+    // §2.6 pair, member 2 — the counterexample that falsified the
+    // dispatch-boundary attribution: LEGAL encoder-produced wire, no
+    // special form anywhere, so skipBody is never called, yet
+    // `error.DepthExceeded` escapes the frame dispatch from
+    // applyEq -> equalsBounded (MAX_VALUE_DEPTH = 256; N=256 ≈ 513 eval
+    // frames ≪ MAX_FRAMES = 1024, and the boolean result makes the tail
+    // copy trivial — the error is mid-walk). Producer-side tagging keeps
+    // it on the eval channel: same NAME as the 1100 test above, opposite
+    // channel, both preserved.
+    const a = testing.allocator;
+    const schema = Schema.Schema.init(&.{core.plugin});
+    const empty_env: Env = .{};
+
+    const src = try deepEqualPairSource(a, 256);
+    defer a.free(src);
+    var cap = try captureRoot(src);
+    defer cap.deinit();
+
+    // Legacy whole-buffer pin: the public entry keeps its bare-error
+    // contract — same error name, signature and results unchanged.
+    try testing.expectError(error.DepthExceeded, evalBinary(a, cap.bytes, &empty_env, schema));
+
+    var source: Expr.BinaryFailureSource = .multiple_roots; // sentinel: unreachable from this entry
+    var r = Expr.evalBinaryView(a, &cap.cursor, cap.view, cap.payload_pos, &empty_env, schema, .{}, &source) catch |err| {
+        try testing.expectEqual(error.DepthExceeded, err);
+        try testing.expectEqual(Expr.BinaryFailureSource.eval, source);
+        return;
+    };
+    r.deinit();
+    return error.TestUnexpectedResult;
+}
+
+test "evalBinaryView: (= F F) one level under the equality ceiling evaluates and leaves the out-param untouched" {
+    // Knife-edge control for the test above: N = 255 (one under
+    // MAX_VALUE_DEPTH) proves the N = 256 failure is the equalsBounded
+    // cap, not a frame/step trip — and success never writes the
+    // out-param (sentinel preserved).
+    const a = testing.allocator;
+    const schema = Schema.Schema.init(&.{core.plugin});
+    const empty_env: Env = .{};
+    const src = try deepEqualPairSource(a, 255);
+    defer a.free(src);
+    var cap = try captureRoot(src);
+    defer cap.deinit();
+    var source: Expr.BinaryFailureSource = .multiple_roots; // sentinel: success must leave it untouched
+    var r = try Expr.evalBinaryView(a, &cap.cursor, cap.view, cap.payload_pos, &empty_env, schema, .{}, &source);
+    defer r.deinit();
+    try testing.expect(r.value == .boolean);
+    try testing.expect(r.value.boolean); // identical structures are equal
+    try testing.expectEqual(Expr.BinaryFailureSource.multiple_roots, source);
+}
+
+test "evalBinaryView: a zero byte budget is refused on the eval channel" {
+    const schema = Schema.Schema.init(&.{core.plugin});
+    const empty_env: Env = .{};
+    var cap = try captureRoot("(+ 1 2)");
+    defer cap.deinit();
+
+    // Bytes: the per-step arena poll trips a zero budget before any value
+    // is produced — an engine-raised eval ceiling, so the out-param carries
+    // the eval channel.
+    var source: Expr.BinaryFailureSource = .multiple_roots; // sentinel: unreachable from this entry
+    var r0 = Expr.evalBinaryView(testing.allocator, &cap.cursor, cap.view, cap.payload_pos, &empty_env, schema, .{ .bytes = 0 }, &source) catch |err| {
+        try testing.expectEqual(error.MemoryBudgetExceeded, err);
+        try testing.expectEqual(Expr.BinaryFailureSource.eval, source);
+        return;
+    };
+    r0.deinit();
+    return error.TestUnexpectedResult;
+}
+
+test "evalBinaryView: a default budget completes and leaves the out-param untouched" {
+    const schema = Schema.Schema.init(&.{core.plugin});
+    const empty_env: Env = .{};
+    var cap = try captureRoot("(+ 1 2)");
+    defer cap.deinit();
+    var source: Expr.BinaryFailureSource = .multiple_roots; // sentinel: success must leave it untouched
+    var r = try Expr.evalBinaryView(testing.allocator, &cap.cursor, cap.view, cap.payload_pos, &empty_env, schema, .{}, &source);
+    defer r.deinit();
+    try testing.expectEqual(@as(f64, 3), r.value.number);
+    try testing.expectEqual(Expr.BinaryFailureSource.multiple_roots, source);
+}
+
+test "evalBinaryView: the result does not borrow the cursor's bytes" {
+    const schema = Schema.Schema.init(&.{core.plugin});
+    const empty_env: Env = .{};
+    var cap = try captureRoot("\"held\"");
+    var r = try Expr.evalBinaryView(testing.allocator, &cap.cursor, cap.view, cap.payload_pos, &empty_env, schema, .{}, null);
+    defer r.deinit();
+    // Free the borrowed inputs before touching the value: the string must
+    // live on the result arena (deep-copied out), mirroring `evalBinary`'s
+    // contract.
+    cap.deinit();
+    try testing.expectEqualStrings("held", r.value.string);
+}
+
+test "classifyBinaryFailure: the three channels and the whole-buffer-only outcome" {
+    // Structural — malformed wire, the BinaryCursor/BinaryFormat names.
+    const structural = [_]BinaryCursor.Error{
+        error.InvalidMagic,        error.InvalidVersion,    error.InvalidFlags,
+        error.InvalidTag,          error.InvalidNamespace,  error.Truncated,
+        error.PoolIndexOutOfRange, error.NodeCountExceeded, error.StringTooLong,
+        error.CommentTooLong,
+    };
+    for (structural) |e| {
+        try testing.expectEqual(Expr.BinaryFailureSource.structural, Expr.classifyBinaryFailure(e));
+    }
+    // Static eval outcomes and the deterministic resource limits. For the
+    // shared `DepthExceeded` this is the FALLBACK mapping (the
+    // producer-side `failure_source` out-param is the authority — see the
+    // 1100/equality pair above); for every other name the classifier is
+    // exact. The four wasm plugin-result names round out the eval arm —
+    // exhaustiveness is compile-guaranteed, this pins the mapping itself.
+    const eval_outcomes = [_]Expr.Error{
+        error.TypeMismatch,             error.DivisionByZero,
+        error.UnknownFunction,          error.AmbiguousFunction,
+        error.ArityMismatch,            error.UnknownBinding,
+        error.InvalidLetBinding,        error.InvalidCondClause,
+        error.InvalidBinderShape,       error.KeywordInExpressionArgs,
+        error.DepthExceeded,            error.MemoryBudgetExceeded,
+        error.PluginFuncNotImplemented, error.PluginFuncResultType,
+        error.PluginFuncFailed,         error.PluginFuncTrapped,
+        error.PluginFuncAllocFailed,
+    };
+    for (eval_outcomes) |e| {
+        try testing.expectEqual(Expr.BinaryFailureSource.eval, Expr.classifyBinaryFailure(e));
+    }
+    // Host failure and the whole-buffer-only outcome.
+    try testing.expectEqual(Expr.BinaryFailureSource.host, Expr.classifyBinaryFailure(error.OutOfMemory));
+    try testing.expectEqual(Expr.BinaryFailureSource.multiple_roots, Expr.classifyBinaryFailure(error.MultipleRoots));
 }

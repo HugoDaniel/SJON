@@ -4,9 +4,9 @@
 // (`src/Edit.zig`) consumes: one of six ops over a `path` into a parsed
 // document, or one of two over the document's root list. A `path` step is a
 // *number* (positional / vector index), a *string* (kvpair key), or empty `[]`
-// (the root form). The engine re-prints
-// in `.full` mode, so trivia (comments, formatting) OUTSIDE the edited subtree
-// survives — the whole reason to edit rather than re-`create`→serialize.
+// (the root form). The default apply reprints in `.full` mode, retaining
+// comments outside rebuilt values but re-deriving layout. Batched apply can
+// select preserve mode, which splices edited spans and leaves other bytes intact.
 //
 // "Outside the edited subtree" is exact, and `wrap` is why it needs saying:
 // the four ops that take a `value` build it from JSON, and the JSON bridge
@@ -200,8 +200,8 @@ export function removeRoot(index: number): ForestEditAction {
 }
 
 /**
- * Point `action` at root `index` of a multi-root document. Every builder
- * above produces a root-less action, which the engine accepts only on a
+ * Point a pathed `action` at root `index` of a multi-root document. The six
+ * pathed builders produce root-less actions, accepted only on a
  * single-root document; this is how one reaches a form in a file that also
  * carries `(use-plugin …)`.
  *

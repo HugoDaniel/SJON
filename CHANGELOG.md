@@ -4,6 +4,131 @@ All notable, breaking, or contract-affecting changes land here, documented
 plainly. The stable surfaces — the binary wire format and the diagnostic-code
 enum — are versioned and corpus-gated; nothing changes them silently.
 
+## Unreleased
+
+## 1.5.0 — 2026-10-25
+
+This release keeps binary wire v5 and the diagnostic-code enum unchanged.
+The npm packaging fixes described under 1.4.2 first reach registry consumers
+with 1.5.0: neither 1.4.2 nor 1.4.3 was published to npm (the previous registry
+latest was 1.4.1). Packages ship compiled JavaScript and declarations, including
+all documented subpaths; use pnpm to rewrite workspace dependencies when packing.
+
+- **Decode once and query many:** `sjon.prepareBinary`, owning
+  `PatternQuery.PreparedBinary`, and the four `queryPreparedBinary*` entries
+  reuse a decoded tree, with fresh per-query environments and tree-path budgets.
+  Preparation is outside those budgets. `sjon.BinaryDecoder` exposes the
+  read-only decoder separately. See [the consumer guide](docs/BINARY_PATTERNS.md).
+- **Evaluate a captured binary expression view:** `Expr.evalBinaryView` uses a
+  borrowed cursor and view without whole-buffer root framing; consumers must
+  honor cursor/input lifetimes. Existing whole-buffer evaluation is unchanged.
+- **Carry author subtrees through Zig lowering:** `LoweringInput.subtree` and
+  `EmittedValue.carry` preserve author syntax and spans while the final forest
+  validates the destination context. This remains a Zig-only hook surface.
+- **Highlight runtime requirement:** the compiled grammar uses JSON import
+  attributes, so its minimum Node version is corrected to 20.10.
+- **Documentation and distribution:** corrected Node/Rust onboarding, eight-op
+  editing and preserve-layout contracts, explicit host capability boundaries,
+  current coverage counts, and stronger documentation drift checks.
+
+
+- **The binary pattern query can now evaluate `(pure <form>)` expression
+  leaves through new additive entries — the frozen legacy entries are
+  unchanged.** `PatternQuery.queryBinaryWithEnv` and
+  `queryBinaryWithBudgetAndEnv` compile a binary pattern with expression
+  leaves captured as IR views, dry-run each at cycle 0, and evaluate them
+  per cycle under the pattern-local `cycle` / `tick` / `seed` (which shadow
+  same-named outer bindings), with the caller's `Expr.Env` chained beneath
+  — where the legacy `queryBinary` / `queryBinaryWithBudget` silently
+  degrade every expression leaf to `silence` and keep their byte-for-byte
+  contract, including in the released read-only `sjon-binary.wasm` (no
+  artifact, host-ABI, wire, or diagnostic-code change; the wasm closure
+  allowlist is untouched). The entry, never a null env, selects semantics.
+  When a leaf exists, the pattern bytes are copied once into the Result
+  arena (one retained cursor, the compile-time pool index reused over the
+  layout-identical copy), so a Result outlives the caller's bytes and env;
+  the retention and pool-index steps preflight checked arithmetic against
+  `budget.bytes` and refuse with `MemoryBudgetExceeded` before allocating.
+  Malformed wire anywhere — including under a captured leaf, surfaced
+  through the cycle-0 dry-run — is a hard, typed `BinaryError` from the
+  existing error enum; static eval defects are the tree path's diagnostics
+  at `[pure]`; later-cycle eval failures are counted drops. No new
+  diagnostic codes, wire still v5, corpus still 393 cases.
+
+A form value in a slot whose value-kind reference cannot resolve is reported
+as the reference it is, and the composition that made it unresolvable is
+named at preload: the aggregate phase resolves every kind reference every
+manifest spells, so a bare name two loaded plugins both declare is a
+schema-build diagnostic in every composing host, before any document. Nothing
+moved on the stable surfaces: no wire-format change (still v5), no new
+diagnostic codes (`ambiguous_element_kind` and `unknown_element_kind` both
+exist and are corpus-covered), and the conformance corpus still at 393 cases.
+
+- **The streaming binary cursor consumes the tree-trailing comment block on
+  root exhaustion, and corrupt flag-set tails are now refused instead of
+  silently accepted.** The wire appends a `[tree trailing comments]` block
+  after the roots whenever flag bit 5 is set — the encoder writes the count
+  varint even for an empty block — but `BinaryCursor.RootIter.next()`
+  returned null at the last root without touching it, so an exact-end
+  consumer landed one to eleven bytes short with no way to reach the block.
+  `RootIter` now mirrors `ChildIter`/`VectorIter`: its null-producing call
+  consumes the count and its entries through the same reader the mid-tree
+  comment sites use and reports the count in a new `trailing_count` field.
+  Error mapping uses existing codes only (`NodeCountExceeded` over-cap or
+  over-long varint, `InvalidTag` bad kind byte, `Truncated` short read);
+  entry text indices stay skipped, not pool-validated, matching the
+  cursor's count-only stance at all four comment sites. This is a
+  deliberate strictness increase on a host-facing surface: the three
+  draining `Validator` walkers — and the released `sjon_validate_binary`
+  wasm export — now surface those errors on a malformed tree-trailing tail
+  where the walk previously succeeded silently, symmetric with the
+  mid-tree trailing reads and `init`'s slack rejection. Non-draining
+  callers (`evalBinary`, `queryPattern`) are unchanged; wire stays 0x05
+  and no diagnostic codes moved.
+
+### Fixed
+
+- **A form child in a slot whose kind reference is ambiguous or unknown reports
+  the reference, never a classified mismatch.** When a form lands in a typed
+  slot whose `.named` reference does not resolve `.found` — two loaded plugins
+  declare the bare name, or nobody declares it — both walkers used to fall into
+  expression classification and emit `wrong_underlying` ("form `x` positional
+  argument expects `y`, got form"), silently losing the head-set narrowing and
+  burying the honest code. The form fast-path in `matchValueAgainstType`
+  (`src/Validator.zig`) now falls through to the `.named` arm, and its binary
+  twin `matchFormAgainstTypeBinary` gained the matching guard between its
+  head-set step and its expression step, so both paths emit
+  `ambiguous_element_kind` (naming the claimants and the qualified spelling)
+  or `unknown_element_kind` at the child's span. A narrowing that cannot
+  resolve is not a value that failed. A document loading one plugin is
+  untouched — one claimant, the bare reference resolves, the narrowing runs as
+  before — and a reference that resolves to a non-form kind keeps today's
+  classified comparison exactly.
+
+- **The aggregate phase resolves every manifest value-kind reference, so a
+  bare-referenced kind name two plugins share is named at preload.**
+  `Schema.validateKindRefs` joins the aggregate validators as the sixth,
+  appended after cross-refs, unions, forms, lowering and defaults so the
+  corpus-locked diagnostic-stream order of the other five does not move. It
+  walks every plugin's forms (each key's `:type`, a form's `:positional` kind,
+  recursing into slot-local `local_forms` on both carriers and into
+  per-`:when` variant keys) and every value-kind's vector-shape `:element`,
+  skips the primitive type shortcuts, and resolves each reference against the
+  aggregate: `unknown_element_kind` for a miss, `ambiguous_element_kind` for a
+  cross-plugin collision, span `{0,0}`, path `[<plugin>, <form>, <slot>]`,
+  stamped `.aggregate`. Declaring the colliding name confers no priority, so a
+  bare reference inside the declarant's own manifest is named too, which makes
+  the ambiguity the composition's property, reported when the schema is built
+  rather than one document's surprise. The two corpus fixtures of that class
+  (`ambiguous-element-kind`, `unknown-element-kind`) were reviewed and moved to
+  expect the preload diagnostic ahead of the document's own: their bytes pinned
+  one phase of a two-phase class and were written before any preload walk
+  existed, and the diff is the prepended diagnostic and nothing else, with the
+  corpus still at 393 cases. The TypeScript parity host ports the walk in the
+  same change (`hosts/typescript-parity/src/plugin.ts`,
+  `validateKindRefs`), the corpus being the cross-host axis; `hosts/web` and
+  `hosts/rust` drive the Zig artifact and inherit the walk.
+
 ## 1.4.3 — 2026-09-30
 
 A checkout of SJON builds on a machine that is not the author's. Nothing on

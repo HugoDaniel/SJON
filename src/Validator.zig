@@ -4837,7 +4837,9 @@ const FormKeysState = struct {
 /// `docs/portable-manifest-v1.md` §4.5 is enforced: counts are read off
 /// a form's `:positional` declaration and nowhere else, so the same kind
 /// reused on a keyed slot or a `vector-shape :element` carries its
-/// bounds inertly.
+/// bounds inertly. Null-on-ambiguity here is deliberate: a count bound
+/// on an unresolved kind de-narrows exactly as a head-set does, and the
+/// aggregate kind-reference walk at preload is what names the pair.
 fn boundedPositionalHeads(
     schema: Schema.Schema,
     spec: Plugin.FormSpec,
@@ -7086,8 +7088,12 @@ fn matchValueAgainstType(
         if (form_or_expr_handled) |v| return v;
         // For `.named` expected, defer to the union dispatch in
         // `matchValueAgainstKind` when the kind is `.union_of` — the
-        // alternative loop may accept the form via a sibling kind.
-        if (resolvesToUnion(schema, expected)) {
+        // alternative loop may accept the form via a sibling kind — and
+        // likewise fall through when the reference itself does not
+        // resolve (ambiguous or dangling): the `.named` arm below owns
+        // the honest report, never a classified-expression
+        // `wrong_underlying` for a narrowing that could not run.
+        if (resolvesToUnion(schema, expected) or isUnresolvedNamedKind(schema, expected)) {
             // fall through to the switch below
         } else {
             const res = try resolveFormExpression(a, schema, tree, idx);
@@ -7170,6 +7176,26 @@ test "resolvePrimitiveShortcut: 8 names resolve; expr and unknowns are null" {
     try std.testing.expect(resolvePrimitiveShortcut("expr") == null);
     try std.testing.expect(resolvePrimitiveShortcut("color") == null);
     try std.testing.expect(resolvePrimitiveShortcut("") == null);
+}
+
+/// True if `expected` is a `.named` reference that does not resolve
+/// `.found` against the aggregate — an ambiguous or dangling kind
+/// reference — and is not a primitive shortcut ("number", "any", …),
+/// which never reaches the value-kind catalog. The form fast-paths in
+/// both walkers consult this before classifying the form's expression:
+/// a narrowing that cannot resolve is not a value that failed, so the
+/// reference itself is reported (`ambiguous_element_kind` /
+/// `unknown_element_kind`), never a spurious `wrong_underlying`.
+fn isUnresolvedNamedKind(schema: Schema.Schema, expected: Plugin.ValueType) bool {
+    const ref = switch (expected) {
+        .named => |r| r,
+        else => return false,
+    };
+    if (resolvePrimitiveShortcut(ref.name) != null) return false;
+    return switch (schema.lookupValueKind(ref.name, ref.namespace)) {
+        .found => false,
+        else => true,
+    };
 }
 
 /// Resolve `expected` to a `.form`-underlying `ValueKind` if it is one;
@@ -9247,7 +9273,7 @@ fn processEvalValidate(
             // rejectable form in a union slot silently passed — the helper's
             // step 4 closes that gap.
             const fv = maybe_form.?;
-            if (matchFormAgainstTypeBinary(schema, fv.head, fv.namespace, fv.children.remaining, e.expected, e.depth)) |f| {
+            if (try matchFormAgainstTypeBinary(a, schema, fv.head, fv.namespace, fv.children.remaining, e.expected, e.depth)) |f| {
                 if (e.outer_vec) |ov| {
                     try emitTypeMismatchBinaryOuter(a, diags, view, ov, f, extras);
                 } else {
@@ -10279,13 +10305,14 @@ fn matchKindBinary(
 /// still threads the `Schema.MAX_KIND_DEPTH` bound for parity with
 /// `resolveExpected`.
 fn matchFormAgainstTypeBinary(
+    a: Allocator,
     schema: Schema.Schema,
     head: []const u8,
     namespace: ?[]const u8,
     argc: u32,
     expected: Plugin.ValueType,
     depth: u8,
-) ?MatchFail {
+) Allocator.Error!?MatchFail {
     // 1. Form-pinned kind with a HeadSet: narrow by head (tree
     //    `matchValueAgainstType` 4342-4349 + `matchValueAgainstKind` `.form`).
     if (resolveFormHeadKind(schema, expected)) |kind| {
@@ -10325,7 +10352,7 @@ fn matchFormAgainstTypeBinary(
         const arm = determinedArm(schema, k, .form);
         var arm_fail: ?MatchFail = null;
         for (us.alternatives, 0..) |alt_name, ai| {
-            const inner = matchFormAgainstTypeBinary(schema, head, namespace, argc, .{ .named = alt_name }, next_d);
+            const inner = try matchFormAgainstTypeBinary(a, schema, head, namespace, argc, .{ .named = alt_name }, next_d);
             if (inner == null) return null;
             if (arm == ai) arm_fail = inner;
         }
@@ -10334,6 +10361,28 @@ fn matchFormAgainstTypeBinary(
             .got_label = "form",
             .alternatives = us.alternatives,
         } };
+    }
+    // 4.5 A `.named` expected that is not a primitive shortcut and does
+    //     not resolve `.found` — an ambiguous or dangling kind reference —
+    //     fails as itself, the binary twin of the tree path's fall-through
+    //     into the `.named` arm (`resolveExpected`'s claimants idiom): the
+    //     narrowing could not run, so the fail names the reference, never
+    //     the form's classified expression (`wrong_underlying`).
+    if (expected == .named) {
+        const ref = expected.named;
+        if (resolvePrimitiveShortcut(ref.name) == null) {
+            switch (schema.lookupValueKind(ref.name, ref.namespace)) {
+                .found => {},
+                .not_found => return MatchFail{ .unknown_element_kind = .{
+                    .name = ref.name,
+                    .namespace = ref.namespace,
+                } },
+                .ambiguous => |amb| return MatchFail{ .ambiguous_element_kind = .{
+                    .name = ref.name,
+                    .claimants = try a.dupe(*const Plugin.Plugin, amb.slice()),
+                } },
+            }
+        }
     }
     // 5. Typed non-form/any/union/expr slot: compare the form's declared
     //    expression result to the expected type (tree 4372-4383).

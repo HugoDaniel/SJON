@@ -147,6 +147,19 @@ check_count() {
 }
 check_count README.md fixtures
 
+# README's retained counts are live claims; missing anchors fail check_count.
+fuzz=$(grep -c 'testing.fuzz(' src/fuzz.zig)
+explained=$(node -e 'console.log(Object.keys(JSON.parse(require("node:fs").readFileSync("landing-page/src/data/errors.json", "utf8"))).length)')
+check_count README.md "never-panic fuzz harnesses" "$fuzz"
+check_count README.md "explained" "$explained"
+catalogue=$(grep -oE '[0-9]+-entry explanations catalogue' README.md | grep -oE '^[0-9]+')
+if [ "$catalogue" = "$explained" ]; then
+    pass "README explanations catalogue = $explained"
+else
+    bad "README explanations catalogue is '$catalogue', expected $explained (anchor required)"
+fi
+
+
 # CLAUDE.md is a dev-repo-only file: the public release cut ships without
 # it, so every CLAUDE.md check below runs only when the file is present.
 # In the dev repo its absence would mean the file was deleted, which the
@@ -211,7 +224,7 @@ fi
 # description. Anything stronger would be prose linting, which this script
 # does not do. It catches the failure that actually happened — a new root
 # export landing with no mention at all.
-exports=$(grep -oE '^pub const [A-Za-z_]+ = @import' src/root.zig | awk '{print $3}')
+exports=$(grep -oE '^pub const [A-Za-z_][A-Za-z0-9_]* = @import' src/root.zig | awk '{print $3}')
 if [ -z "$exports" ]; then
     echo "audit_docs.sh: found no 'pub const X = @import' in src/root.zig — probe is broken" >&2
     exit 2

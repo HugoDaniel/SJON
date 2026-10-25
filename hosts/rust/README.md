@@ -25,7 +25,7 @@ This is the second WASM-backed host wrapper, after the JS host in
 | `tests/host_eval_expr.rs`               | `SjonHost::eval_expr` coverage (5 tests).            |
 | `tests/host_metadata.rs`                | Manifest-metadata smoke tests (4 tests).             |
 | `tests/filesystem_resolver.rs`          | `FilesystemResolver` semantics (8 tests).            |
-| `tests/conformance.rs`                  | 241 of 271 corpus fixtures (skips 29 `lowering-*` — Zig-host-only — and legacy `too-many-keys`). |
+| `tests/conformance.rs`                  | 354 of 393 corpus fixtures (skips 38 `lowering-*` — Zig-host-only — and legacy `too-many-keys`). |
 | `tests/export_schema.rs`                | `SjonHost::export_schema` round-trip coverage (3 tests). |
 | `tests/diagnostic_snapshots.rs`         | `expect-test` HostResult JSON snapshots (4 cases).   |
 | `tests/wasm_bridge.rs`                  | Explicit wasm-bridge invariants (3 tests).           |
@@ -74,7 +74,9 @@ top-level forms into `(plugin …)` declarations / `(use-plugin …)`
 references / data → load each manifest → resolve each reference →
 schema-aggregate → validate the data forest. The diagnostic stream is
 byte-identical (`(code, path)`) to the Zig CLI, the typescript-parity
-reference, and the web host across the conformance corpus.
+reference on overlapping supported fixtures, and the web host on the
+WASM subset. See the [capability matrix](../../docs/INTEGRATION.md#capability-matrix)
+and `conformance/classifier.json` for exclusions.
 
 #### With the bundled `FilesystemResolver`
 

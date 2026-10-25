@@ -1892,48 +1892,315 @@ pub fn evalBinaryWithRuntimeBudget(
     if (root_iter.remaining != 1) return error.MultipleRoots; // != 1 also catches zero roots (name is a slight misnomer for the empty case)
     const root_view = (try root_iter.next()) orelse unreachable;
 
-    var frames: std.ArrayList(FrameBinary) = .empty;
-    defer frames.deinit(gpa);
-    var values: std.ArrayList(Value) = .empty;
-    defer values.deinit(gpa);
+    // Legacy whole-buffer path: no provenance consumer, so `out = null` —
+    // tags write nowhere and results/behavior are byte-identical.
+    var fail: BinaryFailProvenance = .{ .out = null };
+    return runBinaryEngine(&arena, a, gpa, &cursor, root_view, env, schema, runtime, budget, &fail);
+}
 
-    try frames.append(gpa, .{ .eval = .{ .view = root_view, .env = env } });
+/// The shared binary step-loop engine behind both binary entries —
+/// `evalBinaryWithRuntimeBudget` (whole buffer) and `evalBinaryView`
+/// (captured view). Owns the frame/value stacks on `stack_gpa`, drives the
+/// `FrameBinary` loop under `budget`, deep-copies the final value onto the
+/// result arena, and returns the completed `Result` (moving `arena`'s state
+/// out by value; the caller's `errdefer arena.deinit()` still owns cleanup
+/// on failure, exactly as when the loop lived inline).
+///
+/// Allocator roles (both required, and deliberately distinct): `a` is the
+/// result-arena child allocator every *value* allocation goes through (and
+/// what `budget.bytes` polls); `stack_gpa` backs the transient frame/value
+/// stacks. The whole-buffer entry passes `gpa` for both roles' backing (the
+/// arena grows on `gpa`, the stacks live on `gpa`); the view entry passes
+/// the caller's scratch for both.
+///
+/// Provenance (`fail`): the engine tags its OWN error returns on `fail` —
+/// frame/step ceilings and both byte polls `.eval`, stack/arena allocation
+/// failures `.host`, the tail `deepCopyValue` per its two-member error set
+/// (value-depth `.eval`, `OutOfMemory` `.host`). Frame-processor errors
+/// propagate untagged EXCEPT the four `skipBody` sites, which tag
+/// `.structural` through `skipBodyTagged` — the only structural
+/// `DepthExceeded` producer. Whatever escapes untagged is attributed by the
+/// entry's single classifier fallback, so a producer tag is never
+/// overwritten. Entries with no provenance consumer pass `out = null`;
+/// tagging then only flips the local flag and behavior is byte-identical.
+fn runBinaryEngine(
+    arena: *std.heap.ArenaAllocator,
+    a: Allocator,
+    stack_gpa: Allocator,
+    cursor: *BinaryCursor.Cursor,
+    first: BinaryCursor.NodeView,
+    env: *const Env,
+    schema: Schema.Schema,
+    runtime: ?*anyopaque,
+    budget: Budget,
+    fail: *BinaryFailProvenance,
+) BinaryError!Result {
+    var frames: std.ArrayList(FrameBinary) = .empty;
+    defer frames.deinit(stack_gpa);
+    var values: std.ArrayList(Value) = .empty;
+    defer values.deinit(stack_gpa);
+
+    frames.append(stack_gpa, .{ .eval = .{ .view = first, .env = env } }) catch |err| {
+        fail.tag(.host);
+        return err;
+    };
 
     for (0..budget.steps) |_| {
         if (frames.items.len == 0) break;
-        if (frames.items.len > MAX_FRAMES) return error.DepthExceeded;
-        if (arena.queryCapacity() > budget.bytes) return error.MemoryBudgetExceeded;
+        if (frames.items.len > MAX_FRAMES) {
+            fail.tag(.eval);
+            return error.DepthExceeded;
+        }
+        if (arena.queryCapacity() > budget.bytes) {
+            fail.tag(.eval);
+            return error.MemoryBudgetExceeded;
+        }
 
         const f = frames.pop().?;
         switch (f) {
-            .eval => |e| try processEvalBinary(a, gpa, &cursor, e, &frames, &values, schema),
-            .vec_collect => |vc| try processVecCollect(a, gpa, vc, &values),
-            .apply_form => |af| try processApplyForm(a, gpa, af, &values, schema, runtime),
+            .eval => |e| try processEvalBinary(a, stack_gpa, cursor, e, &frames, &values, schema),
+            .vec_collect => |vc| try processVecCollect(a, stack_gpa, vc, &values),
+            .apply_form => |af| try processApplyForm(a, stack_gpa, af, &values, schema, runtime),
             .let_commit => |lc| processLetCommit(lc, &values),
-            .vec_walk => |vw| try processVecWalk(gpa, vw, &frames),
-            .form_walk => |fw| try processFormWalk(a, gpa, fw, &frames, schema),
-            .form_collect_walk => |fc| try processFormCollectWalk(a, gpa, fc, &frames, &values),
-            .let_walk => |lw| try processLetWalk(gpa, &cursor, lw, &frames),
-            .if_after_test => |s| try processIfAfterTest(gpa, &cursor, s, &frames, &values),
-            .cond_after_pred => |s| try processCondAfterPred(gpa, &cursor, s, &frames, &values),
-            .and_after_child => |s| try processAndAfterChild(gpa, s, &frames, &values),
-            .or_after_child => |s| try processOrAfterChild(gpa, s, &frames, &values),
-            .form_drain => |s| try processFormDrain(s.iter),
-            .binder_setup_binary => |s| try processBinderSetupBinary(a, gpa, &cursor, s, &frames, &values),
-            .binder_iter_binary => |s| try processBinderIterBinary(gpa, &cursor, s, &frames, &values),
-            .fold_capture_init => |s| try processFoldCaptureInit(gpa, s, &frames, &values),
+            .vec_walk => |vw| try processVecWalk(stack_gpa, vw, &frames),
+            .form_walk => |fw| try processFormWalk(a, stack_gpa, fw, &frames, schema),
+            .form_collect_walk => |fc| try processFormCollectWalk(a, stack_gpa, fc, &frames, &values),
+            .let_walk => |lw| try processLetWalk(stack_gpa, cursor, lw, &frames),
+            .if_after_test => |s| try processIfAfterTest(stack_gpa, cursor, s, &frames, &values, fail),
+            .cond_after_pred => |s| try processCondAfterPred(stack_gpa, cursor, s, &frames, &values, fail),
+            .and_after_child => |s| try processAndAfterChild(stack_gpa, s, &frames, &values),
+            .or_after_child => |s| try processOrAfterChild(stack_gpa, s, &frames, &values),
+            .form_drain => |s| try processFormDrain(s.iter, fail),
+            .binder_setup_binary => |s| try processBinderSetupBinary(a, stack_gpa, cursor, s, &frames, &values, fail),
+            .binder_iter_binary => |s| try processBinderIterBinary(stack_gpa, cursor, s, &frames, &values),
+            .fold_capture_init => |s| try processFoldCaptureInit(stack_gpa, s, &frames, &values),
         }
     } else {
+        fail.tag(.eval);
         return error.DepthExceeded;
     }
 
     std.debug.assert(values.items.len == 1);
-    // Strings / keywords on the value stack point into `bytes`. Dupe before
-    // returning so the caller can free `bytes`.
-    const final = try deepCopyValue(a, values.items[0]);
+    // Strings / keywords on the value stack point into the cursor's bytes.
+    // Dupe before returning so the caller can free `bytes`.
+    const final = deepCopyValue(a, values.items[0]) catch |err| {
+        // Two-member error set: value-depth → .eval, OutOfMemory → .host —
+        // exactly the classifier's mapping for both names.
+        fail.tag(classifyBinaryFailure(err));
+        return err;
+    };
     // Mirror the tree path: catch an over-budget result after the copy.
-    if (arena.queryCapacity() > budget.bytes) return error.MemoryBudgetExceeded;
-    return .{ .arena = arena, .value = final };
+    if (arena.queryCapacity() > budget.bytes) {
+        fail.tag(.eval);
+        return error.MemoryBudgetExceeded;
+    }
+    return .{ .arena = arena.*, .value = final };
+}
+
+/// Evaluate a **captured subtree view** through the shared binary engine:
+/// an already-captured `NodeView` (an iterator product) plus the payload
+/// position the iterator left the cursor at, evaluated under a borrowed,
+/// already-indexed cursor. This is the entry the pattern query's `(pure
+/// <form>)` expression leaves will drive per cycle — the shared
+/// `FrameBinary` machinery of `evalBinary`, minus the whole-buffer framing.
+/// It never materializes an `Ast.Tree` and never looks at the buffer's
+/// roots: a multi-root or zero-root buffer is fine, an enclosing pattern or
+/// sibling roots are simply never visited (view-only), and `MultipleRoots`
+/// is never raised here.
+///
+/// Lifetime contract (all borrowed inputs, one owned output):
+///
+/// - `cursor` must be initialized over the caller's bytes and already
+///   indexed (`indexPools` — a missing index still works but is
+///   O(pool entries) per lookup, the quadratic mode the index exists to
+///   kill). The cursor, its pool index, and the underlying bytes must
+///   outlive the call. The entry repositions `cursor.pos` — the only field
+///   it mutates — to `payload_pos` and walks from there; callers that need
+///   their own decode iteration preserved pass a **value copy** of the
+///   cursor (`Cursor` is a plain struct of borrowed slices; `pos` is the
+///   only field an eval walk touches).
+/// - `scratch` backs the result arena AND the frame/value stacks. The
+///   returned `Result` owns an arena allocated from `scratch`; its
+///   `.deinit()` returns those pages to `scratch`, so the `Result` must not
+///   outlive the scratch allocator's backing memory. A scratch that runs
+///   dry surfaces as `error.OutOfMemory` (the deterministic-OOM /
+///   clean-drop property the pattern query relies on), and
+///   `budget.bytes` is polled exactly as in the whole-buffer engine.
+/// - The output borrows nothing: string / keyword / vector payloads are
+///   deep-copied onto the result arena, so the caller may free the bytes
+///   (and the pool index) once this returns — same contract as
+///   `evalBinary`.
+///
+/// `budget` has the whole-buffer engine's semantics (per-step frame/byte
+/// polls, post-copy check). There is no `runtime` parameter: a pattern
+/// leaf evaluates with the core plugin only, so a `:impl "wasm:…"` func
+/// surfaces `error.PluginFuncNotImplemented`, mirroring the tree-side leaf
+/// path.
+///
+/// Error channels (see `BinaryFailureSource` for the channels and
+/// `classifyBinaryFailure` for the name-based fallback): malformed wire
+/// anywhere under the capture — bad tag, truncation, out-of-range pool
+/// reference, and `skipBody`'s skip-stack `DepthExceeded` on a
+/// >1024-deep skipped branch (hostile wire; encoder-produced wire cannot
+/// reach it, legal nesting ≤ 1024 admits exactly the 2048-frame skip
+/// stack) — is the **structural** channel. Static eval outcomes and the
+/// engine's resource ceilings — unbound name, arity, the frame/step
+/// ceilings, `equalsBounded`'s value-depth cap under `=`/`!=`, the plugin
+/// arg codec, the tail result copy — are the **eval** channel. The shared
+/// name `DepthExceeded` spans both, so this entry carries the distinction
+/// out-of-band: pass a `failure_source` out-param and it is **set on every
+/// error return and never touched on success** — `.structural` iff a
+/// `skipBody` site produced the error, else the producer's channel
+/// (`.eval` ceilings, `.host` allocator-sourced). Pass `null` for the
+/// bare-error behavior, where the name-exact classifier is the documented
+/// fallback. The whole-buffer entry keeps its `Cursor.init` / one-root
+/// framing, so its own header failures (`InvalidMagic`, …) are structural
+/// too; only `MultipleRoots` is exclusive to it (never raised here).
+pub fn evalBinaryView(
+    scratch: Allocator,
+    cursor: *BinaryCursor.Cursor,
+    view: BinaryCursor.NodeView,
+    payload_pos: u32,
+    env: *const Env,
+    schema: Schema.Schema,
+    budget: Budget,
+    failure_source: ?*BinaryFailureSource,
+) BinaryError!Result {
+    var arena = std.heap.ArenaAllocator.init(scratch);
+    errdefer arena.deinit();
+    // Reposition to the captured payload. `setPos` asserts the position is
+    // in-bounds; `payload_pos` is an iterator product (captured immediately
+    // after `next()` handed out `view`), so a wrong value is a caller
+    // contract violation, same status as the next/read pairing rule.
+    BinaryCursor.setPos(cursor, payload_pos);
+    var fail: BinaryFailProvenance = .{ .out = failure_source };
+    return runBinaryEngine(&arena, arena.allocator(), scratch, cursor, view, env, schema, null, budget, &fail) catch |err| {
+        // The single generic catch, and it yields: producer/engine
+        // attribution (the skipBody sites, the engine's own ceilings) wins
+        // over the name-based fallback, which handles everything else —
+        // cursor structural reads, static eval outcomes, plugin results.
+        if (!fail.tagged) fail.tag(classifyBinaryFailure(err));
+        return err;
+    };
+}
+
+/// Which channel a `BinaryError` came from — the executable form of the
+/// structural-vs-eval mapping documented on the binary entries. This is the
+/// name-based **fallback**: exact for every error that has exactly one
+/// producer family, which is every name except one. The exception is
+/// `DepthExceeded` — `skipBody`'s skip-stack cap (structural, hostile wire
+/// in a skipped branch) and the eval ceilings (frame/step budgets,
+/// `equalsBounded` value depth, the plugin arg codec, the tail copy) share
+/// the name and meet at the same dispatch boundary — so the authority for
+/// that name is `evalBinaryView`'s producer-side `failure_source`
+/// out-param, which tags the `skipBody` sites where they raise. Without an
+/// out-param in use (the legacy whole-buffer contract), this classifier IS
+/// the documented behavior, and its `.eval` mapping of the shared name is
+/// the channel a bare-error caller gets. **No public error enum is
+/// widened**: the distinction rides out-of-band, and the exhaustive
+/// else-free switch below stays the compile-time guard — a future
+/// `BinaryError` member cannot be silently masked; it must be mapped here
+/// (and is tagged at the producer if it comes from `skipBody`).
+pub const BinaryFailureSource = enum {
+    /// Malformed wire: a `BinaryCursor`/`BinaryFormat` structural name
+    /// (`InvalidTag`, `Truncated`, `PoolIndexOutOfRange`, …), including
+    /// `skipBody`'s skip-stack `DepthExceeded` on hostile wire in a
+    /// skipped branch — the one structural bearer of that shared name,
+    /// tagged at the four skip sites. For the pattern dry-run this is the
+    /// propagate-as-`BinaryError` channel.
+    structural,
+    /// A static eval outcome or a deterministic resource limit
+    /// (`UnknownBinding`, `DepthExceeded` from the eval ceilings,
+    /// `MemoryBudgetExceeded`, …).
+    eval,
+    /// Allocator-sourced failure (`OutOfMemory`). Under the view entry's
+    /// bounded scratch this includes deterministic scratch exhaustion (the
+    /// clean-drop property), so `.host` names the allocator channel, not
+    /// necessarily a process-level host failure — callers route it per
+    /// their own contract.
+    host,
+    /// Whole-buffer framing only: raised by `evalBinary`'s one-root check,
+    /// never by `evalBinaryView`.
+    multiple_roots,
+};
+
+pub fn classifyBinaryFailure(err: BinaryError) BinaryFailureSource {
+    return switch (err) {
+        error.OutOfMemory => .host,
+        error.MultipleRoots => .multiple_roots,
+        error.InvalidMagic,
+        error.InvalidVersion,
+        error.InvalidFlags,
+        error.InvalidTag,
+        error.InvalidNamespace,
+        error.Truncated,
+        error.PoolIndexOutOfRange,
+        error.NodeCountExceeded,
+        error.StringTooLong,
+        error.CommentTooLong,
+        => .structural,
+        error.TypeMismatch,
+        error.DivisionByZero,
+        error.UnknownFunction,
+        error.AmbiguousFunction,
+        error.ArityMismatch,
+        error.UnknownBinding,
+        error.InvalidLetBinding,
+        error.InvalidCondClause,
+        error.InvalidBinderShape,
+        error.KeywordInExpressionArgs,
+        error.DepthExceeded,
+        error.MemoryBudgetExceeded,
+        error.PluginFuncNotImplemented,
+        error.PluginFuncResultType,
+        error.PluginFuncFailed,
+        error.PluginFuncTrapped,
+        error.PluginFuncAllocFailed,
+        => .eval,
+    };
+}
+
+/// Producer-side failure provenance for the binary engine — the mechanism
+/// behind `evalBinaryView`'s `failure_source` out-param. `tag` records the
+/// channel AT THE PRODUCER: the engine tags its own error returns, and the
+/// four `skipBody` call sites in the frame processors tag through
+/// `skipBodyTagged` (the only `.structural` `DepthExceeded` producer).
+/// `tagged` gives the single generic catch (`evalBinaryView`'s classifier
+/// fallback) its precedence — a producer's attribution is never
+/// overwritten, and an untagged error always falls to the name-exact
+/// classifier. Entries with no provenance consumer pass `out = null`;
+/// tagging then only flips the local flag, so legacy behavior is
+/// byte-identical.
+const BinaryFailProvenance = struct {
+    out: ?*BinaryFailureSource,
+    tagged: bool = false,
+
+    fn tag(p: *BinaryFailProvenance, src: BinaryFailureSource) void {
+        p.tagged = true;
+        if (p.out) |dst| dst.* = src;
+    }
+};
+
+/// `BinaryCursor.skipBody` with producer-side provenance: every error it
+/// can actually raise is a wire-decode outcome (it allocates nothing, so
+/// the `OutOfMemory` member of the shared `BinaryFormat.Error` set is
+/// unreachable on this path), so any failure at a skip site — including
+/// the skip-stack `DepthExceeded`, the one `DepthExceeded` in the whole
+/// engine that is structural — is tagged `.structural` where it raises.
+/// A future structural name skipBody learns to raise is therefore tagged
+/// correctly here by construction. All other `DepthExceeded` producers
+/// (the engine's frame/step ceilings, `equalsBounded` under `=`/`!=`,
+/// the plugin arg codec, the tail `deepCopyValue`) stay `.eval`/`.host`
+/// via the engine's own tags and the classifier fallback.
+fn skipBodyTagged(
+    cursor: *BinaryCursor.Cursor,
+    view: BinaryCursor.NodeView,
+    fail: *BinaryFailProvenance,
+) BinaryError!void {
+    return BinaryCursor.skipBody(cursor, view) catch |err| {
+        fail.tag(.structural);
+        return err;
+    };
 }
 
 fn processEvalBinary(
@@ -2374,6 +2641,7 @@ fn processIfAfterTest(
     s: anytype,
     frames: *std.ArrayList(FrameBinary),
     values: *std.ArrayList(Value),
+    fail: *BinaryFailProvenance,
 ) BinaryError!void {
     const test_v = values.pop().?;
     var iter = s.iter;
@@ -2387,7 +2655,7 @@ fn processIfAfterTest(
         try frames.append(gpa, .{ .form_drain = .{ .iter = iter } });
         try frames.append(gpa, .{ .eval = .{ .view = then_entry.value, .env = s.env } });
     } else {
-        try BinaryCursor.skipBody(cursor, then_entry.value);
+        try skipBodyTagged(cursor, then_entry.value, fail);
         if (s.has_else) {
             const else_entry = (try iter.next()) orelse unreachable;
             if (else_entry.kind == .keyword) return error.KeywordInExpressionArgs;
@@ -2430,6 +2698,7 @@ fn processCondAfterPred(
     s: anytype,
     frames: *std.ArrayList(FrameBinary),
     values: *std.ArrayList(Value),
+    fail: *BinaryFailProvenance,
 ) BinaryError!void {
     const test_v = values.pop().?;
     var iter = s.iter;
@@ -2445,7 +2714,7 @@ fn processCondAfterPred(
         return;
     }
     // Falsy: skip value clause, recurse on next predicate (if any).
-    try BinaryCursor.skipBody(cursor, value_entry.value);
+    try skipBodyTagged(cursor, value_entry.value, fail);
     if (iter.remaining == 0) {
         _ = try iter.next();
         try values.append(gpa, .nil);
@@ -2680,6 +2949,7 @@ fn processBinderSetupBinary(
     s: anytype,
     frames: *std.ArrayList(FrameBinary),
     values: *std.ArrayList(Value),
+    fail: *BinaryFailProvenance,
 ) BinaryError!void {
     // Pop xs (just-evaluated). For fold, the init value was captured
     // earlier by `fold_capture_init` into `s.init_val_captured` —
@@ -2705,7 +2975,7 @@ fn processBinderSetupBinary(
     // the binder loop owns the cursor exclusively. `skipBody`
     // advances past body's bytes; the terminal `iter.next()`
     // returning null consumes any trailing comments.
-    try BinaryCursor.skipBody(cursor, body_view);
+    try skipBodyTagged(cursor, body_view, fail);
     _ = try form_iter.next();
     const post_form_pos: u32 = cursor.pos;
 
@@ -2792,11 +3062,11 @@ fn processBinderIterBinary(
     try frames.append(gpa, .{ .eval = .{ .view = s.body_view, .env = s.inner_env } });
 }
 
-fn processFormDrain(iter_in: BinaryCursor.ChildIter) BinaryError!void {
+fn processFormDrain(iter_in: BinaryCursor.ChildIter, fail: *BinaryFailProvenance) BinaryError!void {
     var iter = iter_in;
     while (iter.remaining > 0) {
         const entry = (try iter.next()) orelse unreachable;
-        try BinaryCursor.skipBody(iter.cursor, entry.value);
+        try skipBodyTagged(iter.cursor, entry.value, fail);
     }
     // Final next() returns null and consumes form-trailing comments.
     _ = try iter.next();

@@ -16,7 +16,8 @@ semantic tokens; see [docs/TOOLING.md](../../docs/TOOLING.md).
 npm install @sjon-lang/highlight
 ```
 
-The published package is compiled JavaScript plus declarations, built into
+The published package requires Node ≥ 20.10 (JSON import attributes).
+It is compiled JavaScript plus declarations, built into
 `dist/` by `prepack` (`tsconfig.build.json`). Inside this repository the
 workspace imports the `.ts` sources directly, and bundlers (Astro/Vite/esbuild)
 transpile them and resolve the `.json`.

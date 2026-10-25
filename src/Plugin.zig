@@ -325,8 +325,11 @@ pub const MAX_LOWERED_DEPTH: usize = 16;
 pub const MAX_LOWERED_VECTOR_DEPTH: usize = 16;
 
 /// Rough byte budget for lowering output: sum of head + key + string-
-/// value lengths across emitted forms. Exceeded → `lowering_output_too_large`.
-/// Not a precise allocation cap — sufficient to catch runaway hooks.
+/// value lengths across emitted forms, plus a carried subtree's charge
+/// (one unit per carried node, floored at one, plus the bytes of every
+/// comment `cloneNode` copies with it). Exceeded →
+/// `lowering_output_too_large`. Not a precise allocation cap; sufficient
+/// to catch runaway hooks.
 pub const MAX_LOWERED_BYTES: usize = 256 * 1024;
 
 /// One declared `:keyword value` slot on a form. Listed in `FormSpec.keys`.

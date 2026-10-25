@@ -145,7 +145,7 @@ while IFS= read -r -d '' md; do
             broken=$((broken + 1))
         fi
     done < <(grep -oE '\]\([^)]+\)' "$md" 2>/dev/null | sed 's/^](//; s/)$//')
-done < <(find "$WORKTREE" -name '*.md' -type f -print0)
+done < <(find "$WORKTREE" -type f \( -name '*.md' -o -name '*.mdx' \) -print0)
 if [ "$broken" -ne 0 ]; then
     echo "error: $broken broken Markdown link(s) — the cut must hold on its own" >&2
     exit 1

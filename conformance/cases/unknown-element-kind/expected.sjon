@@ -1,2 +1,7 @@
+; The aggregate phase names the manifest's dangling reference first: the value
+; kind `bag` declares `:element missing`, so the preload walk reports it at
+; [unk-elem-test bag element] before the document's element traversal reports
+; the value at [set k].
 (diagnostics
+  (diagnostic :code unknown_element_kind :path [unk-elem-test bag element])
   (diagnostic :code unknown_element_kind :path [set k]))

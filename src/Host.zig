@@ -649,7 +649,7 @@ pub const PreloadedSchema = struct {
     /// Pure aggregate over `plugins`. No allocation; not deinited.
     schema: Schema.Schema,
     /// Phase-tagged diagnostics from the manifest-load pass (`.manifest`,
-    /// spans local to each source) and the five aggregate validators
+    /// spans local to each source) and the six aggregate validators
     /// (`.aggregate`), concatenated in that order. Because every span is
     /// local to a manifest source (never the eventual document), a borrowing
     /// `validateDocument` needs no span rebasing — its own diagnostics are
@@ -691,7 +691,7 @@ const PreparedDocument = struct {
 /// `(plugin …)` declarations → resolve `(use-plugin …)` references (building
 /// the default filesystem resolver when the caller supplies project_root+io)
 /// → dedupe plugin names → preflight resolved wasm → build the user-only and
-/// core-prepended schemas → run the five aggregate validators.
+/// core-prepended schemas → run the six aggregate validators.
 ///
 /// Ownership contract. The CALLER owns `arena` (and passes its `a`), the
 /// `diags` list, and the lazy plugin runtime (`runtime_storage` +
@@ -1024,7 +1024,7 @@ fn prepareDocument(
     for (plugins_slice, 0..) |p, i| eval_plugins[i + 1] = p;
     const eval_schema: Schema.Schema = .{ .plugins = eval_plugins };
 
-    // Aggregate phase — the five schema-internal validators, each owning a
+    // Aggregate phase — the six schema-internal validators, each owning a
     // gpa-allocated slice copied into the host arena then freed. Their order
     // is corpus-locked (see `runAggregateValidators`). Run ONLY when this
     // document contributed at least one plugin: when it didn't, any aggregate
@@ -1835,7 +1835,7 @@ pub fn preloadSchema(
     for (plugin_results_slice, 0..) |pr, i| plugins_slice[i] = pr.plugin;
     const schema: Schema.Schema = .{ .plugins = plugins_slice };
 
-    // Aggregate phase — the same five schema-internal validators the
+    // Aggregate phase — the same six schema-internal validators the
     // document pipeline runs, over the preloaded (user-only) set. Diagnostics
     // stamp `.aggregate`.
     try runAggregateValidators(gpa, a, schema, &diags);
@@ -2500,11 +2500,11 @@ fn formatRuntimeFailureMessage(
 
 const freeAggregateDiagnostics = Ast.Diagnostic.freeOwnedSlice;
 
-/// Run the five schema-internal aggregate validators — cross-refs, unions,
-/// forms, lowering, defaults — copying each one's gpa-allocated diagnostics
-/// into the host arena under `phase = .aggregate` and freeing the backing
-/// slice once copied. `validateDocument` and `evalExpr` run exactly this set
-/// in exactly this order; the order is corpus-locked (it fixes the
+/// Run the six schema-internal aggregate validators — cross-refs, unions,
+/// forms, lowering, defaults, kind refs — copying each one's gpa-allocated
+/// diagnostics into the host arena under `phase = .aggregate` and freeing the
+/// backing slice once copied. `validateDocument` and `evalExpr` run exactly
+/// this set in exactly this order; the order is corpus-locked (it fixes the
 /// aggregate-phase diagnostic-stream sequence), so the list must not be
 /// reordered without re-baselining the conformance fixtures.
 fn runAggregateValidators(
@@ -2519,6 +2519,7 @@ fn runAggregateValidators(
         Schema.Schema.validateForms,
         Schema.Schema.validateLowering,
         Schema.Schema.validateDefaults,
+        Schema.Schema.validateKindRefs,
     }) |validate| {
         const agg = validate(schema, gpa) catch |err| switch (err) {
             error.OutOfMemory => return Error.OutOfMemory,
@@ -3186,7 +3187,7 @@ test "Host.exportSchemaFromSource loads inline plugin + exports its schema" {
 // self-contained `PreloadedSchema`; later `validateDocument` calls borrow it
 // via `HostOptions.preloaded` (commit 3). Never fails on user input — parse /
 // load failures become `.manifest`-phase diagnostics and the offending source
-// contributes no plugin. The five aggregate validators run over the loaded set
+// contributes no plugin. The six aggregate validators run over the loaded set
 // and stamp `.aggregate`. No `core` is seeded (user-only, mirroring
 // `HostResult.plugins`).
 // ---------------------------------------------------------------------------

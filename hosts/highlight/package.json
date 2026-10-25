@@ -1,6 +1,6 @@
 {
   "name": "@sjon-lang/highlight",
-  "version": "1.4.3",
+  "version": "1.5.0",
   "type": "module",
   "description": "SJON syntax-highlighting grammars: a CodeMirror StreamLanguage and a Shiki-compatible TextMate grammar for .sjon sources.",
   "license": "CC0-1.0",
@@ -20,7 +20,7 @@
   },
   "files": ["dist"],
   "engines": {
-    "node": ">=20"
+    "node": ">=20.10"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

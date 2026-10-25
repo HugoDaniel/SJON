@@ -38,15 +38,15 @@ gate that checks it.
   append-only, both gated by the conformance corpus. Full layout in
   [docs/DESIGN.md](docs/DESIGN.md#binary-ir-binaryzig).
 - **Diagnostics as product** — every error carries `(code, severity,
-  span, path)`, a 119-entry explanations catalogue, and LSP
+  span, path)`, a 130-entry explanations catalogue, and LSP
   quick-fixes. See it below.
 
 | Field     | Size | Value  |
 | --------- | ---- | ------ |
 | `version` | 1 B  | `0x05` |
 
-393 fixtures replayed bit-identically across the Zig, Node, Rust, and
-TypeScript hosts. 18 never-panic fuzz harnesses. 119 explained
+393 fixtures in the shared corpus; each host replays its supported subset
+(see the capability matrix below). 25 never-panic fuzz harnesses. 130 explained
 diagnostic codes. Zero dependencies in the core library. Every number
 here is drift-gated by `zig build audit-docs`; run `zig build verify`
 to check all of it yourself.
@@ -74,8 +74,9 @@ and LSP capability list.
 ## Consuming
 
 Every host shares the diagnostic vocabulary, the binary wire format,
-and the conformance corpus — behavior is byte-identical across all
-four. Full comparison table and quickstarts:
+and the conformance corpus. Supported surfaces agree on the replayed
+fixtures; intentional boundaries and skip registries are documented in the
+capability matrix and quickstarts:
 [docs/INTEGRATION.md](docs/INTEGRATION.md).
 
 **Zig** — the reference path, zero runtime dependencies:
@@ -103,13 +104,15 @@ const text = try sjon.print(gpa, tree, .{ .mode = .canonical });
 defer text.deinit();
 ```
 
-**Node / Web (WASM)** — `zig build wasm-all`, then:
+**Node / Web (WASM)** — install `npm install @sjon-lang/web@1.5.0`.
+Build matching artifacts from the 1.5.0 source with Zig 0.16 (`zig build
+wasm-all`); the npm package does not bundle WASM. From the source root:
 
 ```js
-import { SjonEncoder, SjonReader } from "hosts/web/sjon-reader.ts";
+import { SjonEncoder, SjonReader } from "@sjon-lang/web";
 
-const encoder = await SjonEncoder.load("sjon.wasm");
-const reader = await SjonReader.load("sjon-binary.wasm");
+const encoder = await SjonEncoder.load("./zig-out/bin/sjon.wasm");
+const reader = await SjonReader.load("./zig-out/bin/sjon-binary.wasm");
 const binary = encoder.toBinary('(scene :bpm 130)');
 const result = reader.validateBinary(binary);
 ```
@@ -120,8 +123,11 @@ See [`examples/quickstart-web.mjs`](examples/quickstart-web.mjs) and
 **Rust** — wraps `sjon.wasm` via `wasmtime`:
 
 ```rust
-let host = SjonHost::load("sjon.wasm")?;
-let result = host.validate_document(source, options)?;
+use std::path::Path;
+use sjon_host::{HostOptions, SjonHost};
+
+let mut host = SjonHost::load(Path::new("zig-out/bin/sjon.wasm"), None)?;
+let result = host.validate_document(source, &HostOptions::default())?;
 ```
 
 See [`examples/quickstart-rust.rs`](examples/quickstart-rust.rs) and
@@ -138,6 +144,7 @@ See [hosts/schema/README.md](hosts/schema/README.md).
 - [docs/LANGUAGE.md](docs/LANGUAGE.md) — formal grammar, semantics, JSON bridge
 - [docs/DESIGN.md](docs/DESIGN.md) — module map, SoA tree, binary wire format
 - [docs/INTEGRATION.md](docs/INTEGRATION.md) — embedding from Zig, Node/Web, Rust, TypeScript
+- [docs/BINARY_PATTERNS.md](docs/BINARY_PATTERNS.md) — decode once and query binary patterns
 - [docs/TOOLING.md](docs/TOOLING.md) — editor setup, LSP capabilities, `sjon` CLI
 - [docs/plugin-model-v1.md](docs/plugin-model-v1.md) — the plugin contract
 - [examples/](examples/README.md) — runnable fixtures and demos, one per host
@@ -164,9 +171,12 @@ lands updated in the same change.
 Every package in this repo carries the one version declared in
 `src/version.zig`; `zig build audit-format-versions` names any
 manifest that falls out of step. The `@sjon-lang/*` packages carry full
-registry metadata and pack cleanly with `npm pack`; today they are
-consumed as path or workspace dependencies. What each release changed
-is in [CHANGELOG.md](CHANGELOG.md).
+registry metadata and are published through `scripts/publish-npm.sh`.
+Use `pnpm pack` for local tarballs: pnpm rewrites the web package's
+`workspace:*` dependency into the matching registry version. Workspace
+and path dependencies remain supported. What each release changed
+is in [CHANGELOG.md](CHANGELOG.md). The repeatable candidate and publication
+checks are in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 

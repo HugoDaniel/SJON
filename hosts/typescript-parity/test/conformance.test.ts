@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { parse } from '../src/parser.ts';
 import { loadManifest } from '../src/loader.ts';
 import { validate } from '../src/validator.ts';
-import { validateCrossRefs } from '../src/plugin.ts';
+import { validateCrossRefs, validateKindRefs } from '../src/plugin.ts';
 import { validateDocument } from '../src/Host.ts';
 import { queryDocument } from '../src/patternQuery.ts';
 import type { Diagnostic } from '../src/diagnostics.ts';
@@ -480,6 +480,7 @@ for (const name of CASES) {
       extraLoads.some((r) => r.diagnostics.some((d) => d.severity === 'err'));
     if (!anyLoadErr) {
       for (const d of validateCrossRefs(schema)) diags.push(d);
+      for (const d of validateKindRefs(schema)) diags.push(d);
     }
 
     // Phase 3 — input validate.

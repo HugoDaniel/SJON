@@ -550,6 +550,26 @@ test "lossless: tree-trailing comment survives" {
     try testing.expectEqualStrings("42\n; bye\n", got.data);
 }
 
+test "decoder parity: malformed tree-trailing count 257 is NodeCountExceeded in fromBinary" {
+    // The streaming cursor's 257-count tamper must be rejected by the tree
+    // decoder too: the two readers admit the same frames at the tree-trailing
+    // boundary, exactly as they do for leading, form and vector comments.
+    const a = testing.allocator;
+    const bin = try encode("(+ 1 t)", .{
+        .with_spans = false,
+        .with_head_spans = false,
+        .with_kvpair_key_spans = false,
+        .with_tree_trailing_comments = true,
+    });
+    defer bin.deinit();
+    var frame: [256]u8 = undefined;
+    try testing.expect(bin.data.len + 1 <= frame.len);
+    @memcpy(frame[0 .. bin.data.len - 1], bin.data[0 .. bin.data.len - 1]);
+    frame[bin.data.len - 1] = 0x81;
+    frame[bin.data.len] = 0x02;
+    try testing.expectError(error.NodeCountExceeded, fromBinary(a, frame[0 .. bin.data.len + 1], .{}));
+}
+
 test "lossless: vector trailing comment survives binary round-trip" {
     // `[1 2 ; c\n]` — the comment before `]` is vector-trailing trivia. The
     // wire `vector` payload carries a flag-gated trailing-comment field

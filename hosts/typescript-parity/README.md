@@ -52,8 +52,9 @@ Deliberately **not** in v1 of this host:
 ### Conformance cases it skips
 
 The runner (`test/conformance.test.ts`) filters out these case families
-by name — each is covered end-to-end by the Web + Rust hosts, which
-delegate evaluation to the shared `sjon.wasm`:
+by name. Web and Rust cover their own supported subset through `sjon.wasm`;
+`lowering-*` remains Zig-only. The authoritative list is `SKIP_FAMILIES` in
+that runner:
 
   * `plugin-exec-*` — the executable-plugin runtime (instantiate sidecar
     wasm, pre-flight, dispatch); declarative-only by design.
@@ -71,6 +72,13 @@ delegate evaluation to the shared `sjon.wasm`:
   * `exclusive-multi-key-*`, `exclusive-bundle-*` — multi-key
     exclusive-group runtime (schema-export reads the group metadata, but
     the validator emits no group diagnostics).
+
+  * `expr-label-*`, `expr-pow-*`, `expr-value-*` — evaluator-dependent calls
+    and computed value checks.
+  * `pattern-expr-*` — expression-valued pattern leaves; literal patterns run.
+  * `cross-ref-provider-*` except `unknown`, `ambiguous`, and
+    `source-key-unknown` — provider extraction needs an executable runtime;
+    those three aggregate-only cases run.
 
 …plus the legacy `too-many-keys` fixture (`HOST_PASS_SKIP`), noted under
 Usage below. Everything else in `conformance/cases/` runs.

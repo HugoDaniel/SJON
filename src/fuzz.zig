@@ -463,10 +463,29 @@ fn fuzzBinaryCursorInit(_: void, smith: *Smith) anyerror!void {
 
     // If init succeeded, calling rootIter must also produce a known error
     // or a valid iterator.
-    _ = cursor.rootIter() catch |err| {
+    var roots = cursor.rootIter() catch |err| {
         expectKnownBinaryError(err);
         return;
     };
+
+    // Hostile root-exhaustion leg: drive the iterator to its null return,
+    // which consumes the tree-trailing comment block when flag bit 5 is set.
+    // Hostile tails (over-cap count, bad kind, truncation, over-long varint)
+    // are tolerated known outcomes, not findings — unlike the pool-parity leg
+    // above, an error here is routed and the input abandoned. The valid
+    // flags-0x3f corpus seed reaches this branch in corpus mode on day one;
+    // Smith mutations exercise the malformed variants.
+    while (true) {
+        const maybe_view = roots.next() catch |err| {
+            expectKnownBinaryError(err);
+            return;
+        };
+        const view = maybe_view orelse break;
+        BinaryCursor.skipBody(&cursor, view) catch |err| {
+            expectKnownBinaryError(err);
+            return;
+        };
+    }
 }
 
 test "fuzz BinaryCursor.init: never panics on arbitrary bytes" {
@@ -1166,21 +1185,25 @@ test "fuzz Edit under .preserve: returns Bytes or known Edit.Error" {
 // tree, fuzzing the staging step the Host runs between layers.
 // ---------------------------------------------------------------------------
 
-/// Static schema for the lowering harness. Each lowerable head lowers via
-/// `test/identity-v1` (emitting `<head>-normal`) and has a matching `:open`
-/// terminal, so a clean nested document lowers without produced-head noise.
-/// `node`/`wrap`/`leaf` are lowerable (self- and cross-nestable, to trip the
-/// lint); `plain` is non-lowerable (the by-design nested-sugar parent).
+/// Static schema for the lowering harness. `node` lowers via the carry hook,
+/// so authored subtrees with dates, times, units, vectors and kvpairs reach
+/// `cloneNode`; `wrap`/`leaf` lower via `test/identity-v1` (emitting
+/// `<head>-normal`) for the nested-lowerable lint's positive space, and every
+/// produced head is lowerable once more through the carry hook, so a second
+/// staging pass over the lowered tree carries hook-emitted nodes (the weakest
+/// span case, where a staged root's hook-chosen span need not cover its
+/// descendants). `plain` is non-lowerable (the by-design nested-sugar parent).
 const lowering_fuzz_plugin = sjon.Plugin.Plugin{
     .name = "fz",
     .forms = &.{
-        .{ .name = "node", .open = true, .lowering = .{ .hook = "test/identity-v1", .produces = &.{"node-normal"} } },
+        .{ .name = "node", .open = true, .lowering = .{ .hook = "test/fuzz-carry-v1", .produces = &.{"carried"} } },
         .{ .name = "wrap", .open = true, .lowering = .{ .hook = "test/identity-v1", .produces = &.{"wrap-normal"} } },
         .{ .name = "leaf", .open = true, .lowering = .{ .hook = "test/identity-v1", .produces = &.{"leaf-normal"} } },
         .{ .name = "plain", .open = true },
-        .{ .name = "node-normal", .open = true },
-        .{ .name = "wrap-normal", .open = true },
-        .{ .name = "leaf-normal", .open = true },
+        .{ .name = "carried", .open = true, .lowering = .{ .hook = "test/fuzz-carry-v1", .produces = &.{"carried-once"} } },
+        .{ .name = "wrap-normal", .open = true, .lowering = .{ .hook = "test/fuzz-carry-v1", .produces = &.{"carried-once"} } },
+        .{ .name = "leaf-normal", .open = true, .lowering = .{ .hook = "test/fuzz-carry-v1", .produces = &.{"carried-once"} } },
+        .{ .name = "carried-once", .open = true },
     },
 };
 
@@ -1202,6 +1225,7 @@ fn fuzzLowering(_: void, smith: *Smith) anyerror!void {
     var registry: sjon.Lowering.LoweringRegistry = .{};
     defer registry.deinit(testing.allocator);
     try registry.register(testing.allocator, sjon.Lowering_test_hooks.test_identity_v1);
+    try registry.register(testing.allocator, sjon.Lowering_test_hooks.test_fuzz_carry_v1);
 
     // Empty overlay — the worklist walk and lint don't depend on materialized
     // defaults, and an empty one keeps the harness allocation-light.
@@ -1242,6 +1266,41 @@ fn fuzzLowering(_: void, smith: *Smith) anyerror!void {
         return;
     };
     defer lowered.deinit();
+
+    // The second staging layer. The lowered roots (`carried`,
+    // `wrap-normal`, `leaf-normal`) are lowerable once more, so the carry
+    // hook fires on hook-emitted nodes and `buildLoweredTree` clones a
+    // staged subtree whose nodes share the span an earlier pass stamped.
+    var arena2 = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena2.deinit();
+
+    var pr2 = sjon.Lowering.runLoweringPass(
+        testing.allocator,
+        arena2.allocator(),
+        &lowered.tree,
+        lowered.tree.root,
+        schema,
+        &overlay,
+        &registry,
+        .{},
+    ) catch |err| {
+        try testing.expectEqual(error.OutOfMemory, err);
+        return;
+    };
+    defer pr2.deinit(testing.allocator);
+
+    for (pr2.diagnostics) |d| {
+        try testing.expect(d.span.end >= d.span.start);
+        for (d.path) |step| try testing.expect(step.len > 0);
+        _ = d.code;
+        _ = d.severity;
+    }
+
+    var lowered2 = sjon.Lowering.buildLoweredTree(testing.allocator, pr2.invocations, &lowered.tree) catch |err| {
+        try testing.expectEqual(error.OutOfMemory, err);
+        return;
+    };
+    defer lowered2.deinit();
 }
 
 test "fuzz Lowering.runLoweringPass: parsed tree always lowers to a well-formed PassResult" {
@@ -1261,6 +1320,17 @@ test "fuzz Lowering.runLoweringPass: parsed tree always lowers to a well-formed 
             "(node (plain (node)))",
             "(node (leaf) :k (wrap))",
             "(wrap (wrap (wrap (wrap (wrap)))))",
+            // Carry-shaped documents: the carried node is the form itself or
+            // its first child, so an expression, a kvpair value, a vector, a
+            // date and a time all reach `cloneNode` and the charge walk.
+            "(* 1 2)",
+            "(node :slot 7)",
+            "(node [1 2 3])",
+            "(node :at 2026-11-04)",
+            "(node :at 12:34:56)",
+            // A 1000-deep nest (the parser's ceiling is 1024), unterminated so
+            // it fits the draw buffer.
+            "[" ** 1000,
             // Non-lowering shapes — unknown heads, scalars, vectors, exprs.
             "(scene :a 1)",
             "[1 2 3]",
@@ -1458,6 +1528,572 @@ test "fuzz PatternQuery.queryBinary: never panics on arbitrary bytes" {
             "\x00\x00\x00\x00\x00\x00\x00\x00",
         }, .{ .tail = &pattern_window_tail }),
     });
+}
+
+/// The §3.3 leg: the tree harness's expression-leaf seed list, encoded to
+/// the IR under both presets, then mutated (byte substitute / bit flip /
+/// truncate), and queried through the NEW eval entry
+/// (`queryBinaryWithBudgetAndEnv` — the production entry, no stub) with a
+/// fuzzed outer env — pattern-local shadow decoys, names the corpus may
+/// leave unbound, type-mismatched bindings — and a fuzzed budget. The
+/// never-panic contract plus the same exhaustive, else-free `BinaryError`
+/// switch as the legacy leg: a known structural error is an allowed
+/// outcome, and an error name missing from the switch is a compile error
+/// against the enum — it can neither fail the run nor be swallowed.
+///
+/// The eval channels stay non-error by contract (static defects are
+/// diagnostics at `[pure]`, later-cycle failures are counted drops), so a
+/// `DepthExceeded` / `PoolIndexOutOfRange` / `Truncated` reaching the
+/// switch is the hostile-mutation structural channel, exactly as in the
+/// legacy leg. The shadow decoys can never win (pattern locals shadow
+/// `cycle`/`tick`/`seed` on both paths — tree parity is pinned
+/// in-repo); the type-mismatch bindings make the corpus's `(pure …)`
+/// leaves take the static-defect diagnostic or the per-cycle drop channel
+/// rather than an error.
+fn fuzzPatternQueryBinaryEnv(_: void, smith: *Smith) anyerror!void {
+    var buf: [MAX_INPUT]u8 = undefined;
+    const len = smith.sliceWithHash(&buf, 0x9A_77_E2_03);
+
+    const src = try toSentinel(testing.allocator, buf[0..len]);
+    defer testing.allocator.free(src);
+
+    var tree = Parser.parse(testing.allocator, src) catch |err| {
+        try testing.expectEqual(error.OutOfMemory, err);
+        return;
+    };
+    defer tree.deinit();
+
+    if (tree.hasErrors()) return;
+    if (tree.root.len == 0) return;
+
+    // Both presets, so the seed corpus reaches the eval entries over the
+    // span-stripped (pacer payload) and span-carrying profiles alike.
+    var compact = Binary.toBinary(testing.allocator, tree, Binary.ToBinaryOptions.forMode(.compact)) catch |err| {
+        try testing.expectEqual(error.OutOfMemory, err);
+        return;
+    };
+    defer compact.deinit();
+    var full = Binary.toBinary(testing.allocator, tree, Binary.ToBinaryOptions.forMode(.full)) catch |err| {
+        try testing.expectEqual(error.OutOfMemory, err);
+        return;
+    };
+    defer full.deinit();
+
+    // Pick a preset, then mutate a caller-owned copy: substitute a byte,
+    // flip a bit, or truncate — the mutation surface the eval entries'
+    // hostile-wire channels (§2.6 structural) are reachable through.
+    const pick = smith.valueWithHash(u8, 0x0B_15_EE1);
+    const encoded = if (pick & 1 == 0) compact.data else full.data;
+    const mutated = try testing.allocator.dupe(u8, encoded);
+    defer testing.allocator.free(mutated);
+    const keep = if (pick & 2 != 0)
+        smith.valueWithHash(usize, 0x0B_1C_770) % (mutated.len + 1)
+    else
+        mutated.len;
+    const wire = mutated[0..keep];
+    if (pick & 4 != 0 and wire.len > 0) {
+        const pos = smith.valueWithHash(usize, 0x0B_1_5005) % wire.len;
+        if (pick & 8 != 0) {
+            wire[pos] = smith.valueWithHash(u8, 0x0B_1_B770);
+        } else {
+            wire[pos] ^= @as(u8, 1) << @intCast(smith.valueWithHash(u8, 0x0B_1_F100) % 8);
+        }
+    }
+
+    // Fuzzed outer env: null (pattern-locals-only eval), the shadow decoys
+    // (must lose to the pattern locals), the corpus's own names (unbound
+    // for rows that don't use them), and type mismatches (a keyword where
+    // the leaves want a number, a boolean where anything coercible).
+    const outer_env: ?*const Expr.Env = switch ((pick >> 4) % 4) {
+        0 => null,
+        1 => &fuzz_decoy_env,
+        2 => &fuzz_named_env,
+        else => &fuzz_mismatch_env,
+    };
+
+    // Fuzzed budget: the default, byte-starved (the retention preflights
+    // and the engine poll both fire), and hap-starved (HapBudgetExceeded).
+    const budget: PatternQuery.Budget = switch ((pick >> 6) % 4) {
+        0 => .{},
+        1 => .{ .bytes = 0 },
+        2 => .{ .bytes = @as(usize, pick) * 64 },
+        else => .{ .haps = 1 },
+    };
+
+    const window = fuzzWindow(smith);
+    const seed = smith.valueWithHash(i64, 0x0B_15_EED);
+
+    var result = PatternQuery.queryBinaryWithBudgetAndEnv(
+        testing.allocator,
+        wire,
+        patternFuzzSchema(),
+        window,
+        seed,
+        budget,
+        outer_env,
+    ) catch |err| {
+        // PatternQuery.BinaryError = Error || BinaryCursor.Error || MultipleRoots.
+        switch (err) {
+            error.OutOfMemory,
+            error.DepthExceeded,
+            error.MemoryBudgetExceeded,
+            error.HapBudgetExceeded,
+            error.TickOverflow,
+            error.MultipleRoots,
+            error.InvalidMagic,
+            error.InvalidVersion,
+            error.InvalidFlags,
+            error.InvalidTag,
+            error.InvalidNamespace,
+            error.Truncated,
+            error.PoolIndexOutOfRange,
+            error.NodeCountExceeded,
+            error.StringTooLong,
+            error.CommentTooLong,
+            => return,
+        }
+    };
+    defer result.deinit();
+
+    // Touch the results so an invalid union tag would crash here (safe
+    // build) — the eval channels surface as haps / diagnostics / drops,
+    // never as errors.
+    for (result.haps) |h| _ = h.value;
+    for (result.diagnostics) |d| _ = d.code;
+    _ = result.dropped;
+}
+
+const fuzz_decoy_bindings = [_]Expr.Env.Binding{
+    .{ .name = "cycle", .value = .{ .number = 99.0 } },
+    .{ .name = "tick", .value = .{ .integer_i64 = -5 } },
+    .{ .name = "seed", .value = .{ .integer_i64 = 1000 } },
+};
+const fuzz_decoy_env: Expr.Env = .{ .bindings = &fuzz_decoy_bindings };
+
+const fuzz_named_bindings = [_]Expr.Env.Binding{
+    .{ .name = "base", .value = .{ .number = 3.0 } },
+    .{ .name = "sway", .value = .{ .number = 0.25 } },
+};
+const fuzz_named_env: Expr.Env = .{ .bindings = &fuzz_named_bindings };
+
+const fuzz_mismatch_bindings = [_]Expr.Env.Binding{
+    .{ .name = "base", .value = .{ .keyword = "oops" } },
+    .{ .name = "sway", .value = .{ .boolean = true } },
+};
+const fuzz_mismatch_env: Expr.Env = .{ .bindings = &fuzz_mismatch_bindings };
+
+test "fuzz PatternQuery.queryBinaryWithBudgetAndEnv: seeded expr trees, mutated wire, fuzzed env + budget → Result or known BinaryError" {
+    try testing.fuzz({}, fuzzPatternQueryBinaryEnv, .{
+        .corpus = seeds(&.{
+            // The tree harness's expression-leaf list: happy, trig, seeded,
+            // domain-hole, static defects, combinator layering, literal
+            // keyword / vector leaves, degenerate shapes, multi-root.
+            "(pure (+ 1 2))",
+            "(pure (* 0.5 (+ 1 (sin (* (tau) cycle)))))",
+            "(pure (rand01 seed cycle))",
+            "(pure (/ 1 (- cycle 2)))",
+            "(pure (+ nope 0))",
+            "(pure (vec2 1 2))",
+            "(fast 2 (pure (* cycle 2)))",
+            "(stack (pure (sin cycle)) bd)",
+            "(stack (pure (* base 2)) [0.1 0.2])",
+            "(pure sway)",
+            "(pure :kw)",
+            "(pure [1 2])",
+            "(pure 7)",
+            "(pure)",
+            "bd sn",
+            "",
+        }, .{ .tail = &pattern_window_tail }),
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 11b. The independent prepared leg (ask 30 / M4 D6): the env harness's full
+// draw surface routed through the PREPARED pipeline — parse → compact+full
+// encode → caller-owned mutated wire → `sjon.prepareBinary` →
+// `queryPreparedBinaryWithBudgetAndEnv` → haps/diagnostics/dropped.
+//
+// v2-I1 independence: this leg never calls the one-shot entry — no shared
+// refusal an early return could hide behind, no filtering in either
+// direction. The one-shot harness above is untouched.
+//
+// Root discipline differs from the env leg ON PURPOSE: a zero-root tree
+// (the `""` seed) does NOT skip here — it encodes, prepares with
+// `root == null`, and queries as the silence Result (the prepared entries'
+// specified behavior, pinned in D2). Only parse OOM and parse-diagnostics
+// trees return early, and the `skipped` counter makes both visible so the
+// corpus partition can assert none happened.
+//
+// Error scope is separate per stage, each switch exhaustive over its exact
+// typed set and else-free (a new variant is a compile error here, not a
+// swallowed run): prepare catches exactly `Binary.Error || MultipleRoots`
+// (thirteen), query catches exactly `PatternQuery.Error` (five). No blanket
+// catch, no unreachable, no panic on arbitrary wire.
+//
+// Channel counters (v2-L2): every entry that reaches the pipeline lands in
+// exactly one of prepare-refused / query-refused / succeeded, counted
+// through `testing.fuzz`'s context pointer so the registration test can
+// assert the partition programmatically; the printed line is the
+// documented one-time corpus-replay trace, not the proof.
+// ---------------------------------------------------------------------------
+
+/// Aggregate channel counters for the prepared fuzz leg, threaded through
+/// `testing.fuzz`'s context (state context for observations — no
+/// production instrumentation). Corpus replay is deterministic, so the
+/// registration test asserts the exact per-route counts.
+const PreparedFuzzStats = struct {
+    /// Entries that got past parse + the gates + both encodes — every one
+    /// of them lands in exactly one of the three channels below.
+    reached: u64 = 0,
+    /// Parse OOM or parse-diagnostics early exits (must be zero for the
+    /// seeded corpus: every encoded source must decode intact).
+    skipped: u64 = 0,
+    /// `sjon.prepareBinary` typed refusal (the thirteen-set).
+    prepare_refused: u64 = 0,
+    /// The `MultipleRoots` member of `prepare_refused`.
+    multiroot_refused: u64 = 0,
+    /// Prepared-query typed refusal (the five-set).
+    query_refused: u64 = 0,
+    /// Prepared query returned a Result.
+    succeeded: u64 = 0,
+    /// Prepared with `root == null` — the zero-root silence traversal.
+    zero_root_silence: u64 = 0,
+    /// Preset the mutated wire came from (both must be reached).
+    compact_preset: u64 = 0,
+    full_preset: u64 = 0,
+    /// Haps seen across successful queries (nondegenerate-window evidence).
+    haps_seen: u64 = 0,
+};
+
+/// The window the prepared seeds encode: four whole cycles from tick 0 —
+/// the same span the legacy pattern legs use, but reached through THIS
+/// leg's draw order. The prepared harness draws PICK before the window
+/// (the env leg's shape), so the legacy two-record `pattern_window_tail`
+/// does not align here: the pick draw eats the first record and every
+/// mutation draw eats another. Each seed below carries exactly the records
+/// its pick class consumes before the two window draws (one little-endian
+/// u64 per draw, see `SeedOpts.tail`), derived from the actual sequence
+/// slice → pick(u8) → [keep(u64)] → [pos(u64), sub/bit(u8)] → window ×2
+/// (i64) → seed(i64) — not copied from the legacy tail. (Errata, 2026-10-22
+/// — D6 review MEDIUM-1: the earlier "legacy tail misalignment leaves mutated
+/// env-leg seeds on the degenerate `[0, 0)` window" finding was wrong and is
+/// retracted here. The legacy env-leg tail `{0, 4·PPC}` is *not* misaligned:
+/// the pick draw consumes the tail's first record — 0, so pick class 0 for
+/// every corpus seed — the window draws read the second record (4·PPC) and
+/// then exhaust (Smith hands back the weight minimum, 0), and `fuzzWindow`'s
+/// @min/@max normalization yields the nondegenerate `[0, 4·PPC)`. The real
+/// residual: that corpus realizes only pick 0, so its mutation/env/budget
+/// draws are corpus-unreachable in CI (instrumented fuzzer only) — precisely
+/// the gap this leg's derived per-class tails close.)
+const prepared_window_end: u64 = @bitCast(@as(i64, 4 * Pattern.PPC));
+
+/// pick 0 — compact, unmutated, null env, default budget.
+const prepared_tail_clean = [_]u64{ 0, 0, prepared_window_end };
+/// pick 1 — FULL preset, unmutated, null env, default budget.
+const prepared_tail_full = [_]u64{ 1, 0, prepared_window_end };
+/// pick 2 — truncate (keep draw), keep = 0 → empty wire → typed prepare refusal.
+const prepared_tail_truncate = [_]u64{ 2, 0, 0, prepared_window_end };
+/// pick 4 — bit flip at pos 0, bit 0 → magic byte corrupts → typed prepare refusal.
+const prepared_tail_bitflip = [_]u64{ 4, 0, 0, 0, prepared_window_end };
+/// pick 12 — byte substitute at pos 0, 'R' (0x52) → typed prepare refusal.
+const prepared_tail_substitute = [_]u64{ 12, 0, 'R', 0, prepared_window_end };
+/// pick 16 — decoy env (pattern locals must shadow cycle/tick/seed).
+const prepared_tail_env_decoy = [_]u64{ 16, 0, prepared_window_end };
+/// pick 32 — named env (base/sway bound).
+const prepared_tail_env_named = [_]u64{ 32, 0, prepared_window_end };
+/// pick 48 — mismatch env (type-mismatched bindings → diagnostics, not errors).
+const prepared_tail_env_mismatch = [_]u64{ 48, 0, prepared_window_end };
+/// pick 64 — budget bytes = 0 → `MemoryBudgetExceeded`.
+const prepared_tail_budget_bytes0 = [_]u64{ 64, 0, prepared_window_end };
+/// pick 128 — budget bytes = pick × 64 (a real but generous cap).
+const prepared_tail_budget_bytes = [_]u64{ 128, 0, prepared_window_end };
+/// pick 192 — budget haps = 1 → `HapBudgetExceeded` on any multi-hap window.
+const prepared_tail_budget_haps1 = [_]u64{ 192, 0, prepared_window_end };
+
+/// The env leg's 16-entry source corpus verbatim plus `1 2` (a second
+/// multi-root shape), each entry encoded through `seeds()` (never raw
+/// strings) with the tail its intended route needs. Grouped by tail.
+const prepared_corpus = blk: {
+    var list: [17][]const u8 = undefined;
+    var i: usize = 0;
+    for (seeds(&.{
+        // Clean compact routes, zero-root silence, and both multi-root
+        // prepare refusals (pick 0 for all: unmutated, null env, default
+        // budget; the route split comes from the source shape).
+        "(pure (+ 1 2))",
+        "(pure (/ 1 (- cycle 2)))",
+        "(pure 7)",
+        "(pure)",
+        "bd sn",
+        "",
+        "1 2",
+    }, .{ .tail = &prepared_tail_clean })) |entry| {
+        list[i] = entry;
+        i += 1;
+    }
+    for (seeds(&.{"(stack (pure (sin cycle)) bd)"}, .{ .tail = &prepared_tail_full })) |entry| {
+        list[i] = entry;
+        i += 1;
+    }
+    for (seeds(&.{"(pure (* 0.5 (+ 1 (sin (* (tau) cycle)))))"}, .{ .tail = &prepared_tail_truncate })) |entry| {
+        list[i] = entry;
+        i += 1;
+    }
+    for (seeds(&.{"(pure [1 2])"}, .{ .tail = &prepared_tail_bitflip })) |entry| {
+        list[i] = entry;
+        i += 1;
+    }
+    for (seeds(&.{"(pure (vec2 1 2))"}, .{ .tail = &prepared_tail_substitute })) |entry| {
+        list[i] = entry;
+        i += 1;
+    }
+    for (seeds(&.{"(pure (+ nope 0))"}, .{ .tail = &prepared_tail_env_decoy })) |entry| {
+        list[i] = entry;
+        i += 1;
+    }
+    for (seeds(&.{"(stack (pure (* base 2)) [0.1 0.2])"}, .{ .tail = &prepared_tail_env_named })) |entry| {
+        list[i] = entry;
+        i += 1;
+    }
+    for (seeds(&.{"(pure sway)"}, .{ .tail = &prepared_tail_env_mismatch })) |entry| {
+        list[i] = entry;
+        i += 1;
+    }
+    for (seeds(&.{"(pure (rand01 seed cycle))"}, .{ .tail = &prepared_tail_budget_bytes0 })) |entry| {
+        list[i] = entry;
+        i += 1;
+    }
+    for (seeds(&.{"(pure :kw)"}, .{ .tail = &prepared_tail_budget_bytes })) |entry| {
+        list[i] = entry;
+        i += 1;
+    }
+    for (seeds(&.{"(fast 2 (pure (* cycle 2)))"}, .{ .tail = &prepared_tail_budget_haps1 })) |entry| {
+        list[i] = entry;
+        i += 1;
+    }
+    break :blk list;
+};
+
+/// The prepared leg's body. Same Smith draw surface as
+/// `fuzzPatternQueryBinaryEnv` (slice, preset pick, caller-owned mutation,
+/// env pick incl. decoy/named/mismatch, budget pick incl. byte/hap-starved,
+/// window, seed) — then its own full pipeline through `sjon.prepareBinary`
+/// and `queryPreparedBinaryWithBudgetAndEnv`, touching haps / diagnostics /
+/// dropped so an invalid union tag crashes here in safe builds.
+fn fuzzPatternQueryPreparedBinary(stats: *PreparedFuzzStats, smith: *Smith) anyerror!void {
+    var buf: [MAX_INPUT]u8 = undefined;
+    const len = smith.sliceWithHash(&buf, 0x9A_77_E2_04);
+
+    const src = try toSentinel(testing.allocator, buf[0..len]);
+    defer testing.allocator.free(src);
+
+    var tree = Parser.parse(testing.allocator, src) catch |err| {
+        try testing.expectEqual(error.OutOfMemory, err);
+        stats.skipped += 1;
+        return;
+    };
+    defer tree.deinit();
+
+    // Parse-diagnostics trees never reach the encoder. Zero-root trees DO
+    // continue — deliberately no `root.len == 0` skip (see section header).
+    if (tree.hasErrors()) {
+        stats.skipped += 1;
+        return;
+    }
+
+    // Both presets, so the seed corpus reaches the prepared decode over the
+    // span-stripped (pacer payload) and span-carrying profiles alike.
+    var compact = Binary.toBinary(testing.allocator, tree, Binary.ToBinaryOptions.forMode(.compact)) catch |err| {
+        try testing.expectEqual(error.OutOfMemory, err);
+        return;
+    };
+    defer compact.deinit();
+    var full = Binary.toBinary(testing.allocator, tree, Binary.ToBinaryOptions.forMode(.full)) catch |err| {
+        try testing.expectEqual(error.OutOfMemory, err);
+        return;
+    };
+    defer full.deinit();
+
+    stats.reached += 1;
+
+    // Pick a preset, then mutate a caller-owned copy: substitute a byte,
+    // flip a bit, or truncate — the mutation surface the prepared decode's
+    // hostile-wire channels are reachable through.
+    const pick = smith.valueWithHash(u8, 0x0B_15_EE1);
+    if (pick & 1 == 0) stats.compact_preset += 1 else stats.full_preset += 1;
+    const encoded = if (pick & 1 == 0) compact.data else full.data;
+    const mutated = try testing.allocator.dupe(u8, encoded);
+    defer testing.allocator.free(mutated);
+    const keep = if (pick & 2 != 0)
+        smith.valueWithHash(usize, 0x0B_1C_770) % (mutated.len + 1)
+    else
+        mutated.len;
+    const wire = mutated[0..keep];
+    if (pick & 4 != 0 and wire.len > 0) {
+        const pos = smith.valueWithHash(usize, 0x0B_1_5005) % wire.len;
+        if (pick & 8 != 0) {
+            wire[pos] = smith.valueWithHash(u8, 0x0B_1_B770);
+        } else {
+            wire[pos] ^= @as(u8, 1) << @intCast(smith.valueWithHash(u8, 0x0B_1_F100) % 8);
+        }
+    }
+
+    // Fuzzed outer env: null (pattern-locals-only eval), the shadow decoys
+    // (must lose to the pattern locals), the corpus's own names (unbound
+    // for rows that don't use them), and type mismatches — identical
+    // selectors to the one-shot env leg.
+    const outer_env: ?*const Expr.Env = switch ((pick >> 4) % 4) {
+        0 => null,
+        1 => &fuzz_decoy_env,
+        2 => &fuzz_named_env,
+        else => &fuzz_mismatch_env,
+    };
+
+    // Fuzzed budget: the default, byte-starved (the retention preflight and
+    // the engine poll both fire), scaled, and hap-starved
+    // (HapBudgetExceeded).
+    const budget: PatternQuery.Budget = switch ((pick >> 6) % 4) {
+        0 => .{},
+        1 => .{ .bytes = 0 },
+        2 => .{ .bytes = @as(usize, pick) * 64 },
+        else => .{ .haps = 1 },
+    };
+
+    const window = fuzzWindow(smith);
+    const seed = smith.valueWithHash(i64, 0x0B_15_EED);
+
+    // The prepared pipeline proper — the leg's reason to exist. Decode ONCE
+    // into the owned, self-contained prepared object; the wire is only
+    // borrowed for the duration of the prepare call.
+    var prepared = sjon.prepareBinary(testing.allocator, wire) catch |err| {
+        // Exactly `Binary.Error || error{MultipleRoots}` — thirteen typed
+        // refusals, exhaustive and else-free.
+        switch (err) {
+            error.OutOfMemory,
+            error.InvalidMagic,
+            error.InvalidVersion,
+            error.InvalidFlags,
+            error.InvalidTag,
+            error.InvalidNamespace,
+            error.Truncated,
+            error.DepthExceeded,
+            error.PoolIndexOutOfRange,
+            error.NodeCountExceeded,
+            error.StringTooLong,
+            error.CommentTooLong,
+            => {
+                stats.prepare_refused += 1;
+                return;
+            },
+            error.MultipleRoots => {
+                stats.prepare_refused += 1;
+                stats.multiroot_refused += 1;
+                return;
+            },
+        }
+    };
+    defer prepared.deinit();
+
+    // Zero-root payload: the silence path (root == null), counted so the
+    // registration test can prove the `""` seed traversed encode → prepare
+    // → query instead of being filtered.
+    if (prepared.root == null) stats.zero_root_silence += 1;
+
+    var result = PatternQuery.queryPreparedBinaryWithBudgetAndEnv(
+        testing.allocator,
+        &prepared,
+        patternFuzzSchema(),
+        window,
+        seed,
+        budget,
+        outer_env,
+    ) catch |err| {
+        // Exactly `PatternQuery.Error` — five typed refusals, exhaustive
+        // and else-free.
+        switch (err) {
+            error.OutOfMemory,
+            error.DepthExceeded,
+            error.MemoryBudgetExceeded,
+            error.HapBudgetExceeded,
+            error.TickOverflow,
+            => {
+                stats.query_refused += 1;
+                return;
+            },
+        }
+    };
+    defer result.deinit();
+
+    stats.succeeded += 1;
+    stats.haps_seen += result.haps.len;
+
+    // Touch the results so an invalid union tag would crash here (safe
+    // build) — eval channels surface as haps / diagnostics / drops, never
+    // as errors.
+    for (result.haps) |h| _ = h.value;
+    for (result.diagnostics) |d| _ = d.code;
+    _ = result.dropped;
+}
+
+test "fuzz PatternQuery.preparedBinary: seeded expr trees, mutated wire, fuzzed env + budget → prepared Result or known typed error" {
+    var stats: PreparedFuzzStats = .{};
+    try testing.fuzz(&stats, fuzzPatternQueryPreparedBinary, .{
+        .corpus = &prepared_corpus,
+    });
+
+    // One-time corpus-replay trace (v2-L2): the channel counters, printed
+    // once per harness. The assertions below — not this line — are the
+    // proof.
+    std.debug.print(
+        "fuzz PatternQuery.preparedBinary corpus replay: reached={d} prepare_refused={d} (multiroot={d}) query_refused={d} succeeded={d} zero_root_silence={d} compact={d} full={d} haps={d} skipped={d}\n",
+        .{
+            stats.reached,
+            stats.prepare_refused,
+            stats.multiroot_refused,
+            stats.query_refused,
+            stats.succeeded,
+            stats.zero_root_silence,
+            stats.compact_preset,
+            stats.full_preset,
+            stats.haps_seen,
+            stats.skipped,
+        },
+    );
+
+    // Deterministic corpus partition: 17 seeded entries + the test runner's
+    // empty smoke input = 18 pipeline reaches; none skipped (every encoded
+    // source decoded intact and parsed clean); every reach lands in
+    // exactly one typed channel.
+    try testing.expectEqual(@as(u64, 0), stats.skipped);
+    try testing.expectEqual(@as(u64, 18), stats.reached);
+    try testing.expectEqual(stats.reached, stats.prepare_refused + stats.query_refused + stats.succeeded);
+
+    // Each intended route actually reached, with exact counts:
+    //   prepare-refused 5 = both multi-roots ("bd sn", "1 2") + the three
+    //     hostile-mutation wires (truncate→empty, bit flip, substitute —
+    //     each corrupts byte 0 of the magic);
+    //   query-refused 2 = bytes=0 (MemoryBudgetExceeded) and haps=1 over
+    //     an 8-hap window (HapBudgetExceeded);
+    //   succeeded 11 = the clean routes, including the zero-root silences.
+    try testing.expectEqual(@as(u64, 5), stats.prepare_refused);
+    try testing.expectEqual(@as(u64, 2), stats.multiroot_refused);
+    try testing.expectEqual(@as(u64, 2), stats.query_refused);
+    try testing.expectEqual(@as(u64, 11), stats.succeeded);
+
+    // Zero-root silence actually traversed (the `""` seed + the runner's
+    // empty smoke input): encode → prepare(root == null) → query — the
+    // route the legacy env leg filters out.
+    try testing.expectEqual(@as(u64, 2), stats.zero_root_silence);
+
+    // Both presets capable: 17 compact routes (pick 0 class + the smoke
+    // input) and the one full-preset route.
+    try testing.expectEqual(@as(u64, 17), stats.compact_preset);
+    try testing.expectEqual(@as(u64, 1), stats.full_preset);
+
+    // Nondegenerate windows: the successful routes emitted haps — a
+    // degenerate `[0, 0)` window emits none.
+    try testing.expect(stats.haps_seen > 0);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,14 @@
+import { s, edit } from '@sjon-lang/schema';
+import { SjonEncoder, SjonReader } from '@sjon-lang/web';
+import { SjonHost } from '@sjon-lang/web/SjonHost';
+import * as SjonSchemaBackend from '@sjon-lang/web/SjonSchemaBackend';
+import { createNodeFsResolver } from '@sjon-lang/web/createNodeFsResolver';
+import { sjonLanguage, sjonTextMateGrammar } from '@sjon-lang/highlight';
+import { EditorState } from '@codemirror/state';
+import { createHighlighter } from 'shiki';
+const Config = s.form('config', { count: s.number() });
+Config.manifest();
+edit.insertRoot({ $form: 'config', count: 1 });
+EditorState.create({ extensions: [sjonLanguage] });
+await createHighlighter({ langs: [sjonTextMateGrammar], themes: ['github-dark'] });
+void [SjonEncoder, SjonReader, SjonHost, SjonSchemaBackend, createNodeFsResolver];

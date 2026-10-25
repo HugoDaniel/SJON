@@ -1,4 +1,8 @@
 ; Bare `color` resolves to two value-kinds — emit at the kvpair value's
 ; slot path.
+; The aggregate phase names the manifest's own reference first: `:type color`
+; in the plugin's manifest has two claimants in the composed catalog, so the
+; preload walk reports it at [ambig-vk-a swatch hue] before any document.
 (diagnostics
+  (diagnostic :code ambiguous_element_kind :path [ambig-vk-a swatch hue])
   (diagnostic :code ambiguous_element_kind :path [swatch hue]))

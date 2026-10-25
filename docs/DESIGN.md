@@ -1,7 +1,7 @@
 # SJON design overview
 
-This document captures the architecture as of SJON 1.0, after the SoA AST
-migration. It is the standing reference for the module layout, the SoA
+This document describes the current SJON 1.x architecture, including the
+SoA AST and additive APIs introduced through 1.5.0. It is the standing reference for the module layout, the SoA
 tree, and the frozen binary wire format.
 
 ## Pipeline
@@ -31,7 +31,7 @@ tree, and the frozen binary wire format.
 a `Tree`. `sjon.evalExprBinary` and `sjon-binary.wasm`'s
 `sjon_eval_expr_binary` both route through it.
 
-Every public entrypoint in `src/root.zig` (`sjon.parse`, `sjon.print`,
+The tree-oriented public entrypoints in `src/root.zig` (`sjon.parse`, `sjon.print`,
 `sjon.toJson`, `sjon.toBinary`, `sjon.applyEdit`, …) operates on the
 canonical SoA `Ast.Tree`. There is one tree representation; phase 14
 retired the legacy mutable pointer-tree representation entirely.
@@ -56,9 +56,8 @@ LPAREN  SYMBOL("+")  SYMBOL("x")  NUMBER(3)  RPAREN
 RPAREN
 ```
 
-Potential diagnostics: `unterminated_string`, `bad_number`,
-`bad_escape`, `bad_identifier` (none fire here — every token is
-well-formed).
+The lexer produces tokens, including invalid-token tags; the parser
+turns malformed tokens into collected diagnostics. No error occurs here.
 
 **2. Parse** (`Parser.zig`, iterative descent with a heap frame
 stack). The token stream becomes an `Ast.Tree`. Nodes are indices
@@ -75,8 +74,9 @@ idx 6  number      3
 ```
 
 Tree depth here is 2; the parser's `MAX_PARSE_DEPTH = 1024` ceiling is
-nowhere close. Potential diagnostics: `expected_close_paren`,
-`expected_close_bracket`, `nesting_too_deep`, `unexpected_root_kvpair`.
+nowhere close. Missing or mismatched delimiters, excessive nesting, and
+top-level keyword pairs produce parser diagnostics (generally code
+`unspecified`, with a specific message), rather than invented per-message codes.
 
 **3. Validate** (`Validator.zig`, frame-stack walker). Only fires
 when a schema is loaded; for raw safe-expression eval the validator is
@@ -101,18 +101,17 @@ pop   Frame(call "+")   → 5
 pop   Frame(let)        → 5
 ```
 
-Result: `Expr.Value{ .number = 5 }`. Potential diagnostics:
-`expr_unbound_symbol` (if `x` weren't bound), `expr_unknown_function`
-(if `+` weren't in the core vocabulary), `expr_arity` (if `+` were
-called with the wrong number of args), `expr_kind_mismatch` (if one of
-the args were a string), `expr_steps_exceeded` (for runaway recursion).
+Result: `Expr.Value{ .number = 5 }`. Evaluation failures are typed
+`Expr.Error` values: `UnknownBinding`, `UnknownFunction`, `ArityMismatch`,
+`TypeMismatch`, `DepthExceeded`, or `MemoryBudgetExceeded`, for example.
+These are not diagnostic-code enum members. Validation has separate codes,
+such as `arity_mismatch` and `expr_type_mismatch` (`sjon explain <code>`).
 
-The same `(let [x 2] (+ x 3))` evaluated via `evalBinary` skips step 2
-(no Tree materialised). Step 1 produces tokens; the producer routes
-them through `Binary.toBinary` to a byte buffer; `evalBinary` then
-walks the buffer with `BinaryCursor` and produces the same
-`Expr.Value{ .number = 5 }` via the streaming evaluator described in
-`§ Safe-expression evaluator → evalBinary`.
+The binary producer performs steps 1 and 2, then encodes the tree with
+`Binary.toBinary`. A consumer receiving those bytes evaluates through
+`evalBinary` and `BinaryCursor` without materializing another tree. Direct
+source-to-IR parsing remains deferred. For decode-once pattern queries, see
+[BINARY_PATTERNS.md](BINARY_PATTERNS.md).
 
 ## Modules
 
@@ -125,15 +124,16 @@ walks the buffer with `BinaryCursor` and produces the same
 | `Json`                 | `Tree ↔ std.json.Value` bridge with a tagged-object encoding.                 |
 | `Validator`            | Schema-driven walker producing diagnostics. Tree and Binary paths agree on `(code, path)` for cross-host conformance. `Plugin.ValueKind` grew a `numeric` refinement (range / integrality bounds) wired through `checkNumericBoundsValue`; `MatchExtras` grew a tag-true `numeric: ?NumericValue` so the binary path's exact-int comparison fires too. Later refinements followed the same dual-path pattern: a `repr` GPU-representation tag (`repr_out_of_range`), variable-arity vectors (`VectorShape.min_len`/`max_len` → `vector_too_short`/`vector_too_long`), and a unit `reject` flag (`unit_forbidden`) — each mirrored on the tree + binary walkers and locked by `expect*OnBoth` tests. `scalar-or-ref` needs no validator change at all: the loader desugars it to an ordinary `union_of`, and the arm-naming failure report (`Validator.determinedArm`) is the general union rule, which a scalar-or-ref's shape-disjoint arms simply always satisfy. |
 | `Expr`                 | Closed-v1 safe-expression evaluator with an explicit frame stack.             |
-| `Edit`                 | JSON-encoded structural-edit reducer. Six ops; `wrap` composes a node into a new parent by cloning it rather than rebuilding it from JSON, and is the only one whose target keeps its trivia. An action names its root with `root` when the tree has several, and a document the parser only recovered is refused (`ParseErrors`) rather than edited as recovered. Two applies, chosen by `Options.layout`: `.reprint` is the functional rebuild on `Tree` followed by a whole-document print, and `.preserve` lowers each op to one `TextEdit` over the target's span (`Edit.textEdit`, the shape `Handler.TextEdit` aliases) and splices it, so nothing outside that span moves. |
+| `Edit`                 | JSON-encoded structural-edit reducer. Eight ops: six within a root plus `insert_root` / `remove_root` over the root list; `wrap` composes a node into a new parent by cloning it rather than rebuilding it from JSON, and is the only one whose target keeps its trivia. An action names its root with `root` when the tree has several, and a document the parser only recovered is refused (`ParseErrors`) rather than edited as recovered. Two applies, chosen by `Options.layout`: `.reprint` is the functional rebuild on `Tree` followed by a whole-document print, and `.preserve` lowers each op to one `TextEdit` over the target's span (`Edit.textEdit`, the shape `Handler.TextEdit` aliases) and splices it, so nothing outside that span moves. |
 | `Binary`               | Wire format encoder / decoder.                                                |
+| `BinaryDecoder`        | Read-only Binary IR tree decoder, extracted to a leaf (std + Ast + BinaryFormat imports only) so a consumer decodes without the write-side encoder; `Binary.fromBinary` / `Binary.FromBinaryOptions` re-export it verbatim and `BinaryDecoder.Error == Binary.Error == BinaryFormat.Error` by aliasing. |
 | `BinaryCursor`         | Zero-allocation read cursor over a Binary IR buffer.                          |
 | `Plugin`, `Schema`     | Comptime descriptor types + multi-plugin aggregator.                          |
 | `ManifestLoader`       | Reads a v1 portable manifest (`docs/portable-manifest-v1.md`) into an in-memory `Plugin` after meta-validation. |
 | `MetaSchema`           | The hardcoded bootstrap meta-plugin. Every conforming impl validates user manifests against this baseline. |
 | `Host`                 | Cross-host contract over the schema pipeline: `validateDocument` (inline-manifest one-shot), `evalExpr`, schema/lowering export, and the two-phase `preloadSchema` + `HostOptions.preloaded` — compile an external schema once, then borrow it additively across many document validations instead of prepending it (and rebasing spans) every time. A staged lowering run returns every layer: `HostResult.lowering_stages` is one `LoweringStage` (tree + one-hop provenance + defaults overlay) per layer and owns the lowered trees, `lowered_tree` and its two siblings alias the last of them, and `provenanceChain` / `provenanceChainFrom` walk the hops back to the authored form as `Hop`s that carry their own trees. |
-| `Pattern`, `PatternQuery` | Deterministic Strudel-style pattern types + windowed query producing `(haps …)` / `(diagnostics …)` over a tree or Binary IR. |
-| `Lowering`, `LoweringGraph` | Host-registered lowering-hook registry + the graph a hook run emits (source forest → lowered forest). `LoweringProvenance` is per layer and describes one hop: its `source_form_idx` indexes the tree that layer ran over, not the document's. Spans and provenance are separate answers: an emitted form inherits its source form's span unless it sets `EmittedForm.source_span` (a container hook lifting a child out of its own subtree), while `source_form_idx` names the container either way. |
+| `Pattern`, `PatternQuery` | Deterministic Strudel-style pattern types + windowed query producing `(haps …)` / `(diagnostics …)` over a tree or Binary IR. The binary surface has two deliberately distinct contracts, selected by the ENTRY, never by the env: the frozen legacy `queryBinary` / `queryBinaryWithBudget` (what `sjon-binary.wasm` ships today — a `(pure <form>)` leaf silently degrades to `silence`, byte-for-byte behavior preserved) and the eval-capable `queryBinaryWithEnv` / `queryBinaryWithBudgetAndEnv` — a captured leaf becomes an IR view, is dry-run at cycle 0 (static defects surface as the tree path's diagnostics at `[pure]`; malformed wire under the capture is a hard `BinaryError`, typed, even at the dry-run), and is evaluated per cycle under the pattern-local `cycle` / `tick` / `seed`, which shadow same-named outer bindings. `outer_env` chains as the parent of every leaf eval; null env means pattern-locals-only, not legacy semantics. When any expr leaf exists the pattern bytes are copied once into the Result arena over a retained cursor + reused pool index, so the Result outlives both the caller's bytes and the env; the copy (and the pool index) are preflighted with checked arithmetic against `budget.bytes` and refuse with `MemoryBudgetExceeded` before allocating. There is no public `compileBinaryWithEnv`; the compiled node is never exposed. The budget+env one-shot has no tree twin — `queryTreeWithBudget` takes no env — an owner-accepted asymmetry documented on the entry. |
+| `Lowering`, `LoweringGraph` | Host-registered lowering-hook registry + the graph a hook run emits (source forest → lowered forest). `LoweringProvenance` is per layer and describes one hop: its `source_form_idx` indexes the tree that layer ran over, not the document's. Spans and provenance are separate answers: an emitted form inherits its source form's span unless it sets `EmittedForm.source_span` (a container hook lifting a child out of its own subtree), while `source_form_idx` names the container either way. `EmittedValue.carry` relocates a node of the layer's input tree verbatim (tags, spans, comments and re-interned strings, via `Ast.TreeBuilder.cloneNode`); a carry originates no node, is not `:produces`-checked, and is charged per carried node against the lowering budgets. |
 | `EffectiveView`, `MaterializedDefaults` | Read-only effective-value overlay: resolves schema `:default`s (literal or `(expr …)`) over an author tree without mutating it. |
 | `Resolver`, `FilesystemResolver` | `(use-plugin …)` reference resolution; the default filesystem resolver reads a `sjon-project.sjon` project file. |
 | `PluginRuntime`        | Executable-plugin ABI dispatch (`-Dplugin-exec`): instantiate sidecar wasm, pre-flight the import surface + ABI, invoke exports. |
@@ -176,6 +176,7 @@ releases the entire intermediate graph in one call.
 | `applyEdit`        | `source × action_json → []u8` (parse → mutate → print)       |
 | `toBinary`         | `Tree → []u8` (Binary IR; flag-gated spans / comments)       |
 | `fromBinary`       | `[]u8 → Tree` (self-contained, no aliasing)                  |
+| `prepareBinary`    | `[]u8 → PatternQuery.PreparedBinary` (decode once, owned; repeated `queryPreparedBinary*`; native convenience — not a wasm export) |
 | `validateBinary`   | `[]u8 × Schema → Validator.Result` (streams via `BinaryCursor`, no `Tree` built) |
 | `evalExprBinary`   | `[]u8 × Env × Schema → Expr.Result` (streams via `BinaryCursor`, no `Tree` built) |
 
@@ -228,6 +229,9 @@ sorted by `(length, bytes)`. See `src/Binary.zig` for the full layout.
 `Binary.fromBinary` builds a `Tree` directly via `TreeBuilder`,
 deep-copying string and comment text into its own arena so the
 result is self-contained and does not borrow from the input buffer.
+The decoder lives in the leaf module `BinaryDecoder` (std + Ast +
+BinaryFormat imports only — ask 30 / M4), re-exported verbatim by
+`Binary` so every `Binary.fromBinary` referencer is untouched.
 `Validator.validateBinary` and `Expr.evalBinary` skip the tree
 build entirely and stream the same bytes through `BinaryCursor`.
 
@@ -309,6 +313,16 @@ while (try roots.next()) |view| {
 
 See [`examples/binary-ir-demo.zig`](../examples/binary-ir-demo.zig) for a
 runnable end-to-end example (`zig build demo-binary`).
+
+Draining `rootIter` to its null return is also what consumes the wire's
+`[tree trailing comments]` block when the `with_tree_trailing_comments`
+flag is set: `RootIter` mirrors `ChildIter`/`VectorIter`, consuming the
+block on exhaustion and reporting the observed count in
+`trailing_count`. Exact end is therefore reachable — after an error-free
+drain, `cursor.pos == bytes.len` for a frame with no slack — but the
+comparison stays caller policy: the cursor never rejects post-block
+slack, and a null observed after an ignored drain error is not clean
+exhaustion.
 
 **Pool lookup, and the opt-in offset index.** Pool entries are length-
 prefixed, so resolving index `idx` walks `idx` varints from the pool
@@ -552,8 +566,10 @@ keyed by node index. Comments survive every round-trip:
   through the JSON bridge and so arrives trivia-free — including when
   the action is merely *composing* with a subtree rather than changing
   it. `wrap` is the op for that case: it clones the node it wraps, so
-  the wrapped subtree keeps its comments. Layout is not preserved by
-  any op; the printer re-derives it from the tree on every run.
+  the wrapped subtree keeps its comments. The default library `.reprint` mode re-derives layout.
+  `.preserve` splices the named spans and leaves other bytes untouched; the CLI
+  uses preserve mode. Root-list operations use `index`, never `root` or `path`;
+  the six within-root operations use `path` and, on multi-root files, `root`.
 
 ## Vocabulary as data — portable plugin manifests
 
