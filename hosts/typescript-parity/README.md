@@ -36,17 +36,16 @@ substrate features exercised by the corpus subset it runs:
 
 Deliberately **not** in v1 of this host:
 
-  * `expr-func` validation (typed signatures, arity, kvpair-rejection).
+  * Expression evaluation. Static `expr-func` checks for arity, literal
+    argument types, and disallowed kvpairs are implemented.
   * Binary IR and `validateBinary`.
-  * Comments inside structures (only top-level line comments
-    are handled).
   * Block comments (`#| … |#`).
   * Raw strings.
   * The full diagnostic code surface — only the codes the corpus
     cases assert on are wired.
-  * `:version` / `:hash` enforcement on `(use-plugin …)` references —
-    parsed, accepted, not validated (matches the Zig declarative
-    stance).
+  * Executable plugin byte hashing: version pins are checked against the
+    manifest, while a hash pin on a manifest-only resolution is refused with
+    `plugin_hash_mismatch` because there are no WASM bytes to hash.
   * WASM plugin loading.
 
 ### Conformance cases it skips

@@ -18,8 +18,8 @@ Agreement is checked on each host's supported surfaces and replayed fixtures.
 | **TypeScript (reference)** | Second-source conformance verification or porting. **Not for production.**        | `import { Host } from '…/typescript-parity/src/index.ts'`   | [`hosts/typescript-parity/test/conformance.test.ts`](../hosts/typescript-parity/test/conformance.test.ts) |
 
 All four hosts discover `conformance/cases/` and emit the same `(code,
-path)` diagnostics. Differences on supported shared contracts are conformance bugs; intentional
-boundaries and skip registries are described below.
+path)` diagnostics on the fixtures they replay. Differences on supported
+shared contracts are conformance bugs; intentional boundaries and skip registries are described below.
 
 ## Capability matrix
 
@@ -58,7 +58,6 @@ exclusive-group runtime checks. Aggregate-only provider cases still run.
 These exclusions describe existing boundaries, not permission for a new
 shared-contract divergence. [The TS README](../hosts/typescript-parity/README.md)
 details the supported subset.
-
 
 ## Zig — the reference path
 
