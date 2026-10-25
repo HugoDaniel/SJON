@@ -41,6 +41,28 @@ inside the editor, all lesson/error routes, the editing route, `llms.txt`,
 404 handling, and the visible failure banner with LSP WASM unavailable.
 Static route success and a local Astro preview do not replace these checks.
 
+## Rust crate
+
+The Rust host is published as `sjon-host` on crates.io. Its manifest restricts
+publication to that registry and includes library sources, README, and the
+build script. Repository integration tests, corpus data, and WASM artifacts
+are excluded. The packaged build skips corpus-driven test generation; the
+source checkout still enforces corpus/classifier checks.
+
+```sh
+cargo package --manifest-path hosts/rust/Cargo.toml --list
+cargo publish --manifest-path hosts/rust/Cargo.toml --dry-run
+cargo login
+cargo publish --manifest-path hosts/rust/Cargo.toml
+```
+
+Create a crates.io account, verify its email address, and enter a publishing
+API token at the `cargo login` prompt. Verify the uploaded version with
+`cargo info sjon-host@1.5.0`, then build a fresh registry consumer. The crate
+requires Rust 1.92 and a matching external `sjon.wasm`; it does not require
+Zig when using a prebuilt artifact. Instructions are in the
+[Rust README](../hosts/rust/README.md).
+
 ## Prepare and publish
 
 From a clean committed candidate:

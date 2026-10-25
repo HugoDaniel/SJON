@@ -8,6 +8,26 @@ Rust crate that wraps the same `sjon.wasm` artifact the JS web host
 This is the second WASM-backed host wrapper, after the JS host in
 `hosts/web/`.
 
+## Install
+
+```sh
+cargo add sjon-host@1.5.0
+```
+
+Requires Rust 1.92 or newer. The crate ships Rust sources and does not bundle
+`sjon.wasm`. Download the matching artifact from the
+[SJON 1.5.0 release](https://github.com/HugoDaniel/SJON/releases/tag/v1.5.0),
+or build the matching source with Zig 0.16 using `zig build wasm`.
+Pass its path to `SjonHost::load(Path::new("sjon.wasm"), None)`; the
+`Path` type is `std::path::Path`. No Zig toolchain is needed when using a
+prebuilt artifact. See the
+[complete Rust quickstart](https://github.com/HugoDaniel/SJON/blob/v1.5.0/examples/quickstart-rust.rs).
+
+The registry package excludes repository integration tests, conformance data,
+and fuzz targets. Its build script skips conformance test generation when the
+integration-test harness is absent. In a source checkout, missing corpus or
+classifier files still fail the build.
+
 ## Layout
 
 | File                                    | What it is                                           |
@@ -75,7 +95,7 @@ references / data → load each manifest → resolve each reference →
 schema-aggregate → validate the data forest. The diagnostic stream is
 byte-identical (`(code, path)`) to the Zig CLI, the typescript-parity
 reference on overlapping supported fixtures, and the web host on the
-WASM subset. See the [capability matrix](../../docs/INTEGRATION.md#capability-matrix)
+WASM subset. See the [capability matrix](https://github.com/HugoDaniel/SJON/blob/v1.5.0/docs/INTEGRATION.md#capability-matrix)
 and `conformance/classifier.json` for exclusions.
 
 #### With the bundled `FilesystemResolver`
@@ -96,7 +116,7 @@ fn main() -> anyhow::Result<()> {
         FilesystemResolver::build(project_root, Some(project_file.as_path()));
     let resolver: Arc<dyn Resolver> = Arc::new(resolver);
 
-    let mut host = SjonHost::load("./zig-out/bin/sjon.wasm", Some(resolver))?;
+    let mut host = SjonHost::load(std::path::Path::new("./zig-out/bin/sjon.wasm"), Some(resolver))?;
 
     let source = std::fs::read_to_string(project_root.join("scene.sjon"))?;
     let result = host.validate_document(
@@ -168,7 +188,7 @@ fn validate(source: &str) -> anyhow::Result<()> {
             r#"(plugin :name shapes :version "1.0.0")"#.to_string(),
         )]),
     });
-    let mut host = SjonHost::load("./zig-out/bin/sjon.wasm", Some(resolver))?;
+    let mut host = SjonHost::load(std::path::Path::new("./zig-out/bin/sjon.wasm"), Some(resolver))?;
     let _ = host.validate_document(source, &HostOptions::default())?;
     Ok(())
 }
@@ -204,7 +224,7 @@ pre-flight failures collapse to `plugin_abi_mismatch` /
 ### Effective config: reading materialized defaults
 
 The same worked example as the web host's
-[README](../web/README.md) — validate a document that omits defaulted
+[README](https://github.com/HugoDaniel/SJON/blob/v1.5.0/hosts/web/README.md) — validate a document that omits defaulted
 keys, then read the side-table to render the effective config without
 writing into the user's file:
 
@@ -218,7 +238,7 @@ let src = r#"
 (server)
 "#;
 
-let mut host = SjonHost::load("./zig-out/bin/sjon.wasm", None)?;
+let mut host = SjonHost::load(std::path::Path::new("./zig-out/bin/sjon.wasm"), None)?;
 let result = host.validate_document(src, &HostOptions::default())?;
 
 for d in &result.materialized_defaults {
@@ -262,7 +282,21 @@ payload is filesystem-agnostic. They land at the front of
 - **Browser Rust/WASM target.** The Web host covers the browser.
 - **`#[derive(SjonValidate)]` / proc-macro convenience.** Validation is
   schema-driven at runtime; the crate ships no proc-macros.
-- **crates.io publishing.** Crate ships a publish-ready shape but the
-  `cargo publish` step is separate.
+
+## Publishing
+
+From a clean committed checkout, verify the packaged crate before uploading:
+
+```sh
+cargo publish --manifest-path hosts/rust/Cargo.toml --dry-run
+cargo login
+cargo publish --manifest-path hosts/rust/Cargo.toml
+```
+
+Use your crates.io API token at the `cargo login` prompt. The publication
+is `sjon-host` version 1.5.0; Rust code imports it as `sjon_host`.
+The dry run builds the extracted package without the repository corpus.
+Run the repository's `zig build verify` separately to retain full host coverage.
+
 
 [wasmtime]: https://wasmtime.dev/

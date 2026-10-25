@@ -173,10 +173,22 @@ fn check_dead_families(classifier: &Classifier, entries: &[String]) -> Result<()
     Ok(())
 }
 
+/// The published crate deliberately omits repository integration tests.
+/// With the harness present, missing corpus/classifier files must still fail.
+fn has_conformance_harness() -> std::io::Result<bool> {
+    let harness = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/conformance.rs");
+    println!("cargo:rerun-if-changed={}", harness.display());
+    harness.try_exists()
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
+    println!("cargo:rerun-if-changed=build.rs");
+    if !has_conformance_harness()? {
+        return Ok(());
+    }
+
     let corpus = corpus_dir();
     let classifier_file = classifier_path();
-    println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", corpus.display());
     // Re-run when the single-source classifier changes (skip families,
     // markers, precedence) — same data the two TS hosts read.

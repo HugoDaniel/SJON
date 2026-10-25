@@ -25,6 +25,9 @@ all documented subpaths; use pnpm to rewrite workspace dependencies when packing
 - **Carry author subtrees through Zig lowering:** `LoweringInput.subtree` and
   `EmittedValue.carry` preserve author syntax and spans while the final forest
   validates the destination context. This remains a Zig-only hook surface.
+- **Rust distribution:** `sjon-host` is prepared for crates.io with explicit
+  package contents and a corpus-independent consumer build. It requires
+  Rust 1.92 and a matching external `sjon.wasm`.
 - **Highlight runtime requirement:** the compiled grammar uses JSON import
   attributes, so its minimum Node version is corrected to 20.10.
 - **Documentation and distribution:** corrected Node/Rust onboarding, eight-op

@@ -120,7 +120,8 @@ const result = reader.validateBinary(binary);
 See [`examples/quickstart-web.mjs`](examples/quickstart-web.mjs) and
 [hosts/web/README.md](hosts/web/README.md).
 
-**Rust** — wraps `sjon.wasm` via `wasmtime`:
+**Rust** — `cargo add sjon-host@1.5.0`; wraps the matching external
+`sjon.wasm` via `wasmtime` (the crate does not bundle it):
 
 ```rust
 use std::path::Path;

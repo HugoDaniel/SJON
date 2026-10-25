@@ -7,7 +7,15 @@ resolver = "3"
 description = "Rust host wrapping sjon.wasm — validate_document(source, options) for SJON multi-plugin documents"
 license = "CC0-1.0"
 repository = "https://github.com/HugoDaniel/SJON"
-publish = false
+homepage = "https://hugodaniel.com/pages/sjon/"
+documentation = "https://docs.rs/sjon-host"
+readme = "README.md"
+keywords = ["sjon", "validation", "schema", "wasm"]
+categories = ["parser-implementations", "config"]
+publish = ["crates-io"]
+# Consumers need the library, not the repository's corpus, WASM fixtures,
+# or fuzz harness. build.rs skips test generation when that harness is absent.
+include = ["Cargo.toml", "README.md", "build.rs", "src/**"]
 
 [dependencies]
 wasmtime = { version = "44", default-features = false, features = ["cranelift", "runtime"] }

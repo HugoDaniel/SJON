@@ -10,10 +10,11 @@
 //! edition = "2024"
 //!
 //! [dependencies]
-//! sjon-host = { path = "../sjon/hosts/rust" }
+//! sjon-host = "1.5.0"
 //! anyhow = "1"
 //! ```
 //!
+//! For an unpublished checkout, use a path dependency on `hosts/rust`.
 //! Then build the SJON WASM artifact once (`zig build wasm-all` from
 //! the SJON repo) and run `cargo run`.
 //!
