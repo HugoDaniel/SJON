@@ -1,0 +1,9 @@
+; Invalid under the `geometry` bundle, on purpose.
+;
+; `px` is outside `distance`'s `[mm cm m km]` set. The server reports
+; `unit_not_allowed`; changing the suffix to `mm`, `cm`, `m`, or `km`
+; clears it. This document is also the reason the bundle is worth having:
+; the `gpu-textures` bundle knows nothing about `(shape …)`, so the same
+; bytes would be `unknown_form` over there.
+
+(shape :rotation 45deg :radius 12px)

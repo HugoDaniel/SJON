@@ -1,0 +1,24 @@
+; Editor schema bundles for the native `sjon-lsp`.
+;
+; This is an editor-local file: the language server reads it to give each
+; document its own complete schema. The CLI ignores it, and `sjon.wasm` /
+; `sjon-lsp.wasm` never discover it.
+;
+; A bundle matches against the document's `/`-normalized path relative to
+; this file's directory. `*` is one segment; a whole `**` segment is zero or
+; more. Only the nearest `sjon-lsp.sjon` is consulted: nothing is inherited
+; from a parent directory.
+;
+; `:manifests` are resolved relative to this file too, in declaration order.
+; Both plugins below already ship in this repository; copy the example out
+; and point these paths at your own manifests.
+
+(sjon-lsp :version 1
+  :bundles [
+    (bundle :name gpu-textures
+      :files ["gpu/*.sjon"]
+      :manifests ["../plugins/dimensions/plugin.sjon"])
+
+    (bundle :name geometry
+      :files ["geometry/*.sjon"]
+      :manifests ["../plugins/units/plugin.sjon"])])

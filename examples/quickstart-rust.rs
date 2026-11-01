@@ -10,7 +10,7 @@
 //! edition = "2024"
 //!
 //! [dependencies]
-//! sjon-host = "1.5.0"
+//! sjon-host = "1.6.0"
 //! anyhow = "1"
 //! ```
 //!

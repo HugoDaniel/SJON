@@ -32,6 +32,30 @@ const Allocator = std.mem.Allocator;
 /// of files rather than a hundred thousand.
 pub const MAX_SCAN_ENTRIES: usize = 100_000;
 
+/// One workspace pull's shared bounds. A single value spans every
+/// initialization root and every per-document schema context: scanning
+/// counts directory entries against `max_scan_entries`, and ingestion
+/// counts never-open documents against `max_files`. Tests supply smaller
+/// values; the shipped defaults match the historical per-surface ceilings.
+pub const WorkspaceLimits = struct {
+    max_scan_entries: usize = MAX_SCAN_ENTRIES,
+    max_files: usize = Handler.MAX_WORKSPACE_FILES,
+};
+
+/// A decrementing entry budget shared by the roots of one workspace pull.
+/// Keeping the remaining count outside `collect` is what stops N roots
+/// from multiplying the entry ceiling by N.
+pub const Budget = struct {
+    remaining_entries: usize,
+    /// True once any root was cut short. Sticky across roots so the
+    /// transport warns once for the whole pull.
+    stopped_early: bool = false,
+
+    pub fn init(max_entries: usize) Budget {
+        return .{ .remaining_entries = max_entries };
+    }
+};
+
 /// Directory names never descended into. Build outputs and package
 /// directories hold generated or vendored `.sjon` files that are not the
 /// user's to fix, and reporting diagnostics on them buries the ones that
@@ -54,6 +78,10 @@ pub const Scan = struct {
 
 /// Enumerate `**/*.sjon` under `root`, read fresh from disk.
 ///
+/// The one-root compatibility wrapper: it creates a private entry budget
+/// from `options`. A workspace pull with several roots calls
+/// `collectWithBudget` with one shared `Budget` instead.
+///
 /// Unreadable directories and files are skipped rather than fatal: one
 /// permission error should not cost the whole workspace its diagnostics.
 /// Everything is allocated in `arena`, including the returned slice.
@@ -63,6 +91,22 @@ pub fn collect(
     root: []const u8,
     options: Options,
 ) Allocator.Error!Scan {
+    var budget = Budget.init(options.max_entries);
+    return collectWithBudget(arena, io, root, &budget);
+}
+
+/// Enumerate `**/*.sjon` under `root`, decrementing `budget` for each
+/// directory entry visited. The budget is caller-owned so every root of a
+/// multi-root workspace shares one ceiling; when it reaches zero the walk
+/// stops at the next entry and reports `stopped_early`.
+///
+/// Everything is allocated in `arena`, including the returned slice.
+pub fn collectWithBudget(
+    arena: Allocator,
+    io: std.Io,
+    root: []const u8,
+    budget: *Budget,
+) Allocator.Error!Scan {
     var out: std.ArrayList(Handler.WorkspaceFile) = .empty;
 
     // Explicit queue of absolute directory paths, consumed by index so
@@ -70,7 +114,6 @@ pub fn collect(
     var queue: std.ArrayList([]const u8) = .empty;
     try queue.append(arena, try arena.dupe(u8, root));
 
-    var visited: usize = 0;
     var head: usize = 0;
     while (head < queue.items.len) : (head += 1) {
         const dir_path = queue.items[head];
@@ -79,10 +122,11 @@ pub fn collect(
 
         var it = dir.iterate();
         while (it.next(io) catch null) |entry| {
-            visited += 1;
-            if (visited > options.max_entries) {
+            if (budget.remaining_entries == 0) {
+                budget.stopped_early = true;
                 return .{ .files = try out.toOwnedSlice(arena), .stopped_early = true };
             }
+            budget.remaining_entries -= 1;
             if (entry.name.len == 0 or entry.name[0] == '.') continue;
 
             const child = try std.fs.path.join(arena, &.{ dir_path, entry.name });
@@ -109,7 +153,10 @@ pub fn collect(
             }
         }
     }
-    return .{ .files = try out.toOwnedSlice(arena), .stopped_early = false };
+    return .{
+        .files = try out.toOwnedSlice(arena),
+        .stopped_early = budget.stopped_early,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -236,4 +283,56 @@ test "collect: a missing root yields no files rather than an error" {
     const scan = try collect(a, testing.io, ".zig-cache/tmp/definitely-not-here", .{});
     try testing.expectEqual(@as(usize, 0), scan.files.len);
     try testing.expect(!scan.stopped_early);
+}
+
+test "workspace contexts: scan entry budget is shared across roots" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+
+    try tmp.dir.createDirPath(io, "root-a");
+    try tmp.dir.createDirPath(io, "root-b");
+    for ([_][]const u8{ "a1.sjon", "a2.sjon", "a3.sjon" }) |name| {
+        const sub_path = try std.fmt.allocPrint(testing.allocator, "root-a/{s}", .{name});
+        defer testing.allocator.free(sub_path);
+        try tmp.dir.writeFile(io, .{ .sub_path = sub_path, .data = "(a)" });
+    }
+    for ([_][]const u8{ "b1.sjon", "b2.sjon", "b3.sjon" }) |name| {
+        const sub_path = try std.fmt.allocPrint(testing.allocator, "root-b/{s}", .{name});
+        defer testing.allocator.free(sub_path);
+        try tmp.dir.writeFile(io, .{ .sub_path = sub_path, .data = "(b)" });
+    }
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const first_root = try std.fmt.allocPrint(
+        a,
+        ".zig-cache/tmp/{s}/root-a",
+        .{&tmp.sub_path},
+    );
+    const second_root = try std.fmt.allocPrint(
+        a,
+        ".zig-cache/tmp/{s}/root-b",
+        .{&tmp.sub_path},
+    );
+
+    // The limits value is the production default and is shared by every
+    // root of one workspace pull.
+    const limits: WorkspaceLimits = .{};
+    try testing.expectEqual(@as(usize, 100_000), limits.max_scan_entries);
+    try testing.expectEqual(
+        @as(usize, Handler.MAX_WORKSPACE_FILES),
+        limits.max_files,
+    );
+
+    var budget = Budget.init(4);
+    const first = try collectWithBudget(a, io, first_root, &budget);
+    const second = try collectWithBudget(a, io, second_root, &budget);
+
+    try testing.expectEqual(@as(usize, 0), budget.remaining_entries);
+    try testing.expectEqual(@as(usize, 4), first.files.len + second.files.len);
+    try testing.expect(!first.stopped_early);
+    try testing.expect(second.stopped_early);
+    try testing.expect(budget.stopped_early);
 }

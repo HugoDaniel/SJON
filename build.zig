@@ -649,12 +649,121 @@ pub fn build(b: *std.Build) void {
     // on the native LSP install without forcing the lazy dep when it isn't
     // fetched (stays null → verify simply skips it, same as `lsp-all`).
     var native_lsp_install: ?*std.Build.Step = null;
+    // The native JSON-RPC subprocess suite. Captured for the same lazy-dep
+    // reason as the install above: the `lsp-native-test` step lives inside
+    // the fetched block, but `test_step` is declared further down.
+    var native_lsp_native_test: ?*std.Build.Step.Run = null;
+    // Editor schema-bundle wire scenarios. Same lazy-dep capture as the
+    // native suite above; `zig build test` depends on both files.
+    var native_lsp_bundle_test: ?*std.Build.Step.Run = null;
     // Same reason, for the `lsp-main` test step: it belongs with the other
     // `lsp-*` test wiring further down, which is where `test_step` and the
     // kcov steps exist, but its modules can only be built when `lsp_kit`
     // is fetched. Capturing the exe's own modules rather than rebuilding
     // them there is what keeps the tested capability set the shipped one.
     var native_lsp_modules: ?NativeLspModules = null;
+
+    // ---------------------------------------------------------------------
+    // Native schema-context modules.
+    //
+    // These live before the lsp-kit lazy block because the executable imports
+    // them directly: `main.zig` and `context_registry.zig` must name the same
+    // `Handler`, `uri`, and `discovery` module instances or their public
+    // types are distinct to Zig. The test steps further down reuse these
+    // definitions rather than creating parallel module instances.
+    // ---------------------------------------------------------------------
+    const lsp_uri_mod = b.addModule("sjon-lsp-uri-native", .{
+        .root_source_file = b.path("src/lsp/uri.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Editor-local `sjon-lsp.sjon` reader. Pure config parsing/validation;
+    // it imports the ordinary SJON parser rather than owning a second one.
+    const lsp_editor_config_mod = b.addModule("sjon-lsp-editor-config", .{
+        .root_source_file = b.path("src/lsp/editor_config.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sjon", .module = sjon_mod },
+            .{ .name = "uri", .module = lsp_uri_mod },
+        },
+    });
+
+    // Ordered editor schema bundles. Reads only the selected bundle's
+    // manifests, in declaration order, through `CappedRead`; compiles them
+    // with `Host.preloadSchema`; and exposes a core-inclusive effective
+    // schema only when every required input compiled without errors.
+    const lsp_schema_bundle_mod = b.addModule("sjon-lsp-schema-bundle", .{
+        .root_source_file = b.path("src/lsp/schema_bundle.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sjon", .module = sjon_mod },
+            .{ .name = "uri", .module = lsp_uri_mod },
+            .{ .name = "editor_config", .module = lsp_editor_config_mod },
+        },
+    });
+
+    // Per-document association discovery: initialization roots, the
+    // nearest-marker walk, and ready/unconfigured/conflict/config-failure
+    // selections. It reads configurations but creates no handlers and scans
+    // no workspaces; those belong to the context registry and main.
+    const lsp_discovery_mod = b.addModule("sjon-lsp-discovery", .{
+        .root_source_file = b.path("src/lsp/discovery.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "uri", .module = lsp_uri_mod },
+            .{ .name = "editor_config", .module = lsp_editor_config_mod },
+        },
+    });
+
+    const lsp_handler_native_mod = b.addModule("sjon-lsp-handler-native", .{
+        .root_source_file = b.path("src/lsp/Handler.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sjon", .module = sjon_mod },
+            .{ .name = "build_options", .module = build_options_mod },
+            .{ .name = "uri", .module = lsp_uri_mod },
+        },
+    });
+
+    // Workspace enumeration — the filesystem half of the seam
+    // `Handler.ingestWorkspaceFiles` sits behind. Its own module so the
+    // walk's skip/ceiling rules are testable without a server. Defined
+    // before the registry because the registry applies the shared scan/file
+    // budget to every root.
+    const workspace_scan_mod = b.addModule("sjon-lsp-workspace-scan", .{
+        .root_source_file = b.path("src/lsp/workspace_scan.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sjon", .module = sjon_mod },
+            .{ .name = "Handler", .module = lsp_handler_native_mod },
+            .{ .name = "uri", .module = lsp_uri_mod },
+        },
+    });
+
+    // Per-document schema contexts and overlays. Owns open buffers, lazy
+    // baseline/legacy/source/unavailable contexts, monotonic generations,
+    // and the build→validate→swap→deinit replacement transaction.
+    const lsp_context_registry_mod = b.addModule("sjon-lsp-context-registry", .{
+        .root_source_file = b.path("src/lsp/context_registry.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sjon", .module = sjon_mod },
+            .{ .name = "Handler", .module = lsp_handler_native_mod },
+            .{ .name = "uri", .module = lsp_uri_mod },
+            .{ .name = "discovery", .module = lsp_discovery_mod },
+            .{ .name = "editor_config", .module = lsp_editor_config_mod },
+            .{ .name = "schema_bundle", .module = lsp_schema_bundle_mod },
+            .{ .name = "workspace_scan", .module = workspace_scan_mod },
+        },
+    });
+
     if (b.lazyDependency("lsp_kit", .{ .target = target, .optimize = optimize })) |lsp_kit_dep| {
         const lsp_mod = lsp_kit_dep.module("lsp");
 
@@ -662,35 +771,10 @@ pub fn build(b: *std.Build) void {
         // basic_server bits along. Native and WASM both depend on it.
         // `main.zig` uses the URI helper to convert `rootUri` → workspace
         // path; Handler uses its hash context to key the document map.
-        const uri_mod = b.addModule("sjon-lsp-uri", .{
-            .root_source_file = b.path("src/lsp/uri.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        const handler_mod = b.addModule("sjon-lsp-handler", .{
-            .root_source_file = b.path("src/lsp/Handler.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "sjon", .module = sjon_mod },
-                .{ .name = "build_options", .module = build_options_mod },
-                .{ .name = "uri", .module = uri_mod },
-            },
-        });
-
-        // Workspace enumeration — the filesystem half of the seam
-        // `Handler.ingestWorkspaceFiles` sits behind. Its own module so
-        // the walk's skip/ceiling rules are testable without a server.
-        const workspace_scan_mod = b.addModule("sjon-lsp-workspace-scan", .{
-            .root_source_file = b.path("src/lsp/workspace_scan.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "sjon", .module = sjon_mod },
-                .{ .name = "Handler", .module = handler_mod },
-                .{ .name = "uri", .module = uri_mod },
-            },
-        });
+        // These are the same module instances the context registry imports
+        // (defined above), so `*Handler` crosses the boundary as one type.
+        const uri_mod = lsp_uri_mod;
+        const handler_mod = lsp_handler_native_mod;
 
         // Incremental-sync splice. Shared with the WASM transport (which
         // imports it by path); std-only, so it takes no imports and each
@@ -711,10 +795,12 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "sjon", .module = sjon_mod },
                     .{ .name = "lsp", .module = lsp_mod },
-                    .{ .name = "Handler", .module = handler_mod },
-                    .{ .name = "uri", .module = uri_mod },
+                    .{ .name = "Handler", .module = lsp_handler_native_mod },
+                    .{ .name = "uri", .module = lsp_uri_mod },
                     .{ .name = "workspace_scan", .module = workspace_scan_mod },
                     .{ .name = "text_sync", .module = text_sync_mod },
+                    .{ .name = "discovery", .module = lsp_discovery_mod },
+                    .{ .name = "context_registry", .module = lsp_context_registry_mod },
                 },
             }),
         });
@@ -726,9 +812,36 @@ pub fn build(b: *std.Build) void {
             .uri = uri_mod,
             .workspace_scan = workspace_scan_mod,
             .text_sync = text_sync_mod,
+            .discovery = lsp_discovery_mod,
+            .context_registry = lsp_context_registry_mod,
         };
         const lsp_step = b.step("lsp", "Build the SJON LSP (native)");
         lsp_step.dependOn(&install_lsp.step);
+
+        // End-to-end native transport suite: Node drives the installed
+        // executable over Content-Length-framed JSON-RPC. It is a build
+        // step rather than a Zig test because the subject is the real
+        // process boundary (`basic_server.run` + stdio), which an
+        // in-process Zig test cannot exercise. No npm dependency.
+        const native_lsp_test = b.addSystemCommand(&.{ "node", "--test", "tools/lsp_native_tests.mjs" });
+        native_lsp_test.setEnvironmentVariable("SJON_LSP_SERVER", b.getInstallPath(.bin, "sjon-lsp"));
+        native_lsp_test.step.dependOn(&install_lsp.step);
+        native_lsp_native_test = native_lsp_test;
+
+        // Editor schema-bundle routing scenarios, in a sibling run step with
+        // the same server-path handoff and install dependency. One
+        // `lsp-native-test` step runs both files.
+        const bundle_test = b.addSystemCommand(&.{ "node", "--test", "tools/lsp_bundle_tests.mjs" });
+        bundle_test.setEnvironmentVariable("SJON_LSP_SERVER", b.getInstallPath(.bin, "sjon-lsp"));
+        bundle_test.step.dependOn(&install_lsp.step);
+        native_lsp_bundle_test = bundle_test;
+
+        const lsp_native_test_step = b.step(
+            "lsp-native-test",
+            "Run the native LSP JSON-RPC suites against the installed server (requires `node`)",
+        );
+        lsp_native_test_step.dependOn(&native_lsp_test.step);
+        lsp_native_test_step.dependOn(&bundle_test.step);
 
         // The WASM LSP target is wired unconditionally above (see
         // `wasm-lsp` step) since it doesn't need lsp-kit. The aggregate
@@ -742,6 +855,16 @@ pub fn build(b: *std.Build) void {
     // Test wiring
     // ---------------------------------------------------------------------
     const test_step = b.step("test", "Run all tests");
+
+    // The native LSP suite rides `zig build test` when `lsp_kit` is
+    // fetched. It depends on `install_lsp`, so the binary under test is the
+    // one this build just produced — never a stale `zig-out` leftover.
+    if (native_lsp_native_test) |native_lsp_test| {
+        test_step.dependOn(&native_lsp_test.step);
+    }
+    if (native_lsp_bundle_test) |bundle_test| {
+        test_step.dependOn(&bundle_test.step);
+    }
 
     // Coverage wiring — every test binary (and the two demo executables)
     // runs once more under kcov, writing a per-binary report into
@@ -887,14 +1010,54 @@ pub fn build(b: *std.Build) void {
     // offsets is the wasm-only Position helper (freestanding-clean, no
     // imports); uri is the standalone URI decoder (no SJON dep).
     //
-    // `uri` is registered here, ahead of every consumer, and outside the
-    // `lsp_kit` lazy block: it imports no lsp-kit, so its own tests and its
-    // consumers run whether or not that dependency was fetched.
-    const lsp_uri_mod = b.addModule("sjon-lsp-uri-native", .{
-        .root_source_file = b.path("src/lsp/uri.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
+    // `uri` and the editor-config/registry modules are defined above the
+    // lsp-kit lazy block so the executable and their tests share one module
+    // identity. Their test steps stay here with the rest of the LSP wiring.
+    _ = addTestStep(
+        b,
+        test_step,
+        cov_clean,
+        cov_merge,
+        "lsp-editor-config",
+        "src/lsp/editor_config.zig",
+        target,
+        optimize,
+        &.{
+            .{ .name = "sjon", .module = sjon_mod },
+            .{ .name = "uri", .module = lsp_uri_mod },
+        },
+    );
+    // Ordered editor schema bundles.
+    _ = addTestStep(
+        b,
+        test_step,
+        cov_clean,
+        cov_merge,
+        "lsp-schema-bundle",
+        "src/lsp/schema_bundle.zig",
+        target,
+        optimize,
+        &.{
+            .{ .name = "sjon", .module = sjon_mod },
+            .{ .name = "uri", .module = lsp_uri_mod },
+            .{ .name = "editor_config", .module = lsp_editor_config_mod },
+        },
+    );
+    // Per-document association discovery.
+    _ = addTestStep(
+        b,
+        test_step,
+        cov_clean,
+        cov_merge,
+        "lsp-discovery",
+        "src/lsp/discovery.zig",
+        target,
+        optimize,
+        &.{
+            .{ .name = "uri", .module = lsp_uri_mod },
+            .{ .name = "editor_config", .module = lsp_editor_config_mod },
+        },
+    );
     _ = addTestStep(
         b,
         test_step,
@@ -954,17 +1117,27 @@ pub fn build(b: *std.Build) void {
     // (`std.heap.wasm_allocator`), but `wasm.zig` gates the allocator on
     // the target arch so the dispatch handlers are driveable natively:
     // these tests feed a request in and parse the framed response back
-    // out. Handler is compiled as a native module for the import.
-    const lsp_handler_native_mod = b.addModule("sjon-lsp-handler-native", .{
-        .root_source_file = b.path("src/lsp/Handler.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
+    // out. Handler is the same native module the executable imports.
+    _ = addTestStep(
+        b,
+        test_step,
+        cov_clean,
+        cov_merge,
+        "lsp-context-registry",
+        "src/lsp/context_registry.zig",
+        target,
+        optimize,
+        &.{
             .{ .name = "sjon", .module = sjon_mod },
-            .{ .name = "build_options", .module = build_options_mod },
+            .{ .name = "Handler", .module = lsp_handler_native_mod },
             .{ .name = "uri", .module = lsp_uri_mod },
+            .{ .name = "discovery", .module = lsp_discovery_mod },
+            .{ .name = "editor_config", .module = lsp_editor_config_mod },
+            .{ .name = "schema_bundle", .module = lsp_schema_bundle_mod },
+            .{ .name = "workspace_scan", .module = workspace_scan_mod },
         },
-    });
+    );
+
     _ = addTestStep(
         b,
         test_step,
@@ -1029,6 +1202,8 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "uri", .module = lsp_mods.uri },
                 .{ .name = "workspace_scan", .module = lsp_mods.workspace_scan },
                 .{ .name = "text_sync", .module = lsp_mods.text_sync },
+                .{ .name = "discovery", .module = lsp_mods.discovery },
+                .{ .name = "context_registry", .module = lsp_mods.context_registry },
             },
         );
     }
@@ -1447,6 +1622,8 @@ const NativeLspModules = struct {
     uri: *std.Build.Module,
     workspace_scan: *std.Build.Module,
     text_sync: *std.Build.Module,
+    discovery: *std.Build.Module,
+    context_registry: *std.Build.Module,
 };
 
 /// A native `sjon`-importing tool: its executable, the run step that
@@ -1541,29 +1718,28 @@ fn linkSystemWasmtime(b: *std.Build, mod: *std.Build.Module) void {
     for (prefixes) |prefix| {
         const lib_dir = b.fmt("{s}/lib", .{prefix});
         const inc_dir = b.fmt("{s}/include", .{prefix});
-        if (dirExists(lib_dir)) {
+        if (dirExists(b, lib_dir)) {
             mod.addLibraryPath(.{ .cwd_relative = lib_dir });
         }
-        if (dirExists(inc_dir)) {
+        if (dirExists(b, inc_dir)) {
             mod.addIncludePath(.{ .cwd_relative = inc_dir });
         }
     }
 }
 
-/// Returns true if the given absolute path exists on the build host. We
-/// use the libc `access(2)` syscall directly because std.Io.Dir's
-/// existence checks require an `Io` handle that build scripts don't
-/// have lying around. Zig promotes "library directory not found" to a
-/// hard error, so adding a non-existent `addLibraryPath` would break
-/// the build before the actual library lookup; this check lets us only
-/// add prefixes that resolve.
-fn dirExists(path: []const u8) bool {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (path.len >= buf.len) return false;
-    @memcpy(buf[0..path.len], path);
-    buf[path.len] = 0;
-    const zpath: [*:0]const u8 = @ptrCast(&buf);
-    return std.c.access(zpath, 0) == 0;
+/// Returns true if the given absolute path exists on the build host. The
+/// probe goes through the build runner's `Io` interface (`b.graph.io`),
+/// which std dispatches per target: a raw `faccessat` syscall on Linux —
+/// where the build runner links no libc and Zig 0.16 rejects `std.c.*`
+/// with "dependency on libc must be explicitly specified in the build
+/// command" — and libc where the runner already links it (macOS,
+/// OpenBSD). Zig promotes "library directory not found" to a hard error,
+/// so adding a non-existent `addLibraryPath` would break the build
+/// before the actual library lookup; this check lets us only add
+/// prefixes that resolve.
+fn dirExists(b: *std.Build, path: []const u8) bool {
+    std.Io.Dir.cwd().access(b.graph.io, path, .{}) catch return false;
+    return true;
 }
 
 /// Wraps an already-built artifact in a kcov Run that writes per-binary

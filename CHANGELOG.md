@@ -6,6 +6,92 @@ enum — are versioned and corpus-gated; nothing changes them silently.
 
 ## Unreleased
 
+## 1.6.0 — 2026-11-01
+
+This release keeps binary wire v5 and the diagnostic-code enum unchanged,
+and the conformance corpus stays at 393 cases. It is a language-server
+release: the native `sjon-lsp` gains per-document schemas, negotiated
+diagnostic delivery, and a reload path built for real editor lifecycles.
+The CLI, the `sjon-project.sjon` project format, and every other host are
+unchanged. The WASM language server keeps its one supplied schema and never
+discovers a `sjon-lsp.sjon`.
+
+- **Per-document schemas from `sjon-lsp.sjon`:** the native server discovers
+  the nearest version-1 editor bundle configuration for each document, matches
+  its `:files` patterns against the document's `/`-normalized path relative to
+  the configuration directory, and compiles the selected bundle's ordered
+  `:manifests` into that document's complete schema. Discovery is lexical and
+  stops at the nearest marker directory, so a parent configuration is never
+  inherited. A document matching two bundles is a conflict, not a first-match
+  choice; a malformed configuration, unreadable source, or aggregate failure
+  makes the document unavailable instead of falling back to core or a stale
+  schema. The grammar, pattern rules, precedence against `sjon-project.sjon`,
+  and editor-local diagnostics are in
+  [the editor guide](docs/TOOLING.md#editor-schema-bundles).
+- **Document plugin declarations compose on top of the selected bundle:** a
+  ready document with a top-level `(plugin …)` or `(use-plugin …)` directive
+  gets a one-document context composed as `core ++ bundle ++ document`, rebuilt
+  on every open and content change. Documents without a directive share the
+  bundle's baseline handler. Named declaration references resolve against the
+  marker directory's `sjon-project.sjon` only, and every resolved manifest is a
+  saved-input dependency, so repairing a manifest and saving it rebuilds the
+  document.
+- **Diagnostic delivery is negotiated once per connection:** advertising
+  `textDocument.diagnostic` selects pull, even when the capability object is
+  empty; every other client gets push. A push client receives complete
+  `textDocument/publishDiagnostics` sets after open, change, close, and schema
+  reload, with `relatedInformation`, deprecated `tags`, and `codeDescription`
+  emitted only when the active mode announces them. `version` appears only
+  under `publishDiagnostics.versionSupport`, and no report is published after
+  `shutdown`. A pull client that advertises
+  `workspace.diagnostics.refreshSupport` gets one
+  `workspace/diagnostic/refresh` after a successful reload; result IDs include
+  the context generation so the rest see the new state on their next pull.
+- **Schema reloads are transactional:** saved configuration, project, marker,
+  and manifest bytes are the authority for dependents. `didSave` advertises
+  `includeText = false` and rereads the saved path; watcher registration is
+  requested only when the client advertises
+  `workspace.didChangeWatchedFiles.dynamicRegistration` and a rejection is
+  recorded once without retry. Reloads rebuild every context from owned buffers,
+  seed unaffected contexts at their previous generation, and publish the union
+  of old and new affected URIs. A marker deleted during the swap is reported as
+  `sjon-lsp/marker-deleted`, and recreating that known marker recovers the
+  boundary.
+- **Workspace results merge across schema contexts:** initialization roots and
+  configuration contexts share one scan-entry budget and one never-opened-file
+  budget, scanned files are sorted globally and de-duplicated by decoded URI,
+  and workspace diagnostics and symbols keep a stable URI/name/span order.
+  Open buffers shadow disk copies, reference scopes stay per handler, and a
+  ready context keeps serving while an unrelated one is unavailable.
+- **Editor-local diagnostics stay out of the wire-stable enum:** configuration
+  and bundle failures use `source = "sjon-lsp"` with string identifiers
+  (`sjon-lsp/config-*`, `sjon-lsp/bundle-*`, `sjon-lsp/marker-deleted`) and omit
+  `codeDescription`, because there is no `sjon explain` page for them. Ordinary
+  SJON parser and manifest diagnostics on configuration and source files keep
+  their normal codes and documentation links.
+- **A shipped editor-bundle example:** `examples/editor-bundles/` contains a
+  version-1 `sjon-lsp.sjon` with two bundles over two existing plugins, plus
+  documents that show both a clean schema and the diagnostic each bundle
+  raises. See [the example README](examples/editor-bundles/README.md).
+
+### Fixed
+
+- **Reloaded input URIs are owned across the registry swap.** The affected-URI
+  set returned by a reload no longer aliases slices in the destroyed registry,
+  which could read freed memory on real schema bundles when publishing the
+  change.
+- **An empty `didChange` batch republishes the current diagnostics** under the
+  supplied version instead of leaving the client on a stale report; a change
+  for an unopened document still returns `UnknownDocument` without inventing a
+  report.
+- **The build runner probes directories without `std.c.access`.** `dirExists`
+  now goes through the build runner's `Io` interface, so `zig build` on Linux
+  no longer fails with "dependency on libc must be explicitly specified" when
+  gating the wasmtime prefixes. No artifact link flags change.
+- **The Rust packaged-build harness is isolated from the source checkout,** so
+  the crates.io package builds and tests its consumer surface without the
+  repository conformance corpus.
+
 ## 1.5.0 — 2026-10-25
 
 This release keeps binary wire v5 and the diagnostic-code enum unchanged.

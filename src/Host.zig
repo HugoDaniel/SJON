@@ -648,12 +648,22 @@ pub const PreloadedSchema = struct {
     plugins: []const Plugin.Plugin,
     /// Pure aggregate over `plugins`. No allocation; not deinited.
     schema: Schema.Schema,
-    /// Phase-tagged diagnostics from the manifest-load pass (`.manifest`,
-    /// spans local to each source) and the six aggregate validators
-    /// (`.aggregate`), concatenated in that order. Because every span is
-    /// local to a manifest source (never the eventual document), a borrowing
-    /// `validateDocument` needs no span rebasing — its own diagnostics are
-    /// document-local by construction.
+    /// Input-index-aligned manifest-load reports: `source_diagnostics[i]`
+    /// holds every `.manifest`-phase diagnostic produced while loading
+    /// `manifest_sources[i]`. A clean source (or one that emitted nothing)
+    /// gets an empty slice, so a failed source never compacts the indices of
+    /// the sources after it. Each inner slice is arena-owned.
+    source_diagnostics: []const []const HostDiagnostic,
+    /// `.aggregate`-phase diagnostics from the six schema-internal
+    /// validators, in validator order. Kept separate from
+    /// `source_diagnostics`: these failures describe the combined set, not
+    /// any one input. Arena-owned.
+    aggregate_diagnostics: []const HostDiagnostic,
+    /// Flattened compatibility view: `source_diagnostics` concatenated in
+    /// input order, followed by `aggregate_diagnostics`. Because every span
+    /// is local to a manifest source (never the eventual document), a
+    /// borrowing `validateDocument` needs no span rebasing — its own
+    /// diagnostics are document-local by construction.
     diagnostics: []const HostDiagnostic,
 
     pub fn deinit(self: *PreloadedSchema) void {
@@ -665,6 +675,55 @@ pub const PreloadedSchema = struct {
     pub fn hasErrors(self: *const PreloadedSchema) bool {
         for (self.diagnostics) |d| if (d.severity == .err) return true;
         return false;
+    }
+};
+
+/// One saved manifest source a `PreparedSchema` resolved. Recorded as soon
+/// as resolution yields a manifest path — before the load result is known —
+/// so repairing and saving a broken manifest still rebuilds the dependent
+/// document context.
+pub const ResolvedDependency = struct {
+    /// Resolver-returned manifest path. Copied into the `PreparedSchema`
+    /// arena so it outlives the resolver that returned it.
+    source_path: []const u8,
+};
+
+/// Owned result of schema-only document preparation: the parse/manifest/
+/// aggregate prefix of `validateDocument` without executable work.
+///
+/// The caller is a native editor building a one-document context. The
+/// document's own tree, plugin results, diagnostics, and dependency paths
+/// are owned here; the baseline `options.preloaded` bundle is BORROWED and
+/// must outlive this value. `deinit` releases document plugin results, then
+/// the tree, then the arena — never the borrowed baseline.
+pub const PreparedSchema = struct {
+    arena: std.heap.ArenaAllocator,
+    /// Parsed document. Owns its own arena via `tree.deinit()`.
+    tree: Ast.Tree,
+    /// One entry per document-loaded `(plugin …)` / `(use-plugin …)` source
+    /// that loaded cleanly. Document-only: the preloaded baseline's results
+    /// are never adopted here.
+    plugin_results: []ManifestLoader.Result,
+    /// `preloaded.plugins ++ document-loaded plugins` (user-only, no core).
+    /// Borrows the baseline plugin storage.
+    user_schema: Schema.Schema,
+    /// `core ++ preloaded.plugins ++ document-loaded plugins` — the schema
+    /// the validator and evaluator read. `core` appears exactly once.
+    validation_schema: Schema.Schema,
+    /// Parse-phase diagnostics followed by manifest-load (including
+    /// applicable project-index) and aggregate diagnostics.
+    diagnostics: []const HostDiagnostic,
+    /// Manifest paths resolved for this document, in resolution order.
+    dependencies: []const ResolvedDependency,
+    /// True when the document has at least one top-level `(plugin …)` or
+    /// `(use-plugin …)` root, well formed or not.
+    has_directives: bool,
+
+    pub fn deinit(self: *PreparedSchema) void {
+        for (self.plugin_results) |*pr| pr.deinit();
+        self.tree.deinit();
+        self.arena.deinit();
+        self.* = undefined;
     }
 };
 
@@ -686,6 +745,18 @@ const PreparedDocument = struct {
     project_plugin_names: []const []const u8,
 };
 
+/// How the shared preparation prefix is used.
+const PreparationMode = enum {
+    /// Full document execution: build the default resolver whenever a root
+    /// is configured, read wasm sidecars, and pre-flight them for the
+    /// caller's eval/validation tail.
+    executable,
+    /// Schema-only editor preparation: use manifest-only resolution when the
+    /// bundled filesystem resolver is constructed, never pre-flight wasm,
+    /// and skip the resolver entirely when the document has no references.
+    schema_only,
+};
+
 /// Run the manifest-resolution prefix that `validateDocument` and `evalExpr`
 /// share verbatim: parse → wrap parse diagnostics → partition → load inline
 /// `(plugin …)` declarations → resolve `(use-plugin …)` references (building
@@ -702,6 +773,12 @@ const PreparedDocument = struct {
 /// their result structs) plus the arena-backed derived state. On error it
 /// tears the tree and any adopted plugin Results back down; on success the
 /// caller re-arms those two errdefers for its own tail.
+///
+/// `mode == .schema_only` additionally: records every resolved manifest path
+/// into `dependencies` (when non-null) before the load is attempted, uses
+/// manifest-only filesystem resolution, skips default-resolver construction
+/// when the document has no references, and skips wasm pre-flight. It does
+/// not run validation, lowering, or eval — those live in the callers.
 fn prepareDocument(
     gpa: Allocator,
     a: Allocator,
@@ -710,6 +787,8 @@ fn prepareDocument(
     diags: *std.ArrayList(HostDiagnostic),
     runtime_storage: *(if (native_plugin_exec) PluginRuntime else void),
     runtime_initialized: *bool,
+    mode: PreparationMode,
+    dependencies: ?*std.ArrayList(ResolvedDependency),
 ) Error!PreparedDocument {
     // Parse must succeed structurally. A returned tree may carry parse
     // diagnostics; those are forwarded into the host stream and the rest
@@ -810,6 +889,10 @@ fn prepareDocument(
     const effective_resolver: ?Resolver.Resolver = blk: {
         if (options.resolver) |r| break :blk r;
         if (comptime builtin.os.tag == .freestanding) break :blk null;
+        // Schema-only inline preparation never consults the project index.
+        // Reading it would surface diagnostics for an unrelated project and
+        // make an editor open files the document never references.
+        if (mode == .schema_only and part.references.len == 0) break :blk null;
         const root = options.project_root orelse break :blk null;
         const io = options.io orelse break :blk null;
         owned_default_resolver = try FilesystemResolver.init(
@@ -822,7 +905,10 @@ fn prepareDocument(
         for (project_diags) |d| {
             try diags.append(a, try wrapProjectDiagnostic(a, d));
         }
-        break :blk owned_default_resolver.?.resolver();
+        break :blk if (mode == .schema_only)
+            owned_default_resolver.?.resolverManifestOnly()
+        else
+            owned_default_resolver.?.resolver();
     };
 
     // Did-you-mean candidate pool for `unresolved_plugin`: the project
@@ -873,6 +959,12 @@ fn prepareDocument(
         const resolution = try resolver.resolve(resolver.ctx, parsed.reference, a);
         switch (resolution) {
             .manifest => |m| {
+                // Record the path before any pin/load check can reject the
+                // manifest: a saved-input dependency is a file the document
+                // named, not a file that happened to load.
+                if (dependencies) |deps| if (m.source_path) |path| {
+                    try deps.append(a, .{ .source_path = try a.dupe(u8, path) });
+                };
                 if (try enforceHashPin(a, parsed.reference, ref_head_span, m, diags)) continue;
                 const before_len = plugin_results.items.len;
                 try loadResolvedManifest(
@@ -948,24 +1040,29 @@ fn prepareDocument(
                         });
                     }
                 } else if (comptime native_plugin_exec) {
-                    // Pre-flight the resolved wasm bytes. On reject the
-                    // helper appends the diagnostic and pops the plugin
-                    // from `plugin_results`; we just `continue` past
-                    // schema aggregation for this reference. On
-                    // success the plugin stays registered and
-                    // `runEvalPass` dispatches any `:impl "wasm:<name>"`
-                    // call through the now-initialized runtime.
-                    if (try preflightWasmIfPresent(
-                        a,
-                        gpa,
-                        &plugin_results,
-                        diags,
-                        parsed.reference,
-                        ref_head_span,
-                        m,
-                        runtime_storage,
-                        runtime_initialized,
-                    )) continue;
+                    // Schema-only preparation installs no runtime: editor
+                    // declaration contexts never execute plugins, so the
+                    // resolved bytes are irrelevant to this pass.
+                    if (mode == .executable) {
+                        // Pre-flight the resolved wasm bytes. On reject the
+                        // helper appends the diagnostic and pops the plugin
+                        // from `plugin_results`; we just `continue` past
+                        // schema aggregation for this reference. On
+                        // success the plugin stays registered and
+                        // `runEvalPass` dispatches any `:impl "wasm:<name>"`
+                        // call through the now-initialized runtime.
+                        if (try preflightWasmIfPresent(
+                            a,
+                            gpa,
+                            &plugin_results,
+                            diags,
+                            parsed.reference,
+                            ref_head_span,
+                            m,
+                            runtime_storage,
+                            runtime_initialized,
+                        )) continue;
+                    }
                 }
             },
             .failure => |failure| {
@@ -1048,6 +1145,63 @@ fn prepareDocument(
         .schema = schema,
         .eval_schema = eval_schema,
         .project_plugin_names = project_plugin_names,
+    };
+}
+
+/// Prepare one document's schema for an editor context: parse → load its
+/// inline `(plugin …)` declarations → resolve its `(use-plugin …)` references
+/// → build the user-only (`preloaded ++ document`) and validation
+/// (`core ++ preloaded ++ document`) schemas → run the six aggregate
+/// validators.
+///
+/// This is the schema-only half of `validateDocument`. It deliberately does
+/// not materialize defaults, lower, evaluate, or validate the data forest,
+/// and it never initializes a plugin runtime or pre-flights wasm. The caller
+/// owns the returned value; `options.preloaded` is borrowed and must outlive
+/// it. When the document has no references, the bundled filesystem resolver
+/// is not constructed, so an inline-only document does not read
+/// `sjon-project.sjon`.
+pub fn prepareSchema(
+    gpa: Allocator,
+    source: [:0]const u8,
+    options: HostOptions,
+) Error!PreparedSchema {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    errdefer arena.deinit();
+    const a = arena.allocator();
+
+    var diags: std.ArrayList(HostDiagnostic) = .empty;
+    var dependencies: std.ArrayList(ResolvedDependency) = .empty;
+
+    // Schema-only preparation never reaches wasm pre-flight, so the runtime
+    // storage is never constructed and `runtime_initialized` never flips.
+    var runtime_storage: if (native_plugin_exec) PluginRuntime else void = undefined;
+    var runtime_initialized: bool = false;
+
+    const prepared = try prepareDocument(
+        gpa,
+        a,
+        source,
+        options,
+        &diags,
+        &runtime_storage,
+        &runtime_initialized,
+        .schema_only,
+        &dependencies,
+    );
+    var tree = prepared.tree;
+    errdefer tree.deinit();
+    errdefer for (prepared.plugin_results) |*pr| pr.deinit();
+
+    return .{
+        .arena = arena,
+        .tree = tree,
+        .plugin_results = prepared.plugin_results,
+        .user_schema = prepared.schema,
+        .validation_schema = prepared.eval_schema,
+        .diagnostics = try diags.toOwnedSlice(a),
+        .dependencies = try dependencies.toOwnedSlice(a),
+        .has_directives = prepared.part.declarations.len > 0 or prepared.part.references.len > 0,
     };
 }
 
@@ -1331,7 +1485,7 @@ pub fn validateDocument(
         if (runtime_initialized) runtime_storage.deinit(gpa);
     };
 
-    const prepared = try prepareDocument(gpa, a, source, options, &diags, &runtime_storage, &runtime_initialized);
+    const prepared = try prepareDocument(gpa, a, source, options, &diags, &runtime_storage, &runtime_initialized, .executable, null);
     var tree = prepared.tree;
     errdefer tree.deinit();
     errdefer for (prepared.plugin_results) |*pr| pr.deinit();
@@ -1793,10 +1947,12 @@ fn registerProjectPluginWasm(
 /// form (the `ManifestLoader.load` contract). Never fails on user input:
 /// parse failures, load errors, and shape violations become `.manifest`-phase
 /// diagnostics, and the offending source contributes no plugin — a partial
-/// preload still returns the plugins that loaded cleanly. The five schema
-/// aggregate validators (`validateCrossRefs` / `Unions` / `Forms` /
-/// `Lowering` / `Defaults`) then run over the loaded set and stamp
-/// `.aggregate`.
+/// preload still returns the plugins that loaded cleanly. Diagnostics stay
+/// attributed: `source_diagnostics[i]` is the report for
+/// `manifest_sources[i]` (including empty reports for clean inputs), while
+/// the six schema aggregate validators (`validateCrossRefs` / `Unions` /
+/// `Forms` / `Lowering` / `Defaults` / `KindRefs`) run over the loaded set
+/// and stamp `.aggregate` on their own `aggregate_diagnostics` stream.
 ///
 /// No `core` is seeded (user-only, mirroring `HostResult.plugins` /
 /// `HostResult.schema`); the document-time pipeline prepends `core` itself.
@@ -1814,15 +1970,25 @@ pub fn preloadSchema(
     var plugin_results: std.ArrayList(ManifestLoader.Result) = .empty;
     errdefer for (plugin_results.items) |*pr| pr.deinit();
 
+    // Per-source reports stay aligned with `manifest_sources`: collect each
+    // input's diagnostics in a temporary list, freeze it in the arena, then
+    // append the same entries to the flattened stream. A failed source leaves
+    // an empty-or-populated report at its own index rather than shifting the
+    // indices of later sources.
+    const source_diagnostics = try a.alloc([]const HostDiagnostic, manifest_sources.len);
     for (manifest_sources, 0..) |source, i| {
+        var source_diags: std.ArrayList(HostDiagnostic) = .empty;
         try loadManifestSourceInto(
             gpa,
             a,
             source,
             .{ .preload_index = i },
             &plugin_results,
-            &diags,
+            &source_diags,
         );
+        const report = try source_diags.toOwnedSlice(a);
+        source_diagnostics[i] = report;
+        try diags.appendSlice(a, report);
     }
 
     // Freeze the loaded set into a borrowed view. After `toOwnedSlice` the
@@ -1837,14 +2003,18 @@ pub fn preloadSchema(
 
     // Aggregate phase — the same six schema-internal validators the
     // document pipeline runs, over the preloaded (user-only) set. Diagnostics
-    // stamp `.aggregate`.
+    // stamp `.aggregate` and are retained separately from per-source reports.
+    const aggregate_start = diags.items.len;
     try runAggregateValidators(gpa, a, schema, &diags);
+    const aggregate_diagnostics = try a.dupe(HostDiagnostic, diags.items[aggregate_start..]);
 
     return .{
         .arena = arena,
         .plugin_results = plugin_results_slice,
         .plugins = plugins_slice,
         .schema = schema,
+        .source_diagnostics = source_diagnostics,
+        .aggregate_diagnostics = aggregate_diagnostics,
         .diagnostics = try diags.toOwnedSlice(a),
     };
 }
@@ -2167,7 +2337,7 @@ pub fn evalExpr(
         if (runtime_initialized) runtime_storage.deinit(gpa);
     };
 
-    const prepared = try prepareDocument(gpa, a, source, options, &diags, &runtime_storage, &runtime_initialized);
+    const prepared = try prepareDocument(gpa, a, source, options, &diags, &runtime_storage, &runtime_initialized, .executable, null);
     var tree = prepared.tree;
     errdefer tree.deinit();
     errdefer for (prepared.plugin_results) |*pr| pr.deinit();
@@ -3301,6 +3471,154 @@ test "preloadSchema: empty source list is a clean, empty preload" {
     try std.testing.expectEqual(@as(usize, 0), pre.plugin_results.len);
     try std.testing.expectEqual(@as(usize, 0), pre.diagnostics.len);
     try std.testing.expect(!pre.hasErrors());
+}
+
+test "preloadSchema: source reports retain input indices after a failed source" {
+    const a = std.testing.allocator;
+    const sources = [_][:0]const u8{
+        "(plugin :name good :version \"1.0.0\")",
+        // `:underlying string` on a `:cross-ref` is a load-time
+        // wrong_underlying; the whole source is dropped.
+        \\(plugin :name broken :version "1.0.0"
+        \\  (value-kind :name bogus
+        \\    :underlying string
+        \\    :cross-ref (cross-ref :target phrase)))
+        ,
+        // Two top-level roots fail the loader's single-(plugin) shape gate,
+        // producing invalid_manifest.
+        \\(plugin :name a :version "1.0.0")
+        \\(plugin :name b :version "1.0.0")
+        ,
+        "(plugin :name also-good :version \"2.0.0\")",
+    };
+    var pre = try preloadSchema(a, &sources);
+    defer pre.deinit();
+
+    // One report per input; the two failed sources do not compact the slice.
+    try std.testing.expectEqual(sources.len, pre.source_diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 0), pre.source_diagnostics[0].len);
+    try std.testing.expectEqual(@as(usize, 0), pre.source_diagnostics[3].len);
+
+    // Source 1's report holds its manifest-phase failure, not source 2's.
+    try std.testing.expect(pre.source_diagnostics[1].len > 0);
+    var saw_wrong_underlying = false;
+    for (pre.source_diagnostics[1]) |d| {
+        try std.testing.expectEqual(Phase.manifest, d.phase);
+        if (d.code == .wrong_underlying) saw_wrong_underlying = true;
+    }
+    try std.testing.expect(saw_wrong_underlying);
+
+    // Source 2's report holds the shape failure.
+    try std.testing.expectEqual(@as(usize, 1), pre.source_diagnostics[2].len);
+    try std.testing.expectEqual(Ast.Diagnostic.Code.invalid_manifest, pre.source_diagnostics[2][0].code);
+    try std.testing.expectEqual(Phase.manifest, pre.source_diagnostics[2][0].phase);
+
+    // Flat view = per-source reports in input order, then aggregate reports.
+    var next: usize = 0;
+    for (pre.source_diagnostics) |report| {
+        for (report) |d| {
+            try std.testing.expectEqual(d.code, pre.diagnostics[next].code);
+            try std.testing.expectEqual(d.phase, pre.diagnostics[next].phase);
+            try std.testing.expectEqual(d.span, pre.diagnostics[next].span);
+            try std.testing.expectEqualStrings(d.message, pre.diagnostics[next].message);
+            next += 1;
+        }
+    }
+    for (pre.aggregate_diagnostics) |d| {
+        try std.testing.expectEqual(d.code, pre.diagnostics[next].code);
+        try std.testing.expectEqual(d.phase, pre.diagnostics[next].phase);
+        try std.testing.expectEqual(d.span, pre.diagnostics[next].span);
+        try std.testing.expectEqualStrings(d.message, pre.diagnostics[next].message);
+        next += 1;
+    }
+    try std.testing.expectEqual(pre.diagnostics.len, next);
+    // This set has only manifest-phase failures.
+    try std.testing.expectEqual(@as(usize, 0), pre.aggregate_diagnostics.len);
+
+    // Both cleanly loaded sources still contribute plugins, in input order.
+    try std.testing.expectEqual(@as(usize, 2), pre.plugins.len);
+    try std.testing.expectEqualStrings("good", pre.plugins[0].name);
+    try std.testing.expectEqualStrings("also-good", pre.plugins[1].name);
+}
+
+test "preloadSchema: aggregate diagnostics remain separate from per-source diagnostics" {
+    const a = std.testing.allocator;
+    const sources = [_][:0]const u8{
+        // Loads cleanly, but `:target ghost` resolves to no form in the
+        // combined aggregate → an .aggregate-phase unknown_cross_ref_target.
+        \\(plugin :name dangler :version "1.0.0"
+        \\  (value-kind :name ref-kind
+        \\    :underlying symbol
+        \\    :cross-ref (cross-ref :target ghost)))
+        ,
+        "(plugin :name bystander :version \"1.0.0\")",
+    };
+    var pre = try preloadSchema(a, &sources);
+    defer pre.deinit();
+
+    // Both sources load cleanly, so neither input has a source report.
+    try std.testing.expectEqual(@as(usize, 2), pre.source_diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 0), pre.source_diagnostics[0].len);
+    try std.testing.expectEqual(@as(usize, 0), pre.source_diagnostics[1].len);
+
+    // The aggregate failure is reported separately, not attributed to either
+    // clean source.
+    try std.testing.expect(pre.aggregate_diagnostics.len > 0);
+    var saw_dangling = false;
+    for (pre.aggregate_diagnostics) |d| {
+        try std.testing.expectEqual(Phase.aggregate, d.phase);
+        if (d.code == .unknown_cross_ref_target) saw_dangling = true;
+    }
+    try std.testing.expect(saw_dangling);
+
+    // The flattened compatibility view still appends aggregate diagnostics
+    // after every per-source report.
+    var next: usize = 0;
+    for (pre.source_diagnostics) |report| {
+        for (report) |d| {
+            try std.testing.expectEqual(d.code, pre.diagnostics[next].code);
+            next += 1;
+        }
+    }
+    for (pre.aggregate_diagnostics) |d| {
+        try std.testing.expectEqual(d.code, pre.diagnostics[next].code);
+        try std.testing.expectEqual(d.phase, pre.diagnostics[next].phase);
+        try std.testing.expectEqualStrings(d.message, pre.diagnostics[next].message);
+        next += 1;
+    }
+    try std.testing.expectEqual(pre.diagnostics.len, next);
+}
+
+test "preloadSchema: same-name sources stay in input order without resolver deduplication" {
+    // Pinning/characterization test: this behavior is already green at HEAD;
+    // the only red it contributes is the absent `source_diagnostics` field
+    // that this task introduces.
+    const a = std.testing.allocator;
+    const sources = [_][:0]const u8{
+        \\(plugin :name same :version "1.0.0"
+        \\  (form :name first :open true))
+        ,
+        \\(plugin :name same :version "1.0.0"
+        \\  (form :name second :open true))
+        ,
+    };
+    var pre = try preloadSchema(a, &sources);
+    defer pre.deinit();
+
+    // No named-resolver deduplication: both sources survive, in input order.
+    try std.testing.expectEqual(@as(usize, 2), pre.plugins.len);
+    try std.testing.expectEqual(@as(usize, 2), pre.plugin_results.len);
+    try std.testing.expectEqualStrings("same", pre.plugins[0].name);
+    try std.testing.expectEqualStrings("same", pre.plugins[1].name);
+    try std.testing.expectEqualStrings("first", pre.plugins[0].forms[0].name);
+    try std.testing.expectEqualStrings("second", pre.plugins[1].forms[0].name);
+    try std.testing.expectEqual(@as(usize, 1), pre.plugins[0].forms.len);
+    try std.testing.expectEqual(@as(usize, 1), pre.plugins[1].forms.len);
+
+    // Input-aligned reports: both clean inputs get empty reports.
+    try std.testing.expectEqual(@as(usize, 2), pre.source_diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 0), pre.source_diagnostics[0].len);
+    try std.testing.expectEqual(@as(usize, 0), pre.source_diagnostics[1].len);
 }
 
 test "Host.manifestMeta reads the plugin's own :name past a leading nested (expr-func :name …) (A.2)" {

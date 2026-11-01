@@ -71,6 +71,15 @@ pub const ManifestResolution = struct {
     /// runtime adapter is staged separately; until it lands, the host
     /// emits a deferral diagnostic when these bytes are present.
     wasm: ?[]const u8 = null,
+
+    /// Filesystem path the manifest was read from, when the resolver
+    /// knows one. Zig-only: this is not part of the wire format and no
+    /// host envelope carries it. The native editor uses it to record
+    /// saved-input dependencies for reload. Lifetime follows `source`:
+    /// a resolver that borrows source bytes from its own arena (the
+    /// bundled filesystem resolver does) also borrows this path, so a
+    /// caller that retains it must copy it into its own arena.
+    source_path: ?[]const u8 = null,
 };
 
 pub const ResolverFailure = struct {

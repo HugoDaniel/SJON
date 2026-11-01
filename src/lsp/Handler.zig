@@ -55,6 +55,48 @@ pub const Error = error{
     UnknownDocument,
 };
 
+/// How much of the diagnostic pipeline a Handler reports.
+///
+/// The mode is fixed at construction: a document either has a schema
+/// context it may validate against (`.full`) or it does not (`.parse_only`),
+/// and nothing inside one request can change that.
+pub const DiagnosticMode = enum {
+    /// Parse and validate. With a prepared schema, the owner's current
+    /// preparation diagnostics are merged after the current tree's parse
+    /// diagnostics and before the validation ones.
+    full,
+    /// Parse only. Used for an unavailable bundle and for saved source
+    /// routes: the buffer still must show its own syntax errors, but a
+    /// validation result computed against a schema the context could not
+    /// establish would be noise.
+    parse_only,
+};
+
+/// Construction parameters for an externally-owned schema context.
+///
+/// The defaulted value (and `Handler.init`) is the legacy owned path: the
+/// handler starts with core, `loadProject` may replace it, and
+/// `setUserSchemas` may compose user manifests. Supplying `borrowed_schema`
+/// switches that state to borrowed storage; the two mutation entry points
+/// then assert rather than install a schema over an owner's data.
+pub const InitOptions = struct {
+    /// Borrowed. Its plugin storage must outlive this Handler.
+    borrowed_schema: ?Schema.Schema = null,
+    /// Borrowed editor-context identity, not owned by Handler. When null,
+    /// `diagnosticResultId` keeps the legacy `version:generation` /
+    /// `h<hash>:generation` shape byte-for-byte.
+    context_id: ?[]const u8 = null,
+    /// Matches `schema_generation` (`u32`); never unique on its own —
+    /// context identity carries uniqueness.
+    schema_generation: u32 = 0,
+    /// Borrowed. Non-null only for a one-document configured context. The
+    /// owner must keep the pointed-to value current across edits and must
+    /// outlive this Handler.
+    prepared_schema: ?*const Host.PreparedSchema = null,
+    /// Fixed for the Handler's lifetime.
+    diagnostic_mode: DiagnosticMode = .full,
+};
+
 /// One open document. Source is owned; `tree`, `validate_result` and
 /// `materialized` are caches — invalidated and rebuilt on every full
 /// change.
@@ -650,6 +692,21 @@ pub const Parameter = struct {
 
 allocator: Allocator,
 schema: Schema.Schema,
+/// True when `schema` points into storage this Handler does not own (a
+/// compiled bundle, a `PreparedSchema`, or a caller-supplied schema).
+/// `loadProject` and `setUserSchemas` replace `schema` and therefore
+/// assert against borrowed instances: silently rebinding would dangle the
+/// owner's view. `schema` stays a value either way.
+schema_borrowed: bool,
+/// Borrowed editor-context identity used by `diagnosticResultId`. Null
+/// keeps the legacy result-id shape; see `InitOptions.context_id`.
+context_id: ?[]const u8,
+/// Borrowed one-document preparation. Read at request time so the owner
+/// can advance it on every edit without rebuilding the Handler. Never
+/// written through here.
+prepared_schema: ?*const Host.PreparedSchema,
+/// Fixed at construction; see `DiagnosticMode`.
+diagnostic_mode: DiagnosticMode,
 /// Keyed by `uri.HashContext`, not byte-exactly: one file has more than one
 /// legal URI spelling, and the workspace scanner's differs from the client's.
 /// See that context's doc comment for what byte-exact keys cost.
@@ -705,6 +762,10 @@ pub fn init(gpa: Allocator) Self {
         // `loadProject` (called from `initialize` once `rootUri` is known)
         // replaces this with a schema that includes manifest-loaded plugins.
         .schema = Schema.Schema.init(&.{sjon.plugins.core.plugin}),
+        .schema_borrowed = false,
+        .context_id = null,
+        .prepared_schema = null,
+        .diagnostic_mode = .full,
         .documents = .empty,
         .project = null,
         .schema_generation = 0,
@@ -715,6 +776,26 @@ pub fn init(gpa: Allocator) Self {
         .tree_uris = &.{},
         .uri_to_tree_idx = .empty,
     };
+}
+
+/// Construct a Handler bound to an externally-owned schema context.
+///
+/// `init(gpa)` is exactly `initWithOptions(gpa, .{})`: the owned-core path
+/// and every legacy result id remain unchanged. A non-null
+/// `borrowed_schema` is adopted by value but not by ownership — its plugin
+/// storage (and a non-null `prepared_schema`) must outlive this Handler,
+/// and `deinit` releases only state the Handler itself allocated.
+pub fn initWithOptions(gpa: Allocator, options: InitOptions) Self {
+    var self = init(gpa);
+    self.schema_generation = options.schema_generation;
+    self.context_id = options.context_id;
+    self.prepared_schema = options.prepared_schema;
+    self.diagnostic_mode = options.diagnostic_mode;
+    if (options.borrowed_schema) |borrowed| {
+        self.schema = borrowed;
+        self.schema_borrowed = true;
+    }
+    return self;
 }
 
 pub fn deinit(self: *Self) void {
@@ -748,6 +829,10 @@ pub fn deinit(self: *Self) void {
 /// (missing project file, malformed manifest, etc.) is reported via the
 /// project's `diagnostics` and should be surfaced by the transport.
 pub fn loadProject(self: *Self, io: Io, workspace_root_path: ?[]const u8) Allocator.Error!void {
+    // A borrowed schema belongs to an editor-context owner; replacing
+    // `self.schema` here would leave that owner's view dangling and mix
+    // two identities in one Handler.
+    std.debug.assert(!self.schema_borrowed);
     var new_project = try sjon.loadProject(self.allocator, .{
         .project_root = workspace_root_path,
         .io = io,
@@ -1071,6 +1156,9 @@ pub fn setUserSchemas(
     arena: Allocator,
     sources: []const SchemaSource,
 ) Allocator.Error![]const SchemaReport {
+    // Same rule as `loadProject`: this entry point owns the composition it
+    // installs, so it cannot run on a Handler whose schema is borrowed.
+    std.debug.assert(!self.schema_borrowed);
     const reports = try arena.alloc(SchemaReport, sources.len);
     var diag_lists = try arena.alloc(std.ArrayList(Diagnostic), sources.len);
     for (diag_lists) |*l| l.* = .empty;
@@ -1219,6 +1307,27 @@ fn loadOneSchema(
 pub fn getProjectInfo(self: *const Self) ?*const Host.LoadedProject {
     if (self.project == null) return null;
     return &self.project.?;
+}
+
+/// Complete diagnostics for the project source (`sjon-project.sjon`),
+/// translated for an editor. Returns null when the handler holds no
+/// project file — no project loaded, or a workspace without one — so a
+/// caller can tell "no report" from "a clean report".
+///
+/// Filesystem-free and read-only: it projects the diagnostics the
+/// resolver already produced into the transport-neutral shape. Push,
+/// document pull, and workspace pull all call this so the project has
+/// one source report.
+pub fn getProjectDiagnostics(
+    self: *const Self,
+    arena: Allocator,
+) Allocator.Error!?[]const Diagnostic {
+    const proj = self.getProjectInfo() orelse return null;
+    if (proj.project_uri == null or proj.project_source == null) return null;
+
+    const out = try arena.alloc(Diagnostic, proj.diagnostics.len);
+    for (proj.diagnostics, 0..) |d, i| out[i] = translate(d.inner(), .plain);
+    return out;
 }
 
 /// Open a document. If the URI is already open, replaces its state.
@@ -1423,11 +1532,38 @@ pub fn getWorkspaceDiagnostics(
 /// outside the editor, so it is keyed on a hash of its content. Keying it
 /// on a placeholder version would make every disk edit look unchanged and
 /// leave stale errors on screen.
+///
+/// A native schema context adds a `v2:` prefix carrying the context
+/// identity between the marker and the generation. Context ids name the
+/// normalized configuration/project identity (plus the bundle label, and
+/// the document identity for a declaration context), so moving a document
+/// between two freshly-built contexts cannot answer `unchanged` even when
+/// both sides happen to share a version and a generation. With no context
+/// id the legacy strings are byte-identical to what WASM and the
+/// compatibility tests already publish.
 pub fn diagnosticResultId(
     self: *const Self,
     arena: Allocator,
     doc: *const Document,
 ) Allocator.Error![]const u8 {
+    if (self.context_id) |context_id| {
+        return switch (doc.origin) {
+            .open => std.fmt.allocPrint(
+                arena,
+                "v2:{s}:{d}:{d}",
+                .{ context_id, self.schema_generation, doc.version },
+            ),
+            .workspace => std.fmt.allocPrint(
+                arena,
+                "v2:{s}:{d}:h{x}",
+                .{
+                    context_id,
+                    self.schema_generation,
+                    std.hash.Wyhash.hash(0, doc.source),
+                },
+            ),
+        };
+    }
     return switch (doc.origin) {
         .open => std.fmt.allocPrint(arena, "{d}:{d}", .{ doc.version, self.schema_generation }),
         .workspace => std.fmt.allocPrint(
@@ -1504,29 +1640,65 @@ pub fn getDiagnostics(
 ) Allocator.Error!?[]const Diagnostic {
     const doc = self.getDocument(uri) orelse return null;
 
-    const parse_diags = doc.tree.diagnostics;
-    const validate_diags = doc.validate_result.diagnostics;
-    const total = parse_diags.len + validate_diags.len;
-    var out = try arena.alloc(Diagnostic, total);
     // The session's capability, read once for the whole document: every
     // diagnostic in one report is graded against the same host.
     const mode = self.presentation();
-    var i: usize = 0;
-    for (parse_diags) |d| {
-        out[i] = translate(d, mode);
-        i += 1;
+    const parse_diags = doc.tree.diagnostics;
+
+    // An unavailable context (or a saved source route) has no schema it may
+    // report validation against, so only the current buffer's syntax
+    // survives. The parse still ran; this is a reporting rule, not a
+    // different parse result.
+    if (self.diagnostic_mode == .parse_only) {
+        const out = try arena.alloc(Diagnostic, parse_diags.len);
+        for (parse_diags, 0..) |d, i| out[i] = translate(d, mode);
+        return out;
     }
+
+    const validate_diags = doc.validate_result.diagnostics;
+    var out: std.ArrayList(Diagnostic) = .empty;
+
+    for (parse_diags) |d| try out.append(arena, translate(d, mode));
+
+    // The owner's current preparation parsed this same buffer; its parse
+    // diagnostics are byte-identical to the ones just emitted, so match
+    // them out. Manifest and aggregate entries stay, ahead of validation,
+    // in the preparation's own order.
+    if (self.prepared_schema) |prepared| {
+        for (prepared.diagnostics) |pd| {
+            if (duplicatesParseDiagnostic(pd, parse_diags)) continue;
+            try out.append(arena, try translateDupe(arena, pd.inner(), mode));
+        }
+    }
+
     for (validate_diags) |d| {
-        out[i] = translate(d, mode);
+        try out.append(arena, translate(d, mode));
         // Enrichment is a post-translate pass rather than part of
         // `translate`: it needs an allocator, the document, and the
         // Handler's schema + cross-ref index, none of which the pure
         // code→shape mapping has. Parse diagnostics are skipped — every
         // derivable relation is a validation-level one.
-        out[i].related = try self.relatedFor(arena, doc, uri, d);
-        i += 1;
+        out.items[out.items.len - 1].related = try self.relatedFor(arena, doc, uri, d);
     }
-    return out;
+    return try out.toOwnedSlice(arena);
+}
+
+/// True when `pd` is the preparation's copy of one of `parse_diags`.
+///
+/// `Host.prepareSchema` re-parses the same buffer the Handler holds and
+/// wraps that tree's diagnostics as manifest-phase entries with no
+/// declaration anchor. Matching every field keeps a project-index
+/// diagnostic (same phase, different bytes/span) while collapsing only the
+/// genuinely duplicated parse entry.
+fn duplicatesParseDiagnostic(pd: Host.HostDiagnostic, parse_diags: []const Ast.Diagnostic) bool {
+    for (parse_diags) |d| {
+        if (d.code != pd.code) continue;
+        if (d.severity != pd.severity) continue;
+        if (d.span.start != pd.span.start or d.span.end != pd.span.end) continue;
+        if (!std.mem.eql(u8, d.message, pd.message)) continue;
+        return true;
+    }
+    return false;
 }
 
 /// Related locations for one validation diagnostic, or an empty slice

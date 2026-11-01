@@ -12362,3 +12362,220 @@ test "hover on a plain cross-ref does not claim acyclic" {
 
     try std.testing.expect(std.mem.indexOf(u8, hv.contents, "acyclic") == null);
 }
+
+// ---------------------------------------------------------------------------
+// External schema contexts — borrowed schemas, diagnostic modes, result IDs.
+//
+// A native editor registry owns the schema aggregate (a compiled bundle or a
+// one-document `Host.PreparedSchema`) and lends it to a Handler. These tests
+// pin the borrowing rules: the Handler keeps `schema` a value, never frees or
+// mutates what it borrowed, merges the owner's current preparation
+// diagnostics without repeating its own parse, and keys pull result IDs on
+// the borrowed context identity as well as the version/generation pair.
+// ---------------------------------------------------------------------------
+
+test "initWithOptions: borrowed schema serves features without adopting its owner" {
+    const a = std.testing.allocator;
+    const plugins = [_]sjon.Plugin.Plugin{ audioSchemaPlugin(), sjon.plugins.core.plugin };
+    const borrowed: sjon.Schema.Schema = .init(&plugins);
+
+    {
+        var h = Handler.initWithOptions(a, .{ .borrowed_schema = borrowed });
+        defer h.deinit();
+
+        // The field stays a value that points at the owner's plugin storage.
+        try std.testing.expectEqual(borrowed.plugins.ptr, h.schema.plugins.ptr);
+        try std.testing.expectEqual(borrowed.plugins.len, h.schema.plugins.len);
+        // Borrowing does not invent project/user state to tear down.
+        try std.testing.expect(h.project == null);
+        try std.testing.expectEqual(@as(usize, 0), h.user_schemas.items.len);
+
+        try h.openDocument("file:///a.sjon", 1, "(phrase :name p0)");
+        var arena_state: std.heap.ArenaAllocator = .init(a);
+        defer arena_state.deinit();
+        const items = (try h.getCompletion(arena_state.allocator(), "file:///a.sjon", 1)).?;
+        try std.testing.expect(hasCompletion(items, "phrase"));
+    }
+
+    // The owner outlived the handler and is still usable afterwards.
+    switch (sjon.Schema.Schema.init(&plugins).lookupForm("phrase", null)) {
+        .found => {},
+        else => return error.TestExpectedForm,
+    }
+}
+
+test "initWithOptions: parse-only mode retains syntax errors and suppresses validation" {
+    const a = std.testing.allocator;
+    var h = Handler.initWithOptions(a, .{ .diagnostic_mode = .parse_only });
+    defer h.deinit();
+
+    var arena_state: std.heap.ArenaAllocator = .init(a);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try h.openDocument("file:///syntax.sjon", 1, "(+ 1 2");
+    const syntax = (try h.getDiagnostics(arena, "file:///syntax.sjon")).?;
+    try std.testing.expect(syntax.len > 0);
+    var saw_err = false;
+    for (syntax) |d| {
+        if (d.severity == .err) saw_err = true;
+    }
+    try std.testing.expect(saw_err);
+
+    // Well-formed syntax that the empty/core schema would reject: full mode
+    // reports the validator's `unknown_form`, parse-only reports nothing.
+    try h.openDocument("file:///schema.sjon", 1, "(definitely-not-core 1)");
+    const suppressed = (try h.getDiagnostics(arena, "file:///schema.sjon")).?;
+    try std.testing.expectEqual(@as(usize, 0), suppressed.len);
+}
+
+test "prepared schema diagnostics follow the current buffer after every edit" {
+    const a = std.testing.allocator;
+    const uri = "file:///decl.sjon";
+    const first_src: [:0]const u8 = "(plugin)\n(";
+    const second_src: [:0]const u8 = "(+ 1 2)";
+
+    var prepared = try sjon.Host.prepareSchema(a, first_src, .{});
+    defer prepared.deinit();
+    {
+        var h = Handler.initWithOptions(a, .{
+            .borrowed_schema = prepared.validation_schema,
+            .prepared_schema = &prepared,
+        });
+        defer h.deinit();
+
+        try h.openDocument(uri, 1, first_src);
+        var arena_state: std.heap.ArenaAllocator = .init(a);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+
+        const before = (try h.getDiagnostics(arena, uri)).?;
+        try std.testing.expect(before.len > 0);
+
+        // The preparation parsed this same buffer, but its parse diagnostics
+        // are merged once — never twice — with the handler's current tree.
+        for (before, 0..) |diag, i| {
+            for (before[0..i]) |prev| {
+                if (diag.span_start == prev.span_start and
+                    diag.span_end == prev.span_end and
+                    std.mem.eql(u8, diag.code, prev.code) and
+                    std.mem.eql(u8, diag.message, prev.message))
+                {
+                    return error.DuplicatePreparedParseDiagnostic;
+                }
+            }
+        }
+
+        // Replace the borrowed preparation the way an owning context does on
+        // every edit: build the replacement first, rebind, then release the
+        // old one.
+        const replacement = try sjon.Host.prepareSchema(a, second_src, .{});
+        h.schema = replacement.validation_schema;
+        prepared.deinit();
+        prepared = replacement;
+        h.prepared_schema = &prepared;
+
+        try h.changeDocumentFull(uri, 2, second_src);
+        const after_edit = (try h.getDiagnostics(arena, uri)).?;
+        try std.testing.expectEqual(@as(usize, 0), after_edit.len);
+    }
+}
+
+test "diagnosticResultId changes between fresh contexts with equal version and generation" {
+    const a = std.testing.allocator;
+    const uri = "file:///context.sjon";
+
+    var first = Handler.initWithOptions(a, .{
+        .context_id = "config-a#bundle",
+        .schema_generation = 7,
+    });
+    defer first.deinit();
+    var second = Handler.initWithOptions(a, .{
+        .context_id = "config-b#bundle",
+        .schema_generation = 7,
+    });
+    defer second.deinit();
+
+    try first.openDocument(uri, 3, "(+ 1 2)");
+    try second.openDocument(uri, 3, "(+ 1 2)");
+
+    var arena_state: std.heap.ArenaAllocator = .init(a);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const first_id = try first.diagnosticResultId(arena, first.getDocument(uri).?);
+    const second_id = try second.diagnosticResultId(arena, second.getDocument(uri).?);
+
+    // Equal document version, equal generation, different context: the
+    // client must not be able to answer "unchanged" across the move.
+    try std.testing.expect(!std.mem.eql(u8, first_id, second_id));
+    try std.testing.expect(std.mem.startsWith(u8, first_id, "v2:config-a#bundle:7:"));
+    try std.testing.expect(std.mem.startsWith(u8, second_id, "v2:config-b#bundle:7:"));
+}
+
+test "diagnosticResultId without context identity remains byte-identical" {
+    const a = std.testing.allocator;
+    var h = Handler.init(a);
+    defer h.deinit();
+
+    try h.openDocument("file:///open.sjon", 3, "(+ 1 2)");
+    _ = try h.ingestWorkspaceFiles(&.{
+        .{ .uri = "file:///disk.sjon", .source = "(+ 3 4)" },
+    });
+
+    var arena_state: std.heap.ArenaAllocator = .init(a);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const open_id = try h.diagnosticResultId(arena, h.getDocument("file:///open.sjon").?);
+    try std.testing.expectEqualStrings("3:0", open_id);
+
+    const disk = h.getDocument("file:///disk.sjon").?;
+    const want = try std.fmt.allocPrint(arena, "h{x}:0", .{std.hash.Wyhash.hash(0, disk.source)});
+    try std.testing.expectEqualStrings(want, try h.diagnosticResultId(arena, disk));
+}
+
+test "borrowed handler deinit precedes prepared and preloaded owner deinit" {
+    const a = std.testing.allocator;
+    const uri = "file:///owned.sjon";
+    const doc: [:0]const u8 = "(plugin :name inline :version \"1.0.0\")\n(use-plugin \"missing\")\n";
+
+    const baseline_sources = [_][:0]const u8{
+        \\(plugin :name baseline :version "1.0.0"
+        \\  (form :name baseline-form (key :name a :type number :optional false)))
+        ,
+    };
+    var baseline = try sjon.Host.preloadSchema(a, &baseline_sources);
+    defer baseline.deinit();
+
+    var prepared = try sjon.Host.prepareSchema(a, doc, .{ .preloaded = &baseline });
+    defer prepared.deinit();
+
+    {
+        var h = Handler.initWithOptions(a, .{
+            .borrowed_schema = prepared.validation_schema,
+            .prepared_schema = &prepared,
+        });
+        defer h.deinit();
+
+        // Both schema slices are borrowed, not copied.
+        try std.testing.expectEqual(
+            prepared.validation_schema.plugins.ptr,
+            h.schema.plugins.ptr,
+        );
+
+        try h.openDocument(uri, 1, doc);
+        var arena_state: std.heap.ArenaAllocator = .init(a);
+        defer arena_state.deinit();
+        const diags = (try h.getDiagnostics(arena_state.allocator(), uri)).?;
+        try std.testing.expect(diags.len > 0);
+    }
+
+    // The handler is gone; its prepared and preloaded owners are not, and
+    // both are still intact. Their deferred deinits therefore run strictly
+    // after the borrowed handler's — the order the registry teardown uses.
+    try std.testing.expect(prepared.has_directives);
+    try std.testing.expect(prepared.plugin_results.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), baseline.plugins.len);
+    try std.testing.expectEqualStrings("baseline", baseline.plugins[0].name);
+}

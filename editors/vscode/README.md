@@ -36,17 +36,35 @@ pnpm --filter sjon-vscode run bundle   # → dist/extension.cjs (esbuild)
 
 - **Dev host:** open `editors/vscode/` in VS Code and press **F5** ("Run
   Extension"). A second window opens with the extension loaded; open any
-  `.sjon` file — or a workspace containing a `sjon-project.sjon` — to see
-  diagnostics, hover, completion, and goto-definition. `zig build lsp`
-  with no `-Doptimize` is a Debug build, and Debug is the one to point
+  `.sjon` file — or a workspace containing a `sjon-lsp.sjon` or
+  `sjon-project.sjon` — to see diagnostics, hover, completion, and
+  goto-definition. `zig build lsp` with no `-Doptimize` is a Debug
+  build, and Debug is the one to point
   the extension at: `initialize` validates the advertised capability set
   against the handlers behind it, so a mismatch stops the server there
   instead of surfacing as a dead feature.
 - **Package a `.vsix`:** `pnpm dlx @vscode/vsce package` in `editors/vscode/`,
   then *Extensions: Install from VSIX…* in VS Code.
 
-The client watches `**/sjon-project.sjon` and restarts when you change
-`sjon.lsp.path`.
+## Schema discovery
+
+The language server, not the extension, decides which schema a file uses.
+For each open or saved document it walks from the document's directory
+toward the workspace folder, stops at the nearest `sjon-lsp.sjon` or
+`sjon-project.sjon`, and uses a matching bundle when one exists. A
+`sjon-project.sjon` in that same directory is the legacy fallback when no
+bundle matches; nothing is inherited from a parent directory. The full
+grammar, pattern, discovery, conflict, declaration, and saved-byte rules
+are in
+[docs/TOOLING.md](../../docs/TOOLING.md#editor-schema-bundles).
+
+The extension does not parse either configuration file. Its own file-event
+registration is `**/sjon-project.sjon`; when VS Code advertises dynamic
+registration for watched files, the server additionally asks the client
+for a broad `**/*.sjon` watcher. Dynamically changing the workspace folder
+set is not supported by the server, so reload the window after adding or
+removing a folder to initialize it with the new roots. The extension
+restarts the server when `sjon.lsp.path` changes.
 
 ## Grammar (the drift gate)
 

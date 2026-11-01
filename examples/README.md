@@ -9,6 +9,7 @@ index. Run any host demo with the `zig build` verb noted below.
 | [`with-expressions.sjon`](with-expressions.sjon) | Every safe-expression operation, exercised once. |
 | [`wgsl-shader.sjon`](wgsl-shader.sjon) | Multi-line WGSL embedded via triple-quoted raw strings (`"""…"""`). |
 | [`webgpu-render-pipeline.sjon`](webgpu-render-pipeline.sjon) | A compact, non-exhaustive WebGPU render-pipeline sketch: schema validation, cross-ref diagnostics, safe-expression computed values, defaults, host-owned lowering. |
+| [`editor-bundles/`](editor-bundles/README.md) | A worked `sjon-lsp.sjon`: two bundles over two existing plugins, valid and deliberately invalid documents in each folder, and the per-document discovery rules the native server follows. |
 | [`unknown-key-typo.sjon`](unknown-key-typo.sjon), [`warning-deprecated.sjon`](warning-deprecated.sjon), [`hint-plugin-typo/`](hint-plugin-typo) | Diagnostic fixtures: malformed or deprecated input paired with the diagnostics it raises. |
 | [`binary-ir-demo.zig`](binary-ir-demo.zig) | Binary IR end-to-end: parse → toBinary → fromBinary → cursor walk. `zig build demo-binary`. |
 | [`export-schema-demo.zig`](export-schema-demo.zig) | Schema export walkthrough. |

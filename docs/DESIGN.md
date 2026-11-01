@@ -1,7 +1,7 @@
 # SJON design overview
 
 This document describes the current SJON 1.x architecture, including the
-SoA AST and additive APIs introduced through 1.5.0. It is the standing reference for the module layout, the SoA
+SoA AST and additive APIs introduced through 1.6.0. It is the standing reference for the module layout, the SoA
 tree, and the frozen binary wire format.
 
 ## Pipeline

@@ -1,0 +1,6 @@
+; Valid under the `geometry` bundle.
+;
+; `:rotation` is an angle in deg/rad/turn, `:decay` accepts any unit
+; suffix, and `:radius` is a distance in metric SI prefixes.
+
+(shape :rotation 45deg :decay 1.5s :radius 12cm)

@@ -1,0 +1,7 @@
+; Valid under the `gpu-textures` bundle.
+;
+; `:dimension` and `:view` are closed member sets from the `dimensions`
+; plugin. `2d` and `2d-array` are digit-leading members; they are written
+; bare, exactly as the WebGPU spec spells them.
+
+(texture :name albedo :dimension 2d :view 2d-array)

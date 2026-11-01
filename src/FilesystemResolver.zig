@@ -206,6 +206,16 @@ pub fn resolver(self: *Self) Resolver.Resolver {
     return .{ .ctx = self, .resolve = resolveCallback };
 }
 
+/// Build a resolver for schema-only editor preparation. It shares the
+/// explicit-path / project-index / pin selection logic with `resolver`
+/// and differs only in never reading wasm sidecars: no `:wasm-file`
+/// override is inspected and no default-paired `.wasm` is opened. Every
+/// successful resolution returns `wasm == null` plus the manifest's
+/// `source_path`.
+pub fn resolverManifestOnly(self: *Self) Resolver.Resolver {
+    return .{ .ctx = self, .resolve = resolveManifestOnlyCallback };
+}
+
 /// Drain the slice once. Subsequent calls return an empty slice so
 /// callers can't accidentally double-report.
 pub fn takeProjectDiagnostics(self: *Self) []Ast.Diagnostic {
@@ -279,6 +289,7 @@ pub fn resolveProjectPluginWasm(
         arena,
         entry.manifest_path,
         entry.manifest_source,
+        .full,
     );
     return switch (resolution) {
         .manifest => |m| m.wasm,
@@ -650,10 +661,37 @@ fn indexOneManifest(
 // Resolve callback.
 // ---------------------------------------------------------------------
 
+/// How much of a resolved manifest envelope to materialize.
+const ResolutionMode = enum {
+    /// Honor `:wasm-file` and the default paired-wasm convention. Used
+    /// by document execution and eager project loading.
+    full,
+    /// Return the manifest text and its source path without touching any
+    /// wasm sidecar. Used by schema-only editor preparation.
+    manifest_only,
+};
+
 fn resolveCallback(
     ctx: *anyopaque,
     ref: Resolver.Reference,
     arena: Allocator,
+) Allocator.Error!Resolver.Resolution {
+    return resolveReference(ctx, ref, arena, .full);
+}
+
+fn resolveManifestOnlyCallback(
+    ctx: *anyopaque,
+    ref: Resolver.Reference,
+    arena: Allocator,
+) Allocator.Error!Resolver.Resolution {
+    return resolveReference(ctx, ref, arena, .manifest_only);
+}
+
+fn resolveReference(
+    ctx: *anyopaque,
+    ref: Resolver.Reference,
+    arena: Allocator,
+    mode: ResolutionMode,
 ) Allocator.Error!Resolver.Resolution {
     const self: *Self = @ptrCast(@alignCast(ctx));
 
@@ -675,7 +713,7 @@ fn resolveCallback(
                 ),
             } },
         };
-        return try resolveManifestWasm(self.gpa, self.io, arena, abs_path, bytes);
+        return try resolveManifestWasm(self.gpa, self.io, arena, abs_path, bytes, mode);
     }
 
     if (self.name_index.get(ref.name)) |entry| {
@@ -715,7 +753,7 @@ fn resolveCallback(
         // (sentinel-terminated); pass it through without duplication —
         // the caller's `arena` is short-lived and re-duping serves only
         // to break the borrow.
-        return try resolveManifestWasm(self.gpa, self.io, arena, entry.manifest_path, entry.manifest_source);
+        return try resolveManifestWasm(self.gpa, self.io, arena, entry.manifest_path, entry.manifest_source, mode);
     }
 
     if (self.project_file_path == null) {
@@ -743,10 +781,13 @@ fn resolveCallback(
 // ---------------------------------------------------------------------
 
 /// Resolve a manifest's paired wasm bytes, honoring the optional
-/// `:wasm-file` override. Two outcomes:
-///   * Success: `Resolution.manifest{ source, wasm }`. `wasm` is null
-///     for declarative-only plugins (no override, no default-paired
-///     file).
+/// `:wasm-file` override. Three outcomes:
+///   * Success (`.full`): `Resolution.manifest{ source, wasm, source_path }`.
+///     `wasm` is null for declarative-only plugins (no override, no
+///     default-paired file).
+///   * Success (`.manifest_only`): `Resolution.manifest{ source,
+///     source_path }` with `wasm == null`, without parsing the manifest
+///     or looking at any sidecar.
 ///   * Failure: `Resolution.failure{ code, detail }` when the override
 ///     escapes the manifest dir (`plugin_wasm_resolved_outside_package`)
 ///     or is explicitly named but unreadable (`unresolved_plugin`).
@@ -761,7 +802,15 @@ fn resolveManifestWasm(
     arena: Allocator,
     manifest_abs_path: []const u8,
     manifest_source: [:0]const u8,
+    mode: ResolutionMode,
 ) Allocator.Error!Resolver.Resolution {
+    if (mode == .manifest_only) {
+        return .{ .manifest = .{
+            .source = manifest_source,
+            .source_path = manifest_abs_path,
+        } };
+    }
+
     const override = extractWasmFileOverride(gpa, arena, manifest_source) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
     };
@@ -793,11 +842,19 @@ fn resolveManifestWasm(
                 ),
             } },
         };
-        return .{ .manifest = .{ .source = manifest_source, .wasm = bytes } };
+        return .{ .manifest = .{
+            .source = manifest_source,
+            .wasm = bytes,
+            .source_path = manifest_abs_path,
+        } };
     }
 
     const wasm_bytes = try readPairedWasm(io, arena, manifest_abs_path);
-    return .{ .manifest = .{ .source = manifest_source, .wasm = wasm_bytes } };
+    return .{ .manifest = .{
+        .source = manifest_source,
+        .wasm = wasm_bytes,
+        .source_path = manifest_abs_path,
+    } };
 }
 
 /// Scan a parsed `(plugin …)` manifest for a `:wasm-file "<path>"`
@@ -1600,4 +1657,108 @@ test "FilesystemResolver: takeProjectDiagnostics drains exactly once" {
 
     try testing.expectEqual(@as(usize, 1), fs.takeProjectDiagnostics().len);
     try testing.expectEqual(@as(usize, 0), fs.takeProjectDiagnostics().len);
+}
+
+test "FilesystemResolver: manifest-only resolution does not inspect wasm-file overrides" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmpRootPath(testing.allocator, &tmp.sub_path);
+    defer testing.allocator.free(root);
+
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "shapes.sjon",
+        .data =
+        \\(plugin :name shapes :version "1.0.0"
+        \\  :wasm-file "missing.wasm")
+        ,
+    });
+
+    var fs = try Self.init(testing.allocator, testing.io, root, null);
+    defer fs.deinit();
+
+    const ref: Resolver.Reference = .{
+        .name = "shapes",
+        .explicit_path = "shapes.sjon",
+        .span = .{ .start = 0, .end = 0 },
+    };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const full_resolver = fs.resolver();
+    const manifest_only_resolver = fs.resolverManifestOnly();
+
+    // The normal resolver honors `:wasm-file` and fails on the unreadable
+    // override — proof that the override has an observable effect.
+    const full = try full_resolver.resolve(full_resolver.ctx, ref, arena.allocator());
+    try testing.expect(full == .failure);
+    try testing.expectEqual(Ast.Diagnostic.Code.unresolved_plugin, full.failure.code);
+
+    // Manifest-only resolution never parses the manifest or looks for
+    // `:wasm-file` / paired sidecars.
+    const manifest_only = try manifest_only_resolver.resolve(manifest_only_resolver.ctx, ref, arena.allocator());
+    try testing.expect(manifest_only == .manifest);
+    try testing.expect(manifest_only.manifest.wasm == null);
+    try testing.expect(std.mem.indexOf(u8, manifest_only.manifest.source, ":wasm-file") != null);
+
+    const expected_path = try std.fmt.allocPrint(testing.allocator, "{s}/shapes.sjon", .{root});
+    defer testing.allocator.free(expected_path);
+    try testing.expectEqualStrings(expected_path, manifest_only.manifest.source_path.?);
+}
+
+test "FilesystemResolver: manifest-only resolution preserves source paths and duplicate-name rejection" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmpRootPath(testing.allocator, &tmp.sub_path);
+    defer testing.allocator.free(root);
+
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "a.sjon",
+        .data = "(plugin :name shapes :version \"1.0.0\")\n",
+    });
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "b.sjon",
+        .data = "(plugin :name shapes :version \"1.0.0\")\n",
+    });
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "sjon-project.sjon",
+        .data = "(project :plugins [\"a.sjon\" \"b.sjon\"])\n",
+    });
+    const project_file = try std.fmt.allocPrint(testing.allocator, "{s}/sjon-project.sjon", .{root});
+    defer testing.allocator.free(project_file);
+
+    var fs = try Self.init(testing.allocator, testing.io, root, project_file);
+    defer fs.deinit();
+
+    // The shared init/index path still rejects the second claimant.
+    const diags = fs.takeProjectDiagnostics();
+    try testing.expectEqual(@as(usize, 1), diags.len);
+    try testing.expectEqual(Ast.Diagnostic.Code.duplicate_plugin_name, diags[0].code);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const manifest_only_resolver = fs.resolverManifestOnly();
+
+    const named = try manifest_only_resolver.resolve(manifest_only_resolver.ctx, .{
+        .name = "shapes",
+        .span = .{ .start = 0, .end = 0 },
+    }, arena.allocator());
+    try testing.expect(named == .manifest);
+    try testing.expect(named.manifest.wasm == null);
+    const expected_a = try std.fmt.allocPrint(testing.allocator, "{s}/a.sjon", .{root});
+    defer testing.allocator.free(expected_a);
+    try testing.expectEqualStrings(expected_a, named.manifest.source_path.?);
+
+    // A duplicate name does not make the other file unresolvable by path.
+    const explicit = try manifest_only_resolver.resolve(manifest_only_resolver.ctx, .{
+        .name = "shapes",
+        .explicit_path = "b.sjon",
+        .span = .{ .start = 0, .end = 0 },
+    }, arena.allocator());
+    try testing.expect(explicit == .manifest);
+    try testing.expect(explicit.manifest.wasm == null);
+    const expected_b = try std.fmt.allocPrint(testing.allocator, "{s}/b.sjon", .{root});
+    defer testing.allocator.free(expected_b);
+    try testing.expectEqualStrings(expected_b, explicit.manifest.source_path.?);
 }

@@ -3859,3 +3859,297 @@ test "D8-carry: carrying the same named subtree twice is duplicate_cross_ref_tar
     }
     try std.testing.expect(duplicates > 0);
 }
+
+// ---------------------------------------------------------------------------
+// Schema-only document preparation (prepareSchema) — the seam a native editor
+// context uses to compose `baseline ++ document` declarations without running
+// the executable pipeline. The tree and document plugin results are retained;
+// the baseline preload stays borrowed; only `core` is prepended, exactly once.
+// ---------------------------------------------------------------------------
+
+fn expectSchemaForm(schema: sjon.Schema.Schema, name: []const u8) !void {
+    switch (schema.lookupForm(name, null)) {
+        .found => {},
+        else => return error.TestExpectedForm,
+    }
+}
+
+test "prepareSchema: inline and resolved declarations compose after the baseline" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmpRootPath(a, &tmp.sub_path);
+    defer a.free(root);
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "resolved.sjon",
+        .data =
+        \\(plugin :name resolved :version "1.0.0"
+        \\  (form :name resolved-form (key :name a :type number :optional false)))
+        ,
+    });
+
+    const baseline_sources = [_][:0]const u8{
+        \\(plugin :name baseline :version "1.0.0"
+        \\  (form :name baseline-form (key :name a :type number :optional false)))
+        ,
+    };
+    var baseline = try Host.preloadSchema(a, &baseline_sources);
+    defer baseline.deinit();
+
+    const doc: [:0]const u8 =
+        \\(plugin :name inline :version "1.0.0"
+        \\  (form :name inline-form (key :name a :type number :optional false)))
+        \\(use-plugin "resolved" :path "resolved.sjon")
+        \\
+    ;
+
+    var prepared = try Host.prepareSchema(a, doc, .{
+        .preloaded = &baseline,
+        .project_root = root,
+        .io = std.testing.io,
+    });
+    defer prepared.deinit();
+
+    try std.testing.expect(prepared.has_directives);
+    try std.testing.expectEqual(@as(usize, 3), prepared.user_schema.plugins.len);
+    try std.testing.expectEqualStrings("baseline", prepared.user_schema.plugins[0].name);
+    try std.testing.expectEqualStrings("inline", prepared.user_schema.plugins[1].name);
+    try std.testing.expectEqualStrings("resolved", prepared.user_schema.plugins[2].name);
+    try expectSchemaForm(prepared.user_schema, "baseline-form");
+    try expectSchemaForm(prepared.user_schema, "inline-form");
+    try expectSchemaForm(prepared.user_schema, "resolved-form");
+
+    // Document-loaded only: the inline declaration then the resolved reference.
+    try std.testing.expectEqual(@as(usize, 2), prepared.plugin_results.len);
+    try std.testing.expectEqualStrings("inline", prepared.plugin_results[0].plugin.name);
+    try std.testing.expectEqualStrings("resolved", prepared.plugin_results[1].plugin.name);
+    try std.testing.expectEqual(@as(usize, 0), prepared.diagnostics.len);
+}
+
+test "prepareSchema: core is prepended once and the baseline remains borrowed" {
+    const a = std.testing.allocator;
+
+    const baseline_sources = [_][:0]const u8{
+        \\(plugin :name baseline :version "1.0.0"
+        \\  (form :name baseline-form (key :name a :type number :optional false)))
+        ,
+    };
+    var baseline = try Host.preloadSchema(a, &baseline_sources);
+    defer baseline.deinit();
+
+    const doc: [:0]const u8 =
+        \\(plugin :name inline :version "1.0.0"
+        \\  (form :name inline-form (key :name a :type number :optional false)))
+        \\
+    ;
+
+    {
+        var prepared = try Host.prepareSchema(a, doc, .{ .preloaded = &baseline });
+        defer prepared.deinit();
+
+        // User schema is preloaded ++ document; no core.
+        try std.testing.expectEqual(@as(usize, 2), prepared.user_schema.plugins.len);
+        try std.testing.expectEqualStrings("baseline", prepared.user_schema.plugins[0].name);
+        try std.testing.expectEqualStrings("inline", prepared.user_schema.plugins[1].name);
+
+        // Validation schema is core ++ preloaded ++ document: core appears once.
+        try std.testing.expectEqual(@as(usize, 3), prepared.validation_schema.plugins.len);
+        try std.testing.expectEqualStrings("core", prepared.validation_schema.plugins[0].name);
+        var core_count: usize = 0;
+        for (prepared.validation_schema.plugins) |p| {
+            if (std.mem.eql(u8, p.name, "core")) core_count += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 1), core_count);
+
+        // Borrowed, not copied: the baseline plugin's string storage is the
+        // same storage the preload owns.
+        try std.testing.expectEqual(baseline.plugins[0].name.ptr, prepared.user_schema.plugins[0].name.ptr);
+        try std.testing.expectEqual(baseline.plugins[0].name.ptr, prepared.validation_schema.plugins[1].name.ptr);
+    }
+
+    // The preload is still alive and usable after the preparation deinit.
+    try std.testing.expectEqualStrings("baseline", baseline.plugins[0].name);
+    try expectSchemaForm(baseline.schema, "baseline-form");
+}
+
+test "prepareSchema: malformed directives set has_directives and retain current-source diagnostics" {
+    const a = std.testing.allocator;
+    const doc: [:0]const u8 = "(plugin)\n(use-plugin)\n";
+
+    var prepared = try Host.prepareSchema(a, doc, .{});
+    defer prepared.deinit();
+
+    // Both roots are directives even though neither is well formed.
+    try std.testing.expect(prepared.has_directives);
+    try std.testing.expect(prepared.diagnostics.len > 0);
+    for (prepared.diagnostics) |d| {
+        try std.testing.expectEqual(Host.Phase.manifest, d.phase);
+        try std.testing.expectEqual(Ast.Diagnostic.Severity.err, d.severity);
+        try std.testing.expect(d.span.start <= doc.len);
+        try std.testing.expect(d.span.end <= doc.len);
+    }
+}
+
+test "prepareSchema: resolved dependencies survive failed manifest loads" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmpRootPath(a, &tmp.sub_path);
+    defer a.free(root);
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "bad.sjon",
+        .data = "(not-a-plugin)\n",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "good.sjon",
+        .data =
+        \\(plugin :name good :version "1.0.0"
+        \\  (form :name good-form (key :name a :type number :optional false)))
+        ,
+    });
+
+    const doc: [:0]const u8 =
+        \\(use-plugin "bad" :path "bad.sjon")
+        \\(use-plugin "good" :path "good.sjon")
+        \\
+    ;
+
+    var prepared = try Host.prepareSchema(a, doc, .{
+        .project_root = root,
+        .io = std.testing.io,
+    });
+    defer prepared.deinit();
+
+    const bad_path = try std.fmt.allocPrint(a, "{s}/bad.sjon", .{root});
+    defer a.free(bad_path);
+    const good_path = try std.fmt.allocPrint(a, "{s}/good.sjon", .{root});
+    defer a.free(good_path);
+
+    // Both paths are recorded even though only one manifest loaded.
+    try std.testing.expectEqual(@as(usize, 2), prepared.dependencies.len);
+    try std.testing.expectEqualStrings(bad_path, prepared.dependencies[0].source_path);
+    try std.testing.expectEqualStrings(good_path, prepared.dependencies[1].source_path);
+
+    try std.testing.expectEqual(@as(usize, 1), prepared.plugin_results.len);
+    try std.testing.expectEqualStrings("good", prepared.plugin_results[0].plugin.name);
+
+    var saw_error = false;
+    for (prepared.diagnostics) |d| {
+        if (d.severity == .err) saw_error = true;
+    }
+    try std.testing.expect(saw_error);
+}
+
+test "prepareSchema: resolver root is the supplied marker directory" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmpRootPath(a, &tmp.sub_path);
+    defer a.free(root);
+
+    try tmp.dir.createDirPath(std.testing.io, "schemas");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "schemas/shapes.sjon",
+        .data =
+        \\(plugin :name shapes :version "1.0.0"
+        \\  (form :name circle (key :name r :type number :optional false)))
+        ,
+    });
+
+    const doc: [:0]const u8 = "(use-plugin \"shapes\" :path \"schemas/shapes.sjon\")\n";
+    var prepared = try Host.prepareSchema(a, doc, .{
+        .project_root = root,
+        .io = std.testing.io,
+    });
+    defer prepared.deinit();
+
+    const expected = try std.fmt.allocPrint(a, "{s}/schemas/shapes.sjon", .{root});
+    defer a.free(expected);
+
+    try std.testing.expectEqual(@as(usize, 1), prepared.plugin_results.len);
+    try std.testing.expectEqualStrings("shapes", prepared.plugin_results[0].plugin.name);
+    try std.testing.expectEqual(@as(usize, 1), prepared.dependencies.len);
+    try std.testing.expectEqualStrings(expected, prepared.dependencies[0].source_path);
+    try expectSchemaForm(prepared.user_schema, "circle");
+}
+
+test "prepareSchema: inline-only preparation does not read the project file" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmpRootPath(a, &tmp.sub_path);
+    defer a.free(root);
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "sjon-project.sjon",
+        .data = "(not-a-project :plugins [])\n",
+    });
+    const project_file = try std.fmt.allocPrint(a, "{s}/sjon-project.sjon", .{root});
+    defer a.free(project_file);
+
+    const doc: [:0]const u8 =
+        \\(plugin :name inline :version "1.0.0"
+        \\  (form :name inline-form (key :name a :type number :optional false)))
+        \\
+    ;
+
+    const options: Host.HostOptions = .{
+        .project_root = root,
+        .project_file = project_file,
+        .io = std.testing.io,
+    };
+
+    // The same options through the executable pipeline do read the project
+    // file, which is what makes the schema-only skip observable.
+    var full = try Host.validateDocument(a, doc, options);
+    defer full.deinit();
+    try std.testing.expect(full.diagnostics.len > 0);
+
+    var prepared = try Host.prepareSchema(a, doc, options);
+    defer prepared.deinit();
+    try std.testing.expectEqual(@as(usize, 0), prepared.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), prepared.plugin_results.len);
+    try std.testing.expectEqual(@as(usize, 0), prepared.dependencies.len);
+}
+
+test "prepareSchema: explicit references retain applicable project diagnostics" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmpRootPath(a, &tmp.sub_path);
+    defer a.free(root);
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "shapes.sjon",
+        .data =
+        \\(plugin :name shapes :version "1.0.0"
+        \\  (form :name circle (key :name r :type number :optional false)))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "sjon-project.sjon",
+        .data = "(project :plugins [\"missing.sjon\"])\n",
+    });
+    const project_file = try std.fmt.allocPrint(a, "{s}/sjon-project.sjon", .{root});
+    defer a.free(project_file);
+
+    const doc: [:0]const u8 = "(use-plugin \"shapes\" :path \"shapes.sjon\")\n";
+    var prepared = try Host.prepareSchema(a, doc, .{
+        .project_root = root,
+        .project_file = project_file,
+        .io = std.testing.io,
+    });
+    defer prepared.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), prepared.plugin_results.len);
+    try std.testing.expectEqualStrings("shapes", prepared.plugin_results[0].plugin.name);
+
+    var saw_project_error = false;
+    for (prepared.diagnostics) |d| {
+        if (d.phase != .manifest or d.severity != .err) continue;
+        if (std.mem.indexOf(u8, d.message, "missing.sjon") != null) saw_project_error = true;
+    }
+    try std.testing.expect(saw_project_error);
+}

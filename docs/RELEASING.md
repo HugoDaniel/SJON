@@ -58,7 +58,7 @@ cargo publish --manifest-path hosts/rust/Cargo.toml
 
 Create a crates.io account, verify its email address, and enter a publishing
 API token at the `cargo login` prompt. Verify the uploaded version with
-`cargo info sjon-host@1.5.0`, then build a fresh registry consumer. The crate
+`cargo info sjon-host@1.6.0`, then build a fresh registry consumer. The crate
 requires Rust 1.92 and a matching external `sjon.wasm`; it does not require
 Zig when using a prebuilt artifact. Instructions are in the
 [Rust README](../hosts/rust/README.md).

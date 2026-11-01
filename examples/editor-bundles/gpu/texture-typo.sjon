@@ -1,0 +1,7 @@
+; Invalid under the `gpu-textures` bundle, on purpose.
+;
+; `4d` is not a declared member of `texture-dimension`. The server reports
+; `not_member`, names the set, and offers the closest spelling as a quick
+; fix. Delete the `4` or change it to `2` to see the diagnostic clear.
+
+(texture :name albedo :dimension 4d)

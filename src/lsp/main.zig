@@ -1,14 +1,17 @@
 //! SJON Language Server — native entry point.
 //!
 //! Stdio + JSON-RPC via lsp-kit's `basic_server`. The `Server` struct
-//! exposes the typed methods lsp-kit dispatches by name; each one
-//! delegates to the transport-agnostic `Handler` (which is shared with
-//! the WASM target).
+//! exposes the typed methods lsp-kit dispatches by name; each one resolves
+//! the request URI's schema context through `context_registry` and forwards
+//! to that context's transport-agnostic `Handler` (which is shared with the
+//! WASM target). There is no singleton document handler.
 //!
-//! Scope today: initialize (with workspace schema discovery via
-//! `sjon-project.sjon`), didOpen / didChange (full sync) / didClose,
-//! pull-mode `textDocument/diagnostic` (also surfaces project-file
-//! diagnostics on the project URI), `textDocument/hover`,
+//! Scope today: initialize (retaining every workspace folder and loading
+//! each root's `sjon-project.sjon` when no `sjon-lsp.sjon` wins), didOpen /
+//! didChange (full sync) / didClose, per-document diagnostics from
+//! `sjon-lsp.sjon` bundles or the applicable legacy project, pull-mode
+//! `textDocument/diagnostic` (also surfaces project-file diagnostics on the
+//! project URI), `textDocument/hover`,
 //! `textDocument/completion` (form-head and key contexts driven by the
 //! loaded schema), `textDocument/signatureHelp` (form keys / typed
 //! expr-func params with cursor-driven active parameter),
@@ -20,11 +23,12 @@
 //! members, and cross-ref names; `full` only),
 //! `textDocument/formatting`, `textDocument/codeAction` (quickfixes
 //! for `unknown_form`/`unknown_key` via Levenshtein nearest-name), and
-//! `workspace/didChangeWatchedFiles` (re-runs schema discovery and
-//! re-validates every open document, then asks the client to re-pull
-//! diagnostics), and `workspace/diagnostic` (enumerates `**/*.sjon`
-//! under the workspace root and reports on-disk files alongside open
-//! buffers — native only, since the handler owns no filesystem).
+//! `textDocument/didSave` and `workspace/didChangeWatchedFiles` (both
+//! reread saved configuration/manifest bytes, rebuild affected contexts
+//! transactionally, and publish or refresh diagnostics), and
+//! `workspace/diagnostic` (enumerates `**/*.sjon` under the workspace
+//! root and reports on-disk files alongside open buffers — native only,
+//! since the handler owns no filesystem).
 
 const std = @import("std");
 const lsp = @import("lsp");
@@ -32,6 +36,8 @@ const Handler = @import("Handler");
 const sjon = @import("sjon");
 const sjon_version = sjon.version;
 const uri = @import("uri");
+const discovery = @import("discovery");
+const context_registry = @import("context_registry");
 const workspace_scan = @import("workspace_scan");
 const text_sync = @import("text_sync");
 
@@ -76,6 +82,14 @@ pub fn main(init: std.process.Init) !void {
     try lsp.basic_server.run(init.io, init.gpa, transport, &server, std.log.err);
 }
 
+/// How this connection wants unsolicited diagnostics delivered. Selected
+/// once at `initialize`: the presence of `textDocument.diagnostic` means
+/// the client implements the pull model, and everything else falls back
+/// to the push model (`textDocument/publishDiagnostics`). The pull
+/// methods stay advertised and answerable in either mode; this enum only
+/// governs unsolicited delivery.
+const DiagnosticMode = enum { push, pull };
+
 /// lsp-kit-typed dispatcher. Holds the offset encoding negotiated during
 /// `initialize` and forwards every other method to `Handler`. Also keeps
 /// the `transport` so server-initiated requests (`client/registerCapability`,
@@ -85,7 +99,9 @@ pub const Server = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     transport: *lsp.Transport,
-    handler: Handler,
+    /// Owns every open buffer and every schema context this connection can
+    /// route. There is no singleton document handler.
+    registry: context_registry.Registry,
     offset_encoding: lsp.offsets.Encoding,
     /// Whether the client accepts `WorkspaceEdit.documentChanges`, from
     /// `capabilities.workspace.workspaceEdit.documentChanges`. Only that
@@ -93,31 +109,81 @@ pub const Server = struct {
     /// understand it sees an edit with no `changes` and applies nothing —
     /// hence a capability check rather than always sending the better shape.
     client_document_changes: bool,
-    /// Filesystem path of the workspace root, captured at `initialize`
-    /// time so `workspace/didChangeWatchedFiles` can re-resolve
-    /// `sjon-project.sjon` without retaining the request arena.
-    /// Owned by `gpa`; null when the client supplied no workspace.
-    workspace_path: ?[]const u8,
     /// Monotonic counter for server-initiated request IDs. Wraps at u31
     /// to stay inside the LSP spec's signed-32-bit range.
     next_request_id: u31,
+    /// Push or pull for this connection, from `initialize` capabilities.
+    diagnostic_mode: DiagnosticMode,
+    /// Whether push reports may carry `version`, from
+    /// `textDocument.publishDiagnostics.versionSupport`. Always false in
+    /// pull mode: unsolicited reports are never sent there.
+    client_publish_version: bool,
+    /// Whether the active diagnostic capability object accepts
+    /// `relatedInformation` — `textDocument.diagnostic` in pull mode,
+    /// `textDocument.publishDiagnostics` in push mode. Optional fields
+    /// are read from the object for the mode that will actually deliver
+    /// them, so a client's push-only announcement cannot leak into pull.
+    client_related_information: bool,
+    /// Whether the active mode's `tagSupport.valueSet` contains LSP
+    /// `DiagnosticTag.Deprecated` (2). False when `tagSupport` is absent,
+    /// its `valueSet` is absent, or the set omits 2.
+    client_deprecated_tag: bool,
+    /// Whether the active mode's `codeDescriptionSupport` is true.
+    client_code_description: bool,
+    /// `workspace.didChangeWatchedFiles.dynamicRegistration orelse false`.
+    /// Independent of diagnostic mode: it gates only whether this server
+    /// asks the client to register the `.sjon` watcher.
+    client_watcher_dynamic_registration: bool,
+    /// `workspace.diagnostics.refreshSupport orelse false`. Recorded
+    /// independently of mode (a push client may announce it), but used
+    /// only when a pull connection asks for a refresh.
+    client_diagnostic_refresh_support: bool,
+    /// GPA-owned URIs of source reports confirmed for push. A report that
+    /// moved or disappeared is cleared from its old URI; the list replaces
+    /// the former single-project tracker now that one connection can hold
+    /// several roots.
+    pushed_source_uris: std.ArrayList([]const u8),
+    /// Whether the client has sent `shutdown`. Once set, no unsolicited
+    /// diagnostics may be serialized or written, whatever notification
+    /// the loop reads before `exit` (the spec still delivers `exit`, and
+    /// local state may be updated). Every push path funnels through
+    /// `publishReport`, so that one guard covers open, change, close,
+    /// reload, and project-source publication.
+    shutdown_received: bool,
+    /// Pending `client/registerCapability` request id for the broad
+    /// `.sjon` watcher. `onResponse` clears it and records rejection once.
+    watcher_registration_id: ?u31,
+    /// Set after a rejected watcher registration. Watching is unavailable
+    /// for the connection; the server neither retries nor polls.
+    watcher_rejected: bool,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, transport: *lsp.Transport) Server {
         return .{
             .gpa = gpa,
             .io = io,
             .transport = transport,
-            .handler = Handler.init(gpa),
+            .registry = context_registry.Registry.init(gpa, io),
             .offset_encoding = .@"utf-16",
             .client_document_changes = false,
-            .workspace_path = null,
             .next_request_id = 1,
+            .diagnostic_mode = .push,
+            .client_publish_version = false,
+            .client_related_information = false,
+            .client_deprecated_tag = false,
+            .client_code_description = false,
+            .client_watcher_dynamic_registration = false,
+            .client_diagnostic_refresh_support = false,
+            .pushed_source_uris = .empty,
+            .shutdown_received = false,
+            .watcher_registration_id = null,
+            .watcher_rejected = false,
         };
     }
 
     pub fn deinit(self: *Server) void {
-        if (self.workspace_path) |p| self.gpa.free(p);
-        self.handler.deinit();
+        for (self.pushed_source_uris.items) |p| self.gpa.free(p);
+        self.pushed_source_uris.deinit(self.gpa);
+        self.registry.deinit();
     }
 
     pub fn initialize(
@@ -140,20 +206,74 @@ pub const Server = struct {
             if (ws.workspaceEdit) |we| self.client_document_changes = we.documentChanges orelse false;
         }
 
-        // Schema discovery — resolve the workspace root, look for a
-        // `sjon-project.sjon`, and load every plugin manifest it lists.
-        // Failures here surface as project diagnostics on the project
-        // file URI; OOM is the only error that escalates to the client.
-        const workspace_path = resolveWorkspacePath(arena, request) catch null;
-        // Stash a gpa-owned copy so `workspace/didChangeWatchedFiles`
-        // can re-resolve the project file later. The arena copy
-        // disappears when this request returns.
-        if (workspace_path) |p| {
-            self.workspace_path = self.gpa.dupe(u8, p) catch null;
+        // Diagnostic delivery mode is a property of the connection, not of
+        // the workspace: an empty `textDocument.diagnostic` object still
+        // selects pull, and `dynamicRegistration` says nothing about
+        // whether the client can answer a pull. Record it before the
+        // project load so the first event after initialization already
+        // uses the right mode. Optional diagnostic fields come from the
+        // same object that owns the selected mode, so a flag announced
+        // only for the other delivery model cannot leak across.
+        if (request.capabilities.textDocument) |text_document| {
+            if (text_document.diagnostic) |pull| {
+                self.diagnostic_mode = .pull;
+                self.client_publish_version = false;
+                self.client_related_information = pull.relatedInformation orelse false;
+                self.client_deprecated_tag = supportsDeprecatedTag(pull.tagSupport);
+                self.client_code_description = pull.codeDescriptionSupport orelse false;
+            } else if (text_document.publishDiagnostics) |push| {
+                self.client_publish_version = push.versionSupport orelse false;
+                self.client_related_information = push.relatedInformation orelse false;
+                self.client_deprecated_tag = supportsDeprecatedTag(push.tagSupport);
+                self.client_code_description = push.codeDescriptionSupport orelse false;
+            }
         }
-        self.handler.loadProject(self.io, workspace_path) catch |err| {
-            std.log.warn("loadProject failed: {s}", .{@errorName(err)});
+
+        // Watcher registration and refresh support are workspace-scoped
+        // and independent of the diagnostic delivery mode: a push client
+        // still needs the watcher to notice manifest edits. Refresh is
+        // stored but only requested for pull connections.
+        if (request.capabilities.workspace) |ws| {
+            if (ws.didChangeWatchedFiles) |watched| {
+                self.client_watcher_dynamic_registration =
+                    watched.dynamicRegistration orelse false;
+            }
+            if (ws.diagnostics) |diagnostics| {
+                self.client_diagnostic_refresh_support =
+                    diagnostics.refreshSupport orelse false;
+            }
+        }
+
+        // Schema discovery — retain every initialization workspace folder,
+        // then let the registry discover an editor configuration or legacy
+        // project per document. A root-level legacy project is loaded once
+        // so its source report is available before any document is opened;
+        // a root with `sjon-lsp.sjon` is left entirely to per-document
+        // discovery and no sibling project is read eagerly.
+        const folder_uris: []const []const u8 = blk: {
+            const folders = request.workspaceFolders orelse break :blk &.{};
+            const out = arena.alloc([]const u8, folders.len) catch
+                break :blk &.{};
+            for (folders, 0..) |folder, i| out[i] = folder.uri;
+            break :blk out;
         };
+        var roots: ?discovery.Roots = discovery.initializationRoots(
+            arena,
+            folder_uris,
+            request.rootUri,
+            request.rootPath,
+        ) catch null;
+        defer if (roots) |*value| value.deinit();
+        if (roots) |value| {
+            self.registry.configureRoots(value.items) catch |err| {
+                std.log.warn("configureRoots failed: {s}", .{@errorName(err)});
+            };
+            for (value.items) |root| {
+                self.registry.loadRootProject(root.path) catch |err| {
+                    std.log.warn("loadRootProject failed: {s}", .{@errorName(err)});
+                };
+            }
+        }
 
         const server_capabilities = serverCapabilities(self.offset_encoding);
 
@@ -167,18 +287,40 @@ pub const Server = struct {
         };
     }
 
-    pub fn initialized(self: *Server, _: std.mem.Allocator, _: lsp.types.InitializedParams) void {
-        // Ask the client to watch every `.sjon` file in the workspace.
+    pub fn initialized(self: *Server, arena: std.mem.Allocator, _: lsp.types.InitializedParams) void {
+        // Push clients learn the project source's initial state from the
+        // same report path a reload uses: an empty report for a clean
+        // project, the real diagnostics for a broken one. Pull clients
+        // ask for it directly and must not receive an unsolicited push.
+        if (self.diagnostic_mode == .push) {
+            self.syncProjectDiagnostics(arena) catch |err| {
+                std.log.warn("syncProjectDiagnostics failed: {s}", .{@errorName(err)});
+            };
+        }
+
+        // Ask the client to watch every `.sjon` file in the workspace, but
+        // only when it announced dynamic registration for watched files.
         // The pattern is broad on purpose: it covers the project file,
         // every plugin manifest the project may reference now or later,
         // and any future `.sjon` file the user adds. Reload-on-change
         // is cheap (parse a few KB + revalidate cached docs).
+        //
+        // A rejected registration (for example a -32601 error response)
+        // is delivered to `onResponse`, which marks watching unavailable and
+        // logs once. It never becomes a reason to stop publishing or to
+        // retry: diagnostics do not depend on the watcher.
+        if (!self.client_watcher_dynamic_registration) return;
         self.registerSjonFileWatcher() catch |err| {
             std.log.warn("registerSjonFileWatcher failed: {s}", .{@errorName(err)});
         };
     }
 
-    pub fn shutdown(_: *Server, _: std.mem.Allocator, _: void) ?void {
+    pub fn shutdown(self: *Server, _: std.mem.Allocator, _: void) ?void {
+        // From here until `exit`, the loop can still deliver notifications
+        // that mutate local state, but the client must receive no further
+        // server-initiated diagnostics. Recorded rather than enforced here
+        // so every push path inherits the rule at its one write point.
+        self.shutdown_received = true;
         return null;
     }
 
@@ -186,14 +328,17 @@ pub const Server = struct {
 
     pub fn @"textDocument/didOpen"(
         self: *Server,
-        _: std.mem.Allocator,
+        arena: std.mem.Allocator,
         params: lsp.types.TextDocument.DidOpenParams,
-    ) Allocator.Error!void {
-        try self.handler.openDocument(
+    ) (Allocator.Error || lsp.Transport.WriteError)!void {
+        _ = try self.registry.openDocument(
             params.textDocument.uri,
             params.textDocument.version,
             params.textDocument.text,
         );
+        if (self.diagnostic_mode == .push) {
+            try self.publishDocumentDiagnostics(arena, params.textDocument.uri);
+        }
     }
 
     /// Adapts lsp-kit's offset converter to `text_sync`'s mapper
@@ -226,13 +371,14 @@ pub const Server = struct {
         self: *Server,
         arena: std.mem.Allocator,
         params: lsp.types.TextDocument.DidChangeParams,
-    ) Handler.Error!void {
+    ) (Handler.Error || lsp.Transport.WriteError)!void {
         // The splice needs the current text, so the lookup moves ahead of
         // `changeDocumentFull` — but it keeps raising the same error that
         // call used to, rather than turning a client protocol violation
         // into a silent no-op.
-        const doc = self.handler.getDocument(params.textDocument.uri) orelse
+        const routed = self.routedDocument(params.textDocument.uri) orelse
             return error.UnknownDocument;
+        const doc = routed.doc;
 
         // Collected and applied as one batch: an incremental change's
         // range is positioned against the text its predecessors in the
@@ -260,8 +406,10 @@ pub const Server = struct {
                 },
             };
         }
-        if (changes.len == 0) return;
-
+        // An empty batch is a successful change, not a no-op: the client
+        // has supplied a new version, and reports must carry the version
+        // actually validated. `applyChanges` returns the unchanged text,
+        // so this republishes the same diagnostic set at the new version.
         const merged = try text_sync.applyChanges(
             arena,
             doc.source,
@@ -269,40 +417,139 @@ pub const Server = struct {
             OffsetMapper{ .encoding = self.offset_encoding },
         );
 
-        // One reparse for the batch, not one per change.
-        try self.handler.changeDocumentFull(
+        // One reparse for the batch, not one per change. The registry
+        // re-associates the buffer when a declaration changes its context.
+        _ = try self.registry.changeDocumentFull(
             params.textDocument.uri,
             params.textDocument.version,
             merged,
         );
+        if (self.diagnostic_mode == .push) {
+            try self.publishDocumentDiagnostics(arena, params.textDocument.uri);
+        }
+    }
+
+    /// `includeText` is advertised false, so the optional `params.text` is
+    /// ignored even when a client sends it. Saved disk bytes are the
+    /// authority for configuration, projects, and manifests.
+    pub fn @"textDocument/didSave"(
+        self: *Server,
+        arena: std.mem.Allocator,
+        params: lsp.types.TextDocument.DidSaveParams,
+    ) (Allocator.Error || lsp.Transport.WriteError)!void {
+        try self.applySavedInputs(arena, &.{.{
+            .uri = params.textDocument.uri,
+            .kind = .changed,
+        }});
     }
 
     pub fn @"textDocument/didClose"(
         self: *Server,
-        _: std.mem.Allocator,
+        arena: std.mem.Allocator,
         params: lsp.types.TextDocument.DidCloseParams,
-    ) Allocator.Error!void {
-        self.handler.closeDocument(params.textDocument.uri);
+    ) (Allocator.Error || lsp.Transport.WriteError)!void {
+        // Capture the last version before the buffer disappears: the
+        // empty clear must be attributed to the report it supersedes, or
+        // a version-aware client keeps the old report as "current".
+        const document_uri = params.textDocument.uri;
+        const version: ?i32 = if (self.diagnostic_mode == .push and self.client_publish_version)
+            if (self.registry.route(document_uri)) |route|
+                if (route.handler.getDocument(document_uri)) |doc| lspVersion(doc.version) else null
+            else
+                null
+        else
+            null;
+
+        self.registry.closeDocument(document_uri);
+
+        if (self.diagnostic_mode == .push) {
+            // Closing a dirty source discards the live overlay. If a saved
+            // input still owns a report for this URI, restore it; otherwise
+            // the report is genuinely gone and clears.
+            if (try self.registry.savedSourceReportFor(arena, document_uri)) |saved| {
+                const items = try self.diagnosticItems(arena, saved.source, saved.diagnostics);
+                try self.publishReport(document_uri, version, items);
+            } else {
+                try self.publishReport(document_uri, version, &.{});
+            }
+        }
     }
 
     pub fn @"workspace/didChangeWatchedFiles"(
         self: *Server,
-        _: std.mem.Allocator,
-        _: lsp.types.workspace.did_change_watched_files.Params,
-    ) Allocator.Error!void {
-        // We don't filter on the URI list. Watcher pattern is already
-        // narrow (`.sjon` only) and `reloadProject` is cheap enough
-        // that re-running on every match is simpler than tracking which
-        // files matter as manifests vs regular docs.
-        self.handler.reloadProject(self.io, self.workspace_path) catch |err| {
-            std.log.warn("reloadProject failed: {s}", .{@errorName(err)});
-            return;
+        arena: std.mem.Allocator,
+        params: lsp.types.workspace.did_change_watched_files.Params,
+    ) (Allocator.Error || lsp.Transport.WriteError)!void {
+        // One broad registration covers every `.sjon` file. Only selected
+        // markers and known configured dependencies are allowed to trigger
+        // reload work; a wholly new marker takes effect after restart.
+        var changes: std.ArrayList(context_registry.FileChange) = .empty;
+        for (params.changes) |event| {
+            if (!try self.registry.isKnownInputUri(arena, event.uri)) continue;
+            try changes.append(arena, .{
+                .uri = event.uri,
+                .kind = switch (event.type) {
+                    .Created => .created,
+                    .Changed => .changed,
+                    .Deleted => .deleted,
+                    else => continue,
+                },
+            });
+        }
+
+        try self.applySavedInputs(arena, changes.items);
+    }
+
+    /// Shared saved-input transaction for `didSave` and watched events.
+    /// Legacy projects retain their broad re-read behavior — inside the
+    /// same transactional rebuild as configured contexts — and publish the
+    /// open-document and project-source reports; configured contexts
+    /// rebuild only from known inputs and publish old/new affected URIs so
+    /// recovery clears stale source reports. Any failure keeps every old
+    /// context (legacy and configured alike) and publishes nothing.
+    fn applySavedInputs(
+        self: *Server,
+        arena: std.mem.Allocator,
+        changes: []const context_registry.FileChange,
+    ) (Allocator.Error || lsp.Transport.WriteError)!void {
+        const legacy = self.registry.hasLegacyContexts();
+
+        // `reloadSavedInputs` re-reads legacy projects into the replacement
+        // registry and swaps only when every step succeeded, so a failure
+        // anywhere in the reload — including between two legacy roots —
+        // leaves the old registry complete and nothing is published.
+        const result = self.registry.reloadSavedInputs(arena, changes) catch |err| switch (err) {
+            error.OutOfMemory => {
+                // OOM is internal: retain the old contexts and do not publish
+                // an empty success report.
+                std.log.warn("saved-input reload ran out of memory; retaining old contexts", .{});
+                return;
+            },
         };
-        // Pull-mode diagnostics: cached `validate_result`s are now fresh
-        // but the editor doesn't know that. Ask it to re-pull.
-        self.requestDiagnosticRefresh() catch |err| {
-            std.log.warn("workspace/diagnostic/refresh failed: {s}", .{@errorName(err)});
-        };
+
+        if (!result.changed and !legacy) return;
+
+        switch (self.diagnostic_mode) {
+            .push => {
+                if (result.changed) {
+                    try self.publishAffected(arena, result.old_uris, result.new_uris);
+                }
+                if (legacy) {
+                    try self.publishOpenDiagnostics(arena);
+                    try self.syncProjectDiagnostics(arena);
+                }
+            },
+            .pull => {
+                // Only a client that announced refresh support can act on
+                // this; one without it gets the new state on its next pull,
+                // whose result IDs changed with the generation.
+                if (!self.client_diagnostic_refresh_support) return;
+                if (!result.changed and !legacy) return;
+                self.requestDiagnosticRefresh() catch |err| {
+                    std.log.warn("workspace/diagnostic/refresh failed: {s}", .{@errorName(err)});
+                };
+            },
+        }
     }
 
     pub fn @"textDocument/diagnostic"(
@@ -318,53 +565,44 @@ pub const Server = struct {
             },
         };
 
-        // Project file diagnostics: when the editor pulls diagnostics on
-        // `sjon-project.sjon`, return the schema-discovery report rather
-        // than an empty one (the project file isn't an opened document).
-        if (self.handler.getProjectInfo()) |proj| {
-            // Decoded equality, matching the document map and
-            // `ingestWorkspaceFiles`: `Host` builds this URI without
-            // percent-encoding, and a client is free to send another
-            // spelling of the same path.
-            if (proj.project_uri) |purl| if (uri.HashContext.eql(.{}, purl, params.textDocument.uri)) {
-                const proj_source = proj.project_source orelse return empty;
-                const items = try arena.alloc(lsp.types.Diagnostic, proj.diagnostics.len);
-                for (proj.diagnostics, 0..) |d, i| {
-                    const start_pos = lsp.offsets.indexToPosition(proj_source, d.span.start, self.offset_encoding);
-                    const end_pos = lsp.offsets.indexToPosition(proj_source, d.span.end, self.offset_encoding);
-                    items[i] = .{
-                        .range = .{ .start = start_pos, .end = end_pos },
-                        .severity = switch (d.severity) {
-                            .err => .Error,
-                            .warning => .Warning,
-                        },
-                        .code = .{ .string = @tagName(d.code) },
-                        .codeDescription = .{ .href = Handler.codeHref(d.code) },
-                        .source = "sjon",
-                        .message = d.message,
-                    };
-                }
+        // Project source diagnostics: a loaded legacy project is a source
+        // route, not an ordinary document. This answers a pull on
+        // `sjon-project.sjon` even when the editor never opened it.
+        if (try self.registry.projectSourceFor(arena, params.textDocument.uri)) |project| {
+            return .{
+                .related_full_document_diagnostic_report = .{
+                    .items = try self.diagnosticItems(arena, project.source, project.diagnostics),
+                    .resultId = null,
+                    .relatedDocuments = null,
+                },
+            };
+        }
+
+        // A selected configuration or manifest that is not open still owns
+        // its saved-byte report. Pull may ask for it directly.
+        if (self.registry.documentFor(params.textDocument.uri) == null) {
+            if (try self.registry.savedSourceReportFor(arena, params.textDocument.uri)) |saved| {
                 return .{
                     .related_full_document_diagnostic_report = .{
-                        .items = items,
+                        .items = try self.diagnosticItems(arena, saved.source, saved.diagnostics),
                         .resultId = null,
                         .relatedDocuments = null,
                     },
                 };
-            };
+            }
+            return empty;
         }
 
-        const doc = self.handler.getDocument(params.textDocument.uri) orelse return empty;
+        const routed = self.routedDocument(params.textDocument.uri) orelse return empty;
+        const doc = routed.doc;
 
-        // ResultId = `<doc_version>:<schema_generation>`. Both halves
-        // matter: a doc edit bumps doc.version, a manifest/project-file
-        // edit bumps schema_generation. The client short-circuits to
-        // "unchanged" only when both are the same.
-        const current_id = try std.fmt.allocPrint(
-            arena,
-            "{d}:{d}",
-            .{ doc.version, self.handler.schema_generation },
-        );
+        // The Handler owns the one result-id scheme: `<doc_version>:
+        // <schema_generation>` on the legacy path, prefixed with the
+        // context identity when this handler serves a native schema
+        // context. Both halves still matter: a doc edit bumps the version,
+        // a manifest/project-file edit bumps the generation, and a context
+        // move changes the prefix.
+        const current_id = try routed.route.handler.diagnosticResultId(arena, doc);
         if (params.previousResultId) |prev| {
             if (std.mem.eql(u8, prev, current_id)) {
                 return .{
@@ -376,8 +614,13 @@ pub const Server = struct {
             }
         }
 
-        const handler_diags = (try self.handler.getDiagnostics(arena, params.textDocument.uri)) orelse &.{};
-        const items = try self.diagnosticItems(arena, doc.source, handler_diags);
+        const handler_diags = (try routed.route.handler.getDiagnostics(arena, params.textDocument.uri)) orelse &.{};
+        const items = try self.documentDiagnosticItems(
+            arena,
+            params.textDocument.uri,
+            doc.source,
+            handler_diags,
+        );
 
         return .{
             .related_full_document_diagnostic_report = .{
@@ -400,35 +643,67 @@ pub const Server = struct {
         arena: std.mem.Allocator,
         params: lsp.types.workspace.diagnostic.Params,
     ) Allocator.Error!lsp.types.workspace.diagnostic.Report {
-        if (self.workspace_path) |root| {
-            const scan = workspace_scan.collect(arena, self.io, root, .{}) catch
-                workspace_scan.Scan{ .files = &.{}, .stopped_early = false };
-            if (scan.stopped_early) {
-                std.log.warn(
-                    "workspace scan stopped at {d} entries; some files were not examined",
-                    .{workspace_scan.MAX_SCAN_ENTRIES},
-                );
-            }
-            const ingest = self.handler.ingestWorkspaceFiles(scan.files) catch
-                Handler.WorkspaceIngest{ .ingested = 0, .clipped = 0 };
-            if (ingest.clipped > 0) {
-                std.log.warn(
-                    "workspace diagnostics: {d} file(s) beyond the {d}-file cap were not analysed",
-                    .{ ingest.clipped, Handler.MAX_WORKSPACE_FILES },
-                );
-            }
+        const limits: workspace_scan.WorkspaceLimits = .{};
+        var scan_budget = workspace_scan.Budget.init(limits.max_scan_entries);
+        var scanned: std.ArrayList(Handler.WorkspaceFile) = .empty;
+        var scan_stopped = false;
+        for (self.registry.roots) |root| {
+            const scan = workspace_scan.collectWithBudget(
+                arena,
+                self.io,
+                root.path,
+                &scan_budget,
+            ) catch workspace_scan.Scan{ .files = &.{}, .stopped_early = false };
+            scan_stopped = scan_stopped or scan.stopped_early;
+            try scanned.appendSlice(arena, scan.files);
+        }
+        if (scan_stopped) {
+            std.log.warn(
+                "workspace scan stopped at {d} shared entries; some files were not examined",
+                .{limits.max_scan_entries},
+            );
         }
 
-        const reports = try self.handler.getWorkspaceDiagnostics(arena);
-        // Appended, not indexed into a pre-sized slice: the `orelse continue`
-        // below skips a report without filling its slot, and a pre-sized
-        // slice would then serialize undefined memory. Unreachable today
-        // (reports come from `handler.documents` and `getDocument` is an
-        // unfiltered lookup on that same map in this same synchronous call) —
-        // appending makes it stay correct if either half moves.
+        // One global sort and one never-open budget across every root and
+        // context. The registry keeps reference scope per handler; this
+        // merge only decides which bytes each handler holds.
+        const ingest = self.registry.ingestWorkspaceFiles(scanned.items, limits) catch |err| blk: {
+            std.log.warn("workspace ingestion failed: {s}", .{@errorName(err)});
+            break :blk Handler.WorkspaceIngest{ .ingested = 0, .clipped = 0 };
+        };
+        if (ingest.clipped > 0) {
+            std.log.warn(
+                "workspace ingestion clipped {d} files at the shared {d}-file limit",
+                .{ ingest.clipped, limits.max_files },
+            );
+        }
+
+        const reports = try self.registry.workspaceReports(arena);
+        const projects = try self.registry.projectSources(arena);
+
+        // Both slices are sorted by URI; insert each project source at its
+        // first greater document URI so the output stays ordered without a
+        // second sort. A project URI that is also an open buffer is replaced
+        // by the project's own source report rather than duplicated.
         var items: std.ArrayList(lsp.types.workspace.diagnostic.Report.Document) = .empty;
-        try items.ensureTotalCapacityPrecise(arena, reports.len);
+        try items.ensureTotalCapacityPrecise(arena, reports.len + projects.len);
+        var project_index: usize = 0;
         for (reports) |r| {
+            while (project_index < projects.len and
+                std.mem.lessThan(u8, projects[project_index].uri, r.uri))
+            {
+                try self.appendProjectSourceReport(arena, &items, projects[project_index]);
+                project_index += 1;
+            }
+            if (project_index < projects.len and
+                uri.HashContext.eql(.{}, projects[project_index].uri, r.uri))
+            {
+                try self.appendProjectSourceReport(arena, &items, projects[project_index]);
+                project_index += 1;
+                continue;
+            }
+
+            const source = if (self.registry.documentFor(r.uri)) |doc| doc.source else continue;
             const version: ?i32 = if (r.version) |v| @intCast(v) else null;
 
             // An id the client already holds means the document has not
@@ -445,15 +720,68 @@ pub const Server = struct {
                 }
             }
 
-            const doc = self.handler.getDocument(r.uri) orelse continue;
             items.appendAssumeCapacity(.{ .workspace_full_document_diagnostic_report = .{
                 .uri = r.uri,
                 .version = version,
                 .resultId = r.result_id,
-                .items = try self.diagnosticItems(arena, doc.source, r.diagnostics),
+                .items = try self.documentDiagnosticItems(
+                    arena,
+                    r.uri,
+                    source,
+                    r.diagnostics,
+                ),
             } });
         }
+        while (project_index < projects.len) : (project_index += 1) {
+            try self.appendProjectSourceReport(arena, &items, projects[project_index]);
+        }
+
+        // Saved configuration and manifest reports join the same stable URI
+        // order. A URI already represented by a document/project report is
+        // skipped: that report already merged its saved contribution.
+        const sources = try self.registry.savedSourceReports(arena);
+        for (sources) |source_report| {
+            if (containsWorkspaceReport(items.items, source_report.uri)) continue;
+            try items.append(arena, .{ .workspace_full_document_diagnostic_report = .{
+                .uri = source_report.uri,
+                .version = null,
+                .resultId = null,
+                .items = try self.diagnosticItems(
+                    arena,
+                    source_report.source,
+                    source_report.diagnostics,
+                ),
+            } });
+        }
+        std.mem.sort(lsp.types.workspace.diagnostic.Report.Document, items.items, {}, struct {
+            fn lt(
+                _: void,
+                a: lsp.types.workspace.diagnostic.Report.Document,
+                b: lsp.types.workspace.diagnostic.Report.Document,
+            ) bool {
+                return std.mem.lessThan(u8, workspaceDocumentUri(a), workspaceDocumentUri(b));
+            }
+        }.lt);
         return .{ .items = items.items };
+    }
+
+    /// Append the project source's complete report as a direct workspace
+    /// diagnostic document. `version` is null: the project file is not an
+    /// editor buffer, so there is no client version to echo, and
+    /// `resultId` stays null so the client always gets the full source
+    /// report.
+    fn appendProjectSourceReport(
+        self: *Server,
+        arena: Allocator,
+        items: *std.ArrayList(lsp.types.workspace.diagnostic.Report.Document),
+        project: context_registry.ProjectSource,
+    ) Allocator.Error!void {
+        try items.append(arena, .{ .workspace_full_document_diagnostic_report = .{
+            .uri = project.uri,
+            .version = null,
+            .resultId = null,
+            .items = try self.diagnosticItems(arena, project.source, project.diagnostics),
+        } });
     }
 
     fn previousResultId(
@@ -492,14 +820,373 @@ pub const Server = struct {
                     .hint => .Hint,
                 },
                 .code = .{ .string = d.code },
-                .codeDescription = .{ .href = d.code_href },
-                .source = "sjon",
+                // Optional-field capability filtering happens here, once,
+                // for push, document pull, workspace pull, and quick-fix
+                // attachments. A client that did not announce a field
+                // must not receive it, and the quick fix must be
+                // byte-identical to the report that carried its
+                // diagnostic.
+                // Editor-local source reports carry no documentation link;
+                // an empty href is the one honest "no page" value.
+                .codeDescription = if (self.client_code_description and d.code_href.len != 0)
+                    .{ .href = d.code_href }
+                else
+                    null,
+                .source = if (std.mem.startsWith(u8, d.code, "sjon-lsp/")) "sjon-lsp" else "sjon",
                 .message = d.message,
-                .tags = try diagnosticTags(arena, d.tags),
-                .relatedInformation = try self.relatedInformation(arena, d.related),
+                .tags = try self.diagnosticTags(arena, d.tags),
+                .relatedInformation = if (self.client_related_information)
+                    try self.relatedInformation(arena, d.related)
+                else
+                    null,
             };
         }
         return items;
+    }
+
+    /// Translate one document's cached diagnostics, then append the
+    /// native project-failure indicator when the workspace schema failed
+    /// to load. Document push, document pull, and workspace pull all use
+    /// this so an open file shows the actionable failure even when the
+    /// user never opens `sjon-project.sjon`.
+    ///
+    /// The indicator is built as a transport-neutral `Handler.Diagnostic`
+    /// and translated through `diagnosticItems`, so its optional fields
+    /// obey the same connection capabilities as every other item. It is
+    /// deliberately absent from `Handler` and the WASM transport.
+    fn documentDiagnosticItems(
+        self: *Server,
+        arena: std.mem.Allocator,
+        document_uri: []const u8,
+        source: []const u8,
+        diags: []const Handler.Diagnostic,
+    ) Allocator.Error![]const lsp.types.Diagnostic {
+        var items: std.ArrayList(lsp.types.Diagnostic) = .empty;
+        try self.appendUniqueDiagnostics(
+            arena,
+            &items,
+            try self.diagnosticItems(arena, source, diags),
+        );
+
+        // Editor-local failures are native-only and carry no documentation
+        // link. They join the same report as the handler's parse diagnostics,
+        // so an unavailable context cannot look clean while its schema is
+        // missing.
+        const editor = try self.registry.editorDiagnostics(arena, document_uri);
+        try self.appendUniqueDiagnostics(
+            arena,
+            &items,
+            try self.editorDiagnosticItems(arena, editor),
+        );
+
+        // An open saved source combines its live parse report with the
+        // saved-byte source report. The registry suppresses this contribution
+        // when the buffer differs from disk, so no span from one byte stream
+        // is ever rendered against the other.
+        if (try self.registry.savedSourceReportFor(arena, document_uri)) |saved| {
+            try self.appendUniqueDiagnostics(
+                arena,
+                &items,
+                try self.diagnosticItems(arena, saved.source, saved.diagnostics),
+            );
+        }
+
+        const handler = self.registry.handlerFor(document_uri) orelse return items.items;
+        const proj = handler.getProjectInfo() orelse return items.items;
+        // A workspace with no project file is core-only by design, not a
+        // schema-loading failure: the indicator is for a project that was
+        // discovered and then failed to load.
+        if (proj.project_uri == null or !proj.hasErrors()) return items.items;
+
+        const indicator = try self.diagnosticItems(arena, source, &.{.{
+            .span_start = 0,
+            .span_end = 0,
+            .severity = .err,
+            .code = @tagName(sjon.Ast.Diagnostic.Code.unspecified),
+            .message = "workspace schema loading failed; see sjon-project.sjon diagnostics",
+            .code_href = Handler.codeHref(.unspecified),
+        }});
+        try self.appendUniqueDiagnostics(arena, &items, indicator);
+        return items.items;
+    }
+
+    fn appendUniqueDiagnostics(
+        self: *Server,
+        arena: Allocator,
+        items: *std.ArrayList(lsp.types.Diagnostic),
+        candidates: []const lsp.types.Diagnostic,
+    ) Allocator.Error!void {
+        _ = self;
+        for (candidates) |candidate| {
+            var duplicate = false;
+            for (items.items) |existing| {
+                if (existing.range.start.line != candidate.range.start.line or
+                    existing.range.start.character != candidate.range.start.character or
+                    existing.range.end.line != candidate.range.end.line or
+                    existing.range.end.character != candidate.range.end.character or
+                    existing.severity != candidate.severity or
+                    !std.mem.eql(u8, existing.source orelse "", candidate.source orelse "") or
+                    !std.mem.eql(u8, existing.message, candidate.message))
+                {
+                    continue;
+                }
+                if (sameDiagnosticCode(existing.code, candidate.code)) duplicate = true;
+            }
+            if (!duplicate) try items.append(arena, candidate);
+        }
+    }
+
+    /// Map editor-local diagnostics onto lsp-kit's `Diagnostic`. They use
+    /// `source = "sjon-lsp"` and deliberately omit `codeDescription`: their
+    /// strings are not `Ast.Diagnostic.Code` variants and have no
+    /// `sjon explain` page to point at.
+    fn editorDiagnosticItems(
+        self: *Server,
+        arena: std.mem.Allocator,
+        diags: []const context_registry.EditorDiagnostic,
+    ) Allocator.Error![]const lsp.types.Diagnostic {
+        const items = try arena.alloc(lsp.types.Diagnostic, diags.len);
+        for (diags, 0..) |d, i| {
+            const source = self.editorSource(d.uri);
+            items[i] = .{
+                .range = .{
+                    .start = lsp.offsets.indexToPosition(source, d.span.start, self.offset_encoding),
+                    .end = lsp.offsets.indexToPosition(source, d.span.end, self.offset_encoding),
+                },
+                .severity = switch (d.severity) {
+                    .err => .Error,
+                    .warning => .Warning,
+                },
+                .code = .{ .string = d.code },
+                .codeDescription = null,
+                .source = "sjon-lsp",
+                .message = d.message,
+                .tags = null,
+                .relatedInformation = if (self.client_related_information)
+                    try self.editorRelatedInformation(arena, d.related)
+                else
+                    null,
+            };
+        }
+        return items;
+    }
+
+    /// Source bytes for an editor-local diagnostic's primary URI. A marker
+    /// or known source may not be open, but the registry still holds the
+    /// document (source route) when it does. Falling back to an empty slice
+    /// keeps byte-zero locations well-defined without inventing text.
+    fn editorSource(self: *Server, document_uri: []const u8) []const u8 {
+        if (self.registry.documentFor(document_uri)) |doc| return doc.source;
+        return "";
+    }
+
+    fn editorRelatedInformation(
+        self: *Server,
+        arena: std.mem.Allocator,
+        related: []const context_registry.EditorRelated,
+    ) Allocator.Error!?[]const lsp.types.Diagnostic.RelatedInformation {
+        if (related.len == 0) return null;
+        var out: std.ArrayList(lsp.types.Diagnostic.RelatedInformation) = .empty;
+        for (related) |r| {
+            const doc = self.registry.documentFor(r.uri) orelse continue;
+            try out.append(arena, .{
+                .location = .{
+                    .uri = r.uri,
+                    .range = .{
+                        .start = lsp.offsets.indexToPosition(doc.source, r.span.start, self.offset_encoding),
+                        .end = lsp.offsets.indexToPosition(doc.source, r.span.end, self.offset_encoding),
+                    },
+                },
+                .message = r.message,
+            });
+        }
+        if (out.items.len == 0) return null;
+        return out.items;
+    }
+
+    /// Serialize one complete `textDocument/publishDiagnostics` report
+    /// and write it through the connection's transport.
+    ///
+    /// Every push path funnels through here so the notification name,
+    /// parameter shape, and null-optional handling exist once. The
+    /// diagnostics slice and URI live in the caller's request arena and
+    /// are serialized synchronously before it is released.
+    ///
+    /// A client that has sent `shutdown` must not receive this
+    /// notification again. Returning before serialization is the one
+    /// guard the document, project, close, and reload paths all inherit.
+    fn publishReport(
+        self: *Server,
+        document_uri: []const u8,
+        version: ?i32,
+        diagnostics: []const lsp.types.Diagnostic,
+    ) (Allocator.Error || lsp.Transport.WriteError)!void {
+        if (self.shutdown_received) return;
+        try self.transport.writeNotification(
+            self.io,
+            self.gpa,
+            "textDocument/publishDiagnostics",
+            lsp.types.publish_diagnostics.Params,
+            .{
+                .uri = document_uri,
+                .version = version,
+                .diagnostics = diagnostics,
+            },
+            .{ .emit_null_optional_fields = false },
+        );
+    }
+
+    /// Publish the complete current report for one open document. The
+    /// Handler's cached validation is reused: push never re-validates and
+    /// never builds a delta, so the editor's set is exactly the set a
+    /// pull of the same URI would return.
+    fn publishDocumentDiagnostics(
+        self: *Server,
+        arena: Allocator,
+        document_uri: []const u8,
+    ) (Allocator.Error || lsp.Transport.WriteError)!void {
+        const route = self.registry.route(document_uri) orelse return;
+        const doc = route.handler.getDocument(document_uri) orelse return;
+        const handler_diags = (try route.handler.getDiagnostics(arena, document_uri)) orelse return;
+        const items = try self.documentDiagnosticItems(arena, document_uri, doc.source, handler_diags);
+
+        // Report the version actually validated. A version LSP's signed
+        // 32-bit `integer` cannot represent is omitted rather than
+        // wrapped or replaced with a newer one.
+        const version: ?i32 = if (self.client_publish_version) lspVersion(doc.version) else null;
+        try self.publishReport(document_uri, version, items);
+    }
+
+    /// Publish every open document's complete report, in stable URI order.
+    /// Workspace-ingested files (`version == null`) are skipped: push after
+    /// a reload covers open buffers plus the project sources, not every file
+    /// on disk.
+    fn publishOpenDiagnostics(
+        self: *Server,
+        arena: Allocator,
+    ) (Allocator.Error || lsp.Transport.WriteError)!void {
+        const routes = try self.registry.documentRoutes(arena);
+        for (routes) |entry| {
+            const doc = entry.route.handler.getDocument(entry.uri) orelse continue;
+            if (doc.origin != .open) continue;
+            const handler_diags = (try entry.route.handler.getDiagnostics(arena, entry.uri)) orelse continue;
+            const items = try self.documentDiagnosticItems(arena, entry.uri, doc.source, handler_diags);
+            const version: ?i32 = if (self.client_publish_version)
+                lspVersion(doc.version)
+            else
+                null;
+            try self.publishReport(entry.uri, version, items);
+        }
+    }
+
+    /// Publish the current report for every URI a saved-input transaction
+    /// contributed to, then clear every superseded URI that the new state no
+    /// longer contains. This is plan 01's full-report producer attached to
+    /// the reload transaction; push never sends a delta.
+    fn publishAffected(
+        self: *Server,
+        arena: Allocator,
+        old_uris: []const []const u8,
+        new_uris: []const []const u8,
+    ) (Allocator.Error || lsp.Transport.WriteError)!void {
+        for (new_uris) |document_uri| {
+            try self.publishUriReport(arena, document_uri);
+        }
+        for (old_uris) |document_uri| {
+            if (containsUri(new_uris, document_uri)) continue;
+            try self.publishReport(document_uri, null, &.{});
+        }
+    }
+
+    fn publishUriReport(
+        self: *Server,
+        arena: Allocator,
+        document_uri: []const u8,
+    ) (Allocator.Error || lsp.Transport.WriteError)!void {
+        if (self.registry.documentFor(document_uri)) |doc| {
+            const handler = self.registry.handlerFor(document_uri) orelse return;
+            const handler_diags = (try handler.getDiagnostics(arena, document_uri)) orelse &.{};
+            const items = try self.documentDiagnosticItems(
+                arena,
+                document_uri,
+                doc.source,
+                handler_diags,
+            );
+            const version: ?i32 = if (self.client_publish_version and doc.origin == .open)
+                lspVersion(doc.version)
+            else
+                null;
+            try self.publishReport(document_uri, version, items);
+            return;
+        }
+
+        if (try self.registry.savedSourceReportFor(arena, document_uri)) |saved| {
+            const items = try self.diagnosticItems(arena, saved.source, saved.diagnostics);
+            try self.publishReport(document_uri, null, items);
+            return;
+        }
+
+        if (try self.registry.projectSourceFor(arena, document_uri)) |project| {
+            const items = try self.diagnosticItems(arena, project.source, project.diagnostics);
+            try self.publishReport(document_uri, null, items);
+            return;
+        }
+
+        try self.publishReport(document_uri, null, &.{});
+    }
+
+    /// Publish current project-source reports, including an empty report
+    /// when a previously broken project recovers or disappears. Tracking is
+    /// GPA-owned and changes only after a successful write: a failed
+    /// serialization or transport write leaves the last confirmed URI in
+    /// place so a later attempt can still clear it.
+    fn syncProjectDiagnostics(
+        self: *Server,
+        arena: Allocator,
+    ) (Allocator.Error || lsp.Transport.WriteError)!void {
+        const projects = try self.registry.projectSources(arena);
+
+        // A URI that disappeared must clear the report it used to own.
+        // Compare decoded URIs: the loader rebuilds the string on every
+        // reload, so pointer equality says nothing.
+        var index: usize = 0;
+        while (index < self.pushed_source_uris.items.len) {
+            const old_uri = self.pushed_source_uris.items[index];
+            var still_current = false;
+            for (projects) |project| {
+                if (uri.HashContext.eql(.{}, old_uri, project.uri)) {
+                    still_current = true;
+                    break;
+                }
+            }
+            if (still_current) {
+                index += 1;
+                continue;
+            }
+            try self.publishReport(old_uri, null, &.{});
+            self.gpa.free(old_uri);
+            _ = self.pushed_source_uris.swapRemove(index);
+        }
+
+        for (projects) |project| {
+            const items = try self.diagnosticItems(arena, project.source, project.diagnostics);
+            try self.publishReport(project.uri, null, items);
+
+            // Only now is the report confirmed. Reuse the tracking string
+            // when the URI is unchanged; a reload rebuilds the Handler's
+            // copy, so byte equality is the test.
+            var tracked = false;
+            for (self.pushed_source_uris.items) |existing| {
+                if (uri.HashContext.eql(.{}, existing, project.uri)) {
+                    tracked = true;
+                    break;
+                }
+            }
+            if (tracked) continue;
+            const owned = try self.gpa.dupe(u8, project.uri);
+            errdefer self.gpa.free(owned);
+            try self.pushed_source_uris.append(self.gpa, owned);
+        }
     }
 
     /// Map the Handler's related locations onto lsp-kit's
@@ -519,7 +1206,7 @@ pub const Server = struct {
         if (related.len == 0) return null;
         var out: std.ArrayList(lsp.types.Diagnostic.RelatedInformation) = .empty;
         for (related) |r| {
-            const doc = self.handler.getDocument(r.uri) orelse continue;
+            const doc = self.registry.documentFor(r.uri) orelse continue;
             out.append(arena, .{
                 .location = .{
                     .uri = r.uri,
@@ -535,26 +1222,54 @@ pub const Server = struct {
         return out.items;
     }
 
-    /// Map the Handler's transport-neutral tags onto lsp-kit's enum.
-    /// Null (not an empty slice) when there are none — LSP treats an
-    /// absent `tags` as "untagged", and some clients read `[]` as an
-    /// explicit, if empty, tag set.
+    /// Map the Handler's transport-neutral tags onto lsp-kit's enum,
+    /// filtering individually by the active mode's `tagSupport` set. Null
+    /// (not an empty slice) when none survive — LSP treats an absent
+    /// `tags` as "untagged", and some clients read `[]` as an explicit,
+    /// if empty, tag set.
     ///
     /// The two enums agree numerically (both are the LSP wire values),
     /// but they are mapped variant-by-variant rather than bit-cast so a
-    /// future tag can't silently mis-map.
+    /// future tag can't silently mis-map. The capability check sits on
+    /// the mapped value for the same reason: adding a tag to `Handler`
+    /// makes the switch non-exhaustive here instead of announcing a tag
+    /// the client never said it understands.
     fn diagnosticTags(
+        self: *const Server,
         arena: std.mem.Allocator,
         tags: []const Handler.Diagnostic.Tag,
     ) Allocator.Error!?[]const lsp.types.Diagnostic.Tag {
         if (tags.len == 0) return null;
-        const out = try arena.alloc(lsp.types.Diagnostic.Tag, tags.len);
-        for (tags, 0..) |t, i| {
-            out[i] = switch (t) {
+        var out: std.ArrayList(lsp.types.Diagnostic.Tag) = .empty;
+        for (tags) |t| {
+            const tag: lsp.types.Diagnostic.Tag = switch (t) {
                 .deprecated => .Deprecated,
             };
+            if (tag == .Deprecated and !self.client_deprecated_tag) continue;
+            try out.append(arena, tag);
         }
-        return out;
+        if (out.items.len == 0) return null;
+        return out.items;
+    }
+
+    const RoutedDocument = struct {
+        route: context_registry.Route,
+        doc: *const Handler.Document,
+    };
+
+    /// The request URI's active context plus the document it holds. Null
+    /// when the URI is not an open buffer or its route has no document.
+    fn routedDocument(self: *Server, document_uri: []const u8) ?RoutedDocument {
+        const route = self.registry.route(document_uri) orelse return null;
+        const doc = route.handler.getDocument(document_uri) orelse return null;
+        return .{ .route = route, .doc = doc };
+    }
+
+    /// Schema-dependent methods are refused for an unavailable association
+    /// and for source routes. Parse-only features (formatting, folding,
+    /// symbols, selection ranges) remain available through the same handler.
+    fn schemaAvailable(route: context_registry.Route) bool {
+        return route.state == .ready or route.state == .unconfigured;
     }
 
     pub fn @"textDocument/prepareRename"(
@@ -562,9 +1277,11 @@ pub const Server = struct {
         _: std.mem.Allocator,
         params: lsp.types.prepare_rename.Params,
     ) Allocator.Error!?lsp.types.prepare_rename.Result {
-        const doc = self.handler.getDocument(params.textDocument.uri) orelse return null;
+        const routed = self.routedDocument(params.textDocument.uri) orelse return null;
+        if (!schemaAvailable(routed.route)) return null;
+        const doc = routed.doc;
         const offset = lsp.offsets.positionToIndex(doc.source, params.position, self.offset_encoding);
-        const pre = self.handler.prepareRename(params.textDocument.uri, @intCast(offset)) orelse return null;
+        const pre = routed.route.handler.prepareRename(params.textDocument.uri, @intCast(offset)) orelse return null;
         const start = lsp.offsets.indexToPosition(doc.source, pre.span_start, self.offset_encoding);
         const end = lsp.offsets.indexToPosition(doc.source, pre.span_end, self.offset_encoding);
         return .{ .range = .{ .start = start, .end = end } };
@@ -631,9 +1348,11 @@ pub const Server = struct {
         arena: std.mem.Allocator,
         params: lsp.types.rename.Params,
     ) Allocator.Error!?lsp.types.WorkspaceEdit {
-        const doc = self.handler.getDocument(params.textDocument.uri) orelse return null;
+        const routed = self.routedDocument(params.textDocument.uri) orelse return null;
+        if (!schemaAvailable(routed.route)) return null;
+        const doc = routed.doc;
         const offset = lsp.offsets.positionToIndex(doc.source, params.position, self.offset_encoding);
-        const result = (try self.handler.rename(
+        const result = (try routed.route.handler.rename(
             arena,
             params.textDocument.uri,
             @intCast(offset),
@@ -667,7 +1386,7 @@ pub const Server = struct {
         // `EditTarget` per file, then let `workspaceEdit` pick the shape.
         const targets = try arena.alloc(EditTarget, we.changes.len);
         for (we.changes, targets) |fe, *target| {
-            const ref_doc = self.handler.getDocument(fe.uri) orelse {
+            const ref_doc = self.registry.documentFor(fe.uri) orelse {
                 // Document closed between revalidation and this request.
                 // Empty edit list keeps the URI in the response as a benign
                 // no-op, with no version to assert about a file we no longer
@@ -697,14 +1416,17 @@ pub const Server = struct {
         _: std.mem.Allocator,
         params: lsp.types.Definition.Params,
     ) Allocator.Error!?lsp.types.Definition.Result {
-        const doc = self.handler.getDocument(params.textDocument.uri) orelse return null;
+        const routed = self.routedDocument(params.textDocument.uri) orelse return null;
+        if (!schemaAvailable(routed.route)) return null;
+        const doc = routed.doc;
         const offset = lsp.offsets.positionToIndex(doc.source, params.position, self.offset_encoding);
-        const loc = self.handler.getDefinition(params.textDocument.uri, @intCast(offset)) orelse return null;
+        const loc = routed.route.handler.getDefinition(params.textDocument.uri, @intCast(offset)) orelse return null;
 
         // The definition may live in another document (the index is
-        // forest-wide); re-look it up for the byte→position conversion.
-        // A document closed since the last revalidation drops the jump.
-        const def_doc = self.handler.getDocument(loc.uri) orelse return null;
+        // forest-wide); re-look it up by its own URI for the byte→position
+        // conversion. A document closed since the last revalidation drops
+        // the jump.
+        const def_doc = self.registry.documentFor(loc.uri) orelse return null;
         const start = lsp.offsets.indexToPosition(def_doc.source, loc.span_start, self.offset_encoding);
         const end = lsp.offsets.indexToPosition(def_doc.source, loc.span_end, self.offset_encoding);
         return .{ .definition = .{ .location = .{
@@ -720,9 +1442,11 @@ pub const Server = struct {
         arena: std.mem.Allocator,
         params: lsp.types.DocumentHighlight.Params,
     ) Allocator.Error!?[]const lsp.types.DocumentHighlight {
-        const doc = self.handler.getDocument(params.textDocument.uri) orelse return null;
+        const routed = self.routedDocument(params.textDocument.uri) orelse return null;
+        if (!schemaAvailable(routed.route)) return null;
+        const doc = routed.doc;
         const offset = lsp.offsets.positionToIndex(doc.source, params.position, self.offset_encoding);
-        const highlights = (try self.handler.getDocumentHighlights(
+        const highlights = (try routed.route.handler.getDocumentHighlights(
             arena,
             params.textDocument.uri,
             @intCast(offset),
@@ -747,14 +1471,15 @@ pub const Server = struct {
         arena: std.mem.Allocator,
         params: lsp.types.SelectionRange.Params,
     ) Allocator.Error!?[]const lsp.types.SelectionRange {
-        const doc = self.handler.getDocument(params.textDocument.uri) orelse return null;
+        const routed = self.routedDocument(params.textDocument.uri) orelse return null;
+        const doc = routed.doc;
 
         const byte_offsets = try arena.alloc(u32, params.positions.len);
         for (params.positions, byte_offsets) |pos, *slot| {
             slot.* = @intCast(lsp.offsets.positionToIndex(doc.source, pos, self.offset_encoding));
         }
 
-        const chains = (try self.handler.getSelectionRanges(
+        const chains = (try routed.route.handler.getSelectionRanges(
             arena,
             params.textDocument.uri,
             byte_offsets,
@@ -798,14 +1523,14 @@ pub const Server = struct {
         arena: std.mem.Allocator,
         params: lsp.types.workspace.Symbol.Params,
     ) Allocator.Error!?lsp.types.workspace.Symbol.Result {
-        const syms = try self.handler.getWorkspaceSymbols(arena, params.query);
+        const syms = try self.registry.workspaceSymbols(arena, params.query);
 
         var out: std.ArrayList(lsp.types.SymbolInformation) = .empty;
         for (syms) |sym| {
             // A definition can outlive its document in a stale index;
             // without the source there is no byte→position translation,
             // and the editor could not open the location anyway.
-            const doc = self.handler.getDocument(sym.location.uri) orelse continue;
+            const doc = self.registry.documentFor(sym.location.uri) orelse continue;
             const start = lsp.offsets.indexToPosition(doc.source, sym.location.span_start, self.offset_encoding);
             const end = lsp.offsets.indexToPosition(doc.source, sym.location.span_end, self.offset_encoding);
             try out.append(arena, .{
@@ -828,22 +1553,25 @@ pub const Server = struct {
         arena: std.mem.Allocator,
         params: lsp.types.reference.Params,
     ) Allocator.Error!?[]const lsp.types.Location {
-        const doc = self.handler.getDocument(params.textDocument.uri) orelse return null;
+        const routed = self.routedDocument(params.textDocument.uri) orelse return null;
+        if (!schemaAvailable(routed.route)) return null;
+        const doc = routed.doc;
         const offset = lsp.offsets.positionToIndex(doc.source, params.position, self.offset_encoding);
-        const refs = (try self.handler.findReferences(
+        const refs = (try routed.route.handler.findReferences(
             arena,
             params.textDocument.uri,
             @intCast(offset),
             params.context.includeDeclaration,
         )) orelse return null;
 
-        // Translate handler `Location[]` → `lsp.types.Location[]`. We re-look
-        // up each URI's document to convert byte offsets to LSP `Position`s
-        // in the document's encoding. A site whose document closed between
-        // revalidation and the request is dropped silently.
+        // Translate handler `Location[]` → `lsp.types.Location[]`. We look
+        // each site up by its own URI, so a reference in a document held by
+        // another context still converts in that document's encoding. A
+        // site whose document closed between revalidation and the request
+        // is dropped silently.
         var out: std.ArrayList(lsp.types.Location) = .empty;
         for (refs) |r| {
-            const ref_doc = self.handler.getDocument(r.uri) orelse continue;
+            const ref_doc = self.registry.documentFor(r.uri) orelse continue;
             const start = lsp.offsets.indexToPosition(ref_doc.source, r.span_start, self.offset_encoding);
             const end = lsp.offsets.indexToPosition(ref_doc.source, r.span_end, self.offset_encoding);
             try out.append(arena, .{
@@ -859,9 +1587,11 @@ pub const Server = struct {
         arena: std.mem.Allocator,
         params: lsp.types.Hover.Params,
     ) Allocator.Error!?lsp.types.Hover {
-        const doc = self.handler.getDocument(params.textDocument.uri) orelse return null;
+        const routed = self.routedDocument(params.textDocument.uri) orelse return null;
+        if (!schemaAvailable(routed.route)) return null;
+        const doc = routed.doc;
         const offset = lsp.offsets.positionToIndex(doc.source, params.position, self.offset_encoding);
-        const hov = (try self.handler.getHover(arena, params.textDocument.uri, @intCast(offset))) orelse return null;
+        const hov = (try routed.route.handler.getHover(arena, params.textDocument.uri, @intCast(offset))) orelse return null;
         const start = lsp.offsets.indexToPosition(doc.source, hov.span_start, self.offset_encoding);
         const end = lsp.offsets.indexToPosition(doc.source, hov.span_end, self.offset_encoding);
         return .{
@@ -875,9 +1605,11 @@ pub const Server = struct {
         arena: std.mem.Allocator,
         params: lsp.types.completion.Params,
     ) Allocator.Error!?lsp.types.completion.Result {
-        const doc = self.handler.getDocument(params.textDocument.uri) orelse return null;
+        const routed = self.routedDocument(params.textDocument.uri) orelse return null;
+        if (!schemaAvailable(routed.route)) return null;
+        const doc = routed.doc;
         const offset = lsp.offsets.positionToIndex(doc.source, params.position, self.offset_encoding);
-        const items_or_null = try self.handler.getCompletion(arena, params.textDocument.uri, @intCast(offset));
+        const items_or_null = try routed.route.handler.getCompletion(arena, params.textDocument.uri, @intCast(offset));
         const handler_items = items_or_null orelse return null;
         const out = try arena.alloc(lsp.types.completion.Item, handler_items.len);
         for (handler_items, 0..) |it, i| {
@@ -924,9 +1656,11 @@ pub const Server = struct {
         arena: std.mem.Allocator,
         params: lsp.types.SignatureHelp.Params,
     ) Allocator.Error!?lsp.types.SignatureHelp {
-        const doc = self.handler.getDocument(params.textDocument.uri) orelse return null;
+        const routed = self.routedDocument(params.textDocument.uri) orelse return null;
+        if (!schemaAvailable(routed.route)) return null;
+        const doc = routed.doc;
         const offset = lsp.offsets.positionToIndex(doc.source, params.position, self.offset_encoding);
-        const help = (try self.handler.getSignatureHelp(arena, params.textDocument.uri, @intCast(offset))) orelse return null;
+        const help = (try routed.route.handler.getSignatureHelp(arena, params.textDocument.uri, @intCast(offset))) orelse return null;
 
         const sigs = try arena.alloc(lsp.types.SignatureHelp.Signature, help.signatures.len);
         for (help.signatures, 0..) |s, i| {
@@ -955,8 +1689,9 @@ pub const Server = struct {
         arena: std.mem.Allocator,
         params: lsp.types.DocumentSymbol.Params,
     ) Allocator.Error!?lsp.types.DocumentSymbol.Result {
-        const doc = self.handler.getDocument(params.textDocument.uri) orelse return null;
-        const handler_syms = (try self.handler.getDocumentSymbols(arena, params.textDocument.uri)) orelse return null;
+        const routed = self.routedDocument(params.textDocument.uri) orelse return null;
+        const doc = routed.doc;
+        const handler_syms = (try routed.route.handler.getDocumentSymbols(arena, params.textDocument.uri)) orelse return null;
         const out = try translateSymbols(arena, doc.source, self.offset_encoding, handler_syms);
         return .{ .document_symbols = out };
     }
@@ -990,8 +1725,9 @@ pub const Server = struct {
         arena: std.mem.Allocator,
         params: lsp.types.FoldingRange.Params,
     ) Allocator.Error!?[]const lsp.types.FoldingRange {
-        const doc = self.handler.getDocument(params.textDocument.uri) orelse return null;
-        const folds = (try self.handler.getFoldingRanges(arena, params.textDocument.uri)) orelse return null;
+        const routed = self.routedDocument(params.textDocument.uri) orelse return null;
+        const doc = routed.doc;
+        const folds = (try routed.route.handler.getFoldingRanges(arena, params.textDocument.uri)) orelse return null;
 
         var out: std.ArrayList(lsp.types.FoldingRange) = .empty;
         for (folds) |f| {
@@ -1013,8 +1749,10 @@ pub const Server = struct {
         arena: std.mem.Allocator,
         params: lsp.types.semantic_tokens.Params,
     ) Allocator.Error!?lsp.types.semantic_tokens.Result {
-        const doc = self.handler.getDocument(params.textDocument.uri) orelse return null;
-        const toks = (try self.handler.getSemanticTokens(arena, params.textDocument.uri)) orelse return null;
+        const routed = self.routedDocument(params.textDocument.uri) orelse return null;
+        if (!schemaAvailable(routed.route)) return null;
+        const doc = routed.doc;
+        const toks = (try routed.route.handler.getSemanticTokens(arena, params.textDocument.uri)) orelse return null;
 
         // Byte spans → the negotiated encoding, which is the only step
         // that differs between transports; `SemanticToken.encode` then
@@ -1044,10 +1782,12 @@ pub const Server = struct {
         arena: std.mem.Allocator,
         params: lsp.types.InlayHint.Params,
     ) Allocator.Error!?[]const lsp.types.InlayHint {
-        const doc = self.handler.getDocument(params.textDocument.uri) orelse return null;
+        const routed = self.routedDocument(params.textDocument.uri) orelse return null;
+        if (!schemaAvailable(routed.route)) return null;
+        const doc = routed.doc;
         const start_offset: u32 = @intCast(lsp.offsets.positionToIndex(doc.source, params.range.start, self.offset_encoding));
         const end_offset: u32 = @intCast(lsp.offsets.positionToIndex(doc.source, params.range.end, self.offset_encoding));
-        const hints = (try self.handler.getInlayHints(arena, params.textDocument.uri, start_offset, end_offset)) orelse return null;
+        const hints = (try routed.route.handler.getInlayHints(arena, params.textDocument.uri, start_offset, end_offset)) orelse return null;
 
         const out = try arena.alloc(lsp.types.InlayHint, hints.len);
         for (hints, 0..) |h, i| {
@@ -1074,8 +1814,9 @@ pub const Server = struct {
         arena: std.mem.Allocator,
         params: lsp.types.document_formatting.Params,
     ) Allocator.Error!?[]const lsp.types.TextEdit {
-        const doc = self.handler.getDocument(params.textDocument.uri) orelse return null;
-        const edits = (try self.handler.getFormatEdits(arena, params.textDocument.uri)) orelse return null;
+        const routed = self.routedDocument(params.textDocument.uri) orelse return null;
+        const doc = routed.doc;
+        const edits = (try routed.route.handler.getFormatEdits(arena, params.textDocument.uri)) orelse return null;
         const out = try arena.alloc(lsp.types.TextEdit, edits.len);
         for (edits, 0..) |e, i| {
             out[i] = .{
@@ -1094,10 +1835,11 @@ pub const Server = struct {
         arena: std.mem.Allocator,
         params: lsp.types.document_range_formatting.Params,
     ) Allocator.Error!?[]const lsp.types.TextEdit {
-        const doc = self.handler.getDocument(params.textDocument.uri) orelse return null;
+        const routed = self.routedDocument(params.textDocument.uri) orelse return null;
+        const doc = routed.doc;
         const start_offset: u32 = @intCast(lsp.offsets.positionToIndex(doc.source, params.range.start, self.offset_encoding));
         const end_offset: u32 = @intCast(lsp.offsets.positionToIndex(doc.source, params.range.end, self.offset_encoding));
-        const edits = (try self.handler.getRangeFormatEdits(arena, params.textDocument.uri, start_offset, end_offset)) orelse return null;
+        const edits = (try routed.route.handler.getRangeFormatEdits(arena, params.textDocument.uri, start_offset, end_offset)) orelse return null;
         const out = try arena.alloc(lsp.types.TextEdit, edits.len);
         for (edits, 0..) |e, i| {
             out[i] = .{
@@ -1116,10 +1858,12 @@ pub const Server = struct {
         arena: std.mem.Allocator,
         params: lsp.types.CodeAction.Params,
     ) Allocator.Error!?[]const lsp.types.CodeAction.Result {
-        const doc = self.handler.getDocument(params.textDocument.uri) orelse return null;
+        const routed = self.routedDocument(params.textDocument.uri) orelse return null;
+        if (!schemaAvailable(routed.route)) return null;
+        const doc = routed.doc;
         const start_offset: u32 = @intCast(lsp.offsets.positionToIndex(doc.source, params.range.start, self.offset_encoding));
         const end_offset: u32 = @intCast(lsp.offsets.positionToIndex(doc.source, params.range.end, self.offset_encoding));
-        const handler_actions = (try self.handler.getCodeActions(arena, params.textDocument.uri, start_offset, end_offset)) orelse return null;
+        const handler_actions = (try routed.route.handler.getCodeActions(arena, params.textDocument.uri, start_offset, end_offset)) orelse return null;
 
         const out = try arena.alloc(lsp.types.CodeAction.Result, handler_actions.len);
         for (handler_actions, 0..) |act, i| {
@@ -1161,16 +1905,45 @@ pub const Server = struct {
         return out;
     }
 
-    pub fn onResponse(_: *Server, _: std.mem.Allocator, _: lsp.JsonRPCMessage.Response) void {}
+    /// Record the watcher registration outcome. A rejection means watching
+    /// is unavailable for this connection: log once, never retry or poll.
+    pub fn onResponse(
+        self: *Server,
+        _: std.mem.Allocator,
+        response: lsp.JsonRPCMessage.Response,
+    ) void {
+        const pending = self.watcher_registration_id orelse return;
+        const response_id = switch (response.id orelse return) {
+            .number => |number| number,
+            else => return,
+        };
+        if (response_id != @as(i64, @intCast(pending))) return;
+        self.watcher_registration_id = null;
+        switch (response.result_or_error) {
+            .result => {},
+            .@"error" => |err| {
+                if (!self.watcher_rejected) {
+                    self.watcher_rejected = true;
+                    std.log.warn(
+                        "client rejected the .sjon watcher registration ({d}: {s}); watching is unavailable for this connection",
+                        .{ @intFromEnum(err.code), err.message },
+                    );
+                }
+            },
+        }
+    }
 
     /// Send `client/registerCapability` to ask the client to watch every
     /// `.sjon` file under the workspace root. Hand-crafted JSON because
     /// `Registration.registerOptions` is `?LSPAny` (a `std.json.Value`
     /// tree) and constructing one for a single watcher is more code than
-    /// it saves. We don't track the response — `onResponse` ignores it.
+    /// it saves. The request id is retained so `onResponse` can record a
+    /// rejection without turning it into a retry loop.
     fn registerSjonFileWatcher(self: *Server) !void {
         const id = self.next_request_id;
         self.next_request_id +%= 1;
+        self.watcher_registration_id = id;
+        errdefer self.watcher_registration_id = null;
         const json = try std.fmt.allocPrint(self.gpa,
             \\{{"jsonrpc":"2.0","id":{d},"method":"client/registerCapability","params":{{"registrations":[{{"id":"sjon-watch","method":"workspace/didChangeWatchedFiles","registerOptions":{{"watchers":[{{"globPattern":"**/*.sjon"}}]}}}}]}}}}
         , .{id});
@@ -1195,28 +1968,60 @@ pub const Server = struct {
             .{ .emit_null_optional_fields = false },
         );
     }
-
-    /// Pick the most reliable workspace-root URI from `InitializeParams`
-    /// and convert it to a filesystem path. Spec preference order:
-    /// `workspaceFolders[0]` (current) → `rootUri` (deprecated) →
-    /// `rootPath` (legacy). Returns null when none is supplied or none
-    /// is a `file://` URI we know how to translate.
-    fn resolveWorkspacePath(
-        arena: std.mem.Allocator,
-        request: lsp.types.InitializeParams,
-    ) std.mem.Allocator.Error!?[]const u8 {
-        if (request.workspaceFolders) |folders| {
-            if (folders.len > 0) {
-                if (try uri.fileUriToPath(arena, folders[0].uri)) |path| return path;
-            }
-        }
-        if (request.rootUri) |root_uri| {
-            if (try uri.fileUriToPath(arena, root_uri)) |path| return path;
-        }
-        if (request.rootPath) |path| return try arena.dupe(u8, path);
-        return null;
-    }
 };
+
+fn workspaceDocumentUri(document: lsp.types.workspace.diagnostic.Report.Document) []const u8 {
+    return switch (document) {
+        .workspace_full_document_diagnostic_report => |report| report.uri,
+        .workspace_unchanged_document_diagnostic_report => |report| report.uri,
+    };
+}
+
+fn containsWorkspaceReport(
+    documents: []const lsp.types.workspace.diagnostic.Report.Document,
+    wanted: []const u8,
+) bool {
+    for (documents) |document| {
+        if (uri.HashContext.eql(.{}, workspaceDocumentUri(document), wanted)) return true;
+    }
+    return false;
+}
+
+fn containsUri(uris: []const []const u8, wanted: []const u8) bool {
+    for (uris) |candidate| {
+        if (uri.HashContext.eql(.{}, candidate, wanted)) return true;
+    }
+    return false;
+}
+
+const DiagnosticCode = @TypeOf(@as(lsp.types.Diagnostic, undefined).code);
+
+fn sameDiagnosticCode(a: DiagnosticCode, b: DiagnosticCode) bool {
+    const left = a orelse return b == null;
+    const right = b orelse return false;
+    return switch (left) {
+        .string => |value| switch (right) {
+            .string => |other| std.mem.eql(u8, value, other),
+            else => false,
+        },
+        .number => |value| switch (right) {
+            .number => |other| value == other,
+            else => false,
+        },
+    };
+}
+
+/// True only when the active mode's `tagSupport.valueSet` contains LSP
+/// `DiagnosticTag.Deprecated` (2). An absent `tagSupport`, an empty
+/// `valueSet`, or a set without 2 all mean the client did not ask for
+/// the tag.
+fn supportsDeprecatedTag(tag_support: ?lsp.types.ClientCapabilities.TextDocument.Diagnostic.TagOptions) bool {
+    const support = tag_support orelse return false;
+    for (support.valueSet) |tag| {
+        if (tag == .Deprecated) return true;
+    }
+    return false;
+}
 
 /// The capability set the `initialize` response advertises. Lifted out of
 /// `initialize` so it can be handed to lsp-kit's own validator without
@@ -1247,6 +2052,9 @@ fn serverCapabilities(encoding: lsp.offsets.Encoding) lsp.types.ServerCapabiliti
                 // `text_sync.applyChanges`; the whole-document form
                 // stays supported as the spec-required fallback.
                 .change = .Incremental,
+                // Saved inputs are reread from disk; client text is
+                // deliberately not requested or trusted.
+                .save = .{ .save_options = .{ .includeText = false } },
             },
         },
         .diagnosticProvider = .{
@@ -1340,4 +2148,211 @@ test "advertised capabilities match the implemented methods" {
     // The encoding is the only free parameter and it does not reach the
     // check, so any of the three does.
     lsp.basic_server.validateServerCapabilities(Server, serverCapabilities(.@"utf-16"));
+}
+
+/// An in-memory `lsp.Transport` that records every serialized JSON-RPC
+/// message. Test-only: it exists so a push-client contract ("nothing is
+/// written to the wire unless the reload committed") can be asserted
+/// without a process boundary.
+const RecordingTransport = struct {
+    transport: lsp.Transport = undefined,
+    buffer: [64 * 1024]u8 = undefined,
+    starts: [128]usize = undefined,
+    count: usize = 0,
+    used: usize = 0,
+    overflowed: bool = false,
+
+    fn init(self: *RecordingTransport) void {
+        self.transport = .{
+            .vtable = &.{
+                .readJsonMessage = &RecordingTransport.readStub,
+                .writeJsonMessage = &RecordingTransport.write,
+            },
+        };
+    }
+
+    fn readStub(_: *lsp.Transport, _: std.Io, _: std.mem.Allocator) lsp.Transport.ReadError![]u8 {
+        return error.EndOfStream;
+    }
+
+    fn write(
+        transport: *lsp.Transport,
+        _: std.Io,
+        json_message: []const u8,
+    ) lsp.Transport.WriteError!void {
+        const self: *RecordingTransport = @fieldParentPtr("transport", transport);
+        if (self.count >= self.starts.len or self.used + json_message.len > self.buffer.len) {
+            self.overflowed = true;
+            return;
+        }
+        self.starts[self.count] = self.used;
+        @memcpy(self.buffer[self.used..][0..json_message.len], json_message);
+        self.used += json_message.len;
+        self.count += 1;
+    }
+
+    fn message(self: *const RecordingTransport, index: usize) []const u8 {
+        const start = self.starts[index];
+        const end = if (index + 1 < self.count) self.starts[index + 1] else self.used;
+        return self.buffer[start..end];
+    }
+
+    fn countMethod(self: *const RecordingTransport, method: []const u8) usize {
+        var total: usize = 0;
+        for (0..self.count) |index| {
+            if (std.mem.indexOf(u8, self.message(index), method) != null) total += 1;
+        }
+        return total;
+    }
+};
+
+test "reload: failed reload publishes nothing stale to a push client" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const sub: []const u8 = &tmp.sub_path;
+    const relative = try std.fs.path.join(arena, &.{ ".zig-cache", "tmp", sub });
+    const dir = try std.Io.Dir.cwd().realPathFileAlloc(testing.io, relative, arena);
+
+    const writeFixture = struct {
+        fn write(
+            tmp_dir: *std.testing.TmpDir,
+            sub_path: []const u8,
+            data: []const u8,
+        ) !void {
+            if (std.fs.path.dirname(sub_path)) |parent| {
+                try tmp_dir.dir.createDirPath(testing.io, parent);
+            }
+            try tmp_dir.dir.writeFile(testing.io, .{ .sub_path = sub_path, .data = data });
+        }
+    }.write;
+
+    // Two independent legacy roots, each with its own manifest, project,
+    // and a document that is valid only under its root's current schema.
+    try writeFixture(&tmp, "one/one.sjon", "(plugin :name one :version \"1.0.0\" (form :name one-form :open true))\n");
+    try writeFixture(&tmp, "one/sjon-project.sjon", "(project :plugins [\"one.sjon\"])\n");
+    try writeFixture(&tmp, "one/doc.sjon", "(one-form)\n");
+    try writeFixture(&tmp, "two/two.sjon", "(plugin :name two :version \"1.0.0\" (form :name two-form :open true))\n");
+    try writeFixture(&tmp, "two/sjon-project.sjon", "(project :plugins [\"two.sjon\"])\n");
+    try writeFixture(&tmp, "two/doc.sjon", "(two-form)\n");
+
+    const one_dir = try std.fs.path.join(arena, &.{ dir, "one" });
+    const two_dir = try std.fs.path.join(arena, &.{ dir, "two" });
+    const one_folder = try uri.pathToFileUri(arena, one_dir);
+    const two_folder = try uri.pathToFileUri(arena, two_dir);
+    const one_doc = try uri.pathToFileUri(arena, try std.fs.path.join(arena, &.{ one_dir, "doc.sjon" }));
+    const two_doc = try uri.pathToFileUri(arena, try std.fs.path.join(arena, &.{ two_dir, "doc.sjon" }));
+    const one_project = try uri.pathToFileUri(
+        arena,
+        try std.fs.path.join(arena, &.{ one_dir, "sjon-project.sjon" }),
+    );
+
+    var recorder = RecordingTransport{};
+    recorder.init();
+
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    var server = Server.init(failing.allocator(), testing.io, &recorder.transport);
+    errdefer server.deinit();
+
+    _ = server.initialize(arena, .{
+        .capabilities = .{},
+        .workspaceFolders = &.{
+            .{ .uri = one_folder, .name = "one" },
+            .{ .uri = two_folder, .name = "two" },
+        },
+    });
+
+    try server.@"textDocument/didOpen"(arena, .{
+        .textDocument = .{
+            .uri = one_doc,
+            .languageId = .{ .custom_value = "sjon" },
+            .version = 1,
+            .text = "(one-form)\n",
+        },
+    });
+    try server.@"textDocument/didOpen"(arena, .{
+        .textDocument = .{
+            .uri = two_doc,
+            .languageId = .{ .custom_value = "sjon" },
+            .version = 1,
+            .text = "(two-form)\n",
+        },
+    });
+
+    // Both open documents published one clean report: that is the set of
+    // reports the push client holds for the rest of this test.
+    try testing.expectEqual(@as(usize, 2), recorder.count);
+    try testing.expectEqual(@as(usize, 2), recorder.countMethod("textDocument/publishDiagnostics"));
+    const baseline = recorder.count;
+
+    // Both manifests lose their old form on disk. A reload that commits
+    // makes every open document's form unknown; the old schemas are what
+    // the client's held reports still describe.
+    try writeFixture(&tmp, "one/one.sjon", "(plugin :name one :version \"1.0.0\" (form :name one-v2 :open true))\n");
+    try writeFixture(&tmp, "two/two.sjon", "(plugin :name two :version \"1.0.0\" (form :name two-v2 :open true))\n");
+
+    const pullCount = struct {
+        fn count(
+            srv: *Server,
+            arena_alloc: std.mem.Allocator,
+            document_uri: []const u8,
+        ) Allocator.Error!usize {
+            const report = try srv.@"textDocument/diagnostic"(arena_alloc, .{
+                .textDocument = .{ .uri = document_uri },
+            });
+            return report.related_full_document_diagnostic_report.items.len;
+        }
+    }.count;
+
+    // A failed reload is swallowed by the save handler (it only logs), so
+    // the publication stream and the pull answers are the entire witness.
+    // Each iteration fails the n-th allocation of that attempt itself, so
+    // the sweep walks the reload's phases in order regardless of how many
+    // allocations earlier failed attempts consumed.
+    var saw_retained = false;
+    var completed = false;
+    var n: usize = 0;
+    while (n < 8192) : (n += 1) {
+        failing.fail_index = failing.alloc_index + n;
+        failing.resize_fail_index = failing.resize_index + n;
+        // A publication-phase failure escapes as a write error; the
+        // pre-existing publication rule owns that recovery window, so the
+        // sweep only records it and classifies by state.
+        server.@"textDocument/didSave"(arena, .{
+            .textDocument = .{ .uri = one_project },
+        }) catch {};
+        failing.fail_index = std.math.maxInt(usize);
+        failing.resize_fail_index = std.math.maxInt(usize);
+
+        const one_dirty = try pullCount(&server, arena, one_doc) != 0;
+        const two_dirty = try pullCount(&server, arena, two_doc) != 0;
+
+        if (one_dirty != two_dirty) {
+            // Root one serving the new manifest while root two still
+            // serves the old one — with nothing or something published —
+            // is the stale-report defect: the reports the client holds
+            // describe a state the server can no longer serve uniformly.
+            return error.PartialLegacyMutation;
+        }
+        if (one_dirty and two_dirty) {
+            // The reload committed; the failure (if any) landed in
+            // publication, whose recovery window is the pre-existing
+            // publication rule. Stop sampling.
+            completed = true;
+            break;
+        }
+
+        // Nothing committed. The client must have seen nothing new.
+        if (recorder.count != baseline) return error.UnexpectedPublication;
+        saw_retained = true;
+    }
+    try testing.expect(saw_retained);
+    try testing.expect(completed);
+
+    server.deinit();
+    try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }

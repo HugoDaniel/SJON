@@ -69,7 +69,10 @@ https://hugodaniel.com/pages/sjon/errors/unknown_form
 Every diagnostic is a real error page, not a string — same code in
 the CLI, the LSP's Problems panel, and `--format=github` CI
 annotations. See [docs/TOOLING.md](docs/TOOLING.md) for the full CLI
-and LSP capability list.
+and LSP capability list. The native server gives each document its own
+schema from the nearest `sjon-lsp.sjon` bundle, composed with that
+document's own plugin declarations, so multi-schema workspaces get
+per-file diagnostics without separate server instances.
 
 ## Consuming
 
@@ -104,8 +107,8 @@ const text = try sjon.print(gpa, tree, .{ .mode = .canonical });
 defer text.deinit();
 ```
 
-**Node / Web (WASM)** — install `npm install @sjon-lang/web@1.5.0`.
-Build matching artifacts from the 1.5.0 source with Zig 0.16 (`zig build
+**Node / Web (WASM)** — install `npm install @sjon-lang/web@1.6.0`.
+Build matching artifacts from the 1.6.0 source with Zig 0.16 (`zig build
 wasm-all`); the npm package does not bundle WASM. From the source root:
 
 ```js
@@ -120,7 +123,7 @@ const result = reader.validateBinary(binary);
 See [`examples/quickstart-web.mjs`](examples/quickstart-web.mjs) and
 [hosts/web/README.md](hosts/web/README.md).
 
-**Rust** — `cargo add sjon-host@1.5.0`; wraps the matching external
+**Rust** — `cargo add sjon-host@1.6.0`; wraps the matching external
 `sjon.wasm` via `wasmtime` (the crate does not bundle it):
 
 ```rust
