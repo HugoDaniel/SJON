@@ -1,0 +1,31 @@
+; A grouped key declared required (`:optional false`).
+;
+; Grouped keys leave the base even when the manifest marks them required —
+; only an active arm may require one. The interface spelling never said
+; `a?:` / `b?:`, and the alias spelling must not either.
+;
+; `either` is the at-most-one cardinality over required keys: its
+; none-arm may omit both (the validator suppresses per-key required
+; diagnostics for grouped keys), while two complete alternatives stay a
+; violation.
+
+(plugin :name group-required :version "1.0.0"
+  :description "Reference plugin for required keys inside an exclusive group."
+
+  (form :name req
+    :description "Both grouped keys are required in their own arms."
+    (key :name keep :type string :optional false)
+    (key :name a :type number :optional false)
+    (key :name b :type number :optional false)
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [a])
+      (alt :keys [b])))
+
+  (form :name either
+    :description "At-most-one over required keys: the none-arm omits both."
+    (key :name tag :type string :optional false)
+    (key :name c :type number :optional false)
+    (key :name d :type number :optional false)
+    (exclusive-group :cardinality at-most-one
+      (alt :keys [c])
+      (alt :keys [d]))))

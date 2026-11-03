@@ -1,0 +1,22 @@
+; Two enforced groups in one form — the composition case the strict
+; compile matrix consumes. `a`/`b` are exactly-one and `c`/`d` are
+; at-most-one; no grouped key carries a default, so both groups emit
+; structurally and the alias composes `base & (G1 arms) & (G2 arms)`.
+; A valid document picks one of `a`/`b` and at most one of `c`/`d` —
+; the valid cross-product `{a,c} {a,d} {b,c} {b,d}` must all compile.
+
+(plugin :name group-pair :version "1.0.0"
+  :description "Reference plugin for two enforced exclusive groups in one form."
+
+  (form :name pair
+    :description "Two independent groups: exactly-one a|b, at-most-one c|d."
+    (key :name a :type string :optional true)
+    (key :name b :type string :optional true)
+    (key :name c :type number :optional true)
+    (key :name d :type number :optional true)
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [a])
+      (alt :keys [b]))
+    (exclusive-group :cardinality at-most-one
+      (alt :keys [c])
+      (alt :keys [d]))))

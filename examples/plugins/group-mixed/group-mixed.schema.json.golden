@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 2,
+  "x-sjon-export-warnings": [
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `mixed` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin": "group-mixed",
+      "form": "mixed"
+    }
+  ],
+  "$defs": {
+    "form.group-mixed.mixed": {
+      "type": "object",
+      "description": "A default-free enforced group and a defaulted sibling.",
+      "properties": {
+        "$form": {
+          "const": "mixed"
+        },
+        "$ns": {
+          "const": "group-mixed"
+        },
+        "a": {
+          "type": "string"
+        },
+        "b": {
+          "type": "string"
+        },
+        "c": {
+          "type": "number"
+        },
+        "d": {
+          "type": "number",
+          "default": 0
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "a"
+              ]
+            },
+            {
+              "required": [
+                "b"
+              ]
+            }
+          ]
+        },
+        {
+          "not": {
+            "allOf": [
+              {
+                "required": [
+                  "c"
+                ]
+              },
+              {
+                "required": [
+                  "d"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "unevaluatedProperties": false,
+      "x-sjon-exclusive-groups": [
+        {
+          "cardinality": "exactly_one",
+          "alternatives": [
+            [
+              "a"
+            ],
+            [
+              "b"
+            ]
+          ]
+        },
+        {
+          "cardinality": "at_most_one",
+          "alternatives": [
+            [
+              "c"
+            ],
+            [
+              "d"
+            ]
+          ]
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.group-mixed.mixed"
+    }
+  ]
+}

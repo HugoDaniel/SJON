@@ -381,5 +381,5 @@ test "checkCopy: vanished, ok-with-duplicates, mismatch" {
 
 test "schemaExportVersion tracks the Model field default" {
     // Mirrors the compiled truth the audit uses; guards the reflection helper.
-    try std.testing.expectEqual(@as(u64, 1), schemaExportVersion());
+    try std.testing.expectEqual(@as(u64, 2), schemaExportVersion());
 }

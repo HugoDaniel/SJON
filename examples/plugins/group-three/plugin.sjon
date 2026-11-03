@@ -1,0 +1,21 @@
+; Three-alternative exclusive group, one alternative a multi-key bundle.
+;
+; `(choice …)` must carry exactly one of `a`, `(b1 + b2)`, or `c`. The
+; exported arms intersect one `_SjonNotAll` per *competing alternative* —
+; never one flattened key set, which would accept `a + b1 + b2` whenever
+; `c` is absent.
+
+(plugin :name group-three :version "1.0.0"
+  :description "Reference plugin for a three-alternative exclusive group."
+
+  (form :name choice
+    :description "Exactly one of `a`, `(b1 + b2)`, or `c`."
+    (key :name common :type string :optional true)
+    (key :name a :type string :optional true)
+    (key :name b1 :type string :optional true)
+    (key :name b2 :type number :optional true)
+    (key :name c :type boolean :optional true)
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [a])
+      (alt :keys [b1 b2])
+      (alt :keys [c]))))

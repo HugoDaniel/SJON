@@ -86,6 +86,12 @@ export interface ModelDiscriminator {
 export interface ModelVariant {
   readonly when: readonly string[];
   readonly keys: readonly ModelKey[];
+  /** Variant-scoped exclusive groups, scoping over `keys` exactly as
+   *  `ModelForm.exclusiveGroups` scopes over the form's keys. Eligible
+   *  groups (closed scope, no defaulted alternative key) are emitted
+   *  structurally on the TS channel — intersected into that variant's
+   *  branch only. Mirrors `Model.Variant.exclusive_groups`. */
+  readonly exclusiveGroups: readonly ModelExclusiveGroup[];
 }
 
 export type Cardinality = 'exactly_one' | 'at_most_one';
@@ -94,8 +100,11 @@ export interface ModelExclusiveGroup {
   readonly cardinality: Cardinality;
   /**
    * Each alternative is a bundle of key names that must appear together
-   * (M3 multi-key bundles). Single-key alternatives are wrapped as
-   * one-element bundles.
+   * (multi-key bundles): every key of a bundle appears together, and
+   * (for `exactly_one`) a partial bundle satisfies no alternative.
+   * Emitted structurally when the group is eligible — see
+   * `Model.Variant.exclusiveGroups` and `ModelForm.exclusiveGroups`.
+   * Mirrors `Model.ExclusiveGroup`.
    */
   readonly alternatives: readonly (readonly string[])[];
 }

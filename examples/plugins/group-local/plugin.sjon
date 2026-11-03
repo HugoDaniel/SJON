@@ -1,0 +1,51 @@
+; A slot-local form carrying an exclusive group.
+;
+; `(canvas …)`'s `:wrap` slot declares one local form, `inner`, whose
+; `a` / `b` keys are an exactly-one group. The local is emitted inline, so
+; the anonymous-base/arm construction stays inline too — no exported name
+; is minted for it — while the file-level `_SjonNotAll` helper still rides
+; once at the top.
+;
+; `board` and `shelf` are the open/defaulted locals: `board`'s local
+; `hint` is itself open (the runtime bypasses its group sweep), and
+; `shelf`'s local `tune` carries a defaulted alternative key. Both stay
+; annotation-only — no arms, no helper of their own — exactly as an
+; open/defaulted group at form level does.
+
+(plugin :name group-local :version "1.0.0"
+  :description "Reference plugin for an exclusive group on a slot-local form."
+
+  (form :name canvas
+    :description "A canvas whose local wrap form carries an exclusive group."
+    (key :name wrap :type form :optional true
+      (form :name inner
+        :description "A closed local form with an exactly-one group."
+        (key :name tag :type string :optional true)
+        (key :name a :type number :optional true)
+        (key :name b :type number :optional true)
+        (exclusive-group :cardinality exactly-one
+          (alt :keys [a])
+          (alt :keys [b])))))
+
+  (form :name board
+    :description "A board whose local pick form is open — its group is annotation-only."
+    (key :name pick :type form :optional true
+      (form :name hint
+        :description "An open local form; the group sweep is bypassed."
+        :open true
+        (key :name a :type number :optional true)
+        (key :name b :type number :optional true)
+        (exclusive-group :cardinality exactly-one
+          (alt :keys [a])
+          (alt :keys [b])))))
+
+  (form :name shelf
+    :description "A shelf whose local pick form has a defaulted group key."
+    (key :name pick :type form :optional true
+      (form :name tune
+        :description "A closed local form whose group carries a default."
+        (key :name a :type number :optional true)
+        (key :name b :type number :optional true :default 0)
+        (exclusive-group :cardinality exactly-one
+          (alt :keys [a])
+          (alt :keys [b]))))))

@@ -100,7 +100,7 @@ for the full layout.
 
 ## Rust crate
 
-Install with `cargo add sjon-host@1.6.0` (Rust ≥ 1.92), then provide a
+Install with `cargo add sjon-host@1.7.0` (Rust ≥ 1.92), then provide a
 matching external `sjon.wasm`. The crates.io package builds without the
 repository conformance corpus or a Zig toolchain.
 

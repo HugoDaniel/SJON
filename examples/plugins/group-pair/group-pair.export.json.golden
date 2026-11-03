@@ -1,0 +1,61 @@
+{
+  "version": 2,
+  "plugins": [
+    {
+      "name": "group-pair",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "pair",
+          "description": "Two independent groups: exactly-one a|b, at-most-one c|d.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "a",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "b",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "c",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "number"
+              }
+            },
+            {
+              "name": "d",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "number"
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": []
+    }
+  ],
+  "warnings": [
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `pair` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin_name": "group-pair",
+      "form_name": "pair"
+    }
+  ]
+}

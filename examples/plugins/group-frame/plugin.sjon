@@ -1,0 +1,55 @@
+; The downstream wgslayer `frame` placement shape (ask 32): a required
+; `id`, the `frame` box alternative, the `size`+`matrix` pair, TRS keys
+; that `:requires [frame]`, and `exactly-one [frame, size matrix]`.
+;
+; The U4 consumer's documents map onto the emitted alias as:
+;   * `frame` alone (with its TRS keys)      — compiles
+;   * `size`+`matrix` together               — compiles
+;   * both (`placement-both`)                — compile error
+;   * neither (`placement-neither`)          — compile error
+;   * `matrix` without `size`                — compile error (partial bundle)
+
+(plugin :name group-frame :version "1.0.0"
+  :description "Reference plugin for the wgslayer frame placement group."
+
+  (value-kind :name box
+    :description "[x y w h] untransformed local frame."
+    :underlying vector
+    :vector (vector-shape :len 4 :element number))
+
+  (value-kind :name size
+    :description "[w h] geometry size."
+    :underlying vector
+    :vector (vector-shape :len 2 :element number))
+
+  (value-kind :name point
+    :description "[x y] point."
+    :underlying vector
+    :vector (vector-shape :len 2 :element number))
+
+  (value-kind :name transform-matrix
+    :description "[a b c d tx ty] affine local-to-parent matrix."
+    :underlying vector
+    :vector (vector-shape :len 6 :element number))
+
+  (form :name frame
+    :description "Sub-root node; clips descendants to its box when :clip is true."
+    (key :name id :type symbol
+      :description "Node id, unique in scope.")
+    (key :name frame :type box :optional true
+      :description "Placement alternative 1: untransformed local box [x y w h].")
+    (key :name rotation :type number :optional true :requires [frame]
+      :description "Rotation in degrees clockwise (Y-down).")
+    (key :name pivot :type point :optional true :requires [frame]
+      :description "Rotation/scale origin as a unit point of the box.")
+    (key :name scale :type point :optional true :requires [frame]
+      :description "[sx sy] scale about the pivot.")
+    (key :name size :type size :optional true
+      :description "Placement alternative 2 (with :matrix): [w h] geometry size.")
+    (key :name matrix :type transform-matrix :optional true
+      :description "Placement alternative 2 (with :size): affine local-to-parent matrix; written together with :size (a lone :matrix is a partial bundle).")
+    (key :name clip :type boolean :optional true
+      :description "Clip descendants to this node's box.")
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [frame])
+      (alt :keys [size matrix]))))

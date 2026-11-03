@@ -460,6 +460,26 @@ test "renderSignatureText: typed, labeled, variadic, opaque" {
     try std.testing.expectEqualStrings("(mk) -> shapes/point", mk);
 }
 
+/// Deep-copy one scope's exclusive groups into arena-owned IR data. The
+/// form-level and variant-level scopes lower through this one function so
+/// the two IR fields can never drift in shape.
+fn lowerExclusiveGroups(
+    a: Allocator,
+    groups: []const Plugin.ExclusiveGroup,
+) Error![]const Model.ExclusiveGroup {
+    const out = try a.alloc(Model.ExclusiveGroup, groups.len);
+    for (groups, 0..) |g, i| {
+        const alts = try a.alloc([]const []const u8, g.alternatives.len);
+        for (g.alternatives, 0..) |alt, j| {
+            const keys = try a.alloc([]const u8, alt.keys.len);
+            for (alt.keys, 0..) |kn, k| keys[k] = try a.dupe(u8, kn);
+            alts[j] = keys;
+        }
+        out[i] = .{ .cardinality = g.cardinality, .alternatives = alts };
+    }
+    return out;
+}
+
 fn lowerForm(
     a: Allocator,
     schema: Schema.Schema,
@@ -569,7 +589,7 @@ fn lowerForm(
                 .{ form.name, form.local_forms.len, refs.len },
             ) else try std.fmt.allocPrint(
                 a,
-                "positional slot on form `{s}` declares {d} local form(s) — emitted as an inline union plus an open generic branch for the additive global fallback; local-first/global resolution order is SJON-only",
+                "positional slot on form `{s}` declares {d} local form(s) — emitted as an inline union plus the additive global fallback (an open generic branch in JSON Schema, an enumerated-plus-qualified arm in TypeScript); local-first/global resolution order is SJON-only",
                 .{ form.name, form.local_forms.len },
             ),
             .plugin_name = try a.dupe(u8, plugin.name),
@@ -607,6 +627,7 @@ fn lowerForm(
                 variants_out[i] = .{
                     .when = when,
                     .keys = vk_keys,
+                    .exclusive_groups = try lowerExclusiveGroups(a, v.exclusive_groups),
                 };
             }
             discriminator = .{
@@ -629,19 +650,13 @@ fn lowerForm(
 
     var exclusive: []const Model.ExclusiveGroup = &.{};
     if (form.exclusive_groups.len > 0) {
-        const groups = try a.alloc(Model.ExclusiveGroup, form.exclusive_groups.len);
         var any_multi_key = false;
-        for (form.exclusive_groups, 0..) |g, i| {
-            const alts = try a.alloc([]const []const u8, g.alternatives.len);
-            for (g.alternatives, 0..) |alt, j| {
+        for (form.exclusive_groups) |g| {
+            for (g.alternatives) |alt| {
                 if (alt.keys.len > 1) any_multi_key = true;
-                const keys = try a.alloc([]const u8, alt.keys.len);
-                for (alt.keys, 0..) |kn, k| keys[k] = try a.dupe(u8, kn);
-                alts[j] = keys;
             }
-            groups[i] = .{ .cardinality = g.cardinality, .alternatives = alts };
         }
-        exclusive = groups;
+        exclusive = try lowerExclusiveGroups(a, form.exclusive_groups);
         try warnings.append(a, .{
             .code = .exclusive_group_unenforceable,
             .severity = .info,
@@ -727,7 +742,7 @@ fn lowerKey(
             .severity = .info,
             .message = try std.fmt.allocPrint(
                 a,
-                "slot `:{s}` on form `{s}` declares {d} local form(s) — emitted as an inline union plus an open generic branch for the additive global fallback; local-first/global resolution order is SJON-only",
+                "slot `:{s}` on form `{s}` declares {d} local form(s) — emitted as an inline union plus the additive global fallback (an open generic branch in JSON Schema, an enumerated-plus-qualified arm in TypeScript); local-first/global resolution order is SJON-only",
                 .{ key.name, form.name, key.local_forms.len },
             ),
             .plugin_name = try a.dupe(u8, plugin.name),
@@ -2608,6 +2623,54 @@ test "lowering: a value-kind whose vector element names itself lowers to unresol
     var result_u = try exportSchema(a, Schema.Schema.init(&.{q}), .{});
     defer result_u.deinit();
     try testing.expect(result_u.hasErrors());
+}
+
+test "lowering: a variant-scoped exclusive group reaches the IR variant" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "probe",
+        .forms = &.{.{
+            .name = "track",
+            .keys = &.{.{ .name = "kind", .value_type = .{ .named = .{ .name = "kind-tag" } }, .optional = true }},
+            .discriminant_idx = 0,
+            .variants = &.{
+                .{
+                    .when = &.{"kick"},
+                    .keys = &.{
+                        .{ .name = "step", .value_type = .number, .optional = true },
+                        .{ .name = "sweep", .value_type = .number, .optional = true },
+                    },
+                    .exclusive_groups = &.{
+                        .{
+                            .cardinality = .exactly_one,
+                            .alternatives = &.{ .{ .keys = &.{"step"} }, .{ .keys = &.{"sweep"} } },
+                        },
+                    },
+                },
+                .{
+                    .when = &.{"bass"},
+                    .keys = &.{.{ .name = "sequence", .value_type = .any, .optional = true }},
+                },
+            },
+        }},
+        .value_kinds = &.{
+            .{ .name = "kind-tag", .underlying = .symbol, .members = .{ .members = &.{ .{ .name = "kick" }, .{ .name = "bass" } } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try exportSchema(a, schema, .{});
+    defer result.deinit();
+    const disc = result.model.plugins[0].forms[0].discriminator.?;
+    try testing.expectEqual(@as(usize, 2), disc.variants.len);
+    // The kick variant carries its scoped group; bass carries none.
+    const kick = disc.variants[0];
+    try testing.expectEqual(@as(usize, 1), kick.exclusive_groups.len);
+    const group = kick.exclusive_groups[0];
+    try testing.expectEqual(Plugin.Cardinality.exactly_one, group.cardinality);
+    try testing.expectEqual(@as(usize, 2), group.alternatives.len);
+    try testing.expectEqualStrings("step", group.alternatives[0][0]);
+    try testing.expectEqualStrings("sweep", group.alternatives[1][0]);
+    try testing.expectEqual(@as(usize, 0), disc.variants[1].exclusive_groups.len);
 }
 
 test "lowering: deterministic plugin and form ordering matches declaration" {

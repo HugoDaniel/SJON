@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 2,
+  "x-sjon-export-warnings": [
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `req` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin": "group-required",
+      "form": "req"
+    },
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `either` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin": "group-required",
+      "form": "either"
+    }
+  ],
+  "$defs": {
+    "form.group-required.req": {
+      "type": "object",
+      "description": "Both grouped keys are required in their own arms.",
+      "properties": {
+        "$form": {
+          "const": "req"
+        },
+        "$ns": {
+          "const": "group-required"
+        },
+        "a": {
+          "type": "number"
+        },
+        "b": {
+          "type": "number"
+        },
+        "keep": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "$form",
+        "keep",
+        "a",
+        "b"
+      ],
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "a"
+              ]
+            },
+            {
+              "required": [
+                "b"
+              ]
+            }
+          ]
+        }
+      ],
+      "unevaluatedProperties": false,
+      "x-sjon-exclusive-groups": [
+        {
+          "cardinality": "exactly_one",
+          "alternatives": [
+            [
+              "a"
+            ],
+            [
+              "b"
+            ]
+          ]
+        }
+      ]
+    },
+    "form.group-required.either": {
+      "type": "object",
+      "description": "At-most-one over required keys: the none-arm omits both.",
+      "properties": {
+        "$form": {
+          "const": "either"
+        },
+        "$ns": {
+          "const": "group-required"
+        },
+        "c": {
+          "type": "number"
+        },
+        "d": {
+          "type": "number"
+        },
+        "tag": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "$form",
+        "tag",
+        "c",
+        "d"
+      ],
+      "allOf": [
+        {
+          "not": {
+            "allOf": [
+              {
+                "required": [
+                  "c"
+                ]
+              },
+              {
+                "required": [
+                  "d"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "unevaluatedProperties": false,
+      "x-sjon-exclusive-groups": [
+        {
+          "cardinality": "at_most_one",
+          "alternatives": [
+            [
+              "c"
+            ],
+            [
+              "d"
+            ]
+          ]
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.group-required.req"
+    },
+    {
+      "$ref": "#/$defs/form.group-required.either"
+    }
+  ]
+}

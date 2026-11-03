@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 2,
+  "x-sjon-export-warnings": [
+    {
+      "code": "variants_emitted_via_if_then",
+      "severity": "info",
+      "message": "discriminated form `track` — variants emitted as allOf+if/then; source-order (variant keys must follow the discriminant) is not enforced by JSON Schema",
+      "plugin": "group-variant-pair",
+      "form": "track"
+    }
+  ],
+  "$defs": {
+    "form.group-variant-pair.track": {
+      "type": "object",
+      "description": "A track whose kick variant carries two scoped exclusive groups.",
+      "properties": {
+        "$form": {
+          "const": "track"
+        },
+        "$ns": {
+          "const": "group-variant-pair"
+        },
+        "kind": {
+          "enum": [
+            {
+              "$sym": "kick"
+            },
+            {
+              "$sym": "bass"
+            }
+          ]
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": {
+                  "$sym": "kick"
+                }
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "gate": {
+                "type": "string"
+              },
+              "pass": {
+                "type": "string"
+              },
+              "step": {
+                "type": "number"
+              },
+              "sweep": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": {
+                  "$sym": "bass"
+                }
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "sequence": {}
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false,
+      "x-sjon-discriminant": {
+        "key": "kind",
+        "variants": [
+          {
+            "when": "kick",
+            "keys": [
+              "step",
+              "sweep",
+              "gate",
+              "pass"
+            ]
+          },
+          {
+            "when": "bass",
+            "keys": [
+              "sequence"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.group-variant-pair.track"
+    }
+  ]
+}

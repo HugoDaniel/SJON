@@ -6,6 +6,71 @@ enum — are versioned and corpus-gated; nothing changes them silently.
 
 ## Unreleased
 
+## 1.7.0 — 2026-11-03
+
+This release bumps the shared schema-export format to version 2 and makes
+the TypeScript output enforce exclusive groups structurally. Binary wire
+stays v5, the diagnostic-code enum is unchanged, and the conformance
+corpus stays at 393 cases. The 1→2 bump is deliberately breaking for
+generated-TypeScript consumers: an eligible grouped form is now a type
+alias intersected with a union, not an interface, so consumers can no
+longer declaration-merge or `extends` those names.
+
+- **Structural exclusive groups in the TypeScript exporter:** a form whose
+  exclusive groups are all eligible (closed scope, no default on any
+  alternative key) emits as an anonymous base object intersected with one
+  arm-union per enforced group, instead of an interface with every grouped
+  key optional and a JSDoc annotation. Each alternative requires all of its
+  keys and intersects one `_SjonNotAll` per *competing* alternative, never a
+  flattened key set, so a competitor whose keys straddle arms cannot slip
+  through. `exactly-one` is the union of those arms; `at-most-one` prepends
+  a none-arm where every grouped key is `?: never`. The helper is emitted
+  once per file, unexported, only when the file enforces a group.
+- **Variant and slot-local scopes:** a variant-scoped group intersects its
+  arms into that variant's branch only, and a form-level group on a
+  discriminated form intersects the whole parenthesised variant union. A
+  slot-local fallback no longer leaves an open `$form: string` arm: it
+  enumerates the unqualified globals (minus the slot's local head names,
+  which resolve local-first) plus one qualified arm per global, shadowed
+  names included. An enforced group on a local form is therefore enforced
+  even when the value arrives through a variable, a function parameter, or
+  `JSON.parse`, where TypeScript's excess-property checking never fires.
+- **Both emitters agree byte-for-byte:** the Zig exporter and the
+  TypeScript-parity port produce identical `.d.ts` for every wired fixture,
+  including unit-bearing grouped keys (whose `$num` tuple shape must survive
+  the grouping) and variant branches that compose two enforced groups at
+  once. New golden fixtures cover `group-frame`, `group-local`,
+  `group-mixed`, `group-open`, `group-pair`, `group-required`,
+  `group-three`, `group-units`, `group-variant`, `group-variant-pair`, and
+  `not-all`.
+- **Version stamps move together:** JSON Schema artifacts carry
+  `"x-sjon-export-version": 2`, TypeScript artifacts carry
+  `// sjon-export-version: 2` on line 1, and the intermediate IR carries
+  `"version": 2`. Existing JSON Schema and IR artifacts differ only in that
+  stamp; the structural change is in the TypeScript surface.
+- **Known limits stay annotation-only:** open forms bypass group validation,
+  and a group where any alternative key carries a default is skipped, both
+  documented in [the export guide](docs/SCHEMA_EXPORT.md). Under
+  `exactOptionalPropertyTypes: false` an explicitly written `undefined` can
+  still occupy a `?: never` slot; enabling the option rejects it.
+
+### Fixed
+
+- **Two enforced groups on one variant no longer emit a stray brace.** Every
+  group iteration used to close the branch base, so the second group closed a
+  brace that was never open and the generated file failed to parse (TS1005 /
+  TS1109). The base now closes once before the first enforced group.
+- **A slot-local group can no longer be bypassed through the global
+  fallback.** The fallback used to accept any `$form` object through an open
+  `$form: string` arm; it now enumerates the unqualified and qualified global
+  arms, so a shadowed global's shape is a compile error on a bare head too.
+- **Unit-bearing grouped keys keep their wire shape.** A `$num` tuple in a
+  grouped key is emitted identically by the Zig exporter and the TS-parity
+  port, closing the last byte-level divergence on the grouped fixtures.
+- **The strict compile matrix runs both `exactOptionalPropertyTypes` legs.**
+  The on and off settings now join every standard gate, including the
+  missing-key, extra-key, and cross-arm rejections the ruling required.
+
 ## 1.6.0 — 2026-11-01
 
 This release keeps binary wire v5 and the diagnostic-code enum unchanged,

@@ -1,0 +1,53 @@
+{
+  "version": 2,
+  "plugins": [
+    {
+      "name": "group-variant-pair",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "track",
+          "description": "A track whose kick variant carries two scoped exclusive groups.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "kind",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "symbol_members",
+                "names": [
+                  "kick",
+                  "bass"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": [
+        {
+          "name": "kind-tag",
+          "description": "",
+          "shape": {
+            "kind": "symbol_members",
+            "names": [
+              "kick",
+              "bass"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "code": "variants_emitted_via_if_then",
+      "severity": "info",
+      "message": "discriminated form `track` — variants emitted as allOf+if/then; source-order (variant keys must follow the discriminant) is not enforced by JSON Schema",
+      "plugin_name": "group-variant-pair",
+      "form_name": "track"
+    }
+  ]
+}

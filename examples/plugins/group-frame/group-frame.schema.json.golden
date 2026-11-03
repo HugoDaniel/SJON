@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 2,
+  "x-sjon-export-warnings": [
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `frame` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin": "group-frame",
+      "form": "frame"
+    },
+    {
+      "code": "multi_key_exclusive_emitted",
+      "severity": "info",
+      "message": "form `frame` has at least one multi-key bundle in an exclusive group; emitted as `{required: [<bundle>]}` per bundle. Bundle atomicity (partial bundles fail) requires SJON-aware runtime validation",
+      "plugin": "group-frame",
+      "form": "frame"
+    }
+  ],
+  "$defs": {
+    "form.group-frame.frame": {
+      "type": "object",
+      "description": "Sub-root node; clips descendants to its box when :clip is true.",
+      "properties": {
+        "$form": {
+          "const": "frame"
+        },
+        "$ns": {
+          "const": "group-frame"
+        },
+        "clip": {
+          "description": "Clip descendants to this node's box.",
+          "type": "boolean"
+        },
+        "frame": {
+          "description": "Placement alternative 1: untransformed local box [x y w h].",
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "id": {
+          "description": "Node id, unique in scope.",
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "matrix": {
+          "description": "Placement alternative 2 (with :size): affine local-to-parent matrix; written together with :size (a lone :matrix is a partial bundle).",
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 6,
+          "maxItems": 6
+        },
+        "pivot": {
+          "description": "Rotation/scale origin as a unit point of the box.",
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "rotation": {
+          "description": "Rotation in degrees clockwise (Y-down).",
+          "type": "number"
+        },
+        "scale": {
+          "description": "[sx sy] scale about the pivot.",
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "size": {
+          "description": "Placement alternative 2 (with :matrix): [w h] geometry size.",
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        }
+      },
+      "required": [
+        "$form",
+        "id"
+      ],
+      "dependentRequired": {
+        "rotation": [
+          "frame"
+        ],
+        "pivot": [
+          "frame"
+        ],
+        "scale": [
+          "frame"
+        ]
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "frame"
+              ]
+            },
+            {
+              "required": [
+                "size",
+                "matrix"
+              ]
+            }
+          ]
+        }
+      ],
+      "unevaluatedProperties": false,
+      "x-sjon-exclusive-groups": [
+        {
+          "cardinality": "exactly_one",
+          "alternatives": [
+            [
+              "frame"
+            ],
+            [
+              "size",
+              "matrix"
+            ]
+          ]
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.group-frame.frame"
+    }
+  ]
+}

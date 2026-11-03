@@ -2,7 +2,7 @@
 
 A one-way exporter that converts a fully-resolved `Schema.Schema` into JSON Schema 2020-12 and TypeScript `.d.ts` types describing the **canonical JSON shape** of `sjon to-json` output. Use it to give downstream tools (editors, codegen pipelines, language servers, validators in other ecosystems) a machine-readable view of a plugin's forms without re-implementing the SJON parser, meta-schema, or aggregate-phase resolution rules.
 
-Output format version: **`x-sjon-export-version: 1`**. The exporter covers primitives, closed/open forms, typed/untyped vectors, compact members, and literal defaults; discriminated variants, exclusive groups, head-sets (resolved at the slot: `$ref` for a global member, inline body for a slot-local one), unions, slot-local forms (inline anonymous union — open, or closed when the slot also carries a head-set), and rich member-sets (including digit-leading spellings, pinned to their `$num` wire shape); numeric bounds (including `:multiple-of` → `multipleOf`), key dependencies (`:requires` → `dependentRequired`), positional counts both per head and over the whole head-set (`contains` / `minContains` / `maxContains`, the set's over an `anyOf` of its members, plus `$children` in `required` when either level declares a floor), unit-bearing numbers (`$num` tuple via `prefixItems`), unitless numbers (`:reject`), GPU representation tags (`x-sjon-gpu-repr` + branded `F32`…`F16`), variable-arity vectors (`minItems`/`maxItems`), the `scalar-or-ref` shorthand (exported as its desugared union), string bounds (`minLength`/`maxLength`/`pattern`/`format`), cross-ref annotations (`x-sjon-cross-ref` carrying the target, one form or a group of them, plus `name-key`, `acyclic`, and `scope-form` / `provider` + `source-key` when set), the per-plugin layout (with cross-file `$ref` resolution), multi-key exclusive-group bundles, and positional flag-sets (`x-sjon-positional-flags`). Known limitations are listed under *What's not in this exporter* below.
+Output format version: **`x-sjon-export-version: 2`**. The exporter covers primitives, closed/open forms, typed/untyped vectors, compact members, and literal defaults; discriminated variants, exclusive groups, head-sets (resolved at the slot: `$ref` for a global member, inline body for a slot-local one), unions, slot-local forms (inline anonymous union — open, or closed when the slot also carries a head-set), and rich member-sets (including digit-leading spellings, pinned to their `$num` wire shape); numeric bounds (including `:multiple-of` → `multipleOf`), key dependencies (`:requires` → `dependentRequired`), positional counts both per head and over the whole head-set (`contains` / `minContains` / `maxContains`, the set's over an `anyOf` of its members, plus `$children` in `required` when either level declares a floor), unit-bearing numbers (`$num` tuple via `prefixItems`), unitless numbers (`:reject`), GPU representation tags (`x-sjon-gpu-repr` + branded `F32`…`F16`), variable-arity vectors (`minItems`/`maxItems`), the `scalar-or-ref` shorthand (exported as its desugared union), string bounds (`minLength`/`maxLength`/`pattern`/`format`), cross-ref annotations (`x-sjon-cross-ref` carrying the target, one form or a group of them, plus `name-key`, `acyclic`, and `scope-form` / `provider` + `source-key` when set), the per-plugin layout (with cross-file `$ref` resolution), multi-key exclusive-group bundles, and positional flag-sets (`x-sjon-positional-flags`). Known limitations are listed under *What's not in this exporter* below.
 
 ## Intended consumers
 
@@ -46,7 +46,8 @@ Headline 2020-12 features used:
 
 One declaration file per export, with:
 - A small **prelude** declaring `Keyword<S>`, `Symbol_<S>`, `SjonDate`, `SjonTime`, `SjonExpr<T>`, and `CrossRef<TargetForm, S>` — branded primitives that round-trip through canonical JSON.
-- One `interface <Plugin>_<Form> { … }` per simple form, or one `type <Plugin>_<Form> = | { … } | { … }` per discriminated form.
+- One `interface <Plugin>_<Form> { … }` per simple form whose groups are all skipped-open or defaulted (see *Exclusive groups* below), or one `type <Plugin>_<Form> = | { … } | { … }` per discriminated form.
+- A simple form with at least one **structurally enforced** exclusive group (closed form, no default on any alternative key) is a type alias instead: an anonymous base object intersected with a union of per-alternative arms (`type <Plugin>_<Form> = { …base… } & ( | ({ …arm… } & _SjonNotAll<…>) … )`). Open forms and groups with a defaulted alternative key keep the interface/branch spelling with the `@sjon-exclusive-group` JSDoc only. A **variant-scoped** group intersects its arms into that variant's branch only; a **form-level** group on a discriminated form constrains keys every branch repeats, so it intersects the whole parenthesised variant union (`type <Plugin>_<Form> = ( | {branch} | … ) & (arms…)`), never a single branch.
 - A per-plugin barrel: `export type Sjon<Plugin> = Form1 | Form2 | …;`.
 
 ### Intermediate IR (`--target=intermediate`)
@@ -117,7 +118,7 @@ Every construct lands in one of three buckets:
 
 | SJON | JSON Schema | TS | Bucket |
 |---|---|---|---|
-| Closed form | `{type:"object", properties, required, additionalProperties:false}` | `interface … { … }` | ENFORCED |
+| Closed form | `{type:"object", properties, required, additionalProperties:false}` | `interface … { … }` when no group is structurally enforced; `type … = { base } & (arms)` when one is (see *Exclusive groups*) | ENFORCED |
 | Open form | `{… additionalProperties:true}` | `interface … { …; [key: string]: unknown }` | ENFORCED + TS soundness gap (TS lets you assign to `$form`) |
 | `$$`-escape on a `$`-prefixed user key | property name doubled (`$foo` → `$$foo`) | quoted property name `"$$foo"` | ENFORCED |
 | Positional `.none` | no `$children` property | no `$children` field | ENFORCED |
@@ -152,10 +153,18 @@ A digit-leading member is a `number_with_unit` on the wire (LANGUAGE.md §6.5), 
 
 | SJON | JSON Schema | TS | Bucket |
 |---|---|---|---|
-| `exactly_one [a, b, c]` (single-key bundles) | `oneOf:[{required:["a"]}, {required:["b"]}, {required:["c"]}]` | `@sjon-exclusive-group exactly-one [a, b, c]` JSDoc | ENFORCED (schema) + DOCS-ONLY (TS) |
-| `at_most_one [a, b]` (N=2) | `not:{allOf:[{required:["a"]}, {required:["b"]}]}` | same JSDoc | ENFORCED (schema) |
-| `at_most_one [a, b, c]` (N≥3) | `not:{anyOf:[{allOf:[…]}, …]}` pairwise | same JSDoc | ENFORCED (schema) |
-| Multi-key bundles (`(alt :keys [from to])` xor `(alt :keys [at])`) | each bundle becomes one `{required:[<bundle>]}` entry — bundle "present" iff every key in `required` is present | same JSDoc | ENFORCED (schema, all-or-nothing per JSON Schema's `required` semantics) |
+| `exactly_one [a, b, c]` (single-key bundles) | `oneOf:[{required:["a"]}, {required:["b"]}, {required:["c"]}]` | structural arms or JSDoc-only, per the state table below | ENFORCED (schema) + TS per state below |
+| `at_most_one [a, b]` (N=2) | `not:{allOf:[{required:["a"]}, {required:["b"]}]}` | structural arms or JSDoc-only, per the state table below | ENFORCED (schema) + TS per state below |
+| `at_most_one [a, b, c]` (N≥3) | `not:{anyOf:[{allOf:[…]}, …]}` pairwise | structural arms or JSDoc-only, per the state table below | ENFORCED (schema) + TS per state below |
+| Multi-key bundles (`(alt :keys [from to])` xor `(alt :keys [at])`) | each bundle becomes one `{required:[<bundle>]}` entry — bundle "present" iff every key in `required` is present | structural arms or JSDoc-only, per the state table below | ENFORCED (schema, all-or-nothing per JSON Schema's `required` semantics) + TS per state below |
+
+The TypeScript backend classifies every group into one of three states; the choice is per group, so one form can enforce one group and leave a sibling defaulted. Variant-scoped groups follow the same rules inside their active branch.
+
+| Group state | Condition | Emitted TypeScript | Bucket |
+|---|---|---|---|
+| **enforced** | Closed form, and no alternative key carries a default. | The base interface becomes an anonymous object literal; the form is a type alias `Base & (arms)`. Each alternative requires all of its keys and intersects `_SjonNotAll` over every *competing alternative* separately (never one flattened key set). `exactly-one` is the union of those arms; `at-most-one` prepends a none-arm in which all grouped keys are `?: never`. Grouped keys are omitted from the base, including keys declared `:optional false`; only the active arm requires them. The `@sjon-exclusive-group` JSDoc is retained. | ENFORCED (TS) + ANNOTATED |
+| **skipped-open** | The form is open (`:open true`), so unknown keys round-trip and the runtime bypasses the group sweep. | The existing interface/branch is preserved with the grouped keys' declared optionality and the index signature; no group intersection is added. The JSDoc is retained. | DOCS-ONLY (TS) |
+| **defaulted** | Any alternative key carries a default. The **whole group** is skipped, not merely the defaulted alternative. | All grouped keys stay in the base/current branch with their existing optionality/default representation; no arms are added. The JSDoc is retained. | DOCS-ONLY (TS) |
 
 ### Numeric and string bounds
 
@@ -206,11 +215,16 @@ A target group is one namespace over several forms, where a union over two cross
 | …with `:ref R` naming the reference half | desugars to `union [B R]`, so the second alternative exports as whatever kind `R` is. With `R` a cross-ref kind: `{anyOf:[<B>, <$sym envelope + x-sjon-cross-ref>], x-sjon-union-alternatives:["B", "R"]}` | `<B-type> \| CrossRef<"<target>">`; the checked reference reaches the `.d.ts` with no export-side code | ENFORCED (acceptance) + ANNOTATED |
 | First-match dispatch order | — | — | NOT EXPOSED — `anyOf` accepts as long as one alternative matches; the SJON validator picks the first one. |
 | Union over two cross-ref kinds | `{anyOf:[<$sym envelope + x-sjon-cross-ref A>, <… B>], …}` | `CrossRef<"A"> \| CrossRef<"B">` | ENFORCED (envelope) + ANNOTATED — both targets survive into the type, and each branch keeps its own `x-sjon-cross-ref`. What does *not* survive is `union_ambiguous`: it is a document-time observation (this name is registered in both targets), and export has no document. |
-| Slot-local forms (`(key … :type form (form …) …)`) | `{anyOf:[<inline form-a>, …, {type:"object", required:["$form"]}], x-sjon-local-forms:[…]}` | `<inline-a> \| … \| { readonly $form: string }` | ENFORCED (acceptance) + ANNOTATED |
+| Slot-local forms (`(key … :type form (form …) …)`) | `{anyOf:[<inline form-a>, …, {type:"object", required:["$form"]}], x-sjon-local-forms:[…]}` | `<inline-a> \| … \| { readonly $form: "<global>" } \| … \| { readonly $form: "<global>"; readonly $ns: string } \| …` | ENFORCED (acceptance) + ANNOTATED — every TS fallback arm names a global head (unqualified minus the shadowed local heads, plus one qualified arm per global), so an enforced local group cannot be bypassed through the fallback, including when the value arrives through a variable, a function parameter, or `JSON.parse` |
 
 ### Slot-local forms
 
-A `:type form` slot carrying inline `local_forms` (LANGUAGE.md §6.3.1) lowers to an **inline anonymous union** — not a `$ref` set, because locals have no global `$defs` entry. Each local form's full body is emitted *in place* (so a discriminated local keeps its `if/then` chain and a nested local slot expands recursively), followed by a **trailing open generic branch** (`{type:"object", required:["$form"]}` in JSON Schema, `{ readonly $form: string }` in TS) standing in for the additive global fallback. It is `anyOf`, not `oneOf`: the open branch overlaps every specific branch, so exactly-one would always fail (the same reason the union mapping uses `anyOf`). The accepted local names ride as the `x-sjon-local-forms` annotation; the local-first/global resolution order is SJON-only. An `info` warning (`local_forms_emitted_inline`) records the lowering per slot.
+A `:type form` slot carrying inline `local_forms` (LANGUAGE.md §6.3.1) lowers to an **inline anonymous union** — not a `$ref` set, because locals have no global `$defs` entry. Each local form's full body is emitted *in place* (so a discriminated local keeps its `if/then` chain and a nested local slot expands recursively), followed by the **additive global fallback**. It is `anyOf`, not `oneOf`: the fallback overlaps every specific branch, so exactly-one would always fail (the same reason the union mapping uses `anyOf`). The accepted local names ride as the `x-sjon-local-forms` annotation; the local-first/global resolution order is SJON-only. An `info` warning (`local_forms_emitted_inline`) records the lowering per slot.
+
+The fallback is spelled per channel, and the spelling is what keeps an enforced local group honest in TS:
+
+- **JSON Schema** — a trailing open generic branch (`{type:"object", required:["$form"]}`), exactly as before. A local that omits its required keys still satisfies it (one-way acceptance; see the `local-forms` row in the round-trip skips).
+- **TypeScript** — the globals enumerated on two arms: unqualified (`{ readonly $form: "<name>" }`, one per global, the slot's local head names excluded) and qualified (`{ readonly $form: "<name>"; readonly $ns: string }`, one per global, shadowed names included). No arm spells `$form: string`: TypeScript's excess-property checking fires on fresh object literals only, so any open arm — unqualified or qualified-any — admits a local value violating its enforced group (both alternatives, or neither) the moment it arrives through a variable, a function parameter, or `JSON.parse`. A bare head is resolved local-first **with shadowing** at validate time, so a local name never legitimately reaches a global; a qualified head (`$ns` present) bypasses locals and resolves against the plugin catalog, where a `$ns` naming no plugin — or a plugin without that form — is `unknown_form`, so a qualified head naming a local-only name answers no arm, exactly as it has no resolution. Global *key* enforcement (and `$ns` pairing) on the fallback arms stays SJON-runtime-only, as it always was.
 
 #### …behind a head-set: the closed shape
 
@@ -541,7 +555,7 @@ The test skips these categories (their semantics cannot be enforced by JSON Sche
 | `use-plugin` | Resolver-bound cases need project-file plumbing the test doesn't set up |
 | `pair-a` | Cross-plugin head-set; the round-trip test loads only one plugin's manifest |
 
-`local-forms` is **not** skipped — it round-trips because the inline union's trailing open branch (`{required:["$form"]}`) accepts any `{$form}` object, so every SJON-valid document passes ajv. The cost is the other direction: that open branch also accepts a *local* form that omits its required keys (`{$form:"circle"}` with no `:r`) — such an object still satisfies the open branch. So on an **open** locals slot, **required-key enforcement and local-first shadowing are SJON-runtime-only**: the exported schema documents the local shapes (and pins them for IntelliSense) but does not reject an under-specified local. This is consistent with the one-way assertion above.
+`local-forms` is **not** skipped — it round-trips because the inline union's trailing open branch (`{required:["$form"]}`) accepts any `{$form}` object, so every SJON-valid document passes ajv. The cost is the other direction: that open branch also accepts a *local* form that omits its required keys (`{$form:"circle"}` with no `:r`) — such an object still satisfies the open branch. So on an **open** locals slot, **required-key enforcement and local-first shadowing are SJON-runtime-only**: the exported schema documents the local shapes (and pins them for IntelliSense) but does not reject an under-specified local. This is consistent with the one-way assertion above. (The `.d.ts` is stricter than the schema here: its fallback enumerates the globals on unqualified and qualified arms alike, so a shadowed global's *shape* — `{$form:"circle", radius:…}` on a bare head — is a compile error even where ajv waves it through; see *Slot-local forms*.)
 
 `headset-locals` is not skipped either, and it is the counterexample: put a head-set on the same slot and the open branch goes away, so ajv enforces the local's required keys *and* rejects an out-of-set head. That fixture drives both directions deliberately — the one-way assertion is the harness's floor, not a ceiling on what a closed slot can be checked for.
 
@@ -549,15 +563,15 @@ The test skips these categories (their semantics cannot be enforced by JSON Sche
 
 The exporter is **canonical-mode only**. Compact JSON (`sjon to-json --compact`) collapses keyword/symbol/string into bare strings and drops unit suffixes — a schema written against compact JSON would accept bare strings where keywords are required. A future `--mode=compact` could land behind a loud warning, but it isn't planned.
 
-The TS-parity port (`hosts/typescript-parity/src/schemaExport/`) does not yet parse the manifest syntax for discriminator + variants, exclusive groups, or `union_of` — the IR fields are wired but the loader leaves them null/empty until `loader.ts` catches up. Byte-for-byte parity with the Zig goldens on those constructs depends on that follow-up; structural emission is already at full parity for every other fixture.
+The TS-parity port (`hosts/typescript-parity/src/schemaExport/`) parses discriminator + variants, exclusive groups (form-, variant-, and slot-local-scoped), `union_of`, unit shapes, and `:description`, and emits them byte-identically to the Zig exporter — the parity tests in `hosts/typescript-parity/test/schemaExport.test.ts` byte-compare the `.d.ts` output against the `examples/plugins/*/[name].d.ts.golden` fixtures wired into the set. `lowering` is the one M2 field still pinned null: it declares a host-owned hook the declarative-only port has no registry for.
 
 ## Versioning
 
 Every emitted artifact carries the format version:
 
-- JSON Schema: `"x-sjon-export-version": 1` on the top-level object.
-- TypeScript: `// sjon-export-version: 1` on line 1.
-- IR: `"version": 1` on the top-level object.
+- JSON Schema: `"x-sjon-export-version": 2` on the top-level object.
+- TypeScript: `// sjon-export-version: 2` on line 1.
+- IR: `"version": 2` on the top-level object.
 
 Breaking format changes bump the integer. There's no deprecation window — downstream consumers should re-run the exporter and re-diff after a bump.
 

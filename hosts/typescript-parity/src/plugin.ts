@@ -52,6 +52,9 @@ export interface KeySpec {
   readonly name: string;
   readonly valueType: ValueType;
   readonly optional: boolean;
+  /** Author prose from `:description`, surfaced as JSDoc by the exporters.
+   *  Absent when the manifest declared none (or declared it empty). */
+  readonly description?: string;
   /** The parsed `:default` value, or `null` if the key has none. */
   readonly default?: KeyDefault | null;
   /**
@@ -173,6 +176,9 @@ export interface ExclusiveGroup {
 
 export interface FormSpec {
   readonly name: string;
+  /** Author prose from `:description`, surfaced by the exporters. Absent
+   *  when the manifest declared none (or declared it empty). */
+  readonly description?: string;
   readonly keys: readonly KeySpec[];
   readonly positional: PositionalSpec;
   readonly open: boolean;

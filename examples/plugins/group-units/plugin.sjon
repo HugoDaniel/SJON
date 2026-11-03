@@ -1,0 +1,25 @@
+; A unit-bearing key inside an enforced exclusive group.
+;
+; `(span …)` carries an exactly-one group over `width` / `legacy`, where
+; `width` is a unit-bearing number (`mm` / `cm` / `m`). The unit JSDoc
+; forces the multi-line arm shape, so the emitted `.d.ts` must carry
+; `@sjon-unit` inside the arm and a `readonly [number, "<unit>"]` tuple —
+; the exact bytes both emitters are byte-compared on (the fixture that
+; was missing when the TS port diverged on unit keys).
+
+(plugin :name group-units :version "1.0.0"
+  :description "Reference plugin for a unit-bearing key inside an enforced group."
+
+  (value-kind :name length
+    :description "A metric length; the unit suffix is required."
+    :underlying number
+    :unit (unit-shape :required true :allowed [mm cm m]))
+
+  (form :name span
+    :description "An exactly-one group whose first arm carries a unit-bearing key."
+    (key :name label :type string :optional true)
+    (key :name width :type length :optional true)
+    (key :name legacy :type number :optional true)
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [width])
+      (alt :keys [legacy]))))

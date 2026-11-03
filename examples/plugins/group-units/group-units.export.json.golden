@@ -1,0 +1,80 @@
+{
+  "version": 2,
+  "plugins": [
+    {
+      "name": "group-units",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "span",
+          "description": "An exactly-one group whose first arm carries a unit-bearing key.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "label",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "width",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "number_with_unit",
+                "required": true,
+                "allowed": [
+                  "mm",
+                  "cm",
+                  "m"
+                ]
+              }
+            },
+            {
+              "name": "legacy",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "number"
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": [
+        {
+          "name": "length",
+          "description": "A metric length; the unit suffix is required.",
+          "shape": {
+            "kind": "number_with_unit",
+            "required": true,
+            "allowed": [
+              "mm",
+              "cm",
+              "m"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "code": "number_with_unit_emitted_via_prefix_items",
+      "severity": "info",
+      "message": "value-kind `length` emitted as JSON Schema object with `$num` prefixItems [magnitude, unit] (required=true, allowed-units=3); SJON-aware tooling reads the canonical form via the JSON bridge",
+      "plugin_name": "group-units",
+      "kind_name": "length"
+    },
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `span` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin_name": "group-units",
+      "form_name": "span"
+    }
+  ]
+}

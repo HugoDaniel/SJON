@@ -1,6 +1,6 @@
 {
   "name": "sjon-host-ts",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Reference second-host implementation of the SJON validator (TypeScript).",
   "private": true,
   "type": "module",
@@ -9,7 +9,8 @@
     "node": ">=20"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "npm run typecheck:matrix",
+    "typecheck:matrix": "tsc --noEmit && tsc --noEmit -p test/typecheck/tsconfig.exact-off.json",
     "test": "node --test --experimental-strip-types 'test/*.test.ts'"
   },
   "dependencies": {

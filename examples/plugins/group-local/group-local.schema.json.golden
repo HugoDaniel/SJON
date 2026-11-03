@@ -1,0 +1,308 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 2,
+  "x-sjon-export-warnings": [
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `inner` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin": "group-local",
+      "form": "inner"
+    },
+    {
+      "code": "local_forms_emitted_inline",
+      "severity": "info",
+      "message": "slot `:wrap` on form `canvas` declares 1 local form(s) — emitted as an inline union plus the additive global fallback (an open generic branch in JSON Schema, an enumerated-plus-qualified arm in TypeScript); local-first/global resolution order is SJON-only",
+      "plugin": "group-local",
+      "form": "canvas",
+      "key": "wrap"
+    },
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `hint` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin": "group-local",
+      "form": "hint"
+    },
+    {
+      "code": "local_forms_emitted_inline",
+      "severity": "info",
+      "message": "slot `:pick` on form `board` declares 1 local form(s) — emitted as an inline union plus the additive global fallback (an open generic branch in JSON Schema, an enumerated-plus-qualified arm in TypeScript); local-first/global resolution order is SJON-only",
+      "plugin": "group-local",
+      "form": "board",
+      "key": "pick"
+    },
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `tune` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin": "group-local",
+      "form": "tune"
+    },
+    {
+      "code": "local_forms_emitted_inline",
+      "severity": "info",
+      "message": "slot `:pick` on form `shelf` declares 1 local form(s) — emitted as an inline union plus the additive global fallback (an open generic branch in JSON Schema, an enumerated-plus-qualified arm in TypeScript); local-first/global resolution order is SJON-only",
+      "plugin": "group-local",
+      "form": "shelf",
+      "key": "pick"
+    }
+  ],
+  "$defs": {
+    "form.group-local.canvas": {
+      "type": "object",
+      "description": "A canvas whose local wrap form carries an exclusive group.",
+      "properties": {
+        "$form": {
+          "const": "canvas"
+        },
+        "$ns": {
+          "const": "group-local"
+        },
+        "wrap": {
+          "anyOf": [
+            {
+              "type": "object",
+              "description": "A closed local form with an exactly-one group.",
+              "properties": {
+                "$form": {
+                  "const": "inner"
+                },
+                "$ns": {
+                  "const": "group-local"
+                },
+                "a": {
+                  "type": "number"
+                },
+                "b": {
+                  "type": "number"
+                },
+                "tag": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$form"
+              ],
+              "allOf": [
+                {
+                  "oneOf": [
+                    {
+                      "required": [
+                        "a"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "b"
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "unevaluatedProperties": false,
+              "x-sjon-exclusive-groups": [
+                {
+                  "cardinality": "exactly_one",
+                  "alternatives": [
+                    [
+                      "a"
+                    ],
+                    [
+                      "b"
+                    ]
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "object",
+              "required": [
+                "$form"
+              ]
+            }
+          ],
+          "x-sjon-local-forms": [
+            "inner"
+          ]
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "additionalProperties": false
+    },
+    "form.group-local.board": {
+      "type": "object",
+      "description": "A board whose local pick form is open — its group is annotation-only.",
+      "properties": {
+        "$form": {
+          "const": "board"
+        },
+        "$ns": {
+          "const": "group-local"
+        },
+        "pick": {
+          "anyOf": [
+            {
+              "type": "object",
+              "description": "An open local form; the group sweep is bypassed.",
+              "properties": {
+                "$form": {
+                  "const": "hint"
+                },
+                "$ns": {
+                  "const": "group-local"
+                },
+                "a": {
+                  "type": "number"
+                },
+                "b": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "$form"
+              ],
+              "allOf": [
+                {
+                  "oneOf": [
+                    {
+                      "required": [
+                        "a"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "b"
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "unevaluatedProperties": true,
+              "x-sjon-exclusive-groups": [
+                {
+                  "cardinality": "exactly_one",
+                  "alternatives": [
+                    [
+                      "a"
+                    ],
+                    [
+                      "b"
+                    ]
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "object",
+              "required": [
+                "$form"
+              ]
+            }
+          ],
+          "x-sjon-local-forms": [
+            "hint"
+          ]
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "additionalProperties": false
+    },
+    "form.group-local.shelf": {
+      "type": "object",
+      "description": "A shelf whose local pick form has a defaulted group key.",
+      "properties": {
+        "$form": {
+          "const": "shelf"
+        },
+        "$ns": {
+          "const": "group-local"
+        },
+        "pick": {
+          "anyOf": [
+            {
+              "type": "object",
+              "description": "A closed local form whose group carries a default.",
+              "properties": {
+                "$form": {
+                  "const": "tune"
+                },
+                "$ns": {
+                  "const": "group-local"
+                },
+                "a": {
+                  "type": "number"
+                },
+                "b": {
+                  "type": "number",
+                  "default": 0
+                }
+              },
+              "required": [
+                "$form"
+              ],
+              "allOf": [
+                {
+                  "oneOf": [
+                    {
+                      "required": [
+                        "a"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "b"
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "unevaluatedProperties": false,
+              "x-sjon-exclusive-groups": [
+                {
+                  "cardinality": "exactly_one",
+                  "alternatives": [
+                    [
+                      "a"
+                    ],
+                    [
+                      "b"
+                    ]
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "object",
+              "required": [
+                "$form"
+              ]
+            }
+          ],
+          "x-sjon-local-forms": [
+            "tune"
+          ]
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.group-local.canvas"
+    },
+    {
+      "$ref": "#/$defs/form.group-local.board"
+    },
+    {
+      "$ref": "#/$defs/form.group-local.shelf"
+    }
+  ]
+}

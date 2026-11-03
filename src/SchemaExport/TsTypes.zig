@@ -1,10 +1,13 @@
 //! Model → TypeScript `.d.ts` bytes.
 //!
-//! Emits one interface per form (named `<plugin>_<form>` PascalCase),
-//! one type alias per value-kind, and a barrel `Sjon<plugin>` union for
-//! discoverability. The output describes the *canonical* JSON shape of
-//! `sjon to-json` — `$form`, `$ns`, `$kw`, `$sym`, etc. — not the
-//! source-level S-expression syntax.
+//! Emits one interface or type alias per form (named `<plugin>_<form>`
+//! PascalCase — an interface for the plain shapes, an alias whose
+//! anonymous base is intersected by arm unions when an exclusive group
+//! is structurally enforced), one type alias per value-kind, and a
+//! barrel `Sjon<plugin>` union for discoverability. The output
+//! describes the *canonical* JSON shape of `sjon to-json` — `$form`,
+//! `$ns`, `$kw`, `$sym`, etc. — not the source-level S-expression
+//! syntax.
 //!
 //! Branded primitives (`Keyword_<S>`, `Symbol_<S>`, `Date_`, `Time_`,
 //! `Expr_`) sit at the top of every emit so consumers can `import` the
@@ -37,8 +40,11 @@ pub fn emit(
     model: Model.Model,
     warnings: []const Warnings.Warning,
 ) Error![]const u8 {
+    const globals = try dedupeGlobalFormNames(a, model);
     var aw: std.Io.Writer.Allocating = .init(a);
     errdefer aw.deinit();
+    current_global_forms = globals;
+    defer current_global_forms = &.{};
     writeAll(&aw.writer, model, warnings, null) catch |err| switch (err) {
         error.WriteFailed => return error.OutOfMemory,
     };
@@ -55,8 +61,11 @@ pub fn emitForPlugin(
     plugin: Model.Plugin_,
     warnings: []const Warnings.Warning,
 ) Error![]const u8 {
+    const globals = try dedupeGlobalFormNames(a, model);
     var aw: std.Io.Writer.Allocating = .init(a);
     errdefer aw.deinit();
+    current_global_forms = globals;
+    defer current_global_forms = &.{};
     writeAll(&aw.writer, model, warnings, plugin.name) catch |err| switch (err) {
         error.WriteFailed => return error.OutOfMemory,
     };
@@ -64,6 +73,32 @@ pub fn emitForPlugin(
 }
 
 threadlocal var current_filter: ?[]const u8 = null;
+
+/// The unqualified-global enumeration a `form_locals` fallback offers
+/// beside its local arms: every form name in the model, deduped by name,
+/// in declaration order. Set for the duration of one emit (beside
+/// `current_filter`) so `writeShape` reaches it without threading a
+/// parameter through every writer.
+threadlocal var current_global_forms: []const []const u8 = &.{};
+
+/// Compute `current_global_forms`'s value. A bare (unqualified) head is
+/// resolved local-first with shadowing at validate time, so the honest
+/// unqualified fallback for a locals slot is the global catalog minus
+/// the slot's local head names — never an open `$form: string`, which a
+/// local value violating its enforced group would satisfy.
+fn dedupeGlobalFormNames(a: Allocator, model: Model.Model) Error![]const []const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    errdefer names.deinit(a);
+    outer: for (model.plugins) |p| {
+        for (p.forms) |f| {
+            for (names.items) |n| {
+                if (std.mem.eql(u8, n, f.name)) continue :outer;
+            }
+            try names.append(a, f.name);
+        }
+    }
+    return names.toOwnedSlice(a);
+}
 
 fn writeAll(
     w: *std.Io.Writer,
@@ -76,6 +111,14 @@ fn writeAll(
 
     try writeHeader(w, model.version, warnings);
     try writePrelude(w);
+    // The helper rides directly under the brand prelude and before
+    // imports/forms, once, and only when something in this file will
+    // actually reference it.
+    if (fileHasEnforcedGroup(model, filter_plugin)) {
+        try w.writeAll(not_all_helper_decl);
+        try w.writeByte('\n');
+    }
+    try w.writeByte('\n');
     if (filter_plugin) |only| {
         try writeCrossPluginImports(w, model, only);
     }
@@ -205,6 +248,14 @@ fn writeHeader(
     try w.writeByte('\n');
 }
 
+/// The `_SjonNotAll` helper, spelled exactly as it must appear once per
+/// output file: directly after the brand prelude, non-exported, only when
+/// that file contains at least one structurally enforced group. The
+/// underscore prefix avoids the barrel a plugin literally named `not-all`
+/// would produce (`SjonNotAll`).
+const not_all_helper_decl =
+    "type _SjonNotAll<K extends string> = K extends K ? { [P in K]?: never } : never;";
+
 fn writePrelude(w: *std.Io.Writer) std.Io.Writer.Error!void {
     try w.writeAll(
         \\export type Keyword<S extends string = string> = { readonly $kw: S };
@@ -219,7 +270,6 @@ fn writePrelude(w: *std.Io.Writer) std.Io.Writer.Error!void {
         \\export type U16 = number & { readonly __sjonRepr?: "u16" };
         \\export type F16 = number & { readonly __sjonRepr?: "f16" };
         \\
-        \\
     );
 }
 
@@ -231,15 +281,349 @@ fn writeForm(
     try writeFormDoc(w, f);
     if (f.discriminator) |d| {
         try writeDiscriminatedFormType(w, p, f, d);
+    } else if (hasEnforcedFormGroup(f)) {
+        try writeFormType(w, p, f);
     } else {
         try writeFormInterface(w, p, f);
     }
 }
 
+/// True when at least one form-level group on `f` is structurally
+/// enforced (closed scope, no defaulted alternative key).
+fn hasEnforcedFormGroup(f: Model.Form) bool {
+    for (f.exclusive_groups) |g| {
+        if (groupState(f, g) == .enforced) return true;
+    }
+    return false;
+}
+
+/// True when `name` is claimed by any enforced group over `scope_keys`
+/// (the form's keys, or one variant's overlay). Only enforced groups
+/// take their keys out of the base — a defaulted or open group leaves
+/// every key where the interface spelling put it.
+fn isKeyGroupedEnforced(
+    open: bool,
+    scope_keys: []const Model.Key,
+    groups: []const Model.ExclusiveGroup,
+    name: []const u8,
+) bool {
+    for (groups) |g| {
+        if (groupStateForScope(open, scope_keys, g) != .enforced) continue;
+        for (g.alternatives) |alt| {
+            for (alt) |kn| {
+                if (std.mem.eql(u8, kn, name)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// The `Model.Key` named `name` in `scope_keys`, or null. The manifest
+/// guarantees every alternative name resolves in its scope; the null arm
+/// only exists for hand-built models.
+fn scopeKey(keys: []const Model.Key, name: []const u8) ?Model.Key {
+    for (keys) |k| {
+        if (std.mem.eql(u8, k.name, name)) return k;
+    }
+    return null;
+}
+
+/// Whether this file needs `_SjonNotAll`: any enforced group anywhere in
+/// the emitted forms — form-level, variant-scoped, or on a slot-local
+/// form reached through a compound shape.
+fn fileHasEnforcedGroup(model: Model.Model, filter_plugin: ?[]const u8) bool {
+    for (model.plugins) |p| {
+        if (filter_plugin) |only| {
+            if (!std.mem.eql(u8, p.name, only)) continue;
+        }
+        for (p.forms) |f| {
+            if (formHasEnforcedGroup(f)) return true;
+        }
+    }
+    return false;
+}
+
+fn formHasEnforcedGroup(f: Model.Form) bool {
+    if (hasEnforcedFormGroup(f)) return true;
+    if (f.discriminator) |d| {
+        for (d.variants) |v| {
+            for (v.exclusive_groups) |g| {
+                if (groupStateForScope(f.open, v.keys, g) == .enforced) return true;
+            }
+        }
+    }
+    for (f.keys) |k| {
+        if (shapeHasEnforcedGroup(k.value)) return true;
+    }
+    switch (f.positional) {
+        .kind => |shape| return shapeHasEnforcedGroup(shape),
+        else => {},
+    }
+    return false;
+}
+
+fn shapeHasEnforcedGroup(shape: Model.ValueShape) bool {
+    switch (shape) {
+        .vector => |vs| return shapeHasEnforcedGroup(vs.element.*),
+        .union_of => |alts| {
+            for (alts) |alt| {
+                if (shapeHasEnforcedGroup(alt.shape)) return true;
+            }
+            return false;
+        },
+        .form_locals => |forms| {
+            for (forms) |lf| {
+                if (formHasEnforcedGroup(lf)) return true;
+            }
+            return false;
+        },
+        .form_heads => |hs| {
+            for (hs.refs) |ref| {
+                switch (ref.body) {
+                    .local => |lf| if (formHasEnforcedGroup(lf.*)) return true,
+                    else => {},
+                }
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
+/// Column geometry for the block-shaped arm union. The top-level alias
+/// puts pipes at column 2; a variant branch nests four deeper.
+const ArmLayout = struct {
+    pipe: []const u8,
+    key: []const u8,
+    close: []const u8,
+    cont: []const u8,
+};
+
+const arm_layout_top = ArmLayout{
+    .pipe = "  ",
+    .key = "      ",
+    .close = "    ",
+    .cont = "      ",
+};
+
+const arm_layout_variant = ArmLayout{
+    .pipe = "      ",
+    .key = "          ",
+    .close = "        ",
+    .cont = "          ",
+};
+
+/// A form with at least one enforced exclusive group emits as an
+/// anonymous-base type alias intersected by one arm-union per group,
+/// in declaration order:
+///
+///     export type P_Choice = { base } & (arms…) & (arms…);
+///
+/// Grouped keys leave the base — even `:optional false` ones — because
+/// only an active arm may require them; ordinary base keys keep the
+/// interface path's sorted emission. Skipped groups (open, defaulted)
+/// contribute no intersection and keep their keys in the base.
+fn writeFormType(w: *std.Io.Writer, p: Model.Plugin_, f: Model.Form) std.Io.Writer.Error!void {
+    try w.writeAll("export type ");
+    try writeFormTypeName(w, p.name, f.name);
+    try w.writeAll(" = {\n");
+    try w.writeAll("  $form: \"");
+    try w.writeAll(f.name);
+    try w.writeAll("\";\n");
+    try w.writeAll("  $ns: \"");
+    try w.writeAll(p.name);
+    try w.writeAll("\";\n");
+    const indices = Model.sortedKeys(f.keys);
+    for (indices.slice()) |idx| {
+        if (isKeyGroupedEnforced(f.open, f.keys, f.exclusive_groups, f.keys[idx].name)) continue;
+        try writeKey(w, f.keys[idx], "  ");
+    }
+    switch (f.positional) {
+        .none => {},
+        .any => try w.writeAll("  $children?: unknown[];\n"),
+        .kind => |shape| {
+            try writeChildCountsDoc(w, shape, "  ");
+            try w.writeAll("  $children?: Array<");
+            try writeShape(w, shape);
+            try w.writeAll(">;\n");
+        },
+    }
+    try w.writeAll("}");
+    var first = true;
+    for (f.exclusive_groups) |g| {
+        if (groupState(f, g) != .enforced) continue;
+        try w.writeAll(if (first) " & (\n" else ") & (\n");
+        first = false;
+        try writeGroupArms(w, f.keys, g, arm_layout_top);
+    }
+    try w.writeAll(");\n\n");
+}
+
+/// The arm union of one enforced group, one line per arm at `layout`'s
+/// pipe column (`at_most_one` leads with the none-arm). The caller
+/// writes the wrapping `& (\n` before and `)` after.
+fn writeGroupArms(
+    w: *std.Io.Writer,
+    scope_keys: []const Model.Key,
+    group: Model.ExclusiveGroup,
+    layout: ArmLayout,
+) std.Io.Writer.Error!void {
+    if (group.cardinality == .at_most_one) {
+        try w.writeAll(layout.pipe);
+        try w.writeAll("| { ");
+        var first = true;
+        for (group.alternatives) |alt| {
+            for (alt) |kn| {
+                if (!first) try w.writeAll("; ");
+                first = false;
+                try writeKeyName(w, kn);
+                try w.writeAll("?: never");
+            }
+        }
+        try w.writeAll(" }\n");
+    }
+    for (group.alternatives, 0..) |_, i| {
+        try w.writeAll(layout.pipe);
+        try w.writeAll("| ");
+        try writeArm(w, scope_keys, group, i, layout, false);
+        try w.writeByte('\n');
+    }
+}
+
+/// The same arm union on one line, for an inline local-form literal:
+/// `({ a: number } & _SjonNotAll<"b">) | ({ b: number } & _SjonNotAll<"a">)`.
+/// The caller writes the wrapping ` & (` and `)`.
+fn writeGroupArmsInline(
+    w: *std.Io.Writer,
+    scope_keys: []const Model.Key,
+    group: Model.ExclusiveGroup,
+) std.Io.Writer.Error!void {
+    var wrote = false;
+    if (group.cardinality == .at_most_one) {
+        try w.writeAll("{");
+        var first = true;
+        for (group.alternatives) |alt| {
+            for (alt) |kn| {
+                try w.writeAll(if (first) " " else "; ");
+                first = false;
+                try writeKeyName(w, kn);
+                try w.writeAll("?: never");
+            }
+        }
+        try w.writeAll(" }");
+        wrote = true;
+    }
+    for (group.alternatives, 0..) |_, i| {
+        if (wrote) try w.writeAll(" | ");
+        wrote = true;
+        try writeArm(w, scope_keys, group, i, arm_layout_top, true);
+    }
+}
+
+/// One alternative's arm: the alternative's keys required (original
+/// value types, original JSDoc) intersected with one `_SjonNotAll<…>`
+/// **per competing alternative**, in declaration order — never one
+/// flattened key set, which a partial competitor would slip through.
+///
+/// Single-line shape when there is exactly one competitor and no key
+/// JSDoc to carry; the multi-line shape otherwise (the ruling's
+/// `P_Choice`). `inline` forces the single-line shape — inline local
+/// literals carry no JSDoc by design.
+fn writeArm(
+    w: *std.Io.Writer,
+    scope_keys: []const Model.Key,
+    group: Model.ExclusiveGroup,
+    alt_i: usize,
+    layout: ArmLayout,
+    one_line: bool,
+) std.Io.Writer.Error!void {
+    const alt = group.alternatives[alt_i];
+    const multi = !one_line and (group.alternatives.len > 2 or armNeedsDoc(scope_keys, alt));
+    if (!multi) {
+        try w.writeAll("({ ");
+        var first = true;
+        for (alt) |kn| {
+            if (!first) try w.writeAll("; ");
+            first = false;
+            if (scopeKey(scope_keys, kn)) |k| {
+                try writeKeyName(w, k.name);
+                try w.writeAll(": ");
+                try writeShape(w, k.value);
+            } else {
+                try writeKeyName(w, kn);
+                try w.writeAll(": unknown");
+            }
+        }
+        try w.writeAll(" }");
+        for (group.alternatives, 0..) |other, j| {
+            if (j == alt_i) continue;
+            try w.writeAll(" & ");
+            try writeNotAllArg(w, other);
+        }
+        try w.writeAll(")");
+        return;
+    }
+    try w.writeAll("({\n");
+    for (alt) |kn| {
+        var k = scopeKey(scope_keys, kn) orelse
+            Model.Key{ .name = kn, .optional = false, .value = .any };
+        k.optional = false;
+        try writeKey(w, k, layout.key);
+    }
+    var n: usize = 0;
+    const competitors = group.alternatives.len - 1;
+    for (group.alternatives, 0..) |other, j| {
+        if (j == alt_i) continue;
+        if (n == 0) {
+            try w.writeAll(layout.close);
+            try w.writeAll("} & ");
+        } else {
+            try w.writeByte('\n');
+            try w.writeAll(layout.cont);
+            try w.writeAll("& ");
+        }
+        try writeNotAllArg(w, other);
+        n += 1;
+        if (n == competitors) try w.writeAll(")");
+    }
+    if (n == 0) {
+        try w.writeAll(layout.close);
+        try w.writeAll("})");
+    }
+}
+
+/// `_SjonNotAll<"b1" | "b2">` — one competing alternative's key bundle.
+fn writeNotAllArg(
+    w: *std.Io.Writer,
+    alt_names: []const []const u8,
+) std.Io.Writer.Error!void {
+    try w.writeAll("_SjonNotAll<");
+    for (alt_names, 0..) |kn, i| {
+        if (i > 0) try w.writeAll(" | ");
+        try w.writeByte('"');
+        try w.writeAll(kn);
+        try w.writeByte('"');
+    }
+    try w.writeAll(">");
+}
+
+/// True when any key of `alt` carries the JSDoc that forces the
+/// multi-line arm shape.
+fn armNeedsDoc(scope_keys: []const Model.Key, alt: []const []const u8) bool {
+    for (alt) |kn| {
+        if (scopeKey(scope_keys, kn)) |k| {
+            if (keyNeedsDoc(k)) return true;
+        }
+    }
+    return false;
+}
+
 /// Form-level JSDoc: description (if any) followed by one
-/// `@sjon-exclusive-group` line per exclusive group on the form. TS
-/// cannot type-enforce cardinality — the JSDoc is documentation only,
-/// matching the JSON Schema's `x-sjon-exclusive-groups` annotation.
+/// `@sjon-exclusive-group` line per exclusive group on the form. The
+/// annotation is emitted for every group state; closed, default-free
+/// groups additionally get structural arms (see `writeForm`), while
+/// open and defaulted groups stay annotation-only. Matches the JSON
+/// Schema's `x-sjon-exclusive-groups` annotation.
 fn writeFormDoc(w: *std.Io.Writer, f: Model.Form) std.Io.Writer.Error!void {
     const has_desc = f.description.len > 0;
     const has_groups = f.exclusive_groups.len > 0;
@@ -258,7 +642,20 @@ fn writeFormDoc(w: *std.Io.Writer, f: Model.Form) std.Io.Writer.Error!void {
         try w.writeByte('\n');
         if (has_groups) try w.writeAll(" *\n");
     }
-    for (f.exclusive_groups) |g| {
+    try writeExclusiveGroupLines(w, f.exclusive_groups, "");
+    try w.writeAll(" */\n");
+}
+
+/// One `* @sjon-exclusive-group …` content line per group, prefixed by
+/// `indent`. Shared by the form-level doc (`""`) and the per-variant
+/// branch doc (`"  "`) so both scopes spell the annotation identically.
+fn writeExclusiveGroupLines(
+    w: *std.Io.Writer,
+    groups: []const Model.ExclusiveGroup,
+    indent: []const u8,
+) std.Io.Writer.Error!void {
+    for (groups) |g| {
+        try w.writeAll(indent);
         try w.writeAll(" * @sjon-exclusive-group ");
         try w.writeAll(switch (g.cardinality) {
             .exactly_one => "exactly-one",
@@ -274,7 +671,45 @@ fn writeFormDoc(w: *std.Io.Writer, f: Model.Form) std.Io.Writer.Error!void {
         }
         try w.writeAll("]\n");
     }
-    try w.writeAll(" */\n");
+}
+
+/// Eligibility of one exclusive group for structural emission.
+pub const GroupState = enum { enforced, skipped_open, defaulted };
+
+/// Form-scoped eligibility decision.
+pub fn groupState(form: Model.Form, group: Model.ExclusiveGroup) GroupState {
+    return groupStateForScope(form.open, form.keys, group);
+}
+
+/// The scope a group constrains: a form's keys, or one variant's overlay
+/// keys. `open` is the scope's own openness.
+pub fn groupStateForScope(
+    open: bool,
+    keys: []const Model.Key,
+    group: Model.ExclusiveGroup,
+) GroupState {
+    // An open scope round-trips unknown keys, and the runtime bypasses the
+    // group sweep for it, so a structural arm here would reject documents
+    // the validator accepts. Skipping wins over the default check: either
+    // way the group contributes no arm.
+    if (open) return .skipped_open;
+    for (group.alternatives) |alternative| {
+        for (alternative) |name| {
+            // Any defaulted alternative skips the *whole* group, not just
+            // that alternative: defaulted participation depends on whether
+            // a sibling is fully author-present, so the ordinary presence
+            // union is not equivalent.
+            if (scopeKeyHasDefault(keys, name)) return .defaulted;
+        }
+    }
+    return .enforced;
+}
+
+fn scopeKeyHasDefault(keys: []const Model.Key, name: []const u8) bool {
+    for (keys) |k| {
+        if (std.mem.eql(u8, k.name, name)) return k.default != null;
+    }
+    return false;
 }
 
 fn writeFormInterface(w: *std.Io.Writer, p: Model.Plugin_, f: Model.Form) std.Io.Writer.Error!void {
@@ -381,16 +816,34 @@ fn writeDiscriminatedFormType(
 ) std.Io.Writer.Error!void {
     try w.writeAll("export type ");
     try writeFormTypeName(w, p.name, f.name);
-    try w.writeAll(" =");
+    // A form-level enforced group constrains keys every branch repeats,
+    // so it intersects the whole union — parenthesised, because `|`
+    // binds looser than `&` and a bare branch tail would constrain only
+    // the last branch. Mirrors the JSON Schema side's allOf chain.
+    const wrap = hasEnforcedFormGroup(f);
+    if (wrap) {
+        try w.writeAll(" = (");
+    } else {
+        try w.writeAll(" =");
+    }
     for (d.variants) |v| {
-        try writeDiscriminatedBranch(w, p, f, d, .{ .list = v.when }, v.keys);
+        try writeDiscriminatedBranch(w, p, f, d, .{ .list = v.when }, v.keys, v.exclusive_groups);
     }
     // Members no variant selects get one residual branch — common keys
     // only, discriminant narrowed to exactly those members — so the union
     // covers the whole member set the validator accepts.
     if (discriminantKey(f, d)) |dk| {
         if (hasResidualMembers(dk, d)) {
-            try writeDiscriminatedBranch(w, p, f, d, .{ .residual = .{ .members = dk.value, .d = d } }, &.{});
+            try writeDiscriminatedBranch(w, p, f, d, .{ .residual = .{ .members = dk.value, .d = d } }, &.{}, &.{});
+        }
+    }
+    if (wrap) {
+        try w.writeAll("\n)");
+        for (f.exclusive_groups) |g| {
+            if (groupState(f, g) != .enforced) continue;
+            try w.writeAll(" & (\n");
+            try writeGroupArms(w, f.keys, g, arm_layout_top);
+            try w.writeAll(")");
         }
     }
     try w.writeAll(";\n\n");
@@ -398,7 +851,14 @@ fn writeDiscriminatedFormType(
 
 /// One `| { … }` branch of a discriminated form's union: `$form`/`$ns`,
 /// the common keys with the discriminant narrowed to `when`, then
-/// `overlay` (a variant's keys, or none for the residual branch).
+/// `overlay` (a variant's keys, or none for the residual branch). A
+/// variant carrying scoped exclusive groups gets their annotation as a
+/// doc block above the branch — the group constrains that variant's
+/// keys only, so the form-level doc and the residual branch stay clean.
+/// When any of those groups is enforced, the branch object becomes an
+/// anonymous base intersected by the group's arm union (`| ({ … } &
+/// (…))`); form-level enforced groups remove their keys from every
+/// branch instead, their arms riding outside the union.
 fn writeDiscriminatedBranch(
     w: *std.Io.Writer,
     p: Model.Plugin_,
@@ -406,8 +866,20 @@ fn writeDiscriminatedBranch(
     d: Model.Discriminator,
     when: WhenSet,
     overlay: []const Model.Key,
+    groups: []const Model.ExclusiveGroup,
 ) std.Io.Writer.Error!void {
-    try w.writeAll("\n  | {\n");
+    var any_enforced = false;
+    for (groups) |g| {
+        if (groupStateForScope(f.open, overlay, g) == .enforced) any_enforced = true;
+    }
+    if (groups.len > 0) {
+        try w.writeAll("\n  /**\n");
+        try writeExclusiveGroupLines(w, groups, "  ");
+        try w.writeAll("  */\n");
+        try w.writeAll(if (any_enforced) "  | ({\n" else "  | {\n");
+    } else {
+        try w.writeAll("\n  | {\n");
+    }
     try w.writeAll("      $form: \"");
     try w.writeAll(f.name);
     try w.writeAll("\";\n");
@@ -415,19 +887,23 @@ fn writeDiscriminatedBranch(
     try w.writeAll(p.name);
     try w.writeAll("\";\n");
     // Common + discriminant keys, sorted alphabetically. The
-    // discriminant gets its brand narrowed to the branch's `when`.
+    // discriminant gets its brand narrowed to the branch's `when`; keys
+    // claimed by a form-level enforced group leave for its arms.
     const indices = Model.sortedKeys(f.keys);
     for (indices.slice()) |idx| {
         const k = f.keys[idx];
+        if (isKeyGroupedEnforced(f.open, f.keys, f.exclusive_groups, k.name)) continue;
         if (std.mem.eql(u8, k.name, d.key_name)) {
             try writeDiscriminantKey(w, k, when, "      ");
         } else {
             try writeKey(w, k, "      ");
         }
     }
-    // Variant overlay keys.
+    // Variant overlay keys; those claimed by an enforced variant group
+    // leave the base for that group's arms.
     const v_indices = Model.sortedKeys(overlay);
     for (v_indices.slice()) |idx| {
+        if (isKeyGroupedEnforced(f.open, overlay, groups, overlay[idx].name)) continue;
         try writeKey(w, overlay[idx], "      ");
     }
     switch (f.positional) {
@@ -441,7 +917,38 @@ fn writeDiscriminatedBranch(
         },
     }
     if (f.open) try w.writeAll("      [key: string]: unknown;\n");
-    try w.writeAll("    }");
+    if (any_enforced) {
+        // The base object closes exactly once, before the first enforced
+        // group's union; each further group joins with `) & (`. A `} & (`
+        // per group would emit a stray `}` for every group after the
+        // first and the file would not parse.
+        var first_group = true;
+        for (groups) |g| {
+            if (groupStateForScope(f.open, overlay, g) != .enforced) continue;
+            try w.writeAll(if (first_group) "    } & (\n" else "    ) & (\n");
+            first_group = false;
+            try writeGroupArms(w, overlay, g, arm_layout_variant);
+        }
+        try w.writeAll("    ))");
+    } else {
+        try w.writeAll("    }");
+    }
+}
+
+/// Whether `k`'s slot renders a JSDoc block/line above the property —
+/// shared by `writeKey` and the multi-line arm shape decision.
+fn keyNeedsDoc(k: Model.Key) bool {
+    const rich_members = richMembersOf(k.value);
+    const has_expr_default = if (k.default) |d| d == .expression else false;
+    const bounds_anno = numericBoundsOf(k.value);
+    const string_anno = stringBoundsOf(k.value);
+    const cross_ref_anno = crossRefOf(k.value);
+    const unit_anno = unitOf(k.value);
+
+    const has_axis_jsdoc = bounds_anno != null or string_anno != null or
+        cross_ref_anno != null or unit_anno != null or k.requires.len != 0;
+    return k.description.len > 0 or has_expr_default or
+        rich_members != null or has_axis_jsdoc;
 }
 
 fn writeKey(w: *std.Io.Writer, k: Model.Key, indent: []const u8) std.Io.Writer.Error!void {
@@ -454,8 +961,7 @@ fn writeKey(w: *std.Io.Writer, k: Model.Key, indent: []const u8) std.Io.Writer.E
 
     const has_axis_jsdoc = bounds_anno != null or string_anno != null or
         cross_ref_anno != null or unit_anno != null or k.requires.len != 0;
-    const needs_doc = k.description.len > 0 or has_expr_default or
-        rich_members != null or has_axis_jsdoc;
+    const needs_doc = keyNeedsDoc(k);
 
     if (needs_doc) {
         const use_block = rich_members != null or has_axis_jsdoc;
@@ -930,17 +1436,54 @@ fn writeShape(w: *std.Io.Writer, shape: Model.ValueShape) std.Io.Writer.Error!vo
             }
         },
         .form_locals => |forms| {
-            // Inline anonymous union of object literals (one per local form),
-            // plus a trailing open generic branch for the additive global
-            // fallback. TS narrows on the `$form` discriminant; the open
-            // branch makes the slot accept any global form (required-key
-            // enforcement on that branch is SJON-runtime-only — the
-            // open-branch round-trip caveat in SCHEMA_EXPORT.md).
+            // Inline anonymous union of object literals (one per local
+            // form) plus the additive global fallback. TS narrows on the
+            // `$form` discriminant. Every fallback arm names a global
+            // head — none spells `$form: string` — because
+            // excess-property checking fires on fresh object literals
+            // only: an open arm admits every declared local head the
+            // moment its value arrives through a variable, a function
+            // parameter, or `JSON.parse`, and the slot's group stops
+            // being enforced at compile time.
+            //
+            //   * unqualified arms — one `{ readonly $form: "<name>" }`
+            //     per global the slot's local heads do not shadow. A
+            //     bare head is resolved local-first with shadowing
+            //     (Validator.resolveFormSpec), so a local name can never
+            //     reach a global here;
+            //   * qualified arms — one `{ readonly $form: "<name>";
+            //     readonly $ns: string }` per global, shadowed names
+            //     included: a qualified head bypasses locals, and the
+            //     runtime resolves it against the plugin catalog
+            //     (Schema.lookupForm → lookupGeneric), where a `$ns`
+            //     naming no plugin — or a plugin without that form — is
+            //     `unknown_form`. A qualified head naming a local-only
+            //     name therefore has no arm, exactly as it has no
+            //     resolution. The `$ns` spelling itself stays
+            //     runtime-checked: the arms are head-shaped, the same
+            //     one-way acceptance the fallback's key enforcement has
+            //     always had (SCHEMA_EXPORT.md).
+            var first = true;
             for (forms) |lf| {
+                if (!first) try w.writeAll(" | ");
+                first = false;
                 try writeInlineLocalForm(w, lf);
-                try w.writeAll(" | ");
             }
-            try w.writeAll("{ readonly $form: string; readonly $ns?: string }");
+            for (current_global_forms) |name| {
+                if (formListHasName(forms, name)) continue;
+                if (!first) try w.writeAll(" | ");
+                first = false;
+                try w.writeAll("{ readonly $form: \"");
+                try w.writeAll(name);
+                try w.writeAll("\" }");
+            }
+            for (current_global_forms) |name| {
+                if (!first) try w.writeAll(" | ");
+                first = false;
+                try w.writeAll("{ readonly $form: \"");
+                try w.writeAll(name);
+                try w.writeAll("\"; readonly $ns: string }");
+            }
         },
         .cross_ref => |cr| {
             // A group is a union of brands, one per target — the same
@@ -976,6 +1519,19 @@ fn writeShape(w: *std.Io.Writer, shape: Model.ValueShape) std.Io.Writer.Error!vo
     }
 }
 
+/// True when `forms` declares a local named `name` — the head the
+/// *unqualified* fallback enumeration must exclude (it is resolved
+/// local-first, so no bare-head value of that name can legitimately
+/// reach a global). The qualified enumeration deliberately does NOT
+/// consult this: a `$ns` head bypasses locals, so a global with the
+/// same name stays reachable there.
+fn formListHasName(forms: []const Model.Form, name: []const u8) bool {
+    for (forms) |f| {
+        if (std.mem.eql(u8, f.name, name)) return true;
+    }
+    return false;
+}
+
 /// Emit a slot-local form as an inline anonymous object-literal type (no
 /// `export interface NAME` header — locals have no global type name). Mirrors
 /// `writeFormInterface` / `writeDiscriminatedFormType` bodies compactly on one
@@ -988,16 +1544,25 @@ fn writeInlineLocalForm(w: *std.Io.Writer, f: Model.Form) std.Io.Writer.Error!vo
         try w.writeByte('(');
         for (d.variants, 0..) |v, vi| {
             if (vi > 0) try w.writeAll(" | ");
-            try writeInlineDiscriminatedBranch(w, f, d, .{ .list = v.when }, v.keys);
+            try writeInlineDiscriminatedBranch(w, f, d, .{ .list = v.when }, v.keys, v.exclusive_groups);
         }
         // The residual branch, as in `writeDiscriminatedFormType`.
         if (discriminantKey(f, d)) |dk| {
             if (hasResidualMembers(dk, d)) {
                 if (d.variants.len > 0) try w.writeAll(" | ");
-                try writeInlineDiscriminatedBranch(w, f, d, .{ .residual = .{ .members = dk.value, .d = d } }, &.{});
+                try writeInlineDiscriminatedBranch(w, f, d, .{ .residual = .{ .members = dk.value, .d = d } }, &.{}, &.{});
             }
         }
         try w.writeByte(')');
+        // Form-level enforced groups intersect the parenthesised branch
+        // union, exactly as the block-shaped discriminated emitter wraps
+        // its own.
+        for (f.exclusive_groups) |g| {
+            if (groupState(f, g) != .enforced) continue;
+            try w.writeAll(" & (");
+            try writeGroupArmsInline(w, f.keys, g);
+            try w.writeAll(")");
+        }
         return;
     }
     try w.writeAll("{ $form: \"");
@@ -1005,6 +1570,7 @@ fn writeInlineLocalForm(w: *std.Io.Writer, f: Model.Form) std.Io.Writer.Error!vo
     try w.writeAll("\"; $ns?: string;");
     const indices = Model.sortedKeys(f.keys);
     for (indices.slice()) |idx| {
+        if (isKeyGroupedEnforced(f.open, f.keys, f.exclusive_groups, f.keys[idx].name)) continue;
         try w.writeByte(' ');
         try writeInlineKey(w, f.keys[idx]);
     }
@@ -1019,6 +1585,15 @@ fn writeInlineLocalForm(w: *std.Io.Writer, f: Model.Form) std.Io.Writer.Error!vo
     }
     if (f.open) try w.writeAll(" [key: string]: unknown;");
     try w.writeAll(" }");
+    // Enforced groups apply the same anonymous-base/intersection
+    // construction inline; `&` binds tighter than `|`, so a slot union
+    // member stays correctly scoped without extra parentheses.
+    for (f.exclusive_groups) |g| {
+        if (groupState(f, g) != .enforced) continue;
+        try w.writeAll(" & (");
+        try writeGroupArmsInline(w, f.keys, g);
+        try w.writeAll(")");
+    }
 }
 
 /// Compact single-line key for an inline local-form literal: `name?: T;`
@@ -1033,13 +1608,15 @@ fn writeInlineKey(w: *std.Io.Writer, k: Model.Key) std.Io.Writer.Error!void {
 }
 
 /// One `{ … }` branch of an inline discriminated local's union — the
-/// one-line mirror of `writeDiscriminatedBranch`.
+/// one-line mirror of `writeDiscriminatedBranch`, including the
+/// variant-group arm intersection.
 fn writeInlineDiscriminatedBranch(
     w: *std.Io.Writer,
     f: Model.Form,
     d: Model.Discriminator,
     when: WhenSet,
     overlay: []const Model.Key,
+    groups: []const Model.ExclusiveGroup,
 ) std.Io.Writer.Error!void {
     try w.writeAll("{ $form: \"");
     try w.writeAll(f.name);
@@ -1047,6 +1624,7 @@ fn writeInlineDiscriminatedBranch(
     const indices = Model.sortedKeys(f.keys);
     for (indices.slice()) |idx| {
         const k = f.keys[idx];
+        if (isKeyGroupedEnforced(f.open, f.keys, f.exclusive_groups, k.name)) continue;
         try w.writeByte(' ');
         if (std.mem.eql(u8, k.name, d.key_name)) {
             try writeInlineDiscriminantKey(w, k, when);
@@ -1056,11 +1634,18 @@ fn writeInlineDiscriminatedBranch(
     }
     const v_indices = Model.sortedKeys(overlay);
     for (v_indices.slice()) |idx| {
+        if (isKeyGroupedEnforced(f.open, overlay, groups, overlay[idx].name)) continue;
         try w.writeByte(' ');
         try writeInlineKey(w, overlay[idx]);
     }
     if (f.open) try w.writeAll(" [key: string]: unknown;");
     try w.writeAll(" }");
+    for (groups) |g| {
+        if (groupStateForScope(f.open, overlay, g) != .enforced) continue;
+        try w.writeAll(" & (");
+        try writeGroupArmsInline(w, overlay, g);
+        try w.writeAll(")");
+    }
 }
 
 /// Compact discriminant key for an inline local-form variant branch:
@@ -1454,6 +2039,1039 @@ test "emit: exclusive group JSDoc lists cardinality and key bundles" {
     try testing.expect(std.mem.indexOf(u8, bytes, "A note sequence.") != null);
 }
 
+test "emit: variant-scoped exclusive group JSDoc rides the variant branch" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "probe",
+        .forms = &.{.{
+            .name = "track",
+            .keys = &.{.{ .name = "kind", .value_type = .{ .named = .{ .name = "kind-tag" } }, .optional = true }},
+            .discriminant_idx = 0,
+            .variants = &.{
+                .{
+                    .when = &.{"kick"},
+                    .keys = &.{
+                        .{ .name = "step", .value_type = .number, .optional = true },
+                        .{ .name = "sweep", .value_type = .number, .optional = true },
+                    },
+                    .exclusive_groups = &.{
+                        .{
+                            .cardinality = .exactly_one,
+                            .alternatives = &.{ .{ .keys = &.{"step"} }, .{ .keys = &.{"sweep"} } },
+                        },
+                    },
+                },
+                .{
+                    .when = &.{"bass"},
+                    .keys = &.{.{ .name = "sequence", .value_type = .any, .optional = true }},
+                },
+            },
+        }},
+        .value_kinds = &.{
+            .{ .name = "kind-tag", .underlying = .symbol, .members = .{ .members = &.{ .{ .name = "kick" }, .{ .name = "bass" } } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    const anno = "@sjon-exclusive-group exactly-one [step, sweep]";
+    try testing.expect(std.mem.indexOf(u8, bytes, anno) != null);
+    // The annotation is scoped to the `kick` branch, not the form: it
+    // appears exactly once (the `bass` variant and the residual branch
+    // carry no groups) and after the alias header.
+    var count: usize = 0;
+    var search: usize = 0;
+    while (std.mem.indexOfPos(u8, bytes, search, anno)) |at| {
+        count += 1;
+        search = at + anno.len;
+    }
+    try testing.expectEqual(@as(usize, 1), count);
+    const type_at = std.mem.indexOf(u8, bytes, "export type Probe_Track =").?;
+    const anno_at = std.mem.indexOf(u8, bytes, anno).?;
+    const kick_at = std.mem.indexOf(u8, bytes, "kind: Symbol_<\"kick\">").?;
+    try testing.expect(type_at < anno_at and anno_at < kick_at);
+}
+
+// ---------------------------------------------------------------------------
+// Structural exclusive-group emission (anonymous base & per-competitor
+// arms). The expected blocks below are the ruling's literal shapes
+// (`.agent/runs/20261101-223007-architect-consult-ask32-rerun.log` §1-3).
+// ---------------------------------------------------------------------------
+
+fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
+    return std.mem.count(u8, haystack, needle);
+}
+
+test "emit: exactly-one two-alternative group emits a type alias with one arm per alternative" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "x",
+        .forms = &.{.{
+            .name = "phrase",
+            .keys = &.{
+                .{ .name = "name", .value_type = .symbol, .optional = false },
+                .{ .name = "notes", .value_type = .vector, .optional = true },
+                .{ .name = "events", .value_type = .vector, .optional = true },
+            },
+            .exclusive_groups = &.{.{
+                .cardinality = .exactly_one,
+                .alternatives = &.{ .{ .keys = &.{"notes"} }, .{ .keys = &.{"events"} } },
+            }},
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    const expected =
+        \\export type X_Phrase = {
+        \\  $form: "phrase";
+        \\  $ns: "x";
+        \\  name: Symbol_;
+        \\} & (
+        \\  | ({ notes: Array<unknown> } & _SjonNotAll<"events">)
+        \\  | ({ events: Array<unknown> } & _SjonNotAll<"notes">)
+        \\);
+    ;
+    try testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
+    // The interface spelling is gone, and the grouped keys left the base —
+    // only an arm may carry them.
+    try testing.expect(std.mem.indexOf(u8, bytes, "interface X_Phrase") == null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "notes?:") == null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "events?:") == null);
+}
+
+test "emit: three alternatives intersect one _SjonNotAll per competing alternative" {
+    // The ruling's `P_Choice` shape verbatim: an alternative is present
+    // only when ALL its keys are, so each arm excludes each competitor as
+    // its own bundle — never one flattened key set.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "p",
+        .forms = &.{.{
+            .name = "choice",
+            .keys = &.{
+                .{ .name = "common", .value_type = .string, .optional = true },
+                .{ .name = "a", .value_type = .string, .optional = true },
+                .{ .name = "b1", .value_type = .string, .optional = true },
+                .{ .name = "b2", .value_type = .number, .optional = true },
+                .{ .name = "c", .value_type = .boolean, .optional = true },
+            },
+            .exclusive_groups = &.{.{
+                .cardinality = .exactly_one,
+                .alternatives = &.{ .{ .keys = &.{"a"} }, .{ .keys = &.{ "b1", "b2" } }, .{ .keys = &.{"c"} } },
+            }},
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    const expected =
+        \\export type P_Choice = {
+        \\  $form: "choice";
+        \\  $ns: "p";
+        \\  common?: string;
+        \\} & (
+        \\  | ({
+        \\      a: string;
+        \\    } & _SjonNotAll<"b1" | "b2">
+        \\      & _SjonNotAll<"c">)
+        \\  | ({
+        \\      b1: string;
+        \\      b2: number;
+        \\    } & _SjonNotAll<"a">
+        \\      & _SjonNotAll<"c">)
+        \\  | ({
+        \\      c: boolean;
+        \\    } & _SjonNotAll<"a">
+        \\      & _SjonNotAll<"b1" | "b2">)
+        \\);
+    ;
+    try testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
+    // The flattened spelling — which would accept `a + b1 + b2` whenever
+    // `c` is absent — must not appear anywhere.
+    try testing.expect(std.mem.indexOf(u8, bytes, "_SjonNotAll<\"b1\" | \"b2\" | \"c\">") == null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "_SjonNotAll<\"a\" | \"b1\" | \"b2\">") == null);
+}
+
+test "emit: at-most-one group emits the none-arm first" {
+    // The ruling's `Xkey_Tag` shape verbatim — a multi-key bundle and a
+    // single-key competitor, none-arm leading the union.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "xkey",
+        .forms = &.{.{
+            .name = "tag",
+            .keys = &.{
+                .{ .name = "name", .value_type = .symbol, .optional = false },
+                .{ .name = "prefix", .value_type = .string, .optional = true },
+                .{ .name = "suffix", .value_type = .string, .optional = true },
+                .{ .name = "literal", .value_type = .string, .optional = true },
+            },
+            .exclusive_groups = &.{.{
+                .cardinality = .at_most_one,
+                .alternatives = &.{ .{ .keys = &.{ "prefix", "suffix" } }, .{ .keys = &.{"literal"} } },
+            }},
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    const expected =
+        \\export type Xkey_Tag = {
+        \\  $form: "tag";
+        \\  $ns: "xkey";
+        \\  name: Symbol_;
+        \\} & (
+        \\  | { prefix?: never; suffix?: never; literal?: never }
+        \\  | ({ prefix: string; suffix: string } & _SjonNotAll<"literal">)
+        \\  | ({ literal: string } & _SjonNotAll<"prefix" | "suffix">)
+        \\);
+    ;
+    try testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
+    // `?: never` is the only absence spelling.
+    try testing.expect(std.mem.indexOf(u8, bytes, "?: undefined") == null);
+}
+
+test "emit: _SjonNotAll rides once per file, non-exported, after the brand prelude" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "x",
+        .forms = &.{.{
+            .name = "f",
+            .keys = &.{
+                .{ .name = "a", .value_type = .string, .optional = true },
+                .{ .name = "b", .value_type = .string, .optional = true },
+            },
+            .exclusive_groups = &.{.{
+                .cardinality = .exactly_one,
+                .alternatives = &.{ .{ .keys = &.{"a"} }, .{ .keys = &.{"b"} } },
+            }},
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    try testing.expectEqual(@as(usize, 1), countOccurrences(bytes, not_all_helper_decl));
+    // Non-exported: the declaration line never carries `export`.
+    try testing.expect(std.mem.indexOf(u8, bytes, "export type _SjonNotAll") == null);
+    // After the brand prelude's last line, before the first plugin section.
+    const f16_at = std.mem.indexOf(u8, bytes, "export type F16").?;
+    const helper_at = std.mem.indexOf(u8, bytes, not_all_helper_decl).?;
+    const plugin_at = std.mem.indexOf(u8, bytes, "// ----- plugin:").?;
+    try testing.expect(f16_at < helper_at and helper_at < plugin_at);
+}
+
+test "emit: ungrouped, open-only and defaulted-only files emit no helper" {
+    const a = testing.allocator;
+
+    // Ungrouped: interface spelling, byte-identical to the pre-group world.
+    {
+        const p: Plugin.Plugin = .{
+            .name = "x",
+            .forms = &.{.{
+                .name = "row",
+                .keys = &.{.{ .name = "n", .value_type = .number, .optional = false }},
+            }},
+        };
+        const schema = Schema.Schema.init(&.{p});
+        var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+        defer result.deinit();
+        const bytes = result.ts_types_bytes.?;
+        try testing.expect(std.mem.indexOf(u8, bytes, "_SjonNotAll") == null);
+        try testing.expect(std.mem.indexOf(u8, bytes, "export interface X_Row {") != null);
+    }
+
+    // Open-only: the scope is skipped-open — keys stay, index signature
+    // stays, no intersection, no helper.
+    {
+        const p: Plugin.Plugin = .{
+            .name = "x",
+            .forms = &.{.{
+                .name = "scene",
+                .open = true,
+                .keys = &.{
+                    .{ .name = "notes", .value_type = .vector, .optional = true },
+                    .{ .name = "events", .value_type = .vector, .optional = true },
+                },
+                .exclusive_groups = &.{.{
+                    .cardinality = .exactly_one,
+                    .alternatives = &.{ .{ .keys = &.{"notes"} }, .{ .keys = &.{"events"} } },
+                }},
+            }},
+        };
+        const schema = Schema.Schema.init(&.{p});
+        var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+        defer result.deinit();
+        const bytes = result.ts_types_bytes.?;
+        try testing.expect(std.mem.indexOf(u8, bytes, "_SjonNotAll") == null);
+        try testing.expect(std.mem.indexOf(u8, bytes, "export interface X_Scene {") != null);
+        try testing.expect(std.mem.indexOf(u8, bytes, "notes?: Array<unknown>;") != null);
+        try testing.expect(std.mem.indexOf(u8, bytes, "[key: string]: unknown;") != null);
+        // The annotation stays — skipping the arms is not skipping the docs.
+        try testing.expect(std.mem.indexOf(u8, bytes, "@sjon-exclusive-group exactly-one [notes, events]") != null);
+    }
+
+    // Defaulted-only: any defaulted alternative key skips the whole group;
+    // the keys keep their base optionality, no helper.
+    {
+        const p: Plugin.Plugin = .{
+            .name = "x",
+            .forms = &.{.{
+                .name = "def",
+                .keys = &.{
+                    .{ .name = "c", .value_type = .number, .optional = true },
+                    .{ .name = "d", .value_type = .number, .optional = true, .default = .{ .number = 1 } },
+                },
+                .exclusive_groups = &.{.{
+                    .cardinality = .at_most_one,
+                    .alternatives = &.{ .{ .keys = &.{"c"} }, .{ .keys = &.{"d"} } },
+                }},
+            }},
+        };
+        const schema = Schema.Schema.init(&.{p});
+        var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+        defer result.deinit();
+        const bytes = result.ts_types_bytes.?;
+        try testing.expect(std.mem.indexOf(u8, bytes, "_SjonNotAll") == null);
+        try testing.expect(std.mem.indexOf(u8, bytes, "export interface X_Def {") != null);
+        try testing.expect(std.mem.indexOf(u8, bytes, "d?: number;") != null);
+    }
+}
+
+test "emit: per-plugin artifacts carry the helper only in files that enforce a group" {
+    const a = testing.allocator;
+    const grouped: Plugin.Plugin = .{
+        .name = "grp",
+        .forms = &.{.{
+            .name = "f",
+            .keys = &.{
+                .{ .name = "a", .value_type = .string, .optional = true },
+                .{ .name = "b", .value_type = .string, .optional = true },
+            },
+            .exclusive_groups = &.{.{
+                .cardinality = .exactly_one,
+                .alternatives = &.{ .{ .keys = &.{"a"} }, .{ .keys = &.{"b"} } },
+            }},
+        }},
+    };
+    const plain: Plugin.Plugin = .{
+        .name = "plain",
+        .forms = &.{.{ .name = "g", .keys = &.{.{ .name = "n", .value_type = .number, .optional = false }} }},
+    };
+    const schema = Schema.Schema.init(&.{ grouped, plain });
+    var result = try SchemaExport.exportSchema(a, schema, .{
+        .target = .{ .json_schema = false, .ts_types = true },
+        .layout = .per_plugin,
+    });
+    defer result.deinit();
+    var grouped_bytes: ?[]const u8 = null;
+    var plain_bytes: ?[]const u8 = null;
+    for (result.per_plugin.?) |art| {
+        if (std.mem.eql(u8, art.plugin, "grp")) grouped_bytes = art.ts_types_bytes;
+        if (std.mem.eql(u8, art.plugin, "plain")) plain_bytes = art.ts_types_bytes;
+    }
+    try testing.expectEqual(@as(usize, 1), countOccurrences(grouped_bytes.?, not_all_helper_decl));
+    try testing.expect(std.mem.indexOf(u8, plain_bytes.?, "_SjonNotAll") == null);
+}
+
+test "emit: multiple enforced groups compose in declaration order" {
+    // The ruling's `P_Multi` shape verbatim: an exactly-one group followed
+    // by an at-most-one group on one scope.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "p",
+        .forms = &.{.{
+            .name = "multi",
+            .keys = &.{
+                .{ .name = "a", .value_type = .string, .optional = true },
+                .{ .name = "b", .value_type = .string, .optional = true },
+                .{ .name = "c", .value_type = .number, .optional = true },
+                .{ .name = "d", .value_type = .number, .optional = true },
+            },
+            .exclusive_groups = &.{
+                .{
+                    .cardinality = .exactly_one,
+                    .alternatives = &.{ .{ .keys = &.{"a"} }, .{ .keys = &.{"b"} } },
+                },
+                .{
+                    .cardinality = .at_most_one,
+                    .alternatives = &.{ .{ .keys = &.{"c"} }, .{ .keys = &.{"d"} } },
+                },
+            },
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    const expected =
+        \\export type P_Multi = {
+        \\  $form: "multi";
+        \\  $ns: "p";
+        \\} & (
+        \\  | ({ a: string } & _SjonNotAll<"b">)
+        \\  | ({ b: string } & _SjonNotAll<"a">)
+        \\) & (
+        \\  | { c?: never; d?: never }
+        \\  | ({ c: number } & _SjonNotAll<"d">)
+        \\  | ({ d: number } & _SjonNotAll<"c">)
+        \\);
+    ;
+    try testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
+}
+
+test "emit: a defaulted sibling group contributes no intersection and keeps its keys in the base" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "p",
+        .forms = &.{.{
+            .name = "mixed",
+            .keys = &.{
+                .{ .name = "a", .value_type = .string, .optional = true },
+                .{ .name = "b", .value_type = .string, .optional = true },
+                .{ .name = "c", .value_type = .number, .optional = true },
+                .{ .name = "d", .value_type = .number, .optional = true, .default = .{ .number = 0 } },
+            },
+            .exclusive_groups = &.{
+                .{
+                    .cardinality = .exactly_one,
+                    .alternatives = &.{ .{ .keys = &.{"a"} }, .{ .keys = &.{"b"} } },
+                },
+                .{
+                    .cardinality = .at_most_one,
+                    .alternatives = &.{ .{ .keys = &.{"c"} }, .{ .keys = &.{"d"} } },
+                },
+            },
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    const expected =
+        \\export type P_Mixed = {
+        \\  $form: "mixed";
+        \\  $ns: "p";
+        \\  c?: number;
+        \\  d?: number;
+        \\} & (
+        \\  | ({ a: string } & _SjonNotAll<"b">)
+        \\  | ({ b: string } & _SjonNotAll<"a">)
+        \\);
+    ;
+    try testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
+    // Exactly one group union: the defaulted group adds nothing.
+    try testing.expectEqual(@as(usize, 1), countOccurrences(bytes, "} & (\n"));
+}
+
+test "emit: grouped required keys leave the base and are required in their arm" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "p",
+        .forms = &.{.{
+            .name = "req",
+            .keys = &.{
+                .{ .name = "keep", .value_type = .string, .optional = false },
+                .{ .name = "a", .value_type = .number, .optional = false },
+                .{ .name = "b", .value_type = .number, .optional = false },
+            },
+            .exclusive_groups = &.{.{
+                .cardinality = .exactly_one,
+                .alternatives = &.{ .{ .keys = &.{"a"} }, .{ .keys = &.{"b"} } },
+            }},
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    const expected =
+        \\export type P_Req = {
+        \\  $form: "req";
+        \\  $ns: "p";
+        \\  keep: string;
+        \\} & (
+        \\  | ({ a: number } & _SjonNotAll<"b">)
+        \\  | ({ b: number } & _SjonNotAll<"a">)
+        \\);
+    ;
+    try testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
+    // `:optional false` grouped keys are never optional anywhere — only
+    // an active arm requires them.
+    try testing.expect(std.mem.indexOf(u8, bytes, "a?:") == null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "b?:") == null);
+}
+
+test "emit: grouped keys keep their JSDoc inside a multi-line arm" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "x",
+        .forms = &.{.{
+            .name = "doc",
+            .keys = &.{
+                .{ .name = "notes", .value_type = .vector, .optional = true, .description = "Pitch-class sequence." },
+                .{ .name = "events", .value_type = .vector, .optional = true, .description = "Time-stamped event list." },
+            },
+            .exclusive_groups = &.{.{
+                .cardinality = .exactly_one,
+                .alternatives = &.{ .{ .keys = &.{"notes"} }, .{ .keys = &.{"events"} } },
+            }},
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    const expected =
+        \\export type X_Doc = {
+        \\  $form: "doc";
+        \\  $ns: "x";
+        \\} & (
+        \\  | ({
+        \\      /** Pitch-class sequence. */
+        \\      notes: Array<unknown>;
+        \\    } & _SjonNotAll<"events">)
+        \\  | ({
+        \\      /** Time-stamped event list. */
+        \\      events: Array<unknown>;
+        \\    } & _SjonNotAll<"notes">)
+        \\);
+    ;
+    try testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
+}
+
+test "emit: variant-scoped group intersects inside its branch only" {
+    // The ruling's `Probe_Track` shape verbatim: the arms nest in the
+    // `kick` branch, the `bass` branch and the form JSDoc stay untouched.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "probe",
+        .forms = &.{.{
+            .name = "track",
+            .keys = &.{.{ .name = "kind", .value_type = .{ .named = .{ .name = "kind-tag" } }, .optional = true }},
+            .discriminant_idx = 0,
+            .variants = &.{
+                .{
+                    .when = &.{"kick"},
+                    .keys = &.{
+                        .{ .name = "step", .value_type = .number, .optional = true },
+                        .{ .name = "sweep", .value_type = .number, .optional = true },
+                    },
+                    .exclusive_groups = &.{.{
+                        .cardinality = .exactly_one,
+                        .alternatives = &.{ .{ .keys = &.{"step"} }, .{ .keys = &.{"sweep"} } },
+                    }},
+                },
+                .{
+                    .when = &.{"bass"},
+                    .keys = &.{.{ .name = "sequence", .value_type = .any, .optional = true }},
+                },
+            },
+        }},
+        .value_kinds = &.{
+            .{ .name = "kind-tag", .underlying = .symbol, .members = .{ .members = &.{ .{ .name = "kick" }, .{ .name = "bass" } } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    const expected =
+        \\export type Probe_Track =
+        \\  /**
+        \\   * @sjon-exclusive-group exactly-one [step, sweep]
+        \\  */
+        \\  | ({
+        \\      $form: "track";
+        \\      $ns: "probe";
+        \\      kind: Symbol_<"kick">;
+        \\    } & (
+        \\      | ({ step: number } & _SjonNotAll<"sweep">)
+        \\      | ({ sweep: number } & _SjonNotAll<"step">)
+        \\    ))
+        \\  | {
+        \\      $form: "track";
+        \\      $ns: "probe";
+        \\      kind: Symbol_<"bass">;
+        \\      sequence?: unknown;
+        \\    };
+    ;
+    try testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
+    // The variant's group annotation still rides the branch, directly
+    // above the armed `| ({` opening.
+    const anno = " * @sjon-exclusive-group exactly-one [step, sweep]\n  */\n  | ({";
+    try testing.expect(std.mem.indexOf(u8, bytes, anno) != null);
+}
+
+test "emit: two enforced groups on one variant close the base once and join with & (" {
+    // The second enforced group must not write another `}` — the branch
+    // base object was closed before the first group's union. The joiner
+    // between groups is `    ) & (`; a per-group `} & (` emits a stray
+    // brace and the file does not parse (tsc TS1005/TS1109).
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "probe",
+        .forms = &.{.{
+            .name = "track",
+            .keys = &.{.{ .name = "kind", .value_type = .{ .named = .{ .name = "kind-tag" } }, .optional = true }},
+            .discriminant_idx = 0,
+            .variants = &.{.{
+                .when = &.{"kick"},
+                .keys = &.{
+                    .{ .name = "step", .value_type = .number, .optional = true },
+                    .{ .name = "sweep", .value_type = .number, .optional = true },
+                    .{ .name = "gate", .value_type = .string, .optional = true },
+                    .{ .name = "pass", .value_type = .string, .optional = true },
+                },
+                .exclusive_groups = &.{
+                    .{
+                        .cardinality = .exactly_one,
+                        .alternatives = &.{ .{ .keys = &.{"step"} }, .{ .keys = &.{"sweep"} } },
+                    },
+                    .{
+                        .cardinality = .at_most_one,
+                        .alternatives = &.{ .{ .keys = &.{"gate"} }, .{ .keys = &.{"pass"} } },
+                    },
+                },
+            }},
+        }},
+        .value_kinds = &.{
+            .{ .name = "kind-tag", .underlying = .symbol, .members = .{ .members = &.{.{ .name = "kick" }} } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    const expected =
+        \\export type Probe_Track =
+        \\  /**
+        \\   * @sjon-exclusive-group exactly-one [step, sweep]
+        \\   * @sjon-exclusive-group at-most-one [gate, pass]
+        \\  */
+        \\  | ({
+        \\      $form: "track";
+        \\      $ns: "probe";
+        \\      kind: Symbol_<"kick">;
+        \\    } & (
+        \\      | ({ step: number } & _SjonNotAll<"sweep">)
+        \\      | ({ sweep: number } & _SjonNotAll<"step">)
+        \\    ) & (
+        \\      | { gate?: never; pass?: never }
+        \\      | ({ gate: string } & _SjonNotAll<"pass">)
+        \\      | ({ pass: string } & _SjonNotAll<"gate">)
+        \\    ));
+    ;
+    try testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
+    // The stray-brace spelling the second group used to emit: one `}`
+    // per enforced group instead of one for the whole base.
+    try testing.expect(std.mem.indexOf(u8, bytes, ")    } & (") == null);
+    try testing.expectEqual(@as(usize, 1), countOccurrences(bytes, "} & (\n"));
+}
+
+test "emit: a defaulted variant group keeps its keys in the branch and emits no arms" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "probe",
+        .forms = &.{.{
+            .name = "track",
+            .keys = &.{.{ .name = "kind", .value_type = .{ .named = .{ .name = "kind-tag" } }, .optional = true }},
+            .discriminant_idx = 0,
+            .variants = &.{.{
+                .when = &.{"kick"},
+                .keys = &.{
+                    .{ .name = "step", .value_type = .number, .optional = true, .default = .{ .number = 0 } },
+                    .{ .name = "sweep", .value_type = .number, .optional = true },
+                },
+                .exclusive_groups = &.{.{
+                    .cardinality = .exactly_one,
+                    .alternatives = &.{ .{ .keys = &.{"step"} }, .{ .keys = &.{"sweep"} } },
+                }},
+            }},
+        }},
+        .value_kinds = &.{
+            .{ .name = "kind-tag", .underlying = .symbol, .members = .{ .members = &.{.{ .name = "kick" }} } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    // No arms, no helper — and the variant keys stay optional in the branch.
+    try testing.expect(std.mem.indexOf(u8, bytes, "_SjonNotAll") == null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "step?: number;") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "sweep?: number;") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "@sjon-exclusive-group exactly-one [step, sweep]") != null);
+}
+
+test "emit: a form-level group on a discriminated form wraps the variant union" {
+    // `|` binds looser than `&`, so the group cannot ride a branch tail;
+    // the variant union is parenthesised and the group intersects the
+    // whole thing, mirroring the JSON Schema side's allOf chain.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "p",
+        .forms = &.{.{
+            .name = "gate",
+            .keys = &.{
+                .{ .name = "kind", .value_type = .{ .named = .{ .name = "gate-kind" } }, .optional = false },
+                .{ .name = "a", .value_type = .number, .optional = true },
+                .{ .name = "b", .value_type = .number, .optional = true },
+            },
+            .discriminant_idx = 0,
+            .variants = &.{
+                .{ .when = &.{"x"} },
+                .{ .when = &.{"y"} },
+            },
+            .exclusive_groups = &.{.{
+                .cardinality = .exactly_one,
+                .alternatives = &.{ .{ .keys = &.{"a"} }, .{ .keys = &.{"b"} } },
+            }},
+        }},
+        .value_kinds = &.{
+            .{ .name = "gate-kind", .underlying = .symbol, .members = .{ .members = &.{ .{ .name = "x" }, .{ .name = "y" } } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    const expected =
+        \\export type P_Gate = (
+        \\  | {
+        \\      $form: "gate";
+        \\      $ns: "p";
+        \\      kind: Symbol_<"x">;
+        \\    }
+        \\  | {
+        \\      $form: "gate";
+        \\      $ns: "p";
+        \\      kind: Symbol_<"y">;
+        \\    }
+        \\) & (
+        \\  | ({ a: number } & _SjonNotAll<"b">)
+        \\  | ({ b: number } & _SjonNotAll<"a">)
+        \\);
+    ;
+    try testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
+    // The grouped common keys left every branch.
+    try testing.expect(std.mem.indexOf(u8, bytes, "a?:") == null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "b?:") == null);
+}
+
+test "emit: two form-level groups on a discriminated form chain after the union" {
+    // The `wrap` path closes the parenthesised variant union once and
+    // joins each enforced form-level group with ` & (` — the same
+    // composition the non-discriminated alias uses. Two groups on one
+    // discriminated form pin that the wrap loop cannot emit a stray
+    // brace either.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "p",
+        .forms = &.{.{
+            .name = "gate",
+            .keys = &.{
+                .{ .name = "kind", .value_type = .{ .named = .{ .name = "gate-kind" } }, .optional = false },
+                .{ .name = "a", .value_type = .number, .optional = true },
+                .{ .name = "b", .value_type = .number, .optional = true },
+                .{ .name = "c", .value_type = .string, .optional = true },
+                .{ .name = "d", .value_type = .string, .optional = true },
+            },
+            .discriminant_idx = 0,
+            .variants = &.{
+                .{ .when = &.{"x"} },
+                .{ .when = &.{"y"} },
+            },
+            .exclusive_groups = &.{
+                .{
+                    .cardinality = .exactly_one,
+                    .alternatives = &.{ .{ .keys = &.{"a"} }, .{ .keys = &.{"b"} } },
+                },
+                .{
+                    .cardinality = .at_most_one,
+                    .alternatives = &.{ .{ .keys = &.{"c"} }, .{ .keys = &.{"d"} } },
+                },
+            },
+        }},
+        .value_kinds = &.{
+            .{ .name = "gate-kind", .underlying = .symbol, .members = .{ .members = &.{ .{ .name = "x" }, .{ .name = "y" } } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    const expected =
+        \\export type P_Gate = (
+        \\  | {
+        \\      $form: "gate";
+        \\      $ns: "p";
+        \\      kind: Symbol_<"x">;
+        \\    }
+        \\  | {
+        \\      $form: "gate";
+        \\      $ns: "p";
+        \\      kind: Symbol_<"y">;
+        \\    }
+        \\) & (
+        \\  | ({ a: number } & _SjonNotAll<"b">)
+        \\  | ({ b: number } & _SjonNotAll<"a">)
+        \\) & (
+        \\  | { c?: never; d?: never }
+        \\  | ({ c: string } & _SjonNotAll<"d">)
+        \\  | ({ d: string } & _SjonNotAll<"c">)
+        \\);
+    ;
+    try testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
+}
+
+test "emit: a local form with an enforced group intersects inline" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "draw",
+        .forms = &.{.{
+            .name = "canvas",
+            .keys = &.{.{
+                .name = "wrap",
+                .value_type = .form,
+                .optional = true,
+                .local_forms = &.{.{
+                    .name = "inner",
+                    .keys = &.{
+                        .{ .name = "tag", .value_type = .string, .optional = true },
+                        .{ .name = "a", .value_type = .number, .optional = true },
+                        .{ .name = "b", .value_type = .number, .optional = true },
+                    },
+                    .exclusive_groups = &.{.{
+                        .cardinality = .exactly_one,
+                        .alternatives = &.{ .{ .keys = &.{"a"} }, .{ .keys = &.{"b"} } },
+                    }},
+                }},
+            }},
+        }},
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    const inline_expected = "wrap?: { $form: \"inner\"; $ns?: string; tag?: string; } & (({ a: number } & _SjonNotAll<\"b\">) | ({ b: number } & _SjonNotAll<\"a\">))";
+    try testing.expect(std.mem.indexOf(u8, bytes, inline_expected) != null);
+    // The local's group needs the file-level helper too.
+    try testing.expectEqual(@as(usize, 1), countOccurrences(bytes, not_all_helper_decl));
+}
+
+test "emit: the slot-local fallback enumerates globals on both arms and cannot absorb a local head" {
+    // The additive fallback of a form_locals slot must not contain any
+    // open `$form` arm: excess-property checking fires on fresh object
+    // literals only, so a local value violating its enforced group
+    // (both alternatives, or neither) satisfies an open arm the moment
+    // it arrives through a variable, a function parameter, or
+    // `JSON.parse`, and the group is not enforced at compile time. The
+    // runtime resolves a bare head local-first with shadowing
+    // (Validator.resolveFormSpec), so the unqualified arms are exactly
+    // the global catalog minus the local head names; a qualified head
+    // (`$ns` present) bypasses locals but still resolves against the
+    // plugin catalog (Schema.lookupForm), so the qualified arms
+    // enumerate every global — shadowed names included — and a
+    // local-only name answers no arm at all.
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "draw",
+        .forms = &.{
+            .{
+                .name = "canvas",
+                .keys = &.{.{
+                    .name = "wrap",
+                    .value_type = .form,
+                    .optional = true,
+                    .local_forms = &.{.{
+                        .name = "inner",
+                        .keys = &.{
+                            .{ .name = "tag", .value_type = .string, .optional = true },
+                            .{ .name = "a", .value_type = .number, .optional = true },
+                            .{ .name = "b", .value_type = .number, .optional = true },
+                        },
+                        .exclusive_groups = &.{.{
+                            .cardinality = .exactly_one,
+                            .alternatives = &.{ .{ .keys = &.{"a"} }, .{ .keys = &.{"b"} } },
+                        }},
+                    }},
+                }},
+            },
+            .{ .name = "line", .keys = &.{.{ .name = "from", .value_type = .vector, .optional = false }} },
+            // A global whose name collides with the local head: shadowed
+            // for bare heads, so the unqualified enumeration must exclude
+            // it — only a qualified arm can reach it.
+            .{ .name = "inner", .keys = &.{.{ .name = "radius", .value_type = .number, .optional = false }} },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    // Locals, then the unqualified globals in declaration order (canvas,
+    // line) minus the shadowed local head `inner`, then one qualified
+    // arm per global in the same order — `inner` included there.
+    const expected_tail =
+        "wrap?: { $form: \"inner\"; $ns?: string; tag?: string; } & (({ a: number } & _SjonNotAll<\"b\">) | ({ b: number } & _SjonNotAll<\"a\">))" ++
+        " | { readonly $form: \"canvas\" }" ++
+        " | { readonly $form: \"line\" }" ++
+        " | { readonly $form: \"canvas\"; readonly $ns: string }" ++
+        " | { readonly $form: \"line\"; readonly $ns: string }" ++
+        " | { readonly $form: \"inner\"; readonly $ns: string };";
+    try testing.expect(std.mem.indexOf(u8, bytes, expected_tail) != null);
+    // No open `$form` arm of any spelling remains — neither the
+    // unqualified `$form: string` with `$ns` optional nor the
+    // qualified-any `$form: string` with `$ns` required.
+    try testing.expect(std.mem.indexOf(u8, bytes, "$form: string") == null);
+}
+
+test "emit: a discriminated local form's variant group nests inline arms in its branch" {
+    const a = testing.allocator;
+    const p: Plugin.Plugin = .{
+        .name = "draw",
+        .forms = &.{.{
+            .name = "canvas",
+            .keys = &.{.{
+                .name = "pick",
+                .value_type = .form,
+                .optional = true,
+                .local_forms = &.{.{
+                    .name = "choice",
+                    .keys = &.{.{ .name = "kind", .value_type = .{ .named = .{ .name = "pick-kind" } }, .optional = true }},
+                    .discriminant_idx = 0,
+                    .variants = &.{.{
+                        .when = &.{"x"},
+                        .keys = &.{
+                            .{ .name = "a", .value_type = .number, .optional = true },
+                            .{ .name = "b", .value_type = .number, .optional = true },
+                        },
+                        .exclusive_groups = &.{.{
+                            .cardinality = .exactly_one,
+                            .alternatives = &.{ .{ .keys = &.{"a"} }, .{ .keys = &.{"b"} } },
+                        }},
+                    }},
+                }},
+            }},
+        }},
+        .value_kinds = &.{
+            .{ .name = "pick-kind", .underlying = .symbol, .members = .{ .members = &.{ .{ .name = "x" }, .{ .name = "y" } } } },
+        },
+    };
+    const schema = Schema.Schema.init(&.{p});
+    var result = try SchemaExport.exportSchema(a, schema, .{ .target = .{ .json_schema = false, .ts_types = true } });
+    defer result.deinit();
+    const bytes = result.ts_types_bytes.?;
+    // The `x` branch carries the arms; the residual `y` branch stays bare.
+    // The whole local union is parenthesised (inline discriminated
+    // grammar), so the armed branch needs no parens of its own: `&`
+    // already binds tighter than the surrounding `|`.
+    const inline_expected = "pick?: ({ $form: \"choice\"; $ns?: string; kind: Symbol_<\"x\">; } & " ++
+        "(({ a: number } & _SjonNotAll<\"b\">) | ({ b: number } & _SjonNotAll<\"a\">)) " ++
+        "| { $form: \"choice\"; $ns?: string; kind: Symbol_<\"y\">; }) " ++
+        "| { readonly $form: \"canvas\" } | { readonly $form: \"canvas\"; readonly $ns: string };";
+    try testing.expect(std.mem.indexOf(u8, bytes, inline_expected) != null);
+    try testing.expectEqual(@as(usize, 1), countOccurrences(bytes, not_all_helper_decl));
+}
+
+fn groupTestKey(name: []const u8, default: ?Model.Default) Model.Key {
+    return .{ .name = name, .optional = true, .value = .any, .default = default };
+}
+
+fn groupTestForm(keys: []const Model.Key, open: bool) Model.Form {
+    return .{ .name = "f", .keys = keys, .positional = .none, .open = open };
+}
+
+fn groupTestPair() Model.ExclusiveGroup {
+    return .{
+        .cardinality = .exactly_one,
+        .alternatives = &.{ &.{"a"}, &.{"b"} },
+    };
+}
+
+test "groupState: closed default-free group is enforced" {
+    const keys = [_]Model.Key{
+        groupTestKey("a", null),
+        groupTestKey("b", null),
+    };
+    try testing.expectEqual(GroupState.enforced, groupState(groupTestForm(&keys, false), groupTestPair()));
+}
+
+test "groupState: an open scope is skipped-open" {
+    const keys = [_]Model.Key{
+        groupTestKey("a", null),
+        groupTestKey("b", null),
+    };
+    try testing.expectEqual(GroupState.skipped_open, groupState(groupTestForm(&keys, true), groupTestPair()));
+}
+
+test "groupState: any defaulted alternative key defaults the whole group" {
+    const keys = [_]Model.Key{
+        groupTestKey("a", null),
+        groupTestKey("b", .{ .string = "fallback" }),
+    };
+    try testing.expectEqual(GroupState.defaulted, groupState(groupTestForm(&keys, false), groupTestPair()));
+}
+
+test "groupState: a default outside the group does not default it" {
+    const keys = [_]Model.Key{
+        groupTestKey("a", null),
+        groupTestKey("b", null),
+        groupTestKey("c", .{ .string = "fallback" }),
+    };
+    try testing.expectEqual(GroupState.enforced, groupState(groupTestForm(&keys, false), groupTestPair()));
+}
+
+test "groupState: a defaulted sibling group does not skip an enforced one" {
+    const keys = [_]Model.Key{
+        groupTestKey("a", null),
+        groupTestKey("b", null),
+        groupTestKey("c", null),
+        groupTestKey("d", .{ .string = "fallback" }),
+    };
+    const enforced: Model.ExclusiveGroup = .{
+        .cardinality = .exactly_one,
+        .alternatives = &.{ &.{"a"}, &.{"b"} },
+    };
+    const defaulted: Model.ExclusiveGroup = .{
+        .cardinality = .at_most_one,
+        .alternatives = &.{ &.{"c"}, &.{"d"} },
+    };
+    const form = groupTestForm(&keys, false);
+    try testing.expectEqual(GroupState.enforced, groupState(form, enforced));
+    try testing.expectEqual(GroupState.defaulted, groupState(form, defaulted));
+}
+
+test "groupState: open wins over a defaulted alternative key" {
+    const keys = [_]Model.Key{
+        groupTestKey("a", null),
+        groupTestKey("b", .{ .string = "fallback" }),
+    };
+    try testing.expectEqual(GroupState.skipped_open, groupState(groupTestForm(&keys, true), groupTestPair()));
+}
+
+test "groupStateForScope: a variant group reads the variant keys, not the form keys" {
+    const variant_keys = [_]Model.Key{
+        groupTestKey("step", null),
+        groupTestKey("sweep", null),
+    };
+    const form_keys = [_]Model.Key{
+        groupTestKey("kind", null),
+        groupTestKey("step", .{ .string = "fallback" }),
+    };
+    const group: Model.ExclusiveGroup = .{
+        .cardinality = .exactly_one,
+        .alternatives = &.{ &.{"step"}, &.{"sweep"} },
+    };
+    try testing.expectEqual(GroupState.enforced, groupStateForScope(false, &variant_keys, group));
+    try testing.expectEqual(GroupState.defaulted, groupStateForScope(false, &form_keys, group));
+}
+
 test "emit: discriminated form becomes a union of per-variant object types" {
     const a = testing.allocator;
     const p: Plugin.Plugin = .{
@@ -1565,8 +3183,9 @@ test "emit: a discriminated form whose variants cover every member emits no resi
 test "emit: positional local forms render as inline $children union" {
     // Positional locals lower to `positional = .kind{.form_locals}`, so the
     // `$children` array becomes a typed `Array<…>` of the inline object-literal
-    // union (one branch per local head, `$form` brand + keys) plus the open
-    // global-fallback branch — the same rendering a keyed local slot produces.
+    // union (one branch per local head, `$form` brand + keys) plus the
+    // enumerated global fallback — the same rendering a keyed local slot
+    // produces.
     const a = testing.allocator;
     const p: Plugin.Plugin = .{
         .name = "draw",
@@ -1588,8 +3207,10 @@ test "emit: positional local forms render as inline $children union" {
     // Each local head brands its `$form` literal in the inline union…
     try testing.expect(std.mem.indexOf(u8, bytes, "$form: \"circle\"") != null);
     try testing.expect(std.mem.indexOf(u8, bytes, "$form: \"rect\"") != null);
-    // …and the trailing open branch keeps the additive global fallback open.
-    try testing.expect(std.mem.indexOf(u8, bytes, "$form: string") != null);
+    // …and the trailing fallback enumerates the model's one global
+    // (`canvas`), unqualified and qualified — no open arm remains.
+    try testing.expect(std.mem.indexOf(u8, bytes, "{ readonly $form: \"canvas\" } | { readonly $form: \"canvas\"; readonly $ns: string }") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "$form: string") == null);
 }
 
 test "emit: bounded head-set counts ride as a $children doc comment" {

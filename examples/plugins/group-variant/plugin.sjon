@@ -1,0 +1,25 @@
+; A variant-scoped exclusive group.
+;
+; `(track …)` discriminates on `kind`. The `kick` variant carries an
+; exactly-one group over `step` / `sweep`, so its exported branch nests the
+; arm union inside that branch only; the `bass` variant gains nothing.
+
+(plugin :name group-variant :version "1.0.0"
+  :description "Reference plugin for a variant-scoped exclusive group."
+
+  (value-kind :name kind-tag
+    :underlying symbol
+    :members (member-set :values [kick bass]))
+
+  (form :name track
+    :description "A track whose kick variant carries a scoped exclusive group."
+    :discriminant kind
+    (key :name kind :type kind-tag :optional true)
+    (variant :when kick
+      (key :name step :type number :optional true)
+      (key :name sweep :type number :optional true)
+      (exclusive-group :cardinality exactly-one
+        (alt :keys [step])
+        (alt :keys [sweep])))
+    (variant :when bass
+      (key :name sequence :type any :optional true))))

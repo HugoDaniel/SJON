@@ -1,0 +1,20 @@
+; An open form carrying an exclusive group.
+;
+; `(page …)` is `:open true`, so runtime validation bypasses the group
+; sweep for it and the export keeps the interface spelling: the group
+; rides as `@sjon-exclusive-group` JSDoc only, every grouped key stays
+; optional in the base, and both-present / neither-present documents
+; must still compile — the ruling's skipped-open acceptance cases.
+
+(plugin :name group-open :version "1.0.0"
+  :description "Reference plugin for an exclusive group on an open form."
+
+  (form :name page
+    :description "An open page; its group is annotation-only."
+    :open true
+    (key :name title :type string :optional true)
+    (key :name a :type string :optional true)
+    (key :name b :type string :optional true)
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [a])
+      (alt :keys [b]))))

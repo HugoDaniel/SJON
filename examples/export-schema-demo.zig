@@ -92,6 +92,33 @@ pub fn main(init: std.process.Init) !u8 {
     //     where a reader sees which keys a variant carries and what they
     //     default to. ---
     try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/variant-defaults/plugin.sjon", "examples/plugins/variant-defaults/variant-defaults", &any_diff, .{ .markdown = true });
+    // --- Structural exclusive-group emission (Task 4): the shapes the TS
+    //     parity host must reproduce byte for byte — three alternatives,
+    //     a variant-scoped group, a slot-local group, a required grouped
+    //     key, a defaulted sibling group, and a plugin whose barrel is
+    //     `SjonNotAll`. ---
+    // --- Strict compile matrix (Task 5): the wgslayer frame placement
+    //     shape and two enforced groups in one form — the forms whose
+    //     emitted aliases the typecheck consumers accept/reject against. ---
+    try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/group-frame/plugin.sjon", "examples/plugins/group-frame/group-frame", &any_diff, .{});
+    try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/group-pair/plugin.sjon", "examples/plugins/group-pair/group-pair", &any_diff, .{});
+    try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/group-three/plugin.sjon", "examples/plugins/group-three/group-three", &any_diff, .{});
+    try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/group-variant/plugin.sjon", "examples/plugins/group-variant/group-variant", &any_diff, .{});
+    // Two enforced groups on one variant: the branch base closes once and
+    // the group unions join with `) & (` — the shape whose second group
+    // used to emit a stray brace.
+    try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/group-variant-pair/plugin.sjon", "examples/plugins/group-variant-pair/group-variant-pair", &any_diff, .{});
+    try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/group-local/plugin.sjon", "examples/plugins/group-local/group-local", &any_diff, .{});
+    // A unit-bearing key inside an enforced group: the unit JSDoc forces
+    // the multi-line arm and the tuple must be `readonly` — the parity
+    // fixture whose absence let the TS port diverge on unit keys.
+    try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/group-units/plugin.sjon", "examples/plugins/group-units/group-units", &any_diff, .{});
+    try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/group-required/plugin.sjon", "examples/plugins/group-required/group-required", &any_diff, .{});
+    // An open form with a group: skipped-open — the interface spelling and
+    // both/neither acceptance the ruling requires compile proof of.
+    try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/group-open/plugin.sjon", "examples/plugins/group-open/group-open", &any_diff, .{});
+    try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/group-mixed/plugin.sjon", "examples/plugins/group-mixed/group-mixed", &any_diff, .{});
+    try exportManifestFixture(gpa, io, regen, stderr, "examples/plugins/not-all/plugin.sjon", "examples/plugins/not-all/not-all", &any_diff, .{});
     // --- M3 multi-plugin per-plugin layout (pair-a/pair-b) ---
     try exportPerPluginPair(gpa, io, regen, stderr, &any_diff);
 

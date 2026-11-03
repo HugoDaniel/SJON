@@ -1,0 +1,22 @@
+; One enforced group beside a defaulted sibling group.
+;
+; `(mixed …)` has an exactly-one group over `a` / `b` with no defaults, and
+; an at-most-one group over `c` / `d` where `d` carries a default. The
+; defaulted group skips the whole group — `c` and `d` stay in the base with
+; their current optionality — while the default-free group still emits arms.
+
+(plugin :name group-mixed :version "1.0.0"
+  :description "Reference plugin for a defaulted sibling beside an enforced group."
+
+  (form :name mixed
+    :description "A default-free enforced group and a defaulted sibling."
+    (key :name a :type string :optional true)
+    (key :name b :type string :optional true)
+    (key :name c :type number :optional true)
+    (key :name d :type number :optional true :default 0)
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [a])
+      (alt :keys [b]))
+    (exclusive-group :cardinality at-most-one
+      (alt :keys [c])
+      (alt :keys [d]))))

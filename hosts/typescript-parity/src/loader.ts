@@ -288,6 +288,7 @@ function isRecognizedSpdx(lic: string): boolean {
 
 function buildFormSpec(form: FormNode, diagnostics: Diagnostic[], depth = 1): FormSpec {
   let name = '';
+  let description = '';
   let open = false;
   let positional: PositionalSpec = { kind: 'none' };
   const keys: KeySpec[] = [];
@@ -302,6 +303,9 @@ function buildFormSpec(form: FormNode, diagnostics: Diagnostic[], depth = 1): Fo
       switch (child.key) {
         case 'name':
           if (child.value.tag === 'symbol') name = child.value.text;
+          break;
+        case 'description':
+          if (child.value.tag === 'string') description = child.value.value;
           break;
         case 'discriminant':
           if (child.value.tag === 'symbol') {
@@ -463,6 +467,7 @@ function buildFormSpec(form: FormNode, diagnostics: Diagnostic[], depth = 1): Fo
   }
 
   const spec: Mutable<FormSpec> = { name, keys, positional, open };
+  if (description) spec.description = description;
   if (localForms.length > 0) spec.localForms = localForms;
   if (discriminantName !== null) spec.discriminantName = discriminantName;
   if (discriminantIdx !== null) spec.discriminantIdx = discriminantIdx;
@@ -865,6 +870,7 @@ function emitExclusiveInvalid(
 
 function buildKeySpec(form: FormNode, diagnostics: Diagnostic[], depth: number): KeySpec {
   let name = '';
+  let description = '';
   let valueType: ValueType = { kind: 'any' };
   let optional: boolean | null = null;
   let defaultValue: KeyDefault | null = null;
@@ -875,6 +881,9 @@ function buildKeySpec(form: FormNode, diagnostics: Diagnostic[], depth: number):
     switch (child.key) {
       case 'name':
         if (child.value.tag === 'symbol') name = child.value.text;
+        break;
+      case 'description':
+        if (child.value.tag === 'string') description = child.value.value;
         break;
       case 'type':
         if (child.value.tag === 'symbol') valueType = parseValueType(child.value.text);
@@ -940,7 +949,7 @@ function buildKeySpec(form: FormNode, diagnostics: Diagnostic[], depth: number):
     if (localForms.length > 0) {
       return withRequires(
         withWalkOpaque(
-          { name, valueType, optional: effective, default: defaultValue, localForms },
+          { name, description, valueType, optional: effective, default: defaultValue, localForms },
           walkOpaque,
         ),
         requires,
@@ -949,7 +958,10 @@ function buildKeySpec(form: FormNode, diagnostics: Diagnostic[], depth: number):
   }
 
   return withRequires(
-    withWalkOpaque({ name, valueType, optional: effective, default: defaultValue }, walkOpaque),
+    withWalkOpaque(
+      { name, description, valueType, optional: effective, default: defaultValue },
+      walkOpaque,
+    ),
     requires,
   );
 }

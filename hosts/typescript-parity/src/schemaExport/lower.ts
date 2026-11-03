@@ -26,6 +26,7 @@ import type {
   NumericBounds,
   NumericBound,
   StringBounds,
+  ExclusiveGroup,
 } from '../plugin.ts';
 import { effectiveOptional, lookupForm, lookupValueKind } from '../plugin.ts';
 import type {
@@ -116,7 +117,7 @@ export function lowerSchema(schema: Schema): { model: Model; warnings: readonly 
   const ctx: LowerCtx = { schema, warnings: [] };
   const plugins: ModelPlugin[] = schema.plugins.map((p) => lowerPlugin(ctx, p));
   return {
-    model: { plugins, version: 1 },
+    model: { plugins, version: 2 },
     warnings: dedupeWarnings(ctx.warnings),
   };
 }
@@ -139,6 +140,18 @@ function lowerPlugin(ctx: LowerCtx, plugin: Plugin): ModelPlugin {
     forms,
     valueKinds,
   };
+}
+
+/** Deep-copy one scope's exclusive groups into IR data. The form-level and
+ *  variant-level scopes lower through this one function so the two IR fields
+ *  can never drift in shape. Mirrors Zig's `lowerExclusiveGroups`. */
+function lowerExclusiveGroups(
+  groups: readonly ExclusiveGroup[] | undefined,
+): ModelExclusiveGroup[] {
+  return (groups ?? []).map((g) => ({
+    cardinality: g.cardinality,
+    alternatives: g.alternatives.map((alt) => alt.keys),
+  }));
 }
 
 function lowerForm(ctx: LowerCtx, plugin: Plugin, form: FormSpec): ModelForm {
@@ -216,7 +229,7 @@ function lowerForm(ctx: LowerCtx, plugin: Plugin, form: FormSpec): ModelForm {
         'local_forms_emitted_inline',
         'info',
         headSet === null
-          ? `positional slot on form \`${form.name}\` declares ${localSpecs.length} local form(s) — emitted as an inline union plus an open generic branch for the additive global fallback; local-first/global resolution order is SJON-only`
+          ? `positional slot on form \`${form.name}\` declares ${localSpecs.length} local form(s) — emitted as an inline union plus the additive global fallback (an open generic branch in JSON Schema, an enumerated-plus-qualified arm in TypeScript); local-first/global resolution order is SJON-only`
           : `positional slot on form \`${form.name}\` declares ${localSpecs.length} local form(s) behind a ${headSet.length}-head head-set — emitted as a closed inline union with no global fallback branch; a head outside the set is \`not_head_member\``,
         { pluginName: plugin.name, formName: form.name },
       ),
@@ -243,6 +256,7 @@ function lowerForm(ctx: LowerCtx, plugin: Plugin, form: FormSpec): ModelForm {
       variants: (form.variants ?? []).map((v) => ({
         when: v.when,
         keys: v.keys.map((k) => lowerKey(ctx, plugin, form, k)),
+        exclusiveGroups: lowerExclusiveGroups(v.exclusiveGroups),
       })),
     };
     ctx.warnings.push(
@@ -256,10 +270,7 @@ function lowerForm(ctx: LowerCtx, plugin: Plugin, form: FormSpec): ModelForm {
   }
 
   const sourceGroups = form.exclusiveGroups ?? [];
-  const exclusiveGroups: ModelExclusiveGroup[] = sourceGroups.map((g) => ({
-    cardinality: g.cardinality,
-    alternatives: g.alternatives.map((alt) => alt.keys),
-  }));
+  const exclusiveGroups = lowerExclusiveGroups(sourceGroups);
   if (sourceGroups.length > 0) {
     ctx.warnings.push(
       makeWarning(
@@ -287,7 +298,7 @@ function lowerForm(ctx: LowerCtx, plugin: Plugin, form: FormSpec): ModelForm {
 
   return {
     name: form.name,
-    description: '',
+    description: form.description ?? '',
     keys,
     positional,
     open: form.open,
@@ -319,7 +330,7 @@ function lowerKey(ctx: LowerCtx, plugin: Plugin, form: FormSpec, key: KeySpec): 
       makeWarning(
         'local_forms_emitted_inline',
         'info',
-        `slot \`:${key.name}\` on form \`${form.name}\` declares ${key.localForms.length} local form(s) — emitted as an inline union plus an open generic branch for the additive global fallback; local-first/global resolution order is SJON-only`,
+        `slot \`:${key.name}\` on form \`${form.name}\` declares ${key.localForms.length} local form(s) — emitted as an inline union plus the additive global fallback (an open generic branch in JSON Schema, an enumerated-plus-qualified arm in TypeScript); local-first/global resolution order is SJON-only`,
         { pluginName: plugin.name, formName: form.name, keyName: key.name },
       ),
     );
@@ -331,7 +342,7 @@ function lowerKey(ctx: LowerCtx, plugin: Plugin, form: FormSpec, key: KeySpec): 
     // optional (may be omitted). Mirrors the Zig exporter's
     // `key.effectiveOptional()` so the two hosts agree.
     optional: effectiveOptional(key),
-    description: '',
+    description: key.description ?? '',
     value,
     default: lowerKeyDefault(key.default),
     requires: key.requires ?? [],
@@ -427,7 +438,9 @@ function lowerValueKind(
       makeWarning(
         'number_with_unit_emitted_via_prefix_items',
         'info',
-        `value-kind \`${vk.name}\` — number-with-unit emitted via \`prefixItems: [<magnitude>, <unit>]\``,
+        // Byte-for-byte with the Zig exporter's message — the warning
+        // rides the `.d.ts` header, which the parity tests compare.
+        `value-kind \`${vk.name}\` emitted as JSON Schema object with \`$num\` prefixItems [magnitude, unit] (required=${vk.unit.required ? 'true' : 'false'}, allowed-units=${vk.unit.allowed.length}); SJON-aware tooling reads the canonical form via the JSON bridge`,
         scope,
       ),
     );

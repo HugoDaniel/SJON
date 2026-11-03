@@ -1,0 +1,17 @@
+; A plugin literally named `not-all`.
+;
+; The barrel naming rules turn `not-all` into `SjonNotAll`, so the
+; type-level helper must stay `_SjonNotAll` (underscore-prefixed,
+; non-exported) to avoid colliding with it in the same output file.
+
+(plugin :name not-all :version "1.0.0"
+  :description "Reference plugin whose barrel is SjonNotAll."
+
+  (form :name flag
+    :description "Exactly one of `on` / `off`."
+    (key :name name :type symbol :optional false)
+    (key :name on :type boolean :optional true)
+    (key :name off :type boolean :optional true)
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [on])
+      (alt :keys [off]))))

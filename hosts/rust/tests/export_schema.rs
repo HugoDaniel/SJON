@@ -135,7 +135,7 @@ fn intermediate_target_returns_ir_only() {
         serde_json::from_str(&ir_text).expect("intermediate IR is valid JSON");
     assert_eq!(
         ir.get("version").and_then(serde_json::Value::as_u64),
-        Some(1),
-        "IR should carry version: 1",
+        Some(2),
+        "IR should carry version: 2",
     );
 }

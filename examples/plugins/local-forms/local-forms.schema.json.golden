@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "x-sjon-export-version": 1,
+  "x-sjon-export-version": 2,
   "x-sjon-export-warnings": [
     {
       "code": "local_forms_emitted_inline",
       "severity": "info",
-      "message": "slot `:child` on form `group` declares 1 local form(s) — emitted as an inline union plus an open generic branch for the additive global fallback; local-first/global resolution order is SJON-only",
+      "message": "slot `:child` on form `group` declares 1 local form(s) — emitted as an inline union plus the additive global fallback (an open generic branch in JSON Schema, an enumerated-plus-qualified arm in TypeScript); local-first/global resolution order is SJON-only",
       "plugin": "local-forms",
       "form": "group",
       "key": "child"
@@ -13,7 +13,7 @@
     {
       "code": "local_forms_emitted_inline",
       "severity": "info",
-      "message": "slot `:shape` on form `canvas` declares 3 local form(s) — emitted as an inline union plus an open generic branch for the additive global fallback; local-first/global resolution order is SJON-only",
+      "message": "slot `:shape` on form `canvas` declares 3 local form(s) — emitted as an inline union plus the additive global fallback (an open generic branch in JSON Schema, an enumerated-plus-qualified arm in TypeScript); local-first/global resolution order is SJON-only",
       "plugin": "local-forms",
       "form": "canvas",
       "key": "shape"

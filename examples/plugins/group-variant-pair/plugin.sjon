@@ -1,0 +1,33 @@
+; Two enforced groups on one variant.
+;
+; `(track …)` discriminates on `kind`. The `kick` variant carries an
+; exactly-one group over `step` / `sweep` AND an at-most-one group over
+; `gate` / `pass`, so its exported branch has to close the anonymous base
+; object once and join the two arm unions with `& (` — a second `} & (`
+; would emit a stray brace and the file would not parse. The `bass`
+; variant gains nothing.
+
+(plugin :name group-variant-pair :version "1.0.0"
+  :description "Reference plugin for two enforced groups on one variant."
+
+  (value-kind :name kind-tag
+    :underlying symbol
+    :members (member-set :values [kick bass]))
+
+  (form :name track
+    :description "A track whose kick variant carries two scoped exclusive groups."
+    :discriminant kind
+    (key :name kind :type kind-tag :optional true)
+    (variant :when kick
+      (key :name step :type number :optional true)
+      (key :name sweep :type number :optional true)
+      (key :name gate :type string :optional true)
+      (key :name pass :type string :optional true)
+      (exclusive-group :cardinality exactly-one
+        (alt :keys [step])
+        (alt :keys [sweep]))
+      (exclusive-group :cardinality at-most-one
+        (alt :keys [gate])
+        (alt :keys [pass])))
+    (variant :when bass
+      (key :name sequence :type any :optional true))))

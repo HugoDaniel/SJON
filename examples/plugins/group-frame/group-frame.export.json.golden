@@ -1,0 +1,174 @@
+{
+  "version": 2,
+  "plugins": [
+    {
+      "name": "group-frame",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "frame",
+          "description": "Sub-root node; clips descendants to its box when :clip is true.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "id",
+              "optional": false,
+              "description": "Node id, unique in scope.",
+              "value": {
+                "kind": "symbol"
+              }
+            },
+            {
+              "name": "frame",
+              "optional": true,
+              "description": "Placement alternative 1: untransformed local box [x y w h].",
+              "value": {
+                "kind": "vector",
+                "len": 4,
+                "element": {
+                  "kind": "number"
+                }
+              }
+            },
+            {
+              "name": "rotation",
+              "optional": true,
+              "description": "Rotation in degrees clockwise (Y-down).",
+              "value": {
+                "kind": "number"
+              },
+              "requires": [
+                "frame"
+              ]
+            },
+            {
+              "name": "pivot",
+              "optional": true,
+              "description": "Rotation/scale origin as a unit point of the box.",
+              "value": {
+                "kind": "vector",
+                "len": 2,
+                "element": {
+                  "kind": "number"
+                }
+              },
+              "requires": [
+                "frame"
+              ]
+            },
+            {
+              "name": "scale",
+              "optional": true,
+              "description": "[sx sy] scale about the pivot.",
+              "value": {
+                "kind": "vector",
+                "len": 2,
+                "element": {
+                  "kind": "number"
+                }
+              },
+              "requires": [
+                "frame"
+              ]
+            },
+            {
+              "name": "size",
+              "optional": true,
+              "description": "Placement alternative 2 (with :matrix): [w h] geometry size.",
+              "value": {
+                "kind": "vector",
+                "len": 2,
+                "element": {
+                  "kind": "number"
+                }
+              }
+            },
+            {
+              "name": "matrix",
+              "optional": true,
+              "description": "Placement alternative 2 (with :size): affine local-to-parent matrix; written together with :size (a lone :matrix is a partial bundle).",
+              "value": {
+                "kind": "vector",
+                "len": 6,
+                "element": {
+                  "kind": "number"
+                }
+              }
+            },
+            {
+              "name": "clip",
+              "optional": true,
+              "description": "Clip descendants to this node's box.",
+              "value": {
+                "kind": "boolean"
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": [
+        {
+          "name": "box",
+          "description": "[x y w h] untransformed local frame.",
+          "shape": {
+            "kind": "vector",
+            "len": 4,
+            "element": {
+              "kind": "number"
+            }
+          }
+        },
+        {
+          "name": "size",
+          "description": "[w h] geometry size.",
+          "shape": {
+            "kind": "vector",
+            "len": 2,
+            "element": {
+              "kind": "number"
+            }
+          }
+        },
+        {
+          "name": "point",
+          "description": "[x y] point.",
+          "shape": {
+            "kind": "vector",
+            "len": 2,
+            "element": {
+              "kind": "number"
+            }
+          }
+        },
+        {
+          "name": "transform-matrix",
+          "description": "[a b c d tx ty] affine local-to-parent matrix.",
+          "shape": {
+            "kind": "vector",
+            "len": 6,
+            "element": {
+              "kind": "number"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `frame` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin_name": "group-frame",
+      "form_name": "frame"
+    },
+    {
+      "code": "multi_key_exclusive_emitted",
+      "severity": "info",
+      "message": "form `frame` has at least one multi-key bundle in an exclusive group; emitted as `{required: [<bundle>]}` per bundle. Bundle atomicity (partial bundles fail) requires SJON-aware runtime validation",
+      "plugin_name": "group-frame",
+      "form_name": "frame"
+    }
+  ]
+}

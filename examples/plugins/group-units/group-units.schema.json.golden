@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-sjon-export-version": 2,
+  "x-sjon-export-warnings": [
+    {
+      "code": "number_with_unit_emitted_via_prefix_items",
+      "severity": "info",
+      "message": "value-kind `length` emitted as JSON Schema object with `$num` prefixItems [magnitude, unit] (required=true, allowed-units=3); SJON-aware tooling reads the canonical form via the JSON bridge",
+      "plugin": "group-units",
+      "kind": "length"
+    },
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `span` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin": "group-units",
+      "form": "span"
+    }
+  ],
+  "$defs": {
+    "form.group-units.span": {
+      "type": "object",
+      "description": "An exactly-one group whose first arm carries a unit-bearing key.",
+      "properties": {
+        "$form": {
+          "const": "span"
+        },
+        "$ns": {
+          "const": "group-units"
+        },
+        "label": {
+          "type": "string"
+        },
+        "legacy": {
+          "type": "number"
+        },
+        "width": {
+          "type": "object",
+          "properties": {
+            "$num": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string",
+                  "enum": [
+                    "mm",
+                    "cm",
+                    "m"
+                  ]
+                }
+              ],
+              "minItems": 2,
+              "maxItems": 2,
+              "items": false
+            }
+          },
+          "required": [
+            "$num"
+          ],
+          "additionalProperties": false,
+          "x-sjon-unit": {
+            "required": true,
+            "allowed": [
+              "mm",
+              "cm",
+              "m"
+            ]
+          }
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "width"
+              ]
+            },
+            {
+              "required": [
+                "legacy"
+              ]
+            }
+          ]
+        }
+      ],
+      "unevaluatedProperties": false,
+      "x-sjon-exclusive-groups": [
+        {
+          "cardinality": "exactly_one",
+          "alternatives": [
+            [
+              "width"
+            ],
+            [
+              "legacy"
+            ]
+          ]
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/form.group-units.span"
+    }
+  ]
+}

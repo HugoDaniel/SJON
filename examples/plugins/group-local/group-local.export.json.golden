@@ -1,0 +1,194 @@
+{
+  "version": 2,
+  "plugins": [
+    {
+      "name": "group-local",
+      "version": "1.0.0",
+      "forms": [
+        {
+          "name": "canvas",
+          "description": "A canvas whose local wrap form carries an exclusive group.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "wrap",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "form_locals",
+                "forms": [
+                  {
+                    "name": "inner",
+                    "description": "A closed local form with an exactly-one group.",
+                    "open": false,
+                    "positional": "none",
+                    "keys": [
+                      {
+                        "name": "tag",
+                        "optional": true,
+                        "description": "",
+                        "value": {
+                          "kind": "string"
+                        }
+                      },
+                      {
+                        "name": "a",
+                        "optional": true,
+                        "description": "",
+                        "value": {
+                          "kind": "number"
+                        }
+                      },
+                      {
+                        "name": "b",
+                        "optional": true,
+                        "description": "",
+                        "value": {
+                          "kind": "number"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "board",
+          "description": "A board whose local pick form is open — its group is annotation-only.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "pick",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "form_locals",
+                "forms": [
+                  {
+                    "name": "hint",
+                    "description": "An open local form; the group sweep is bypassed.",
+                    "open": true,
+                    "positional": "none",
+                    "keys": [
+                      {
+                        "name": "a",
+                        "optional": true,
+                        "description": "",
+                        "value": {
+                          "kind": "number"
+                        }
+                      },
+                      {
+                        "name": "b",
+                        "optional": true,
+                        "description": "",
+                        "value": {
+                          "kind": "number"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "shelf",
+          "description": "A shelf whose local pick form has a defaulted group key.",
+          "open": false,
+          "positional": "none",
+          "keys": [
+            {
+              "name": "pick",
+              "optional": true,
+              "description": "",
+              "value": {
+                "kind": "form_locals",
+                "forms": [
+                  {
+                    "name": "tune",
+                    "description": "A closed local form whose group carries a default.",
+                    "open": false,
+                    "positional": "none",
+                    "keys": [
+                      {
+                        "name": "a",
+                        "optional": true,
+                        "description": "",
+                        "value": {
+                          "kind": "number"
+                        }
+                      },
+                      {
+                        "name": "b",
+                        "optional": true,
+                        "description": "",
+                        "value": {
+                          "kind": "number"
+                        },
+                        "default": 0
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "value_kinds": []
+    }
+  ],
+  "warnings": [
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `inner` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin_name": "group-local",
+      "form_name": "inner"
+    },
+    {
+      "code": "local_forms_emitted_inline",
+      "severity": "info",
+      "message": "slot `:wrap` on form `canvas` declares 1 local form(s) — emitted as an inline union plus the additive global fallback (an open generic branch in JSON Schema, an enumerated-plus-qualified arm in TypeScript); local-first/global resolution order is SJON-only",
+      "plugin_name": "group-local",
+      "form_name": "canvas",
+      "key_name": "wrap"
+    },
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `hint` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin_name": "group-local",
+      "form_name": "hint"
+    },
+    {
+      "code": "local_forms_emitted_inline",
+      "severity": "info",
+      "message": "slot `:pick` on form `board` declares 1 local form(s) — emitted as an inline union plus the additive global fallback (an open generic branch in JSON Schema, an enumerated-plus-qualified arm in TypeScript); local-first/global resolution order is SJON-only",
+      "plugin_name": "group-local",
+      "form_name": "board",
+      "key_name": "pick"
+    },
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `tune` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin_name": "group-local",
+      "form_name": "tune"
+    },
+    {
+      "code": "local_forms_emitted_inline",
+      "severity": "info",
+      "message": "slot `:pick` on form `shelf` declares 1 local form(s) — emitted as an inline union plus the additive global fallback (an open generic branch in JSON Schema, an enumerated-plus-qualified arm in TypeScript); local-first/global resolution order is SJON-only",
+      "plugin_name": "group-local",
+      "form_name": "shelf",
+      "key_name": "pick"
+    }
+  ]
+}

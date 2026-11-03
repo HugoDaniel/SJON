@@ -23,8 +23,8 @@
 // `loader.ts` parses them, and `test/schemaExport.test.ts` compares the
 // `allOf` composition and `x-sjon-*` annotations against the Zig goldens.
 // End-to-end byte agreement is still out of reach for reasons below this
-// file: the loader does not read `:description`, and an untyped vector slot
-// omits the `items: {}` the Zig exporter writes.
+// file: the JSON Schema channel does not yet emit key `:description`, and an
+// untyped vector slot omits the `items: {}` the Zig exporter writes.
 
 import type { Member } from '../plugin.ts';
 import type {

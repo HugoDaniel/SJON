@@ -18,7 +18,7 @@ pub const Model = struct {
     plugins: []const Plugin_,
     /// Format version stamp, copied onto every emitted artifact's
     /// `x-sjon-export-version` annotation.
-    version: u32 = 1,
+    version: u32 = 2,
 };
 
 /// One emitted plugin namespace.
@@ -57,11 +57,15 @@ pub const Form = struct {
     /// `true` when the source `FormSpec.open` is true — extra unknown
     /// keys round-trip via the canonical JSON bridge's `$$`-escape.
     open: bool = false,
-    /// Discriminator + variants snapshot. M1 emits these as deferred
-    /// stubs with warnings; full encoding lands in M2.
+    /// Discriminator + variants snapshot. The JSON Schema channel
+    /// emits the variants as allOf + if/then branches; the TS channel
+    /// as a per-variant union of branded branches.
     discriminator: ?Discriminator = null,
-    /// Source-level exclusive groups. M1 carries them through as
-    /// annotation-only data; M2 wires them to `oneOf`/`not`.
+    /// Source-level exclusive groups, scoping over the form's keys.
+    /// Eligible groups (closed form, no defaulted alternative key) are
+    /// emitted structurally — `oneOf` / `not:{allOf}` on the JSON
+    /// Schema channel, the anonymous-base/arm alias construction on
+    /// TS; open and defaulted groups stay annotation-only on both.
     exclusive_groups: []const ExclusiveGroup = &.{},
     /// Lowering hook declaration, when one is attached. Annotation-only
     /// in every milestone — host owns the hook implementation.
@@ -127,14 +131,26 @@ pub const Discriminator = struct {
 pub const Variant = struct {
     when: []const []const u8,
     keys: []const Key,
+    /// Variant-scoped exclusive groups, scoping over `keys` exactly as
+    /// `Form.exclusive_groups` scopes over the form's keys. Eligible
+    /// groups (closed scope, no defaulted alternative key) are emitted
+    /// structurally on the TS channel — intersected into that variant's
+    /// branch only; the JSON Schema channel carries them as `oneOf` /
+    /// `not:{allOf}` inside the variant's `if/then`.
+    exclusive_groups: []const ExclusiveGroup = &.{},
 };
 
-/// One exclusive-group constraint passed through annotation-only.
+/// One exclusive-group constraint. On the TS channel an eligible group
+/// becomes the anonymous-base/arm construction (`TsTypes.zig`); on the
+/// JSON Schema channel a `oneOf` (exactly_one) or `not:{allOf}`
+/// (at_most_one); open and defaulted groups stay annotation-only on
+/// both channels.
 pub const ExclusiveGroup = struct {
     cardinality: Plugin.Cardinality,
-    /// Alternatives expressed as key-name bundles. v1 is always one
-    /// name per bundle; the slice-of-slices shape leaves headroom for
-    /// multi-key bundles without an IR break.
+    /// Alternatives expressed as key-name bundles: every key of a bundle
+    /// must appear together, and (for `exactly_one`) a partial bundle
+    /// satisfies no alternative. Multi-key bundles are carried and
+    /// emitted as bundles end-to-end.
     alternatives: []const []const []const u8,
 };
 

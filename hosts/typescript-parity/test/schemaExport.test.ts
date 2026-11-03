@@ -8,10 +8,10 @@
 // expected $defs entries.
 //
 // Parity with the Zig goldens (`examples/plugins/*.golden`) is asserted at
-// the bottom of this file, on the `kit` / `kit-xor` fixtures: the `.d.ts`
-// output is compared byte-for-byte modulo `:description` JSDoc (the one
-// construct this port's loader still does not read), and the JSON Schema's
-// `allOf` composition + `x-sjon-*` annotations are compared structurally.
+// the bottom of this file: the `.d.ts` output is compared byte-for-byte on
+// every fixture that exercises the structural export surface. The JSON
+// Schema's `allOf` composition + `x-sjon-*` annotations are compared
+// structurally.
 // The JSON Schema is not yet byte-comparable end-to-end — key shapes carry
 // their own small emission gaps — but the M2 constructs themselves are.
 
@@ -47,7 +47,7 @@ test('schemaExport: inline plugin emits valid JSON Schema 2020-12', () => {
     'https://json-schema.org/draft/2020-12/schema',
     'expected 2020-12 $schema',
   );
-  assert.equal(schema['x-sjon-export-version'], 1);
+  assert.equal(schema['x-sjon-export-version'], 2);
   assert.ok(schema.$defs['form.smoke.row'], 'missing $defs/form.smoke.row');
 
   // TS surface mentions the form interface.
@@ -419,15 +419,24 @@ test('schemaExport: slot-local forms emit an inline anyOf + open branch and a TS
   assert.deepEqual(shape['x-sjon-local-forms'], ['circle', 'rect']);
   assert.deepEqual(shape.anyOf[2], { type: 'object', required: ['$form'] });
 
-  // TS: the slot is an inline union — the circle branch plus the open arm.
+  // TS: the slot is an inline union — the circle branch plus the fallback
+  // arms: the unqualified globals enumerated by name minus the local
+  // heads (canvas here), then one qualified arm per global. Every arm
+  // names a global head — the old open arms (`$form: string` with `$ns`
+  // optional or required) are deliberately gone: excess-property
+  // checking fires on fresh object literals only, so either open arm
+  // let a local value violating an enforced group through the back
+  // door once it arrived through a variable, a function parameter, or
+  // `JSON.parse`.
   assert.match(
     exportResult.tsTypesBytes,
     /shape: \{ \$form: "circle"; \$ns\?: string; r: number; \}/,
   );
   assert.match(
     exportResult.tsTypesBytes,
-    /\| \{ readonly \$form: string; readonly \$ns\?: string \}/,
+    /\| \{ readonly \$form: "canvas" \} \| \{ readonly \$form: "canvas"; readonly \$ns: string \}/,
   );
+  assert.doesNotMatch(exportResult.tsTypesBytes, /readonly \$form: string/);
 
   // The inline emission is recorded as an info warning.
   const codes = new Set(exportResult.warnings.map((w) => w.code));
@@ -503,21 +512,18 @@ test('schemaExport: the two cross-ref routes render differently in every target'
 
 // ── Cross-exporter comparison: the M2 constructs ────────────────────────
 //
-// The file header used to call byte-parity with the Zig goldens a stretch
-// goal blocked on the loader. The loader now parses discriminators and
-// exclusive groups, so the two exporters can finally be compared on them —
-// against `examples/plugins/{kit,kit-xor}`, the fixtures that exist for
-// exactly these constructs.
+// The loader now reads `:description`, so the two exporters can be compared
+// across their whole output — not only the constructs, but the JSDoc and the
+// layout decisions that description presence drives.
 //
-// One gap remains and is named rather than normalised away: this port's
-// loader does not read `:description`, so every golden line that carries
-// author prose is dropped before comparing. Nothing else is.
+// `examples/plugins/{kit,kit-xor,variant-set}` are the pre-existing M2
+// fixtures; the `group-*` / `not-all` set pins the structural exclusive-group
+// emission ported in Task 4.
 
 function goldenOrSkip(rel: string): string | null {
   const p = path.join(examples, rel);
   return existsSync(p) ? readFileSync(p, 'utf8') : null;
 }
-
 function exportOf(fixture: string) {
   const manifestPath = path.join(examples, fixture, 'plugin.sjon');
   if (!existsSync(manifestPath)) return null;
@@ -525,24 +531,6 @@ function exportOf(fixture: string) {
     target: { jsonSchema: true, tsTypes: true },
   });
   return exportResult;
-}
-
-/** Drop the JSDoc a `:description` produces: a whole single-line `/** … *​/`,
- *  a prose line inside a multi-line block, and the `*` separator that only
- *  existed to space prose from the `@sjon-…` annotations below it. The
- *  annotation lines themselves are kept — they are what this compares.
- *
- *  Continuation lines carry the member's indentation on both emitters, so
- *  the prose and separator patterns allow leading whitespace. A single-line
- *  block containing an `@`-annotation is NOT a description and is kept —
- *  both emitters reserve the single-line shape for lone prose. */
-function withoutDescriptionDoc(src: string): string {
-  return src
-    .split('\n')
-    .filter(
-      (l) => !/^\s*\/\*\*(?!.*@).*\*\/$/.test(l) && !/^\s*\* [^@]/.test(l) && l.trim() !== '*',
-    )
-    .join('\n');
 }
 
 test('schemaExport: kit-xor exclusive groups match the Zig golden exactly', () => {
@@ -611,18 +599,140 @@ test('schemaExport: variant-set — a multi-value :when guards one branch, and m
   assert.match(dts, /topology: Symbol_<"point-list" \| "line-list" \| "triangle-list">;/);
 });
 
-for (const fixture of ['kit', 'kit-xor', 'variant-set']) {
-  test(`schemaExport: ${fixture} .d.ts matches the Zig golden (minus :description)`, () => {
+const VARIANT_GROUP_SRC = `(plugin :name probe :version "1.0.0"
+  (value-kind :name kind-tag
+    :underlying symbol
+    :members (member-set :values [kick bass]))
+  (form :name track
+    :discriminant kind
+    (key :name kind :type kind-tag :optional true)
+    (variant :when kick
+      (key :name step :type number :optional true)
+      (key :name sweep :type number :optional true)
+      (exclusive-group :cardinality exactly-one
+        (alt :keys [step])
+        (alt :keys [sweep])))
+    (variant :when bass
+      (key :name sequence :type any :optional true))))`;
+
+function variantGroupExport() {
+  return exportSchema(VARIANT_GROUP_SRC, nullHostOptions(), {
+    target: { jsonSchema: true, tsTypes: true },
+  }).exportResult;
+}
+
+test('schemaExport: a variant-scoped exclusive group reaches the IR variant', () => {
+  const model = variantGroupExport().model;
+  const track = model.plugins[0]!.forms[0]!;
+  const variants = track.discriminator!.variants;
+  assert.equal(variants.length, 2);
+  // The kick variant carries its scoped group; bass carries none.
+  assert.deepEqual(variants[0]!.exclusiveGroups, [
+    { cardinality: 'exactly_one', alternatives: [['step'], ['sweep']] },
+  ]);
+  assert.deepEqual(variants[1]!.exclusiveGroups, []);
+});
+
+test('schemaExport: a variant-scoped exclusive group annotates its TS branch', () => {
+  const dts = variantGroupExport().tsTypesBytes!;
+  const anno = ' * @sjon-exclusive-group exactly-one [step, sweep]';
+  assert.ok(dts.includes(anno), 'variant branch is missing the group annotation');
+  // The annotation is scoped to the `kick` branch, not the form: exactly
+  // one occurrence (the `bass` variant carries no groups), placed between
+  // the alias header and the kick branch's discriminant brand.
+  assert.equal(dts.split(anno).length - 1, 1);
+  const typeAt = dts.indexOf('export type Probe_Track =');
+  const annoAt = dts.indexOf(anno);
+  const kickAt = dts.indexOf('kind: Symbol_<"kick">');
+  assert.ok(typeAt < annoAt && annoAt < kickAt);
+});
+
+for (const fixture of [
+  'kit',
+  'kit-xor',
+  'variant-set',
+  // Structural exclusive-group emission (Task 4). Each golden is the Zig
+  // exporter's own bytes; the port must reproduce them exactly for the
+  // three-alternative, variant-scoped, slot-local, required-key, mixed
+  // default/enforced, and not-all-barrel shapes.
+  'group-three',
+  'group-variant',
+  // Two enforced groups on one variant — the composition whose second
+  // group used to emit a stray brace in both emitters.
+  'group-variant-pair',
+  'group-local',
+  // A unit-bearing key inside an enforced group — the unit JSDoc forces
+  // the multi-line arm and the tuple must be readonly, on both hosts.
+  'group-units',
+  // An open form with a group — skipped-open: interface spelling, both
+  // and neither accepted.
+  'group-open',
+  'group-required',
+  'group-mixed',
+  'not-all',
+  // Strict compile matrix (Task 5): the wgslayer frame placement shape
+  // (value-kind tuples, :requires keys, exactly-one [frame, size+matrix])
+  // and two enforced groups composed in one form.
+  'group-frame',
+  'group-pair',
+  // The additive slot-local fallback: local-first shadowing (local
+  // `circle` shadows global `circle`), the nested local slot, and the
+  // global-fallback arms the exclusive-group enforcement leans on.
+  'local-forms',
+]) {
+  test(`schemaExport: ${fixture} .d.ts matches the Zig golden byte for byte`, () => {
     const result = exportOf(fixture);
     const golden = goldenOrSkip(`${fixture}/${fixture}.d.ts.golden`);
     if (!result || !golden) return;
-    assert.equal(
-      withoutDescriptionDoc(result.tsTypesBytes!),
-      withoutDescriptionDoc(golden),
-      `${fixture} .d.ts drifted from the Zig exporter`,
-    );
+    assert.equal(result.tsTypesBytes!, golden, `${fixture} .d.ts drifted from the Zig exporter`);
   });
 }
+
+// The strict compile matrix (`test/typecheck/*.ts`, Task 5) consumes
+// committed copies of these Zig-emitted goldens from `test/golden/`.
+// Each copy must stay byte-identical to its source of truth — the
+// examples golden, whose bytes the loop above already proves the TS
+// host reproduces exactly.
+for (const name of [
+  'group-frame',
+  'group-local',
+  'group-mixed',
+  'group-open',
+  'group-pair',
+  'group-three',
+  'group-required',
+  'group-units',
+  'group-variant-pair',
+  'local-forms',
+  'not-all',
+  'xkey',
+]) {
+  test(`typecheck golden copy: ${name}.d.ts matches the examples golden`, () => {
+    const golden = goldenOrSkip(`${name}/${name}.d.ts.golden`);
+    if (!golden) return;
+    const copy = readFileSync(path.join(here, 'golden', `${name}.d.ts`), 'utf8');
+    assert.equal(copy, golden, `test/golden/${name}.d.ts drifted from the examples golden`);
+  });
+}
+
+test('schemaExport: three alternatives intersect one _SjonNotAll per competitor', () => {
+  // The flattened spelling would accept `a + b1 + b2` whenever `c` is
+  // absent; the per-competitor arms reject it.
+  const dts = exportOf('group-three')!.tsTypesBytes!;
+  assert.match(dts, /_SjonNotAll<"b1" \| "b2">/);
+  assert.doesNotMatch(dts, /_SjonNotAll<"a" \| "b1" \| "b2" \| "c">/);
+  assert.doesNotMatch(dts, /_SjonNotAll<"b1" \| "b2" \| "c">/);
+});
+
+test('schemaExport: a plugin named not-all keeps its barrel clear of the helper', () => {
+  const dts = exportOf('not-all')!.tsTypesBytes!;
+  assert.match(
+    dts,
+    /^type _SjonNotAll<K extends string> = K extends K \? \{ \[P in K\]\?: never \} : never;$/m,
+  );
+  assert.doesNotMatch(dts, /export type _SjonNotAll/);
+  assert.match(dts, /^export type SjonNotAll =$/m);
+});
 
 // ---------------------------------------------------------------------------
 // S7b — a head-set slot resolves its members against the slot's locals.

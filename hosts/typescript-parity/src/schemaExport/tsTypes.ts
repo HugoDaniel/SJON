@@ -1,10 +1,13 @@
 // Model → TypeScript `.d.ts` bytes — TypeScript port of
 // `src/SchemaExport/TsTypes.zig`.
 //
-// Emits one interface per form (`<Plugin>_<Form>` PascalCase), one
-// type alias per value-kind, a `Sjon<Plugin>` barrel union per
-// plugin. The output describes the canonical JSON shape of
-// `sjon to-json` — `$form`, `$ns`, `$kw`, `$sym`, etc.
+// Emits one interface or type alias per form (`<Plugin>_<Form>`
+// PascalCase — an interface for the plain shapes, an alias whose
+// anonymous base is intersected by arm unions when an exclusive group is
+// structurally enforced), one type alias per value-kind, a
+// `Sjon<Plugin>` barrel union per plugin. The output describes the
+// canonical JSON shape of `sjon to-json` — `$form`, `$ns`, `$kw`,
+// `$sym`, etc.
 //
 // Structural parity with Zig:
 //
@@ -12,22 +15,24 @@
 //     `SjonTime`, `SjonExpr<>`, `CrossRef<>`)
 //   * Same form-naming scheme: `<Plugin>_<Form>` PascalCase
 //   * Same per-key/per-shape mapping: optional `?`, literal `$form`,
-//     branded `Symbol_<>` for members, tuple `[number, "deg"]` for
-//     unit-bearing numbers, JSDoc `@minimum`/`@maximum`/`@minLength`/
-//     `@maxLength`/`@pattern`/`@format`/`@sjon-cross-ref` annotations
+//     branded `Symbol_<>` for members, tuple `readonly [number, "deg"]`
+//     for unit-bearing numbers, JSDoc `@minimum`/`@maximum`/
+//     `@minLength`/`@maxLength`/`@pattern`/`@format`/`@sjon-unit`/
+//     `@sjon-cross-ref` annotations
 //
 // Discriminated forms and exclusive groups are emitted here too, now that
 // `loader.ts` parses them: a discriminated form becomes a per-variant union
 // (`writeDiscriminatedFormType`) and every group adds a
-// `@sjon-exclusive-group` JSDoc line. On the `kit` / `kit-xor` fixtures the
-// output is byte-identical to the Zig goldens except for the JSDoc a
-// `:description` produces — the one manifest field this port's loader still
-// does not read. `test/schemaExport.test.ts` asserts exactly that.
+// `@sjon-exclusive-group` JSDoc line. On the fixtures wired into
+// `test/schemaExport.test.ts` (kit, kit-xor, variant-set, the group-*
+// family, local-forms) the output is byte-identical to the Zig goldens —
+// including `:description` text, which this port's loader reads.
 
 import type {
   Model,
   ModelCrossRef,
   ModelDiscriminator,
+  ModelExclusiveGroup,
   ModelForm,
   ModelKey,
   ModelMember,
@@ -92,10 +97,25 @@ export function emitForPlugin(
   return emitWithContext(model, warnings, { filterPlugin: plugin.name, model });
 }
 
+/** The `_SjonNotAll` helper, spelled exactly as it must appear once per
+ *  output file: directly after the brand prelude, non-exported, only when
+ *  that file contains at least one structurally enforced group. The
+ *  underscore prefix avoids the barrel a plugin literally named `not-all`
+ *  would produce (`SjonNotAll`). */
+const NOT_ALL_HELPER_DECL =
+  'type _SjonNotAll<K extends string> = K extends K ? { [P in K]?: never } : never;';
+
 function emitWithContext(model: Model, warnings: readonly Warning[], ctx: EmitContext): string {
   let out = '';
   out += writeHeader(model.version, warnings);
-  out += BRAND_PRELUDE + '\n';
+  out += BRAND_PRELUDE;
+  // The helper rides directly under the brand prelude and before
+  // imports/forms, once, and only when something in this file will
+  // actually reference it.
+  if (fileHasEnforcedGroup(model, ctx.filterPlugin)) {
+    out += NOT_ALL_HELPER_DECL + '\n';
+  }
+  out += '\n';
   if (ctx.filterPlugin) {
     out += writeCrossPluginImports(model, ctx.filterPlugin);
   }
@@ -190,9 +210,284 @@ function collectCrossPluginRefsFromShape(
 
 function writeForm(plugin: ModelPlugin, form: ModelForm, ctx: EmitContext): string {
   const doc = writeFormDoc(form);
-  return form.discriminator
-    ? doc + writeDiscriminatedFormType(plugin, form, form.discriminator, ctx)
-    : doc + writeFormInterface(plugin, form, ctx);
+  if (form.discriminator) {
+    return doc + writeDiscriminatedFormType(plugin, form, form.discriminator, ctx);
+  }
+  if (hasEnforcedFormGroup(form)) {
+    return doc + writeFormType(plugin, form, ctx);
+  }
+  return doc + writeFormInterface(plugin, form, ctx);
+}
+
+/** True when at least one form-level group on `form` is structurally
+ *  enforced (closed scope, no defaulted alternative key). */
+function hasEnforcedFormGroup(form: ModelForm): boolean {
+  return form.exclusiveGroups.some((g) => groupState(form, g) === 'enforced');
+}
+
+/** True when `name` is claimed by any enforced group over `scopeKeys`
+ *  (the form's keys, or one variant's overlay). Only enforced groups
+ *  take their keys out of the base — a defaulted or open group leaves
+ *  every key where the interface spelling put it. */
+function isKeyGroupedEnforced(
+  open: boolean,
+  scopeKeys: readonly ModelKey[],
+  groups: readonly ModelExclusiveGroup[],
+  name: string,
+): boolean {
+  for (const g of groups) {
+    if (groupStateForScope(open, scopeKeys, g) !== 'enforced') continue;
+    for (const alt of g.alternatives) {
+      if (alt.includes(name)) return true;
+    }
+  }
+  return false;
+}
+
+/** The `ModelKey` named `name` in `scopeKeys`, or undefined. The manifest
+ *  guarantees every alternative name resolves in its scope; the undefined
+ *  arm only exists for hand-built models. */
+function scopeKey(keys: readonly ModelKey[], name: string): ModelKey | undefined {
+  return keys.find((k) => k.name === name);
+}
+
+/** Whether this file needs `_SjonNotAll`: any enforced group anywhere in
+ *  the emitted forms — form-level, variant-scoped, or on a slot-local
+ *  form reached through a compound shape. */
+function fileHasEnforcedGroup(model: Model, filterPlugin: string | null): boolean {
+  for (const p of model.plugins) {
+    if (filterPlugin && p.name !== filterPlugin) continue;
+    for (const f of p.forms) {
+      if (formHasEnforcedGroup(f)) return true;
+    }
+  }
+  return false;
+}
+
+function formHasEnforcedGroup(form: ModelForm): boolean {
+  if (hasEnforcedFormGroup(form)) return true;
+  if (form.discriminator) {
+    for (const v of form.discriminator.variants) {
+      for (const g of v.exclusiveGroups) {
+        if (groupStateForScope(form.open, v.keys, g) === 'enforced') return true;
+      }
+    }
+  }
+  for (const k of form.keys) {
+    if (shapeHasEnforcedGroup(k.value)) return true;
+  }
+  return form.positional.kind === 'kind' && shapeHasEnforcedGroup(form.positional.shape);
+}
+
+function shapeHasEnforcedGroup(shape: ModelValueShape): boolean {
+  switch (shape.kind) {
+    case 'vector':
+      return shapeHasEnforcedGroup(shape.vector.element);
+    case 'union_of':
+      return shape.alternatives.some((alt) => shapeHasEnforcedGroup(alt.shape));
+    case 'form_locals':
+      return shape.forms.some((form) => formHasEnforcedGroup(form));
+    case 'form_heads':
+      return shape.heads.some((head) => {
+        const body = refBody(head);
+        return body.kind === 'local' && formHasEnforcedGroup(body.form);
+      });
+    default:
+      return false;
+  }
+}
+
+/** Column geometry for the block-shaped arm union. The top-level alias
+ *  puts pipes at column 2; a variant branch nests four deeper. */
+interface ArmLayout {
+  readonly pipe: string;
+  readonly key: string;
+  readonly close: string;
+  readonly cont: string;
+}
+
+const arm_layout_top: ArmLayout = {
+  pipe: '  ',
+  key: '      ',
+  close: '    ',
+  cont: '      ',
+};
+
+const arm_layout_variant: ArmLayout = {
+  pipe: '      ',
+  key: '          ',
+  close: '        ',
+  cont: '          ',
+};
+
+/** A form with at least one enforced exclusive group emits as an
+ *  anonymous-base type alias intersected by one arm-union per group, in
+ *  declaration order:
+ *
+ *      export type P_Choice = { base } & (arms…) & (arms…);
+ *
+ *  Grouped keys leave the base — even `:optional false` ones — because
+ *  only an active arm may require them; ordinary base keys keep the
+ *  interface path's sorted emission. Skipped groups (open, defaulted)
+ *  contribute no intersection and keep their keys in the base. Mirrors
+ *  `writeFormType` in `src/SchemaExport/TsTypes.zig`. */
+function writeFormType(plugin: ModelPlugin, form: ModelForm, ctx: EmitContext): string {
+  let out = `export type ${formTypeName(plugin.name, form.name)} = {\n`;
+  out += `  $form: "${form.name}";\n`;
+  out += `  $ns: "${plugin.name}";\n`;
+  for (const k of sortKeys(form.keys)) {
+    if (isKeyGroupedEnforced(form.open, form.keys, form.exclusiveGroups, k.name)) continue;
+    out += writeKey(k, '  ', ctx);
+  }
+  out += writeChildren(form, '  ', ctx);
+  out += '}';
+  let first = true;
+  for (const g of form.exclusiveGroups) {
+    if (groupState(form, g) !== 'enforced') continue;
+    out += first ? ' & (\n' : ') & (\n';
+    first = false;
+    out += writeGroupArms(form.keys, g, arm_layout_top, ctx);
+  }
+  out += ');\n\n';
+  return out;
+}
+
+/** The arm union of one enforced group, one line per arm at `layout`'s
+ *  pipe column (`at_most_one` leads with the none-arm). The caller
+ *  writes the wrapping `& (\n` before and `)` after. */
+function writeGroupArms(
+  scopeKeys: readonly ModelKey[],
+  group: ModelExclusiveGroup,
+  layout: ArmLayout,
+  ctx: EmitContext,
+): string {
+  let out = '';
+  if (group.cardinality === 'at_most_one') {
+    out += layout.pipe + '| { ';
+    let first = true;
+    for (const alt of group.alternatives) {
+      for (const kn of alt) {
+        if (!first) out += '; ';
+        first = false;
+        out += escapeIdentifier(kn) + '?: never';
+      }
+    }
+    out += ' }\n';
+  }
+  for (let i = 0; i < group.alternatives.length; i++) {
+    out += layout.pipe + '| ' + writeArm(scopeKeys, group, i, layout, false, ctx) + '\n';
+  }
+  return out;
+}
+
+/** The same arm union on one line, for an inline local-form literal:
+ *  `({ a: number } & _SjonNotAll<"b">) | ({ b: number } & _SjonNotAll<"a">)`.
+ *  The caller writes the wrapping ` & (` and `)`. */
+function writeGroupArmsInline(
+  scopeKeys: readonly ModelKey[],
+  group: ModelExclusiveGroup,
+  ctx: EmitContext,
+): string {
+  let out = '';
+  let wrote = false;
+  if (group.cardinality === 'at_most_one') {
+    out += '{';
+    let first = true;
+    for (const alt of group.alternatives) {
+      for (const kn of alt) {
+        out += first ? ' ' : '; ';
+        first = false;
+        out += escapeIdentifier(kn) + '?: never';
+      }
+    }
+    out += ' }';
+    wrote = true;
+  }
+  for (let i = 0; i < group.alternatives.length; i++) {
+    if (wrote) out += ' | ';
+    wrote = true;
+    out += writeArm(scopeKeys, group, i, arm_layout_top, true, ctx);
+  }
+  return out;
+}
+
+/** One alternative's arm: the alternative's keys required (original
+ *  value types, original JSDoc) intersected with one `_SjonNotAll<…>` per
+ *  competing alternative, in declaration order — never one flattened key
+ *  set, which a partial competitor would slip through. */
+function writeArm(
+  scopeKeys: readonly ModelKey[],
+  group: ModelExclusiveGroup,
+  altIndex: number,
+  layout: ArmLayout,
+  oneLine: boolean,
+  ctx: EmitContext,
+): string {
+  const alt = group.alternatives[altIndex]!;
+  const multi = !oneLine && (group.alternatives.length > 2 || armNeedsDoc(scopeKeys, alt));
+  let out = '';
+  if (!multi) {
+    out += '({ ';
+    let first = true;
+    for (const kn of alt) {
+      if (!first) out += '; ';
+      first = false;
+      const k = scopeKey(scopeKeys, kn);
+      if (k) {
+        out += escapeIdentifier(k.name) + ': ' + writeShape(k.value, ctx);
+      } else {
+        out += escapeIdentifier(kn) + ': unknown';
+      }
+    }
+    out += ' }';
+    for (let j = 0; j < group.alternatives.length; j++) {
+      if (j === altIndex) continue;
+      out += ' & ' + writeNotAllArg(group.alternatives[j]!);
+    }
+    out += ')';
+    return out;
+  }
+  out += '({\n';
+  for (const kn of alt) {
+    const k = scopeKey(scopeKeys, kn) ?? {
+      name: kn,
+      optional: false,
+      description: '',
+      value: { kind: 'any' } as const,
+      default: null,
+      requires: [],
+    };
+    out += writeKey({ ...k, optional: false }, layout.key, ctx);
+  }
+  let n = 0;
+  const competitors = group.alternatives.length - 1;
+  for (let j = 0; j < group.alternatives.length; j++) {
+    if (j === altIndex) continue;
+    if (n === 0) {
+      out += layout.close + '} & ';
+    } else {
+      out += '\n' + layout.cont + '& ';
+    }
+    out += writeNotAllArg(group.alternatives[j]!);
+    n += 1;
+    if (n === competitors) out += ')';
+  }
+  if (n === 0) out += layout.close + '})';
+  return out;
+}
+
+/** `_SjonNotAll<"b1" | "b2">` — one competing alternative's key bundle. */
+function writeNotAllArg(altNames: readonly string[]): string {
+  return `_SjonNotAll<${altNames.map((kn) => `"${kn}"`).join(' | ')}>`;
+}
+
+/** True when any key of `alt` carries the JSDoc that forces the
+ *  multi-line arm shape. */
+function armNeedsDoc(scopeKeys: readonly ModelKey[], alt: readonly string[]): boolean {
+  return alt.some((kn) => {
+    const k = scopeKey(scopeKeys, kn);
+    return k !== undefined && keyNeedsDoc(k);
+  });
 }
 
 function writeFormInterface(plugin: ModelPlugin, form: ModelForm, ctx: EmitContext): string {
@@ -227,31 +522,100 @@ function writeDiscriminatedFormType(
   ctx: EmitContext,
 ): string {
   let out = `export type ${formTypeName(plugin.name, form.name)} =`;
-  const branch = (when: readonly string[], overlay: readonly ModelKey[]): string => {
-    let b = '\n  | {\n';
-    b += `      $form: "${form.name}";\n`;
-    b += `      $ns: "${plugin.name}";\n`;
-    for (const k of sortKeys(form.keys)) {
-      b +=
-        k.name === disc.keyName
-          ? writeDiscriminantKey(k, when, '      ')
-          : writeKey(k, '      ', ctx);
-    }
-    for (const vk of sortKeys(overlay)) {
-      b += writeKey(vk, '      ', ctx);
-    }
-    b += writeChildren(form, '      ', ctx);
-    if (form.open) b += '      [key: string]: unknown;\n';
-    b += '    }';
-    return b;
-  };
-  for (const v of disc.variants) out += branch(v.when, v.keys);
+  // A form-level enforced group constrains keys every branch repeats, so
+  // it intersects the whole union — parenthesised, because `|` binds
+  // looser than `&` and a bare branch tail would constrain only the last
+  // branch. Mirrors the JSON Schema side's allOf chain.
+  const wrap = hasEnforcedFormGroup(form);
+  if (wrap) out += ' (';
+  for (const v of disc.variants) {
+    out += writeDiscriminatedBranch(plugin, form, disc, v.when, v.keys, v.exclusiveGroups, ctx);
+  }
   // Members no variant selects get one residual branch — common keys only,
   // discriminant narrowed to exactly those members — so the union covers the
   // whole member set the validator accepts. Mirrors Zig.
   const residual = residualMembers(form, disc);
-  if (residual.length > 0) out += branch(residual, []);
+  if (residual.length > 0)
+    out += writeDiscriminatedBranch(plugin, form, disc, residual, [], [], ctx);
+  if (wrap) {
+    out += '\n)';
+    for (const g of form.exclusiveGroups) {
+      if (groupState(form, g) !== 'enforced') continue;
+      out += ' & (\n';
+      out += writeGroupArms(form.keys, g, arm_layout_top, ctx);
+      out += ')';
+    }
+  }
   return `${out};\n\n`;
+}
+
+/** One `| { … }` branch of a discriminated form's union: `$form`/`$ns`,
+ *  the common keys with the discriminant narrowed to `when`, then
+ *  `overlay` (a variant's keys, or none for the residual branch). A
+ *  variant carrying scoped exclusive groups gets their annotation as a
+ *  doc block above the branch — the group constrains that variant's keys
+ *  only, so the form-level doc and the residual branch stay clean. When
+ *  any of those groups is enforced, the branch object becomes an
+ *  anonymous base intersected by the group's arm union (`| ({ … } & (…))`);
+ *  form-level enforced groups remove their keys from every branch
+ *  instead, their arms riding outside the union. Mirrors
+ *  `writeDiscriminatedBranch` in `src/SchemaExport/TsTypes.zig`. */
+function writeDiscriminatedBranch(
+  plugin: ModelPlugin,
+  form: ModelForm,
+  disc: ModelDiscriminator,
+  when: readonly string[],
+  overlay: readonly ModelKey[],
+  groups: readonly ModelExclusiveGroup[],
+  ctx: EmitContext,
+): string {
+  const anyEnforced = groups.some((g) => groupStateForScope(form.open, overlay, g) === 'enforced');
+  let out = '';
+  if (groups.length > 0) {
+    out += '\n  /**\n';
+    out += exclusiveGroupLines(groups, '  ');
+    out += '  */\n';
+    out += anyEnforced ? '  | ({\n' : '  | {\n';
+  } else {
+    out += '\n  | {\n';
+  }
+  out += `      $form: "${form.name}";\n`;
+  out += `      $ns: "${plugin.name}";\n`;
+  // Common + discriminant keys, sorted alphabetically. The discriminant
+  // gets its brand narrowed to the branch's `when`; keys claimed by a
+  // form-level enforced group leave for its arms.
+  for (const k of sortKeys(form.keys)) {
+    if (isKeyGroupedEnforced(form.open, form.keys, form.exclusiveGroups, k.name)) continue;
+    out +=
+      k.name === disc.keyName
+        ? writeDiscriminantKey(k, when, '      ')
+        : writeKey(k, '      ', ctx);
+  }
+  // Variant overlay keys; those claimed by an enforced variant group leave
+  // the base for that group's arms.
+  for (const vk of sortKeys(overlay)) {
+    if (isKeyGroupedEnforced(form.open, overlay, groups, vk.name)) continue;
+    out += writeKey(vk, '      ', ctx);
+  }
+  out += writeChildren(form, '      ', ctx);
+  if (form.open) out += '      [key: string]: unknown;\n';
+  if (anyEnforced) {
+    // The base object closes exactly once, before the first enforced
+    // group's union; each further group joins with `) & (`. Mirrors the
+    // Zig emitter — a `} & (` per group emits a stray brace for every
+    // group after the first and the file does not parse.
+    let firstGroup = true;
+    for (const g of groups) {
+      if (groupStateForScope(form.open, overlay, g) !== 'enforced') continue;
+      out += firstGroup ? '    } & (\n' : '    ) & (\n';
+      firstGroup = false;
+      out += writeGroupArms(overlay, g, arm_layout_variant, ctx);
+    }
+    out += '    ))';
+  } else {
+    out += '    }';
+  }
+  return out;
 }
 
 /** Every member of the discriminant's set that no variant's `:when` lists —
@@ -354,12 +718,60 @@ function writeFormDoc(form: ModelForm): string {
     out += ` * ${form.description}\n`;
     if (form.exclusiveGroups.length > 0) out += ' *\n';
   }
-  for (const g of form.exclusiveGroups) {
+  out += exclusiveGroupLines(form.exclusiveGroups, '');
+  out += ' */\n';
+  return out;
+}
+
+export type GroupState = 'enforced' | 'skipped-open' | 'defaulted';
+
+/** Form-scoped eligibility decision. */
+export function groupState(form: ModelForm, group: ModelExclusiveGroup): GroupState {
+  return groupStateForScope(form.open, form.keys, group);
+}
+
+/** The scope a group constrains: a form's keys, or one variant's overlay
+ *  keys. `open` is the scope's own openness. */
+export function groupStateForScope(
+  open: boolean,
+  keys: readonly ModelKey[],
+  group: ModelExclusiveGroup,
+): GroupState {
+  // An open scope round-trips unknown keys, and the runtime bypasses the
+  // group sweep for it, so a structural arm here would reject documents
+  // the validator accepts. Skipping wins over the default check: either
+  // way the group contributes no arm.
+  if (open) return 'skipped-open';
+  for (const alternative of group.alternatives) {
+    for (const name of alternative) {
+      // Any defaulted alternative skips the *whole* group, not just that
+      // alternative: defaulted participation depends on whether a sibling
+      // is fully author-present, so the ordinary presence union is not
+      // equivalent.
+      if (scopeKeyHasDefault(keys, name)) return 'defaulted';
+    }
+  }
+  return 'enforced';
+}
+
+function scopeKeyHasDefault(keys: readonly ModelKey[], name: string): boolean {
+  for (const key of keys) {
+    if (key.name === name) return key.default !== null;
+  }
+  return false;
+}
+
+/** One `* @sjon-exclusive-group …` content line per group, prefixed by
+ *  `indent`. Shared by the form-level doc (`''`) and the per-variant
+ *  branch doc (`'  '`) so both scopes spell the annotation identically.
+ *  Mirrors Zig's `writeExclusiveGroupLines`. */
+function exclusiveGroupLines(groups: readonly ModelExclusiveGroup[], indent: string): string {
+  let out = '';
+  for (const g of groups) {
     const card = g.cardinality === 'exactly_one' ? 'exactly-one' : 'at-most-one';
     const alts = g.alternatives.map((bundle) => bundle.join(' + ')).join(', ');
-    out += ` * @sjon-exclusive-group ${card} [${alts}]\n`;
+    out += `${indent} * @sjon-exclusive-group ${card} [${alts}]\n`;
   }
-  out += ' */\n';
   return out;
 }
 
@@ -381,52 +793,108 @@ function writeKey(key: ModelKey, indent: string, ctx: EmitContext): string {
  * discriminant brand, matching the JSON side's if/then reuse.
  */
 function writeInlineLocalForm(form: ModelForm, ctx: EmitContext): string {
-  const sortedKeys = [...form.keys].sort((a, b) => a.name.localeCompare(b.name));
+  const sortedKeys = sortKeys(form.keys);
   if (form.discriminator) {
     const disc = form.discriminator;
-    const branch = (when: readonly string[], overlay: readonly ModelKey[]): string => {
-      let s = `{ $form: "${form.name}"; $ns?: string;`;
-      for (const k of sortedKeys) {
-        s +=
-          k.name === disc.keyName
-            ? ` ${escapeIdentifier(k.name)}: ${whenBrand(when)};`
-            : ` ${writeInlineLocalKey(k, ctx)}`;
-      }
-      const sortedVKeys = [...overlay].sort((a, b) => a.name.localeCompare(b.name));
-      for (const vk of sortedVKeys) s += ` ${writeInlineLocalKey(vk, ctx)}`;
-      if (form.open) s += ' [key: string]: unknown;';
-      s += ' }';
-      return s;
-    };
-    const branches = disc.variants.map((v) => branch(v.when, v.keys));
+    const branches = disc.variants.map((v) =>
+      writeInlineDiscriminatedBranch(form, disc, v.when, v.keys, v.exclusiveGroups, ctx),
+    );
     // The residual branch, as in `writeDiscriminatedFormType`.
     const residual = residualMembers(form, disc);
-    if (residual.length > 0) branches.push(branch(residual, []));
-    return `(${branches.join(' | ')})`;
+    if (residual.length > 0) {
+      branches.push(writeInlineDiscriminatedBranch(form, disc, residual, [], [], ctx));
+    }
+    let out = `(${branches.join(' | ')})`;
+    // Form-level enforced groups intersect the parenthesised branch
+    // union, exactly as the block-shaped discriminated emitter wraps its
+    // own.
+    for (const g of form.exclusiveGroups) {
+      if (groupState(form, g) !== 'enforced') continue;
+      out += ' & (' + writeGroupArmsInline(form.keys, g, ctx) + ')';
+    }
+    return out;
   }
-  let s = `{ $form: "${form.name}"; $ns?: string;`;
-  for (const k of sortedKeys) s += ` ${writeInlineLocalKey(k, ctx)}`;
+  let out = `{ $form: "${form.name}"; $ns?: string;`;
+  for (const k of sortedKeys) {
+    if (isKeyGroupedEnforced(form.open, form.keys, form.exclusiveGroups, k.name)) continue;
+    out += ` ${writeInlineLocalKey(k, ctx)}`;
+  }
   switch (form.positional.kind) {
     case 'none':
       break;
     case 'any':
-      s += ' $children?: unknown[];';
+      out += ' $children?: unknown[];';
       break;
     case 'kind':
-      s += ` $children?: Array<${writeShape(form.positional.shape, ctx)}>;`;
+      out += ` $children?: Array<${writeShape(form.positional.shape, ctx)}>;`;
       break;
     default:
       assertNever(form.positional);
   }
-  if (form.open) s += ' [key: string]: unknown;';
-  s += ' }';
-  return s;
+  if (form.open) out += ' [key: string]: unknown;';
+  out += ' }';
+  // Enforced groups apply the same anonymous-base/intersection
+  // construction inline; `&` binds tighter than `|`, so a slot union
+  // member stays correctly scoped without extra parentheses.
+  for (const g of form.exclusiveGroups) {
+    if (groupState(form, g) !== 'enforced') continue;
+    out += ' & (' + writeGroupArmsInline(form.keys, g, ctx) + ')';
+  }
+  return out;
+}
+
+/** One `{ … }` branch of an inline discriminated local's union — the
+ *  one-line mirror of `writeDiscriminatedBranch`, including the
+ *  variant-group arm intersection. */
+function writeInlineDiscriminatedBranch(
+  form: ModelForm,
+  disc: ModelDiscriminator,
+  when: readonly string[],
+  overlay: readonly ModelKey[],
+  groups: readonly ModelExclusiveGroup[],
+  ctx: EmitContext,
+): string {
+  let out = `{ $form: "${form.name}"; $ns?: string;`;
+  for (const k of sortKeys(form.keys)) {
+    if (isKeyGroupedEnforced(form.open, form.keys, form.exclusiveGroups, k.name)) continue;
+    out +=
+      k.name === disc.keyName
+        ? ` ${escapeIdentifier(k.name)}: ${whenBrand(when)};`
+        : ` ${writeInlineLocalKey(k, ctx)}`;
+  }
+  for (const vk of sortKeys(overlay)) {
+    if (isKeyGroupedEnforced(form.open, overlay, groups, vk.name)) continue;
+    out += ` ${writeInlineLocalKey(vk, ctx)}`;
+  }
+  if (form.open) out += ' [key: string]: unknown;';
+  out += ' }';
+  for (const g of groups) {
+    if (groupStateForScope(form.open, overlay, g) !== 'enforced') continue;
+    out += ' & (' + writeGroupArmsInline(overlay, g, ctx) + ')';
+  }
+  return out;
 }
 
 /** Compact single-line key for an inline local-form literal: `name?: T;`. */
 function writeInlineLocalKey(key: ModelKey, ctx: EmitContext): string {
   const optMark = key.optional ? '?' : '';
   return `${escapeIdentifier(key.name)}${optMark}: ${writeShape(key.value, ctx)};`;
+}
+
+/** Whether `key`'s slot renders a JSDoc block/line above the property —
+ *  shared by `buildKeyJSDoc` and the multi-line arm shape decision.
+ *  Mirrors `keyNeedsDoc` in `src/SchemaExport/TsTypes.zig`, unit
+ *  metadata included: a unit-bearing key carries `@sjon-unit`. */
+function keyNeedsDoc(key: ModelKey): boolean {
+  if (key.description) return true;
+  if (key.default && key.default.kind === 'expression') return true;
+  if (numericBoundsOf(key.value)) return true;
+  if (stringBoundsOf(key.value)) return true;
+  if (key.requires.length > 0) return true;
+  if (crossRefOf(key.value)) return true;
+  if (unitOf(key.value)) return true;
+  if (richMembersOf(key.value)) return true;
+  return false;
 }
 
 function buildKeyJSDoc(key: ModelKey, indent: string): string {
@@ -475,6 +943,16 @@ function buildKeyJSDoc(key: ModelKey, indent: string): string {
         (cr.scopeForm ? ` scope-form=${cr.scopeForm}` : ''),
     );
   }
+  const unit = unitOf(key.value);
+  if (unit) {
+    // Mirrors `writeUnitDoc` in `TsTypes.zig` byte for byte:
+    // `@sjon-unit required=true allowed=[mm, cm, m]`.
+    let unitLine = `@sjon-unit required=${unit.required ? 'true' : 'false'}`;
+    if (unit.allowed.length > 0) {
+      unitLine += ` allowed=[${unit.allowed.join(', ')}]`;
+    }
+    lines.push(unitLine);
+  }
   const rich = richMembersOf(key.value);
   if (rich) {
     for (const m of rich) {
@@ -483,13 +961,28 @@ function buildKeyJSDoc(key: ModelKey, indent: string): string {
   }
   if (lines.length === 0) return '';
   // Block form whenever any line is an `@`-annotation, single-line only for
-  // a lone description — mirroring `TsTypes.zig`'s `use_block` rule. The two
-  // emitters are byte-compared on the `kit` / `kit-xor` goldens (modulo the
-  // `:description` this port does not read), so the *shape* has to agree and
-  // not just the content. Continuation lines carry `indent`, as Zig's do.
+  // a lone description — mirroring `TsTypes.zig`'s `use_block` rule. The
+  // two emitters are byte-compared across the group-* / kit / kit-xor /
+  // local-forms goldens (`:description` included — the loader reads it),
+  // so the *shape* has to agree and not just the content. Continuation
+  // lines carry `indent`, as Zig's do.
   const hasAnnotation = lines.some((l) => l.startsWith('@'));
   if (lines.length === 1 && !hasAnnotation) return `${indent}/** ${lines[0]} */\n`;
   return `${indent}/**\n` + lines.map((l) => `${indent} * ${l}`).join('\n') + `\n${indent} */\n`;
+}
+
+/** Every form name in the model, deduped by name, in declaration order —
+ *  the unqualified-global enumeration a `form_locals` fallback offers
+ *  beside its local arms. Mirrors Zig's `dedupeGlobalFormNames` (the
+ *  `current_global_forms` threadlocal). */
+function globalFormNames(model: Model): readonly string[] {
+  const names: string[] = [];
+  for (const p of model.plugins) {
+    for (const f of p.forms) {
+      if (!names.includes(f.name)) names.push(f.name);
+    }
+  }
+  return names;
 }
 
 function writeShape(shape: ModelValueShape, ctx: EmitContext): string {
@@ -567,13 +1060,31 @@ function writeShape(shape: ModelValueShape, ctx: EmitContext): string {
       return branches.length > 0 ? branches.join(' | ') : 'never';
     }
     case 'form_locals': {
-      // Inline anonymous union of object literals (one per local form), plus
-      // a trailing open generic branch for the additive global fallback. TS
-      // narrows on the `$form` discriminant; the open branch makes the slot
-      // accept any global form (required-key enforcement on it is SJON-
-      // runtime-only). Mirrors the Zig `form_locals` arm in `TsTypes.zig`.
+      // Inline anonymous union of object literals (one per local form)
+      // plus the additive global fallback. TS narrows on the `$form`
+      // discriminant. Every fallback arm names a global head — none
+      // spells `$form: string` — because excess-property checking fires
+      // on fresh object literals only: an open arm admits every declared
+      // local head the moment its value arrives through a variable, a
+      // function parameter, or `JSON.parse`, and the slot's group stops
+      // being enforced at compile time. The unqualified arms enumerate
+      // the globals the slot's local heads do not shadow (a bare head
+      // resolves local-first with shadowing, so a local name can never
+      // reach a global); the qualified arms enumerate every global,
+      // shadowed names included — a `$ns` head bypasses locals and
+      // resolves against the plugin catalog, where a namespace naming
+      // no plugin or no such form is `unknown_form`. The `$ns` spelling
+      // itself stays runtime-checked, the same one-way acceptance the
+      // fallback's key enforcement has always had.
+      // Mirrors the Zig `form_locals` arm in `TsTypes.zig`.
       const branches = shape.forms.map((lf) => writeInlineLocalForm(lf, ctx));
-      branches.push('{ readonly $form: string; readonly $ns?: string }');
+      for (const name of globalFormNames(ctx.model)) {
+        if (shape.forms.some((lf) => lf.name === name)) continue;
+        branches.push(`{ readonly $form: "${name}" }`);
+      }
+      for (const name of globalFormNames(ctx.model)) {
+        branches.push(`{ readonly $form: "${name}"; readonly $ns: string }`);
+      }
       return branches.join(' | ');
     }
     case 'expr':
@@ -592,10 +1103,12 @@ function writeShape(shape: ModelValueShape, ctx: EmitContext): string {
 }
 
 function writeUnitTuple(unit: ModelUnitShape): string {
+  // `readonly` matches the Zig emitter (a unit value round-trips through
+  // the bridge as a fixed pair; the golden fixtures byte-compare it).
   if (unit.allowed.length > 0) {
-    return unit.allowed.map((u) => `[number, "${u}"]`).join(' | ');
+    return unit.allowed.map((u) => `readonly [number, "${u}"]`).join(' | ');
   }
-  return '[number, string]';
+  return 'readonly [number, string]';
 }
 
 function writeBarrel(plugin: ModelPlugin): string {
@@ -621,6 +1134,11 @@ function stringBoundsOf(shape: ModelValueShape): ModelStringBounds | null {
 
 function crossRefOf(shape: ModelValueShape): ModelCrossRef | null {
   if (shape.kind === 'cross_ref') return shape.crossRef;
+  return null;
+}
+
+function unitOf(shape: ModelValueShape): ModelUnitShape | null {
+  if (shape.kind === 'number_with_unit') return shape.unit;
   return null;
 }
 
