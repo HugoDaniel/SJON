@@ -47,6 +47,12 @@ test('initialize: advertises hover + signatureHelp capabilities', async () => {
   assert.ok(isRecord(completion));
   assert.deepEqual(completion['triggerCharacters'], ['(', ':', '[']);
   assert.equal(caps['foldingRangeProvider'], true);
+
+  // `gD` and `gd` are one implementation in both transports; the WASM
+  // handshake has to announce the declaration capability or Helix never
+  // sends the request.
+  assert.equal(caps['definitionProvider'], true);
+  assert.equal(caps['declarationProvider'], true);
 });
 
 test('initialize: positionEncoding defaults to utf-16', async () => {

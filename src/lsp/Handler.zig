@@ -324,6 +324,13 @@ pub const CompletionItem = struct {
     /// `label` (snippets, `(head …)` wrappers) so client-side filtering
     /// matches what the user sees.
     filter_text: ?[]const u8 = null,
+    /// LSP `CompletionItem.textEdit`. When set the client replaces
+    /// `[span_start, span_end)` with `new_text` and ignores `insert_text`.
+    /// The completed-key value items use it because their typed token is
+    /// the key, not a prefix of the value label: a client's own word
+    /// boundary can stop at `-`, so `:load-op|` + `clear` otherwise
+    /// becomes `:load-load-op clear`.
+    text_edit: ?TextEdit = null,
     /// LSP `commitCharacters`. Each byte is a character that, when
     /// typed, accepts the item and inserts the character after it.
     /// Empty = no commit characters (editor uses its defaults). Used
@@ -3591,7 +3598,7 @@ pub fn getCompletion(
     const items: ?[]const CompletionItem = switch (ctx.position) {
         .none => null,
         .form_head => try self.completionsForFormHead(arena, &doc.tree, ctx, byte_offset),
-        .kvpair_key => try self.completionsForKeywordKey(arena, &doc.tree, byte_offset),
+        .kvpair_key => try self.completionsForKeywordKey(arena, uri, doc, ctx, byte_offset),
         .kvpair_value => try self.completionsForKvpairValue(arena, uri, doc, byte_offset),
         .vector_elem => try self.completionsForVectorElement(arena, uri, doc, byte_offset, ctx),
         .expr_arg => try self.completionsForExprArg(arena, &doc.tree, ctx, byte_offset),
@@ -4565,15 +4572,45 @@ fn appendValueTypePlaceholder(
 fn completionsForKeywordKey(
     self: *const Self,
     arena: Allocator,
-    tree: *const Ast.Tree,
+    uri: []const u8,
+    doc: *const Document,
+    ctx: ResolvedContext,
     cursor: u32,
 ) Allocator.Error![]const CompletionItem {
+    const tree = &doc.tree;
     const enclosing_idx = findEnclosingFormIdx(tree, cursor) orelse return &.{};
     const enclosing = tree.formHeader(enclosing_idx);
     const hit = switch (self.resolveFormAt(tree, enclosing_idx)) {
         .found => |h| h,
         else => return &.{},
     };
+
+    // Completed key: the backward token is exactly a declared key, so the
+    // value slot it opens is the useful surface. Exact match wins even
+    // when the token is also a strict prefix of a longer key (`:v` beside
+    // `:version`); a strict prefix or an unknown token falls through to
+    // the key list below. The resolver stays schema-free — this is the
+    // one place the schema is known.
+    //
+    // `findEnclosingKvpairKey` cannot answer here: the cursor sits at the
+    // key's end, so its backward walk consumes the key and finds nothing
+    // before it. Resolve by the token instead, then hand the value
+    // builders the same slot context `completionsForKvpairValue` builds.
+    if (ctx.prefix.len > 0) {
+        if (self.resolveKeyIn(tree, enclosing_idx, enclosing, hit.form, ctx.prefix, cursor)) |key| {
+            const values = try self.completionsForKeySlot(
+                arena,
+                uri,
+                doc,
+                enclosing_idx,
+                hit,
+                key,
+                findKvpairValueByKey(tree, enclosing, ctx.prefix),
+                cursor,
+            );
+            return completedKeyItems(arena, values, ctx.prefix, cursor);
+        }
+    }
 
     // Collect names of kvpair keys already present in the enclosing
     // form so we can filter both direct duplicates and exclusive-group
@@ -4698,6 +4735,35 @@ fn completionsForKvpairValue(
     // kvpair's own value position, so no sibling can start between the
     // two and the pair picks out the same discriminant either way.
     const key = self.resolveKeyIn(&doc.tree, enclosing_form_idx, enclosing, hit.form, key_name, cursor) orelse return &.{};
+    return self.completionsForKeySlot(
+        arena,
+        uri,
+        doc,
+        enclosing_form_idx,
+        hit,
+        key,
+        findKvpairValueByKey(&doc.tree, enclosing, key_name),
+        cursor,
+    );
+}
+
+/// Build the candidates one already-resolved key opens. Shared by the
+/// two entry points that know a key without the cursor sitting in its
+/// value: `completionsForKvpairValue` (cursor after the key and a space)
+/// and the completed-key arm in `completionsForKeywordKey` (cursor
+/// immediately after the key token, before the space). Keeping one body
+/// means the two cannot offer different values for the same key.
+fn completionsForKeySlot(
+    self: *const Self,
+    arena: Allocator,
+    uri: []const u8,
+    doc: *const Document,
+    enclosing_form_idx: Ast.NodeIndex,
+    hit: Schema.FormHit,
+    key: *const sjon.Plugin.KeySpec,
+    value_idx: ?Ast.NodeIndex,
+    cursor: u32,
+) Allocator.Error![]const CompletionItem {
     const vt = key.value_type;
 
     // Primitive-shape slots: `.boolean` and `.nil` value types have a
@@ -4731,11 +4797,46 @@ fn completionsForKvpairValue(
         .enclosing_form_idx = enclosing_form_idx,
         .plugin = hit.plugin,
         .local_forms = key.local_forms,
-        .value_idx = findKvpairValueByKey(&doc.tree, enclosing, key_name),
+        .value_idx = value_idx,
         .cursor = cursor,
     };
     if (kind.union_of != null) return self.completionsForUnionSlot(arena, ctx, kind);
     return self.completionsForValueKind(arena, ctx, kind);
+}
+
+/// Apply the completed-key item contract to a value list. The client's
+/// typed token is the key, not a prefix of any value label, so every item
+/// filters on that token — otherwise a prefix-filtering client (Helix)
+/// discards the whole list it just asked for. Accepting an item restores
+/// the key ahead of the value, so the accepted text is `"<key> <value>"`
+/// and the key survives the completion.
+///
+/// The `text_edit` is what makes that replacement exact: `range` is the
+/// typed key token (the symbol run before `cursor`, excluding the `:`),
+/// so a client whose own word boundary stops at `-` still replaces the
+/// whole key rather than only its last segment.
+fn completedKeyItems(
+    arena: Allocator,
+    items: []const CompletionItem,
+    key_token: []const u8,
+    cursor: u32,
+) Allocator.Error![]const CompletionItem {
+    if (items.len == 0) return items;
+    std.debug.assert(key_token.len <= cursor);
+    const token_start = cursor - @as(u32, @intCast(key_token.len));
+    const out = try arena.dupe(CompletionItem, items);
+    for (out) |*item| {
+        item.filter_text = key_token;
+        const value = item.insert_text orelse item.label;
+        const new_text = try std.fmt.allocPrint(arena, "{s} {s}", .{ key_token, value });
+        item.insert_text = new_text;
+        item.text_edit = .{
+            .span_start = token_start,
+            .span_end = cursor,
+            .new_text = new_text,
+        };
+    }
+    return out;
 }
 
 /// Everything the per-kind completion arms read besides the kind itself.
@@ -5209,8 +5310,10 @@ fn findKvpairValueByKey(
 /// `value_idx` is a bare-number AST node (no existing suffix) and the
 /// cursor sits exactly at the value's end-of-span — the unambiguous
 /// "user finished typing a number, may want a unit" signal. Partial
-/// suffix (`120m|`, AST tag `.number_with_unit`) is deferred until
-/// `CompletionItem` carries a `text_edit` for clean replacement.
+/// suffix (`120m|`, AST tag `.number_with_unit`) is deferred: the
+/// completed-key branch is the only completion context that emits a
+/// `text_edit`, because only there is the replacement range the typed
+/// token rather than a value prefix.
 fn unitSuffixCompletions(
     arena: Allocator,
     tree: *const Ast.Tree,
@@ -7954,9 +8057,11 @@ fn locateCrossRefSite(
 /// Returns an empty slice when the cursor IS on a site but no
 /// references have been recorded (a definition with zero uses).
 ///
-/// Cross-document references work transparently: a reference in URI X
-/// to a definition in URI Y is included regardless of which document
-/// the cursor lives in, as long as both are open.
+/// Scope is per-tree: the LSP never sets `Validator.Options.share_scope`,
+/// so a reference resolves only within its own document's tree. A
+/// same-named declaration in another open file is not included, and the
+/// use stays diagnosed `not_cross_ref` — the same limit `getDefinition`
+/// below refuses to jump across rather than answering with a near-match.
 pub fn findReferences(
     self: *const Self,
     arena: Allocator,

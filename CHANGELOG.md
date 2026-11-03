@@ -6,6 +6,39 @@ enum — are versioned and corpus-gated; nothing changes them silently.
 
 ## Unreleased
 
+## 1.7.1 — 2026-11-03
+
+A language-server polish release. Nothing on the language side changed:
+binary wire stays v5, the diagnostic-code enum is unchanged, and the
+conformance corpus stays at 393 cases. The hosts, the CLI, and the
+project format are untouched.
+
+### Added
+
+- **`textDocument/declaration` is answered.** Both language servers —
+  native and `sjon-lsp.wasm` — route goto-declaration through the same
+  cross-ref resolution as goto-definition and return the same scalar
+  `Location`: a SJON cross-ref has one definition site, and there is no
+  forward declaration distinct from it. The capability is advertised as
+  `declarationProvider`; before this release neither server accepted
+  the method.
+
+- **Key completion offers the completed key's values.** When the token
+  at the cursor is exactly a declared key, key-position completion now
+  returns the values that key accepts, with the key restored ahead of
+  the value on accept so the inserted text is `"<key> <value>"`. An
+  exact match wins even when the token is also a strict prefix of a
+  longer key (`:v` beside `:version`); a strict prefix or unknown token
+  still gets the key list.
+
+### Fixed
+
+- **The exact-key value completions carry a `textEdit`.** Its range
+  spans the whole typed key token, so a client whose word boundary
+  stops at `-` replaces the entire key instead of its last segment:
+  accepting `clear` on `:load-op|` inserts `:load-op clear`, not
+  `:load-load-op clear`.
+
 ## 1.7.0 — 2026-11-03
 
 This release bumps the shared schema-export format to version 2 and makes

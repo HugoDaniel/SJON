@@ -126,6 +126,92 @@ fn crossRefDirectPlugin() sjon.Plugin.Plugin {
     };
 }
 
+/// pngine-shaped fixture for the completed-key rule. A colour attachment
+/// declares the two WebGPU enum slots (`:load-op` / `:store-op`) and a
+/// cross-ref key (`:module`), so the exact-match route is exercised both
+/// through the member-set builder and through `ValueSlotCtx`'s cross-ref
+/// arm. Names, member sets and shape mirror `pngine/schema/pngine.sjon`'s
+/// `color-attachment`, which is the real document the live probe drives.
+fn completedKeyPlugin() sjon.Plugin.Plugin {
+    const load_op: sjon.Plugin.ValueKind = .{
+        .name = "load-op",
+        .underlying = .symbol,
+        .members = .{ .members = &.{
+            .{ .name = "clear", .description = "Clear the attachment at pass start." },
+            .{ .name = "load", .description = "Preserve the attachment's contents." },
+        } },
+    };
+    const store_op: sjon.Plugin.ValueKind = .{
+        .name = "store-op",
+        .underlying = .symbol,
+        .members = .{ .members = &.{
+            .{ .name = "store", .description = "Keep the pass result." },
+            .{ .name = "discard", .description = "Discard the pass result." },
+        } },
+    };
+    const module_ref: sjon.Plugin.ValueKind = .{
+        .name = "module-ref",
+        .underlying = .symbol,
+        .cross_ref = .{ .targets = &.{"module"} },
+    };
+    return .{
+        .name = "gpu",
+        .value_kinds = &.{ load_op, store_op, module_ref },
+        .forms = &.{
+            .{
+                .name = "color-attachment",
+                .keys = &.{
+                    .{ .name = "load-op", .value_type = .{ .named = .{ .name = "load-op" } }, .optional = false },
+                    .{ .name = "store-op", .value_type = .{ .named = .{ .name = "store-op" } }, .optional = false },
+                    .{ .name = "module", .value_type = .{ .named = .{ .name = "module-ref" } }, .optional = true },
+                },
+            },
+            .{
+                .name = "module",
+                .keys = &.{
+                    .{ .name = "name", .value_type = .symbol, .optional = false },
+                },
+            },
+        },
+    };
+}
+
+/// The plan's tie fixture: one form declares both `:v` and `:version`, so
+/// `v|` is simultaneously an exact key and a strict prefix of a longer
+/// one. Exact match has to win, and the longer key must return as soon as
+/// the token stops being an exact key (`ver|`).
+fn completedKeyTiePlugin() sjon.Plugin.Plugin {
+    const v_kind: sjon.Plugin.ValueKind = .{
+        .name = "v-kind",
+        .underlying = .symbol,
+        .members = .{ .members = &.{
+            .{ .name = "alpha" },
+            .{ .name = "beta" },
+        } },
+    };
+    const version_kind: sjon.Plugin.ValueKind = .{
+        .name = "version-kind",
+        .underlying = .symbol,
+        .members = .{ .members = &.{
+            .{ .name = "one" },
+            .{ .name = "two" },
+        } },
+    };
+    return .{
+        .name = "tie",
+        .value_kinds = &.{ v_kind, version_kind },
+        .forms = &.{
+            .{
+                .name = "tie",
+                .keys = &.{
+                    .{ .name = "v", .value_type = .{ .named = .{ .name = "v-kind" } }, .optional = true },
+                    .{ .name = "version", .value_type = .{ .named = .{ .name = "version-kind" } }, .optional = true },
+                },
+            },
+        },
+    };
+}
+
 /// Mirror of `examples/plugins/local-forms/plugin.sjon`, the fixture that
 /// exists to pin slot-local resolution. `canvas.:shape` declares local
 /// `circle` (`:r`), `rect` (`:w :h`) and `group` (whose `:child` nests a
@@ -1124,6 +1210,160 @@ test "completion in member-value position lists members with deprecated tag" {
     try std.testing.expectEqual(@as(usize, 1), items[2].tags.len);
     try std.testing.expectEqual(CompletionItem.Tag.deprecated, items[2].tags[0]);
     try std.testing.expectEqual(CompletionItem.Kind.enum_member, items[0].kind);
+}
+
+test "completion at a completed key offers that key's values before the space" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{completedKeyPlugin()});
+
+    // (color-attachment :load-op clear :store-op store)
+    //  0               18      26
+    // Cursor is byte 26: directly after the complete `load-op` token and
+    // before the space that opens its value slot. Today this is the
+    // keyword-key context, so the regression had to be pinned here: the
+    // exact key, not the key list, decides the candidate set.
+    try h.openDocument("file:///a.sjon", 1, "(color-attachment :load-op clear :store-op store)");
+
+    const arena = fx.arena();
+
+    const items = (try h.getCompletion(arena, "file:///a.sjon", 26)).?;
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expectEqualStrings("clear", items[0].label);
+    try std.testing.expectEqual(CompletionItem.Kind.enum_member, items[0].kind);
+    // Item contract: the client filters against the *typed key token*, and
+    // accepting an item restores that token ahead of the value.
+    try std.testing.expectEqualStrings("load-op", items[0].filter_text.?);
+    try std.testing.expectEqualStrings("load-op clear", items[0].insert_text.?);
+    // `text_edit` is the contract that actually works: the typed key token
+    // is `load-op` at bytes 19..26, and accepting `clear` replaces exactly
+    // that token with `load-op clear`. `insert_text` alone cannot express
+    // this because a client's own word boundary stops after the `-`.
+    try std.testing.expectEqual(@as(u32, 19), items[0].text_edit.?.span_start);
+    try std.testing.expectEqual(@as(u32, 26), items[0].text_edit.?.span_end);
+    try std.testing.expectEqualStrings("load-op clear", items[0].text_edit.?.new_text);
+    try std.testing.expectEqualStrings("load", items[1].label);
+    try std.testing.expectEqualStrings("load-op", items[1].filter_text.?);
+    try std.testing.expectEqualStrings("load-op load", items[1].insert_text.?);
+    try std.testing.expectEqual(@as(u32, 19), items[1].text_edit.?.span_start);
+    try std.testing.expectEqual(@as(u32, 26), items[1].text_edit.?.span_end);
+    try std.testing.expectEqualStrings("load-op load", items[1].text_edit.?.new_text);
+    try std.testing.expect(!hasCompletion(items, "store-op"));
+}
+
+test "completion at a completed cross-ref key carries a textEdit for the key token" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{completedKeyPlugin()});
+
+    // (module :name m0)
+    // (color-attachment :module)
+    //                            ^ cursor 43, directly after the cross-ref key
+    // The value list comes from the cross-ref arm, but the replacement
+    // contract is the same as the member-set arm: replace `module` at
+    // bytes 37..43 with `module m0`.
+    try h.openDocument("file:///a.sjon", 1, "(module :name m0)\n(color-attachment :module)");
+
+    const arena = fx.arena();
+
+    const items = (try h.getCompletion(arena, "file:///a.sjon", 43)).?;
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+    try std.testing.expectEqualStrings("m0", items[0].label);
+    try std.testing.expectEqualStrings("module", items[0].filter_text.?);
+    try std.testing.expectEqualStrings("module m0", items[0].insert_text.?);
+    try std.testing.expectEqual(@as(u32, 37), items[0].text_edit.?.span_start);
+    try std.testing.expectEqual(@as(u32, 43), items[0].text_edit.?.span_end);
+    try std.testing.expectEqualStrings("module m0", items[0].text_edit.?.new_text);
+}
+
+test "completion on a strict key prefix still offers keys" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{completedKeyPlugin()});
+
+    // (color-attachment :load)
+    //  0               18   23
+    // `load` is a strict prefix of `load-op`, not a declared key, so the
+    // exact-match rule must not fire: keys stay the answer while typing.
+    try h.openDocument("file:///a.sjon", 1, "(color-attachment :load)");
+
+    const arena = fx.arena();
+
+    const items = (try h.getCompletion(arena, "file:///a.sjon", 23)).?;
+    try std.testing.expect(hasCompletionOfKind(items, "load-op", .field));
+    try std.testing.expect(hasCompletionOfKind(items, "store-op", .field));
+    try std.testing.expect(!hasCompletion(items, "clear"));
+    try std.testing.expect(!hasCompletion(items, "load"));
+    // Only the exact completed-key branch emits a value `text_edit`; the
+    // key list keeps its own plain insertion behaviour.
+    for (items) |item| try std.testing.expect(item.text_edit == null);
+}
+
+test "completion exact match wins a prefix tie with a longer key" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{completedKeyTiePlugin()});
+
+    // (tie :v)
+    //  0  4 56 7
+    // `v` is declared and is also a strict prefix of `version`.
+    // Exact match wins: the cursor gets `:v`'s values, not the key list.
+    try h.openDocument("file:///a.sjon", 1, "(tie :v)");
+
+    const arena = fx.arena();
+
+    const exact = (try h.getCompletion(arena, "file:///a.sjon", 7)).?;
+    try std.testing.expectEqual(@as(usize, 2), exact.len);
+    try std.testing.expectEqualStrings("alpha", exact[0].label);
+    try std.testing.expectEqual(CompletionItem.Kind.enum_member, exact[0].kind);
+    try std.testing.expectEqualStrings("v", exact[0].filter_text.?);
+    try std.testing.expectEqualStrings("v alpha", exact[0].insert_text.?);
+    // The key token is the single byte 6..7, excluding the `:` at 5.
+    try std.testing.expectEqual(@as(u32, 6), exact[0].text_edit.?.span_start);
+    try std.testing.expectEqual(@as(u32, 7), exact[0].text_edit.?.span_end);
+    try std.testing.expectEqualStrings("v alpha", exact[0].text_edit.?.new_text);
+    try std.testing.expect(!hasCompletion(exact, "version"));
+
+    // (tie :ver)
+    //  0  4 56 9
+    // One more keystroke and `ver` is neither a key nor an exact match, so
+    // the longer key returns as a key candidate.
+    try h.openDocument("file:///a.sjon", 1, "(tie :ver)");
+    const prefix = (try h.getCompletion(arena, "file:///a.sjon", 9)).?;
+    try std.testing.expect(hasCompletionOfKind(prefix, "version", .field));
+    try std.testing.expect(!hasCompletion(prefix, "alpha"));
+    for (prefix) |item| try std.testing.expect(item.text_edit == null);
+}
+
+test "completion on an unknown key pins today's key-completion behaviour" {
+    const a = std.testing.allocator;
+    var fx = handlerFixture(a);
+    defer fx.deinit();
+    const h = &fx.h;
+    h.schema = .init(&.{completedKeyPlugin()});
+
+    // (color-attachment :zzz)
+    //  0               18  22
+    // No declared key matches, so the pre-existing behaviour is unchanged:
+    // the declared keys are offered, and no value leaks into the list.
+    try h.openDocument("file:///a.sjon", 1, "(color-attachment :zzz)");
+
+    const arena = fx.arena();
+
+    const items = (try h.getCompletion(arena, "file:///a.sjon", 22)).?;
+    try std.testing.expect(hasCompletionOfKind(items, "load-op", .field));
+    try std.testing.expect(hasCompletionOfKind(items, "store-op", .field));
+    try std.testing.expect(hasCompletionOfKind(items, "module", .field));
+    try std.testing.expect(!hasCompletion(items, "clear"));
+    try std.testing.expect(!hasCompletion(items, "store"));
 }
 
 test "hover on a string-bounded key shows the Constraints summary" {

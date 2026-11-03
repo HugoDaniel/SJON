@@ -160,6 +160,8 @@ fn handleMessage(json: []const u8) void {
         handleCodeAction(id, params);
     } else if (eq(method, "textDocument/definition")) {
         handleDefinition(id, params);
+    } else if (eq(method, "textDocument/declaration")) {
+        handleDeclaration(id, params);
     } else if (eq(method, "textDocument/documentHighlight")) {
         handleDocumentHighlight(id, params);
     } else if (eq(method, "textDocument/selectionRange")) {
@@ -289,6 +291,7 @@ fn handleInitialize(id: ?std.json.Value, params: ?std.json.Value) void {
         "\"semanticTokensProvider\":{\"full\":true,\"legend\":" ++ semantic_legend_json ++ "}," ++
         "\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\",\"refactor.rewrite\",\"refactor.extract\",\"refactor.inline\"]}," ++
         "\"definitionProvider\":true," ++
+        "\"declarationProvider\":true," ++
         "\"documentHighlightProvider\":true," ++
         "\"selectionRangeProvider\":true," ++
         "\"workspaceSymbolProvider\":true," ++
@@ -761,7 +764,7 @@ fn handleCompletion(id: ?std.json.Value, params: ?std.json.Value) void {
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(wasm_allocator);
-    appendCompletionItems(&buf, items) catch {
+    appendCompletionItems(&buf, doc.source, items) catch {
         sendResultRawWithId(req_id, "null");
         return;
     };
@@ -770,6 +773,7 @@ fn handleCompletion(id: ?std.json.Value, params: ?std.json.Value) void {
 
 fn appendCompletionItems(
     buf: *std.ArrayList(u8),
+    source: []const u8,
     items: []const Handler.CompletionItem,
 ) Allocator.Error!void {
     const a = wasm_allocator;
@@ -809,6 +813,15 @@ fn appendCompletionItems(
         if (it.filter_text) |s| {
             try buf.appendSlice(a, ",\"filterText\":");
             try appendJsonString(buf, s);
+        }
+        if (it.text_edit) |te| {
+            const start = offsets.indexToPosition(source, te.span_start, offset_encoding);
+            const end = offsets.indexToPosition(source, te.span_end, offset_encoding);
+            try buf.appendSlice(a, ",\"textEdit\":{\"range\":");
+            try appendRange(buf, start, end);
+            try buf.appendSlice(a, ",\"newText\":");
+            try appendJsonString(buf, te.new_text);
+            try buf.append(a, '}');
         }
         if (it.commit_characters.len > 0) {
             try buf.appendSlice(a, ",\"commitCharacters\":[");
@@ -1404,6 +1417,16 @@ fn handleDefinition(id: ?std.json.Value, params: ?std.json.Value) void {
         return;
     }
     sendResultRawWithId(req_id, inner);
+}
+
+/// `textDocument/declaration` → the same single `Location` as definition.
+/// SJON has one authored `:name` serving both roles, so `gD` is an exact
+/// alias rather than a second resolution path; `handleDefinition` owns the
+/// lookup and `appendLocations` the byte→position translation. Nulls stay
+/// identical too: supporting declaration does not make more names
+/// navigable.
+fn handleDeclaration(id: ?std.json.Value, params: ?std.json.Value) void {
+    handleDefinition(id, params);
 }
 
 /// `textDocument/documentHighlight` → `DocumentHighlight[]`, or `null`
@@ -2320,6 +2343,70 @@ test "textDocument/definition returns the definition Location" {
     try std.testing.expectEqual(@as(i64, 16), end.get("character").?.integer);
 }
 
+/// Assert two LSP `Location` JSON values are the same location. Compares
+/// values field by field: `expectEqualDeep` would compare the two `uri`
+/// slice *pointers*, which the two responses own separately.
+fn expectSameLocationJson(expected: std.json.Value, actual: std.json.Value) !void {
+    try std.testing.expect(expected == .object);
+    try std.testing.expect(actual == .object);
+    try std.testing.expectEqualStrings(
+        expected.object.get("uri").?.string,
+        actual.object.get("uri").?.string,
+    );
+    const expected_range = expected.object.get("range").?.object;
+    const actual_range = actual.object.get("range").?.object;
+    for ([_][]const u8{ "start", "end" }) |edge| {
+        const expected_pos = expected_range.get(edge).?.object;
+        const actual_pos = actual_range.get(edge).?.object;
+        try std.testing.expectEqual(
+            expected_pos.get("line").?.integer,
+            actual_pos.get("line").?.integer,
+        );
+        try std.testing.expectEqual(
+            expected_pos.get("character").?.integer,
+            actual_pos.get("character").?.integer,
+        );
+    }
+}
+
+test "textDocument/declaration is an exact alias of definition" {
+    var fx = DispatchFixture.init();
+    defer fx.deinit();
+    try fx.openCrossRefDoc();
+
+    // Same position, two spellings of the request: `gD` must answer with
+    // the byte-identical `Location` `gd` does.
+    var def = try fx.request(
+        \\{"jsonrpc":"2.0","id":2,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///a.sjon"},"position":{"line":1,"character":15}}}
+    );
+    defer def.deinit();
+    var decl = try fx.request(
+        \\{"jsonrpc":"2.0","id":3,"method":"textDocument/declaration","params":{"textDocument":{"uri":"file:///a.sjon"},"position":{"line":1,"character":15}}}
+    );
+    defer decl.deinit();
+
+    try std.testing.expect(decl.value.object.get("error") == null);
+    try expectSameLocationJson(
+        def.value.object.get("result").?,
+        decl.value.object.get("result").?,
+    );
+}
+
+test "textDocument/declaration returns null off any cross-ref site" {
+    var fx = DispatchFixture.init();
+    defer fx.deinit();
+    try fx.openCrossRefDoc();
+
+    // Line 0, character 3 — inside the form head `phrase`.
+    var res = try fx.request(
+        \\{"jsonrpc":"2.0","id":2,"method":"textDocument/declaration","params":{"textDocument":{"uri":"file:///a.sjon"},"position":{"line":0,"character":3}}}
+    );
+    defer res.deinit();
+
+    try std.testing.expect(res.value.object.get("error") == null);
+    try std.testing.expect(res.value.object.get("result").? == .null);
+}
+
 test "a position outside u32 is no position: hover answers null and didChange keeps the document" {
     var fx = DispatchFixture.init();
     defer fx.deinit();
@@ -2545,6 +2632,7 @@ test "initialize advertises definitionProvider" {
 
     const caps = res.value.object.get("result").?.object.get("capabilities").?.object;
     try std.testing.expect(caps.get("definitionProvider").?.bool);
+    try std.testing.expect(caps.get("declarationProvider").?.bool);
     try std.testing.expect(caps.get("documentHighlightProvider").?.bool);
     try std.testing.expect(caps.get("selectionRangeProvider").?.bool);
     try std.testing.expect(caps.get("workspaceSymbolProvider").?.bool);
@@ -2650,6 +2738,50 @@ test "diagnostic JSON includes tags: [2] for deprecated_member" {
     // LSP `DiagnosticTag.Deprecated` is 2 — deliberately *not* the 1 that
     // `CompletionItemTag.Deprecated` uses.
     try std.testing.expectEqual(@as(i64, 2), tags.items[0].integer);
+}
+
+test "completion at a completed key carries textEdit for the key token" {
+    var fx = DispatchFixture.init();
+    defer fx.deinit();
+
+    var schemas = try fx.request(
+        \\{"jsonrpc":"2.0","id":1,"method":"sjon/setSchemas","params":{"schemas":[{"uri":"inmemory://schema/0","text":"(plugin :name gpu :version \"1.0.0\" (value-kind :name load-op :underlying symbol :members (member-set :values [clear load])) (form :name color-attachment (key :name load-op :type load-op :optional false)))"}]}}
+    );
+    defer schemas.deinit();
+
+    // `(color-attachment :load-op)` — cursor at character 26, directly
+    // after the key token and before the closing `)`. The key token is
+    // bytes/characters 19..26, excluding the `:` at 18.
+    handleMessage(
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.sjon","version":1,"languageId":"sjon","text":"(color-attachment :load-op)"}}}
+    );
+
+    var res = try fx.request(
+        \\{"jsonrpc":"2.0","id":2,"method":"textDocument/completion","params":{"textDocument":{"uri":"file:///a.sjon"},"position":{"line":0,"character":26}}}
+    );
+    defer res.deinit();
+
+    const items = res.value.object.get("result").?.array;
+    try std.testing.expectEqual(@as(usize, 2), items.items.len);
+    // Every value item carries the same replacement contract.
+    for (items.items) |item_value| {
+        const item = item_value.object;
+        const te = item.get("textEdit") orelse return error.MissingTextEdit;
+        const range = te.object.get("range").?.object;
+        try std.testing.expectEqual(@as(i64, 0), range.get("start").?.object.get("line").?.integer);
+        try std.testing.expectEqual(@as(i64, 19), range.get("start").?.object.get("character").?.integer);
+        try std.testing.expectEqual(@as(i64, 0), range.get("end").?.object.get("line").?.integer);
+        try std.testing.expectEqual(@as(i64, 26), range.get("end").?.object.get("character").?.integer);
+        const label = item.get("label").?.string;
+        const expected = try std.fmt.allocPrint(wasm_allocator, "load-op {s}", .{label});
+        defer wasm_allocator.free(expected);
+        try std.testing.expectEqualStrings(expected, te.object.get("newText").?.string);
+    }
+    const first = items.items[0].object;
+    try std.testing.expectEqualStrings("clear", first.get("label").?.string);
+    try std.testing.expectEqualStrings("load-op", first.get("filterText").?.string);
+    try std.testing.expectEqualStrings("load-op clear", first.get("insertText").?.string);
+    try std.testing.expectEqualStrings("load-op clear", first.get("textEdit").?.object.get("newText").?.string);
 }
 
 test "diagnostic JSON carries relatedInformation with location + message" {

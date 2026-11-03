@@ -15,6 +15,8 @@
 //! `textDocument/completion` (form-head and key contexts driven by the
 //! loaded schema), `textDocument/signatureHelp` (form keys / typed
 //! expr-func params with cursor-driven active parameter),
+//! `textDocument/definition` and `textDocument/declaration` (one cross-ref
+//! resolution; declaration is an exact alias),
 //! `textDocument/documentSymbol`,
 //! `textDocument/foldingRange` (one fold per multi-line form/vector),
 //! `textDocument/inlayHint` (plugin-source ghost text on bare form
@@ -1408,6 +1410,37 @@ pub const Server = struct {
         return try self.workspaceEdit(arena, targets);
     }
 
+    /// The `Location` both navigation requests return: definition and
+    /// declaration are one operation in SJON, because a cross-ref has one
+    /// authored `:name` that serves both roles. `gD` therefore reuses this
+    /// body rather than forking a second resolution path.
+    fn crossRefLocation(
+        self: *Server,
+        document_uri: []const u8,
+        position: lsp.types.Position,
+    ) Allocator.Error!?lsp.types.Definition.Result {
+        const routed = self.routedDocument(document_uri) orelse return null;
+        if (!schemaAvailable(routed.route)) return null;
+        const doc = routed.doc;
+        const offset = lsp.offsets.positionToIndex(doc.source, position, self.offset_encoding);
+        const loc = routed.route.handler.getDefinition(document_uri, @intCast(offset)) orelse return null;
+
+        // Scope is per-tree: `Handler.getDefinition` never resolves across
+        // documents (the LSP does not set `share_scope`), so `loc.uri` is
+        // in practice the requesting one and a declaration in another file
+        // is out of scope. It is still re-looked up by the `Location`'s own
+        // URI for the byte→position conversion — the index is forest-wide
+        // by construction — and a document closed since the last
+        // revalidation drops the jump.
+        const def_doc = self.registry.documentFor(loc.uri) orelse return null;
+        const start = lsp.offsets.indexToPosition(def_doc.source, loc.span_start, self.offset_encoding);
+        const end = lsp.offsets.indexToPosition(def_doc.source, loc.span_end, self.offset_encoding);
+        return .{ .definition = .{ .location = .{
+            .uri = loc.uri,
+            .range = .{ .start = start, .end = end },
+        } } };
+    }
+
     /// Goto-definition. A cross-ref name resolves to exactly one
     /// definition in its scope, so this returns the scalar `Location`
     /// arm rather than a list or `LocationLink[]`.
@@ -1416,23 +1449,19 @@ pub const Server = struct {
         _: std.mem.Allocator,
         params: lsp.types.Definition.Params,
     ) Allocator.Error!?lsp.types.Definition.Result {
-        const routed = self.routedDocument(params.textDocument.uri) orelse return null;
-        if (!schemaAvailable(routed.route)) return null;
-        const doc = routed.doc;
-        const offset = lsp.offsets.positionToIndex(doc.source, params.position, self.offset_encoding);
-        const loc = routed.route.handler.getDefinition(params.textDocument.uri, @intCast(offset)) orelse return null;
+        return self.crossRefLocation(params.textDocument.uri, params.position);
+    }
 
-        // The definition may live in another document (the index is
-        // forest-wide); re-look it up by its own URI for the byte→position
-        // conversion. A document closed since the last revalidation drops
-        // the jump.
-        const def_doc = self.registry.documentFor(loc.uri) orelse return null;
-        const start = lsp.offsets.indexToPosition(def_doc.source, loc.span_start, self.offset_encoding);
-        const end = lsp.offsets.indexToPosition(def_doc.source, loc.span_end, self.offset_encoding);
-        return .{ .definition = .{ .location = .{
-            .uri = loc.uri,
-            .range = .{ .start = start, .end = end },
-        } } };
+    /// Goto-declaration. An exact alias of `textDocument/definition`: SJON
+    /// has no forward declaration distinct from the definition, so `gD`
+    /// answers with the same `Location` and the same nulls as `gd` instead
+    /// of pretending the two roles differ.
+    pub fn @"textDocument/declaration"(
+        self: *Server,
+        _: std.mem.Allocator,
+        params: lsp.types.declaration.Params,
+    ) Allocator.Error!?lsp.types.Definition.Result {
+        return self.crossRefLocation(params.textDocument.uri, params.position);
     }
 
     /// Highlight every occurrence of the cross-ref name under the
@@ -1645,6 +1674,13 @@ pub const Server = struct {
                 .tags = lsp_tags,
                 .sortText = it.sort_text,
                 .filterText = it.filter_text,
+                .textEdit = if (it.text_edit) |te| .{ .text_edit = .{
+                    .range = .{
+                        .start = lsp.offsets.indexToPosition(doc.source, te.span_start, self.offset_encoding),
+                        .end = lsp.offsets.indexToPosition(doc.source, te.span_end, self.offset_encoding),
+                    },
+                    .newText = te.new_text,
+                } } else null,
                 .commitCharacters = lsp_commit,
             };
         }
@@ -2120,6 +2156,7 @@ fn serverCapabilities(encoding: lsp.offsets.Encoding) lsp.types.ServerCapabiliti
             },
         },
         .definitionProvider = .{ .bool = true },
+        .declarationProvider = .{ .bool = true },
         .documentHighlightProvider = .{ .bool = true },
         .selectionRangeProvider = .{ .bool = true },
         .workspaceSymbolProvider = .{ .bool = true },

@@ -46,6 +46,24 @@ const AUDIO_SCHEMA = `(plugin :name audio :version "1.0.0"
   (form :name jump (key :name target :type phrase-name :optional false)))
 `;
 
+/// Navigation fixture for goto-definition / goto-declaration: one
+/// addressable cross-ref (`p0`), one runtime member-set value that is not
+/// an authored declaration, and one unresolved reference.
+const NAV_SCHEMA = `(plugin :name nav :version "1.0.0"
+  (value-kind :name phrase-name :underlying symbol :cross-ref (cross-ref :target phrase))
+  (value-kind :name view-source :underlying symbol
+    :members (member-set (member :name context-current-texture)))
+  (form :name phrase (key :name name :type symbol :optional false))
+  (form :name jump (key :name target :type phrase-name :optional false))
+  (form :name view (key :name source :type view-source :optional false)))
+`;
+
+/// `p0` is the definition at line 0 chars 14..16 and the use at line 1
+/// chars 14..16; `context-current-texture` (line 2) is a member-set
+/// value with no authored declaration; `xyz` (line 3) resolves nowhere.
+const NAV_DOCUMENT =
+  '(phrase :name p0)\n(jump :target p0)\n(view :source context-current-texture)\n(jump :target xyz)';
+
 /// Task manifest v1: one required key, `title`. A schema swap to v2
 /// renames the requirement so an unchanged document's diagnostic message
 /// must move with the new schema generation.
@@ -530,6 +548,64 @@ test('diagnostic ranges use UTF-16 code units after non-ASCII text', async () =>
     const unknown = report.diagnostics.find((diagnostic) => diagnostic.code === 'unknown_form');
     assert.ok(unknown, `expected unknown_form; got ${JSON.stringify(diagnosticCodes(report))}`);
     assert.deepEqual(unknown.range, range(0, 11, 0, 15));
+  } finally {
+    if (client !== undefined) await client.close();
+    await rm(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test('initialize advertises declarationProvider beside definitionProvider', async () => {
+  const fixture = await makeProjectFixture(AUDIO_SCHEMA);
+  let client;
+  try {
+    client = await spawnLspServer({
+      serverPath: requireServerPath(),
+      cwd: fixture.dir,
+    });
+    const result = await client.initialize({ capabilities: {}, rootUri: fixture.rootUri });
+    assert.equal(result.capabilities.definitionProvider, true);
+    assert.equal(result.capabilities.declarationProvider, true);
+  } finally {
+    if (client !== undefined) await client.close();
+    await rm(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test('textDocument/declaration answers byte-identically to definition, including nulls', async () => {
+  const fixture = await makeProjectFixture(NAV_SCHEMA);
+  let client;
+  try {
+    client = await spawnLspServer({
+      serverPath: requireServerPath(),
+      cwd: fixture.dir,
+    });
+    await client.initialize({ capabilities: {}, rootUri: fixture.rootUri });
+
+    const uri = fixture.uri('doc.sjon');
+    didOpen(client, uri, 1, NAV_DOCUMENT);
+    await client.waitForNotification(PUSH_METHOD, (params) => params.uri === uri);
+
+    const at = (line, character) => ({ textDocument: { uri }, position: { line, character } });
+    const definition = (position) => client.request('textDocument/definition', position);
+    const declaration = (position) => client.request('textDocument/declaration', position);
+
+    // (a) Use site: `gD` is the same answer as `gd`, down to the exact
+    // `:name` span (line 0, chars 14..16).
+    const defUse = await definition(at(1, 15));
+    const declUse = await declaration(at(1, 15));
+    assert.deepEqual(declUse, defUse);
+    assert.deepEqual(declUse.range, range(0, 14, 0, 16));
+
+    // (b) On the declaration itself both keys self-jump to that same span.
+    assert.deepEqual(await definition(at(0, 15)), defUse);
+    assert.deepEqual(await declaration(at(0, 15)), defUse);
+
+    // (c) A runtime member-set value has no authored declaration, and an
+    // unresolved reference has no target: both transports stay null.
+    assert.equal(await definition(at(2, 20)), null);
+    assert.equal(await declaration(at(2, 20)), null);
+    assert.equal(await definition(at(3, 15)), null);
+    assert.equal(await declaration(at(3, 15)), null);
   } finally {
     if (client !== undefined) await client.close();
     await rm(fixture.dir, { recursive: true, force: true });
