@@ -279,6 +279,53 @@ willing to say "identically" out loud. Two groups of cases are skipped on the
 WebAssembly hosts, and each one is named with its reason beside the skip list
 rather than quietly dropped.
 
+## The schema, exported
+
+The plugin declaration above is machine-readable, and `sjon
+export-schema` hands it to the rest of your tooling: JSON Schema 2020-12 and
+TypeScript types that describe the canonical JSON `sjon to-json` writes, so a
+codegen pipeline, an Ajv validator, or an editor's TypeScript service can
+agree with SJON without re-implementing the parser.
+
+A form whose keys exclude each other does not export as a comment asking
+nicely. Say a plugin declares that a phrase carries notes or events, never
+both and never neither. The emitted TypeScript is a union where each arm
+requires its own keys and forbids the others':
+
+```ts
+export type KitXor_Phrase = {
+  $form: "phrase";
+  $ns: "kit-xor";
+  name: Symbol_;
+} & (
+  | ({
+      /** Pitch-class sequence. */
+      notes: Array<unknown>;
+    } & _SjonNotAll<"events">)
+  | ({
+      /** Time-stamped event list. */
+      events: Array<unknown>;
+    } & _SjonNotAll<"notes">)
+);
+```
+
+An excerpt of a real `--target=typescript` run. A caller who sets both keys
+gets a compile error, not a document that fails validation later, and setting
+neither fails too. JSON Schema has no way to see source order, so a constraint
+that depends on it stays SJON-only and the exporter says so in an info note
+instead of pretending. Targets are `json-schema`, `typescript`, or the default
+`both`; `--layout=per-plugin` writes one schema and one `.d.ts` per plugin
+with cross-file `$ref`s already resolved. The same exporter is reachable from
+the hosts: `SjonHost.exportSchema` in JavaScript, `export_schema` in Rust, and
+a native port in the TypeScript host, all pinned by an
+`x-sjon-export-version: 2` stamp so consumers can tell what they got.
+
+<LinkCard
+  title="The export guide"
+  href="https://git.hugodaniel.com/releases/sjon/src/branch/main/docs/SCHEMA_EXPORT.md"
+  description="Every construct the exporter covers, what each target emits, the per-plugin layout, and the documented limits."
+/>
+
 ## Parse once, share the tree
 
 The parser runs once and builds a single structure-of-arrays tree. Validation,

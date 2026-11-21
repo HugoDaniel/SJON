@@ -16,11 +16,14 @@ import type {
   FormFieldNode,
   FormInput,
   FormNode,
+  FormOptions,
   MemberSymbol,
   NumberNode,
   Node,
   OptionalNode,
   PluginNode,
+  PositionalInput,
+  ReprNumber,
   ShapeRecord,
   SjonExpr,
   StringNode,
@@ -32,15 +35,18 @@ import type {
   CrossRefProviderDef,
   FormDef,
   FormKeyDef,
+  GpuRepr,
   NamedKindDef,
   NodeDef,
   NumericBoundsIR,
   PluginDef,
+  PositionalDef,
   ShapeIR,
   StringBoundsIR,
 } from './shape.ts';
 import { resolveFormDef } from './shape.ts';
 import { assertNever, canonicalMemberName, isFormObject } from './internal.ts';
+import { CHILDREN_KEY, RESERVED_KEYS } from './discriminators.ts';
 import {
   type ParseOptions,
   type SafeEditResult,
@@ -52,6 +58,7 @@ import {
   SjonValidationError,
   requireBackend,
   requireEditBackend,
+  runManifestValidation,
   runParse,
   runParseValue,
   safeApplyAll,
@@ -63,6 +70,7 @@ import type { EditAction, EditPath } from './edit.ts';
 import { serializeFormAsPlugin, serializePlugin } from './serialize.ts';
 import { serializeValue } from './value.ts';
 import type { SjonValue } from './value.ts';
+import * as v from './value-ctor.ts';
 
 // ---------------------------------------------------------------------------
 // Generic leaf node
@@ -85,19 +93,36 @@ function leaf<Out, In = Out>(def: NodeDef): Node<Out, In> {
 }
 
 // ---------------------------------------------------------------------------
-// Number node (numeric refinements)
+// Number node (numeric refinements + GPU representation / unit rejection)
 // ---------------------------------------------------------------------------
 
-function numberNode(def: NodeDef): NumberNode {
-  const current: NumericBoundsIR =
-    def.shape.kind === 'number' && def.shape.bounds ? def.shape.bounds : {};
-  const withBounds = (patch: NumericBoundsIR): NumberNode =>
-    numberNode({ ...def, shape: { kind: 'number', bounds: { ...current, ...patch } } });
+/** The closed GPU tag set, in the exporter prelude's order. */
+const GPU_REPRS: readonly GpuRepr[] = ['f32', 'u32', 'i32', 'u16', 'f16'];
+
+/** Refuse an unknown representation tag at the `.repr()` call site, before a
+ *  manifest that the loader would reject can be serialized. */
+function assertGpuRepr(tag: string): asserts tag is GpuRepr {
+  if (!(GPU_REPRS as readonly string[]).includes(tag)) {
+    throw new Error(
+      `SJON schema: repr(${JSON.stringify(tag)}) is not a GPU representation tag — use one of ${GPU_REPRS.join(', ')}.`,
+    );
+  }
+}
+
+function numberNode<Out extends number = number>(def: NodeDef): NumberNode<Out> {
+  // Read the whole numeric shape, not just its bounds: `repr` and
+  // `rejectUnits` are orthogonal siblings, and every refinement below must
+  // carry them forward (`.min()` on a repr-tagged number may not drop the tag).
+  const shape: Extract<ShapeIR, { kind: 'number' }> =
+    def.shape.kind === 'number' ? def.shape : { kind: 'number' };
+  const current: NumericBoundsIR = shape.bounds ?? {};
+  const withBounds = (patch: NumericBoundsIR): NumberNode<Out> =>
+    numberNode<Out>({ ...def, shape: { ...shape, bounds: { ...current, ...patch } } });
   const node = {
     _def: def,
-    optional: () => numberNode({ ...def, isOptional: true }),
-    default: (value: number) => numberNode({ ...def, default: value }),
-    describe: (description: string) => numberNode({ ...def, description }),
+    optional: () => numberNode<Out>({ ...def, isOptional: true }),
+    default: (value: number) => numberNode<Out>({ ...def, default: value }),
+    describe: (description: string) => numberNode<Out>({ ...def, description }),
     min: (value: number) => withBounds({ min: value }),
     max: (value: number) => withBounds({ max: value }),
     gt: (value: number) => withBounds({ min: value, exclusiveMin: true }),
@@ -114,8 +139,14 @@ function numberNode(def: NodeDef): NumberNode {
       }
       return withBounds({ multipleOf: divisor });
     },
+    repr: <R extends GpuRepr>(tag: R): NumberNode<ReprNumber<R>> => {
+      assertGpuRepr(tag);
+      return numberNode<ReprNumber<R>>({ ...def, shape: { ...shape, repr: tag } });
+    },
+    rejectUnits: (): NumberNode<Out> =>
+      numberNode<Out>({ ...def, shape: { ...shape, rejectUnits: true } }),
   };
-  return node as unknown as NumberNode;
+  return node as unknown as NumberNode<Out>;
 }
 
 // ---------------------------------------------------------------------------
@@ -148,19 +179,37 @@ function stringPreset(bounds: StringBoundsIR, suggestedKind: string): StringNode
 // Form node
 // ---------------------------------------------------------------------------
 
-function buildFormDef(head: string, shape: ShapeRecord, ns: string, description?: string): FormDef {
+/** Runtime half of the third `s.form` argument (the string spelling is
+ *  normalized to `{ns}` before this is called). */
+interface FormOptionsRuntime {
+  readonly ns?: string | undefined;
+  readonly open?: boolean | undefined;
+  readonly positional?: AnyNode | 'any' | undefined;
+}
+
+function buildFormDef(
+  head: string,
+  shape: ShapeRecord,
+  ns: string,
+  options?: FormOptionsRuntime,
+): FormDef {
   const keys: FormKeyDef[] = Object.keys(shape).map((name) => ({
     name,
     def: (shape[name] as AnyNode)._def,
   }));
-  const base: FormDef = {
+  const positional: PositionalDef =
+    options?.positional === undefined
+      ? { kind: 'none' }
+      : options.positional === 'any'
+        ? { kind: 'any' }
+        : { kind: 'typed', element: options.positional._def };
+  return {
     head,
     ns,
-    open: false,
-    positional: { kind: 'none' },
+    open: options?.open === true,
+    positional,
     keys,
   };
-  return description !== undefined ? { ...base, description } : base;
 }
 
 /**
@@ -168,12 +217,24 @@ function buildFormDef(head: string, shape: ShapeRecord, ns: string, description?
  * schema's `$form`/`$ns` (always — smuggled tags in the input are ignored),
  * copy each declared key through `materialize` (which recurses into nested
  * forms / vectors-of-forms), fill declared defaults for omitted defaulted keys,
- * and omit absent optionals. Module-level + def-driven so it recurses to any
- * depth without a registry. Backend-free.
+ * and omit absent optionals. An **open** form first copies every undeclared own
+ * field (structural `$`-keys excluded), then overwrites declared keys — a
+ * closed form keeps dropping them. A non-`none` positional reads `$children`:
+ * a typed element goes through `materialize`, `'any'` is left untouched, and a
+ * `none` slot ignores a smuggled array. Module-level + def-driven so it recurses
+ * to any depth without a registry. Backend-free.
  */
 function createFromDef(def: FormDef, input: unknown): Record<string, unknown> {
   const out: Record<string, unknown> = { $form: def.head, $ns: def.ns };
   const fields = (input ?? {}) as Record<string, unknown>;
+  if (def.open) {
+    // Copy first so the input's own order survives; the declared-key pass below
+    // overwrites every declared value (and fills defaults) authoritatively.
+    for (const [key, value] of Object.entries(fields)) {
+      if (RESERVED_KEYS.includes(key) || value === undefined) continue;
+      out[key] = value;
+    }
+  }
   for (const key of def.keys) {
     const provided = fields[key.name];
     if (provided !== undefined) {
@@ -183,6 +244,16 @@ function createFromDef(def: FormDef, input: unknown): Record<string, unknown> {
       // schema's value. A nested-form default is itself a constructed FormOut;
       // an expression default is plain data. Either way clone, don't re-build.
       out[key.name] = structuredClone(key.def.default);
+    }
+  }
+  if (def.positional.kind !== 'none') {
+    const children = fields[CHILDREN_KEY];
+    if (children !== undefined) {
+      const positional = def.positional;
+      out[CHILDREN_KEY] =
+        positional.kind === 'typed' && Array.isArray(children)
+          ? children.map((child) => materialize(positional.element.shape, child))
+          : children;
     }
   }
   return out;
@@ -231,21 +302,39 @@ function currentFormJson(json: unknown): SjonValue {
   return (json ?? {}) as SjonValue;
 }
 
-function formNode<NS extends string, Head extends string, Sh extends ShapeRecord>(
-  def: FormDef,
-): FormNode<NS, Head, Sh> {
-  type Out = FormNode<NS, Head, Sh>['_out'];
+function formNode<
+  NS extends string,
+  Head extends string,
+  Sh extends ShapeRecord,
+  Open extends boolean = false,
+  P extends PositionalInput | undefined = undefined,
+>(def: FormDef): FormNode<NS, Head, Sh, Open, P> {
+  type Out = FormNode<NS, Head, Sh, Open, P>['_out'];
   const manifest = (): string => serializeFormAsPlugin(def);
   // Construct a conformant form value: delegate to the recursive, def-driven
   // `createFromDef` so nested forms / vectors-of-forms are stamped + filled at
-  // every depth. Backend-free.
-  const create = (input: FormInput<Sh>): Out => createFromDef(def, input) as Out;
+  // every depth, and open/positional fields follow the same def. Backend-free.
+  const create = (input: FormInput<Sh, Open, P>): Out => createFromDef(def, input) as Out;
   const node = {
     _def: def,
-    describe: (description: string) => formNode<NS, Head, Sh>({ ...def, description }),
+    describe: (description: string) => formNode<NS, Head, Sh, Open, P>({ ...def, description }),
     create,
-    toSjon: (input: FormInput<Sh>): string => serializeValue(create(input) as SjonValue),
-    toCanonicalSjon: (input: FormInput<Sh>, options?: ParseOptions): string => {
+    toSjon: (input: FormInput<Sh, Open, P>): string => serializeValue(create(input) as SjonValue),
+    // A starter document, not a typed value: every declared key is emitted in
+    // declaration order — a declared default deep-cloned, every other key
+    // (required or optional) the held symbol. No positionals, no recursion into
+    // held compound slots; the caller validates it with `heldSymbol` on their
+    // own backend when they choose to.
+    skeleton: (heldSymbol?: string): string => {
+      const hole = v.sym(heldSymbol ?? '_');
+      const fields: Record<string, unknown> = {};
+      for (const key of def.keys) {
+        fields[key.name] = key.def.default !== undefined ? structuredClone(key.def.default) : hole;
+      }
+      const value = { $form: def.head, $ns: def.ns, ...fields };
+      return serializeValue(value as SjonValue);
+    },
+    toCanonicalSjon: (input: FormInput<Sh, Open, P>, options?: ParseOptions): string => {
       const backend = requireBackend(options?.backend);
       if (!backend.fromValue) {
         throw new Error(
@@ -263,7 +352,7 @@ function formNode<NS extends string, Head extends string, Sh extends ShapeRecord
       return backend.exportSchema(manifest()).tsTypes ?? '';
     },
     validate: (source: string, options?: ParseOptions): ValidateOutcome =>
-      requireBackend(options?.backend).validate(`${manifest()}\n\n${source}`),
+      runManifestValidation(manifest(), source, requireBackend(options?.backend)),
     parse: (source: string, options?: ParseOptions): Out => {
       const result = runParse<Out>(
         manifest(),
@@ -347,7 +436,7 @@ function formNode<NS extends string, Head extends string, Sh extends ShapeRecord
         backend,
       );
     },
-    open: (source: string, options?: ParseOptions): FormDocument<NS, Head, Sh> => {
+    open: (source: string, options?: ParseOptions): FormDocument<NS, Head, Sh, Open, P> => {
       const backend = requireEditBackend(options?.backend);
       if (!backend.toJson) {
         throw new Error(
@@ -409,7 +498,7 @@ function formNode<NS extends string, Head extends string, Sh extends ShapeRecord
         save(saveOptions?: { readonly validate?: boolean }): string {
           const text = applyAll(source, actions, backend);
           if (saveOptions?.validate) {
-            const outcome = backend.validate(`${manifest()}\n\n${text}`);
+            const outcome = runManifestValidation(manifest(), text, backend);
             if (outcome.diagnostics.some((d) => d.severity === 'err')) {
               throw new SjonValidationError(outcome.diagnostics);
             }
@@ -419,10 +508,10 @@ function formNode<NS extends string, Head extends string, Sh extends ShapeRecord
         safeSave: (): SafeEditResult => safeApplyAll(source, actions, backend),
         toString: (): string => applyAll(source, actions, backend),
       };
-      return doc as unknown as FormDocument<NS, Head, Sh>;
+      return doc as unknown as FormDocument<NS, Head, Sh, Open, P>;
     },
   };
-  return node as unknown as FormNode<NS, Head, Sh>;
+  return node as unknown as FormNode<NS, Head, Sh, Open, P>;
 }
 
 // ---------------------------------------------------------------------------
@@ -580,15 +669,29 @@ export function vector(element: AnyNode, len?: number): AnyNode {
  * deep edit paths into the recursive region cap at the `Depth` budget — both are
  * TS-compiler limits, documented on `FormFieldNode` in `infer.ts`.
  */
-export function formOf<NS extends string, Head extends string, Sh extends ShapeRecord>(
-  inner: FormNode<NS, Head, Sh>,
-): FormFieldNode<NS, Head, Sh>;
-export function formOf<NS extends string, Head extends string, Sh extends ShapeRecord>(
-  inner: () => FormNode<NS, Head, Sh>,
-): FormFieldNode<NS, Head, Sh>;
-export function formOf<NS extends string, Head extends string, Sh extends ShapeRecord>(
-  inner: FormNode<NS, Head, Sh> | (() => FormNode<NS, Head, Sh>),
-): FormFieldNode<NS, Head, Sh> {
+export function formOf<
+  NS extends string,
+  Head extends string,
+  Sh extends ShapeRecord,
+  Open extends boolean,
+  P extends PositionalInput | undefined,
+>(inner: FormNode<NS, Head, Sh, Open, P>): FormFieldNode<NS, Head, Sh, Open, P>;
+export function formOf<
+  NS extends string,
+  Head extends string,
+  Sh extends ShapeRecord,
+  Open extends boolean,
+  P extends PositionalInput | undefined,
+>(inner: () => FormNode<NS, Head, Sh, Open, P>): FormFieldNode<NS, Head, Sh, Open, P>;
+export function formOf<
+  NS extends string,
+  Head extends string,
+  Sh extends ShapeRecord,
+  Open extends boolean = false,
+  P extends PositionalInput | undefined = undefined,
+>(
+  inner: FormNode<NS, Head, Sh, Open, P> | (() => FormNode<NS, Head, Sh, Open, P>),
+): FormFieldNode<NS, Head, Sh, Open, P> {
   // A FormNode is a plain object; only the lazy form is a function. Store the
   // thunk unevaluated so a self-reference (`() => Self`) doesn't trip TS's TDZ
   // or recurse forever — `resolveFormDef` calls it lazily later.
@@ -597,7 +700,7 @@ export function formOf<NS extends string, Head extends string, Sh extends ShapeR
   return leaf({
     shape: { kind: 'form', form },
     isOptional: false,
-  }) as unknown as FormFieldNode<NS, Head, Sh>;
+  }) as unknown as FormFieldNode<NS, Head, Sh, Open, P>;
 }
 
 /**
@@ -730,15 +833,49 @@ function rebuildNode(def: NodeDef): AnyNode {
   }
 }
 
-/** A `(form …)`. `ns` (the data form's `$ns`) defaults to the form head. */
-export const form = <Head extends string, Sh extends ShapeRecord, NS extends string = Head>(
+/**
+ * A `(form …)`. `ns` (the data form's `$ns`) defaults to the form head.
+ *
+ * The third argument takes the legacy namespace string, which stays
+ * byte-identical to the old call, or an options object:
+ *
+ *     s.form('note', { text: s.string() }, { ns: 'studio', open: true })
+ *     s.form('lines', { title: s.string() }, { positional: s.string() })
+ *
+ * `open` and `positional` normalize into the existing `FormDef.open` /
+ * `PositionalDef` IR — no new shape variant.
+ */
+export const form = <
+  Head extends string,
+  Sh extends ShapeRecord,
+  NS extends string = Head,
+  const Open extends boolean = false,
+  P extends PositionalInput | undefined = undefined,
+>(
   head: Head,
   shape: Sh,
-  ns?: NS,
-): FormNode<NS, Head, Sh> => formNode<NS, Head, Sh>(buildFormDef(head, shape, (ns ?? head) as NS));
+  nsOrOptions?: NS | FormOptions<NS, Open, P>,
+): FormNode<NS, Head, Sh, Open, P> => {
+  const options: FormOptionsRuntime =
+    typeof nsOrOptions === 'string' ? { ns: nsOrOptions } : (nsOrOptions ?? {});
+  return formNode<NS, Head, Sh, Open, P>(
+    buildFormDef(head, shape, (options.ns ?? head) as NS, options),
+  );
+};
 
 /** A `(plugin …)` grouping forms + named kinds (for multi-form / cross-ref docs). */
 export const plugin = (name: string, init: PluginInit = {}): PluginNode => pluginNode(name, init);
 
-// Type-only helpers, surfaced as `s.infer<typeof Form>` / `s.input<…>`.
-export type { infer, input } from './infer.ts';
+// Type-only helpers, surfaced as `s.infer<typeof Form>` / `s.input<…>`, plus
+// the number-representation brands (`s.GpuRepr`, `s.U32`, …).
+export type {
+  F16,
+  F32,
+  GpuRepr,
+  I32,
+  infer,
+  input,
+  ReprNumber,
+  U16,
+  U32,
+} from './infer.ts';

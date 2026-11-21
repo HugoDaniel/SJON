@@ -7,13 +7,15 @@
 //
 // STRUCTURAL RECOVERY. `Parser.zig`'s contract — "trees always exist
 // after parse (possibly partial); collection over abort"
-// (docs/LANGUAGE.md §4.3) — is honoured here for the four *structural* deviations,
+// (docs/LANGUAGE.md §4.3) — is honoured here for these structural deviations,
 // each emitting an `unspecified` diagnostic and continuing:
 //
 //   * a form left open at end of input   (closed at `source.length`)
 //   * a vector left open at end of input (ditto)
 //   * a close delimiter at top level     (skipped)
-//   * a `0x` prefix with no hex digit    (skipped, yields no node)
+//   * an engine `.invalid` token this port models — a comma, a `#` that
+//     never opens a block comment, an unterminated `#| … |#`, and a `0x`
+//     prefix with no hex digit (skipped, yields no node)
 //
 // This is not full parity with `Parser.zig`, which recovers from every
 // deviation. The remaining sites — an unterminated string, an invalid
@@ -51,6 +53,12 @@ export function parse(source: string, diagOut?: Diagnostic[]): readonly Node[] {
     const c = p.peek();
     if (c === ')' || c === ']') {
       p.recordUnexpectedClose();
+      p.skipWhitespace();
+      continue;
+    }
+    // An engine `.invalid` token (comma, a `#` with no `|`) yields no
+    // node, so it is drained here rather than inside `parseNode`.
+    if (p.skipInvalidToken()) {
       p.skipWhitespace();
       continue;
     }
@@ -105,6 +113,13 @@ interface PathFrame {
   /** True when this frame is the value of a kvpair, in which case the
    *  key *and* the head both appear in the path. */
   parentViaKvpair: boolean;
+  /** Positional children attached so far (forms) / elements pushed
+   *  (vectors). Mirrors `Parser.zig`'s `positional_n` and
+   *  `top.children.items.len` for the in-progress suffix. */
+  childCount: number;
+  /** Kvpair key awaiting its value, or `null`. Mirrors `top.pending`:
+   *  while set, the in-progress suffix names the key, not an ordinal. */
+  pendingKey: string | null;
 }
 
 class Parser {
@@ -130,11 +145,17 @@ class Parser {
   }
 
   /** Snapshot the semantic path of the currently-open frames. Mirrors
-   *  `Parser.zig:buildPath` with `in_progress = false`: per frame, a
-   *  kvpair key (when reached as a kvpair value) followed by the form
-   *  head; vectors contribute their parent step alone. Zig skips its
-   *  root frame — `frames` here holds no root, so the walk is total. */
-  private buildPath(): string[] {
+   *  `Parser.zig:buildPath`: per frame, a kvpair key (when reached as a
+   *  kvpair value) followed by the form head; vectors contribute their
+   *  parent step alone. Zig skips its root frame — `frames` here holds
+   *  no root, so the walk is total.
+   *
+   *  `inProgress` reproduces the second half of the engine's walk: the
+   *  slot the current token would occupy — the pending kvpair key, or
+   *  the next positional/element ordinal. Parser diagnostics emitted by
+   *  the `.invalid` branch pass `true`; frame-level errors (unclosed
+   *  delimiter, stray close) pass `false`. */
+  private buildPath(inProgress = false): string[] {
     const out: string[] = [];
     for (const f of this.frames) {
       if (f.parentViaKvpair) {
@@ -145,16 +166,22 @@ class Parser {
         if (step.length > 0) out.push(step);
       }
     }
+    if (inProgress && this.frames.length > 0) {
+      const top = this.frames[this.frames.length - 1]!;
+      out.push(
+        top.kind === 'form' && top.pendingKey !== null ? top.pendingKey : String(top.childCount),
+      );
+    }
     return out;
   }
 
   /** Emit a parser diagnostic against the open frames. Parser syntax
    *  diagnostics all carry `unspecified`, per `Parser.zig`. */
-  private recordSyntax(message: string, start: number, end: number): void {
+  private recordSyntax(message: string, start: number, end: number, inProgress = false): void {
     this.diagnostics.push({
       code: 'unspecified',
       message,
-      path: this.buildPath(),
+      path: this.buildPath(inProgress),
       span: { start, end },
       severity: 'err',
     });
@@ -180,6 +207,8 @@ class Parser {
       head,
       parentStep: parent.step,
       parentViaKvpair: parent.viaKvpair,
+      childCount: 0,
+      pendingKey: null,
     });
   }
 
@@ -187,19 +216,53 @@ class Parser {
     return this.pos >= this.src.length;
   }
 
-  /** Consume whitespace and ; line comments. Block comments and
-   *  significant trivia are out of scope for this minimal port. */
+  /** Consume whitespace, `;` line comments, and `#| … |#` block comments.
+   *  Block comments do not nest: the first `|#` closes them, exactly as
+   *  `Lexer.zig`'s `.block_pipe` state refuses to consume a `|` that is
+   *  not followed by `#`. An unterminated block comment is one `.invalid`
+   *  token to end of input. */
   skipWhitespace(): void {
     while (!this.atEnd()) {
       const c = this.src[this.pos];
-      if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === ',') {
+      if (c === ' ' || c === '\t' || c === '\n' || c === '\r') {
         this.pos++;
       } else if (c === ';') {
         while (!this.atEnd() && this.src[this.pos] !== '\n') this.pos++;
+      } else if (c === '#' && this.src[this.pos + 1] === '|') {
+        this.skipBlockComment();
       } else {
         break;
       }
     }
+  }
+
+  /** Consume one `#| … |#` block comment. Mirrors the lexer's
+   *  `.block_hash` → `.block_body` → `.block_pipe` walk: no nesting, and
+   *  EOF before a close turns the whole run into one `.invalid` token. */
+  private skipBlockComment(): void {
+    const start = this.pos;
+    this.pos += 2; // `#|`
+    while (!this.atEnd()) {
+      if (this.src[this.pos] === '|' && this.src[this.pos + 1] === '#') {
+        this.pos += 2;
+        return;
+      }
+      this.pos++;
+    }
+    this.recordSyntax('invalid token', start, this.pos, true);
+  }
+
+  /** Consume one engine `.invalid` token this port models: a comma, or a
+   *  `#` that does not open a block comment. One diagnostic at the
+   *  in-progress slot, no node — `Parser.zig:handleInvalidToken`.
+   *  Returns true when a token was consumed. */
+  skipInvalidToken(): boolean {
+    const c = this.src[this.pos];
+    if (c !== ',' && c !== '#') return false;
+    const start = this.pos;
+    this.pos++;
+    this.recordSyntax('invalid token', start, this.pos, true);
+    return true;
   }
 
   parseNode(): Node {
@@ -231,18 +294,21 @@ class Parser {
     const headEnd = this.pos;
     let head = headRaw;
     let namespace: string | null = null;
+    // `Parser.splitNamespace`: the first interior `/` splits; a leading or
+    // trailing slash is not a separator, so `/head` and `ns/` stay whole.
     const slash = headRaw.indexOf('/');
-    if (slash >= 0) {
+    if (slash > 0 && slash + 1 < headRaw.length) {
       namespace = headRaw.slice(0, slash);
       head = headRaw.slice(slash + 1);
     }
     const headSpan: Span = { start: headStart, end: headEnd };
     this.pushFrame('form', head, parentStep);
+    const frame = this.frames[this.frames.length - 1]!;
 
     // Parse children (greedy `:k v` pairing).
     const children: Node[] = [];
-    /** Positional (non-kvpair, non-keyword) children so far — the step
-     *  a positional child is named by. Mirrors `computeChildStep`. */
+    /** Positional (non-kvpair) children so far — the step a positional
+     *  child is named by. Mirrors `computeChildStep`. */
     let positionals = 0;
     while (true) {
       this.skipWhitespace();
@@ -259,6 +325,7 @@ class Parser {
         this.pos++;
         break;
       }
+      if (this.skipInvalidToken()) continue;
       if (this.skipInvalidHexPrefix()) continue;
       this.pendingStep = { step: String(positionals), viaKvpair: false };
       const ch = this.parseNode();
@@ -267,16 +334,20 @@ class Parser {
         // If the next node is also a keyword, this :k becomes a
         // positional keyword flag (no v0.1 corpus case exercises this,
         // but we mirror the rule for fidelity).
+        frame.pendingKey = ch.name;
         this.skipWhitespace();
         // Drain before the lookahead, not after: a malformed `0x` starts
         // with a digit, so it would otherwise read as "a value follows"
         // and `:k` would pair with whatever came after the typo. In Zig
         // the `.invalid` token is simply absent, so `(a :x 0x)` leaves
-        // `:x` as a positional flag.
-        while (this.skipInvalidHexPrefix()) this.skipWhitespace();
+        // `:x` as a positional flag. The same drain covers a comma (or
+        // bare `#`) between the key and its value; both report at the
+        // pending key, as the engine's `buildPath(in_progress)` does.
+        while (this.skipInvalidToken() || this.skipInvalidHexPrefix()) this.skipWhitespace();
         if (!this.atEnd() && this.src[this.pos] !== ')' && this.src[this.pos] !== ':') {
           this.pendingStep = { step: ch.name, viaKvpair: true };
           const value = this.parseNode();
+          frame.pendingKey = null;
           children.push({
             tag: 'kvpair',
             key: ch.name,
@@ -285,11 +356,15 @@ class Parser {
             span: { start: ch.span.start, end: this.pos },
           });
         } else {
+          frame.pendingKey = null;
           children.push(ch);
+          positionals++;
+          frame.childCount = positionals;
         }
       } else {
         children.push(ch);
         positionals++;
+        frame.childCount = positionals;
       }
     }
     this.frames.pop();
@@ -309,6 +384,7 @@ class Parser {
     const start = this.pos;
     this.expect('[');
     this.pushFrame('vector', '', parentStep);
+    const frame = this.frames[this.frames.length - 1]!;
     const elements: Node[] = [];
     while (true) {
       this.skipWhitespace();
@@ -322,9 +398,11 @@ class Parser {
         this.pos++;
         break;
       }
+      if (this.skipInvalidToken()) continue;
       if (this.skipInvalidHexPrefix()) continue;
       this.pendingStep = { step: String(elements.length), viaKvpair: false };
       elements.push(this.parseNode());
+      frame.childCount = elements.length;
     }
     this.frames.pop();
     return { tag: 'vector', elements, span: { start, end: this.pos } };
@@ -563,7 +641,7 @@ class Parser {
     if (p !== 'x' && p !== 'X') return false;
     if (isHexDigit(this.src[i + 2])) return false; // a well-formed literal
     this.pos = i + 2;
-    this.recordSyntax('invalid token', start, this.pos);
+    this.recordSyntax('invalid token', start, this.pos, true);
     return true;
   }
 

@@ -712,11 +712,12 @@ test "arithmetic: + - * / mod" {
 }
 
 // `mod` is floored for EVERY divisor — the result takes the divisor's
-// sign. A bare `@mod` is floored only for a positive divisor and degrades
-// to `@rem` for a negative one, so the negative-divisor arms below are the
-// ones that regress if `applyMod`'s correction is ever dropped. The
-// positive-divisor arms are here to prove the correction did not disturb
-// the region every document actually uses.
+// sign. `applyMod` is `@rem` plus one corrective add, so the
+// negative-divisor arms below are the ones that regress if that add is
+// ever dropped. The positive-divisor arms are here to prove the add did
+// not disturb the region every document actually uses, and the edge arms
+// pin the two cases where `@mod` (and the closed form) disagree with the
+// correctly rounded floored result.
 test "mod: floored for a negative divisor too" {
     const Case = struct { src: [:0]const u8, want: f64 };
     for ([_]Case{
@@ -734,11 +735,20 @@ test "mod: floored for a negative divisor too" {
         .{ .src = "(mod 6 -3)", .want = 0 },
         .{ .src = "(mod -6 -3)", .want = 0 },
         .{ .src = "(mod 0 -3)", .want = 0 },
-        // Precision: the closed form x - y*floor(x/y) gives 0 here, and a
-        // naive @rem-plus-correction gives the divisor itself for the
-        // second. Correcting `@mod` inherits its handling of both.
+        // Precision: the closed form x - y*floor(x/y) gives 0 for the
+        // first. The second's true floored result is 1e16 - 1, which f64
+        // cannot represent — spacing is 2 above 2^53, so it ties to even
+        // onto 1e16, equal to the divisor. Zig's `@mod` returns 0 here;
+        // `@rem` is -1 and the corrective add yields 1e16.
         .{ .src = "(mod 1e16 3)", .want = 1 },
-        .{ .src = "(mod -1 1e16)", .want = 0 },
+        .{ .src = "(mod -1 1e16)", .want = 10000000000000000 },
+        // Edges the `@mod` base got wrong: an infinite divisor returns
+        // the numerator for a zero numerator and +inf for a negative one,
+        // and an overflowing quotient is still an exact multiple of the
+        // smallest subnormal.
+        .{ .src = "(mod 0 (* 1e308 1e308))", .want = 0 },
+        .{ .src = "(mod -5 (* 1e308 1e308))", .want = std.math.inf(f64) },
+        .{ .src = "(mod 1e308 5e-324)", .want = 0 },
     }) |c| {
         var r = try evalSource(c.src);
         defer r.deinit();

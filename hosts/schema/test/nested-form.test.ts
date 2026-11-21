@@ -124,3 +124,39 @@ test('a top-level form also used as a nested element is not double-emitted (plug
   const todoForms = manifest.match(/\(form :name todo\n/g) ?? [];
   assert.equal(todoForms.length, 1, 'todo declared top-level is not re-emitted as nested');
 });
+
+test('a hoisted inner form positional kind is registered before the snapshot, exactly once', () => {
+  // `Entry` is reached only through `s.formOf`, so `declareForm` must hoist its
+  // typed positional's refined kind *before* `assemble` snapshots the value-kind
+  // list — otherwise the inner form references a kind that was never emitted.
+  const Entry = s.form('entry', { name: s.string() }, { ns: 'kit', positional: s.number().min(1) });
+  const Container = s.form('container', { entry: s.formOf(Entry) }, 'kit');
+  const manifest = Container.manifest();
+
+  const kindOccurrences = manifest.match(/\(value-kind :name num-min1 /g) ?? [];
+  assert.equal(kindOccurrences.length, 1, 'the refined positional kind is emitted exactly once');
+  assert.match(manifest, /\(form :name entry :positional num-min1\n/);
+  assert.ok(
+    manifest.indexOf('(value-kind :name num-min1') < manifest.indexOf('(form :name entry'),
+    'the value-kind must be declared before the inner form that references it',
+  );
+});
+
+test('a positional form nested as a field keeps its typed $children in inference', () => {
+  const Leaf = s.form('leaf', { label: s.string() }, { ns: 'kit', positional: s.string() });
+  const Root = s.form('root', { leaf: s.formOf(Leaf) }, 'kit');
+  type RootOut = s.infer<typeof Root>;
+  // Compile-time only: never dereferenced at runtime (a null cast would throw
+  // in node:test). `tsc --noEmit` is the gate for the two assertions.
+  function _probe(): void {
+    const out = null as unknown as RootOut;
+    const leafChildren: string[] | undefined = out.leaf.$children;
+    void leafChildren;
+    // @ts-expect-error nested typed positional children stay strings
+    const wrong: number[] | undefined = out.leaf.$children;
+    void wrong;
+  }
+  void _probe;
+  assert.equal(Leaf._def.positional.kind, 'typed');
+  assert.equal(Root._def.keys.length, 1);
+});

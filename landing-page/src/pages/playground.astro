@@ -41,9 +41,11 @@ const base = import.meta.env.BASE_URL.replace(/\/+$/, '');
   <p>
     Type below. The parser, the validator and the expression evaluator here are
     the same ones the command line runs, compiled to WebAssembly and loaded
-    into this tab: diagnostics land in the gutter, values appear under the
-    editor as you type, and nothing you write leaves the page. Pick an example
-    to start from, or bring the camera
+    into this tab: diagnostics land in the gutter with a quickfix where one
+    exists, completion offers the keys the schema allows for the form you are
+    in and, once a key is written, the values that key accepts, values appear
+    under the editor as you type, and nothing you write leaves the page. Pick
+    an example to start from, or bring the camera
     from <a href={`${base}${FIRST_LESSON.route}`}>section 1 of the tutorial</a> and break
     it on purpose.
   </p>

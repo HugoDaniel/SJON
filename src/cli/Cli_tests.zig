@@ -292,6 +292,215 @@ test "Cli: D3 --format=json sets project_file null when --no-project" {
 }
 
 // ---------------------------------------------------------------------
+// P1 — `sjon validate --against MANIFEST DOCUMENT`.
+//
+// One composed source, `MANIFEST + "\n" + DOCUMENT`, through the ordinary
+// Host pipeline: no project discovery, no preload, no span rebasing. The
+// tests pin the composition byte-for-byte where it is observable (a
+// document diagnostic's span shifts by manifest length + 1) and pin the
+// usage contract (one schema source, so project flags are rejected rather
+// than silently combined).
+// ---------------------------------------------------------------------
+
+const fixture_against_manifest: [:0]const u8 = "conformance/cases/flag-set-valid/schema.sjon";
+const fixture_against_input: [:0]const u8 = "conformance/cases/flag-set-valid/input.sjon";
+const fixture_against_xref_manifest: [:0]const u8 = "conformance/cases/cross-ref-missing/schema.sjon";
+const fixture_against_xref_input: [:0]const u8 = "conformance/cases/cross-ref-missing/input.sjon";
+/// A document whose sibling `sjon-project.sjon` resolves its `(use-plugin …)`.
+const fixture_against_project_doc: [:0]const u8 = "conformance/cases/use-plugin-resolved/document.sjon";
+
+test "Cli: validate --against validates a legacy schema/input pair" {
+    var out = try invoke(&.{
+        "sjon", "validate", "--against", fixture_against_manifest, fixture_against_input,
+    });
+    defer out.deinit();
+    try testing.expectEqual(@as(u8, 0), out.code);
+    // No diagnostics, and no `# project:` header — against mode has no
+    // project file to name.
+    try testing.expectEqual(@as(usize, 0), out.stdout.written().len);
+    try testing.expectEqual(@as(usize, 0), out.stderr.written().len);
+}
+
+test "Cli: validate --against reports document errors and JSON composed spans" {
+    var human = try invoke(&.{
+        "sjon", "validate", "--against", fixture_against_xref_manifest, fixture_against_xref_input,
+    });
+    defer human.deinit();
+    try testing.expectEqual(@as(u8, 1), human.code);
+    try testing.expect(std.mem.indexOf(u8, human.stdout.written(), "not_cross_ref") != null);
+    try testing.expect(std.mem.indexOf(u8, human.stdout.written(), "# project:") == null);
+
+    var out = try invoke(&.{
+        "sjon",      "validate",                    "--format=json",
+        "--against", fixture_against_xref_manifest, fixture_against_xref_input,
+    });
+    defer out.deinit();
+    try testing.expectEqual(@as(u8, 1), out.code);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out.stdout.written(), .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    // The JSON `file` is the document argument, not the composed source.
+    try testing.expectEqualStrings(fixture_against_xref_input, obj.get("file").?.string);
+    try testing.expectEqual(std.json.Value{ .null = {} }, obj.get("project_file").?);
+
+    // Read the manifest's exact bytes the way production does to pin the
+    // composition: manifest, one inserted LF, then the document. No
+    // trimming, so no document span can land before `len + 1`.
+    const manifest_bytes = try readBack(testing.allocator, fixture_against_xref_manifest);
+    defer testing.allocator.free(manifest_bytes);
+
+    var saw_not_cross_ref = false;
+    for (obj.get("diagnostics").?.array.items) |item| {
+        const d = item.object;
+        if (!std.mem.eql(u8, d.get("code").?.string, "not_cross_ref")) continue;
+        try testing.expectEqualStrings("validation", d.get("phase").?.string);
+        const start = d.get("span").?.object.get("start").?.integer;
+        try testing.expect(start >= @as(i64, @intCast(manifest_bytes.len + 1)));
+        saw_not_cross_ref = true;
+    }
+    try testing.expect(saw_not_cross_ref);
+}
+
+test "Cli: validate --against surfaces manifest diagnostics" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // A manifest the meta-validator rejects: `(plugin …)` without `:name`.
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "bad-manifest.sjon",
+        .data = "(plugin :version \"1.0.0\")\n",
+    });
+    const manifest_arg = try std.fmt.allocPrintSentinel(
+        a,
+        "--against=.zig-cache/tmp/{s}/bad-manifest.sjon",
+        .{&tmp.sub_path},
+        0,
+    );
+    defer a.free(manifest_arg);
+
+    var out = try invoke(&.{
+        "sjon", "validate", "--format=json", manifest_arg, fixture_against_input,
+    });
+    defer out.deinit();
+    // User SJON — even a broken manifest — is diagnostics, exit 1, not a
+    // usage error about argv.
+    try testing.expectEqual(@as(u8, 1), out.code);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out.stdout.written(), .{});
+    defer parsed.deinit();
+    var saw_manifest = false;
+    for (parsed.value.object.get("diagnostics").?.array.items) |item| {
+        const d = item.object;
+        if (!std.mem.eql(u8, d.get("phase").?.string, "manifest")) continue;
+        try testing.expectEqualStrings("missing_required_key", d.get("code").?.string);
+        saw_manifest = true;
+    }
+    try testing.expect(saw_manifest);
+}
+
+test "Cli: validate --against rejects ambiguous invocation" {
+    // Missing value.
+    var missing = try invoke(&.{ "sjon", "validate", "--against" });
+    defer missing.deinit();
+    try testing.expectEqual(@as(u8, 2), missing.code);
+    try testing.expect(std.mem.indexOf(u8, missing.stderr.written(), "requires a manifest") != null);
+
+    // Empty value and flag-looking values are not paths.
+    var empty = try invoke(&.{ "sjon", "validate", "--against=", fixture_against_input });
+    defer empty.deinit();
+    try testing.expectEqual(@as(u8, 2), empty.code);
+    try testing.expect(std.mem.indexOf(u8, empty.stderr.written(), "requires a manifest") != null);
+
+    var flag_value = try invoke(&.{ "sjon", "validate", "--against", "--no-project", fixture_against_input });
+    defer flag_value.deinit();
+    try testing.expectEqual(@as(u8, 2), flag_value.code);
+    try testing.expect(std.mem.indexOf(u8, flag_value.stderr.written(), "got a flag instead") != null);
+
+    // `-` would make the manifest and the document fight over stdin.
+    var stdin_manifest = try invoke(&.{ "sjon", "validate", "--against=-", fixture_against_input });
+    defer stdin_manifest.deinit();
+    try testing.expectEqual(@as(u8, 2), stdin_manifest.code);
+    try testing.expect(std.mem.indexOf(u8, stdin_manifest.stderr.written(), "stdin") != null);
+
+    // One flag names one manifest.
+    var repeated = try invoke(&.{
+        "sjon", "validate", "--against=a", "--against=b", fixture_against_input,
+    });
+    defer repeated.deinit();
+    try testing.expectEqual(@as(u8, 2), repeated.code);
+    try testing.expect(std.mem.indexOf(u8, repeated.stderr.written(), "given more than once") != null);
+
+    // `--against` implies no project discovery, so the project flags are
+    // contradictory, not a hidden second schema source.
+    var with_root = try invoke(&.{
+        "sjon", "validate", "--project-root=conformance/cases/flag-set-valid", "--against", fixture_against_manifest, fixture_against_input,
+    });
+    defer with_root.deinit();
+    try testing.expectEqual(@as(u8, 2), with_root.code);
+    try testing.expect(std.mem.indexOf(u8, with_root.stderr.written(), "cannot be combined") != null);
+
+    var with_no_project = try invoke(&.{
+        "sjon", "validate", "--against", fixture_against_manifest, "--no-project", fixture_against_input,
+    });
+    defer with_no_project.deinit();
+    try testing.expectEqual(@as(u8, 2), with_no_project.code);
+    try testing.expect(std.mem.indexOf(u8, with_no_project.stderr.written(), "cannot be combined") != null);
+
+    // Validate-only: `check` does not do the composition.
+    var on_check = try invoke(&.{ "sjon", "check", "--against", fixture_against_manifest, fixture_against_input });
+    defer on_check.deinit();
+    try testing.expectEqual(@as(u8, 2), on_check.code);
+    try testing.expect(std.mem.indexOf(u8, on_check.stderr.written(), "unknown option") != null);
+}
+
+test "Cli: validate --against ignores ambient project discovery" {
+    // The document's directory carries a `sjon-project.sjon` that resolves
+    // `(use-plugin "shapes")` — the plain validate proves the ambient
+    // project is discoverable and sufficient.
+    var thoughtless = try invoke(&.{ "sjon", "validate", fixture_against_project_doc });
+    defer thoughtless.deinit();
+    try testing.expectEqual(@as(u8, 0), thoughtless.code);
+
+    // Against mode must not consult it: the manifest argument is the one
+    // schema source, so the reference has no resolver and fails.
+    var out = try invoke(&.{
+        "sjon", "validate", "--against", fixture_against_manifest, fixture_against_project_doc,
+    });
+    defer out.deinit();
+    try testing.expectEqual(@as(u8, 1), out.code);
+    try testing.expect(std.mem.indexOf(u8, out.stdout.written(), "unresolved_plugin") != null);
+}
+
+test "Cli: validate --against preserves stdin and output formats" {
+    const a = testing.allocator;
+    // Document `-` keeps sole ownership of stdin; the manifest is a path.
+    const tail = try std.fmt.allocPrint(a, "validate --against {s} --format=json -", .{fixture_against_manifest});
+    defer a.free(tail);
+    const out = try runCliWithStdin(a, tail, "(task :done)\n");
+    defer a.free(out.stdout);
+    defer a.free(out.stderr);
+    try testing.expectEqual(@as(u8, 0), exitCode(out.term));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out.stdout, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expectEqualStrings("<stdin>", obj.get("file").?.string);
+    try testing.expectEqual(std.json.Value{ .null = {} }, obj.get("project_file").?);
+    try testing.expectEqual(@as(usize, 0), obj.get("diagnostics").?.array.items.len);
+
+    // --format=github must go through the ordinary annotation renderer,
+    // not a new against-only path.
+    var gh = try invoke(&.{
+        "sjon", "validate", "--against", fixture_against_xref_manifest, "--format=github", fixture_against_xref_input,
+    });
+    defer gh.deinit();
+    try testing.expectEqual(@as(u8, 1), gh.code);
+    try testing.expect(std.mem.startsWith(u8, gh.stdout.written(), "::error file="));
+    try testing.expect(std.mem.indexOf(u8, gh.stdout.written(), "not_cross_ref") != null);
+}
+
+// ---------------------------------------------------------------------
 // Shared project-flag grammar — Phase 8 item 5.
 //
 // `check`, `project info|verify|lock|sync`, and `plugin info|check` all

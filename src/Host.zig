@@ -40,6 +40,7 @@ const ManifestLoader = @import("ManifestLoader.zig");
 const Resolver = @import("Resolver.zig");
 const Parser = @import("Parser.zig");
 const Validator = @import("Validator.zig");
+const Edit = @import("Edit.zig");
 const ProviderExtraction = @import("ProviderExtraction.zig");
 const Expr = @import("Expr.zig");
 const MaterializedDefaults = @import("MaterializedDefaults.zig");
@@ -161,8 +162,12 @@ pub const HostOptions = struct {
     /// `PreloadedSchema.diagnostics`), so they are NOT re-run here unless this
     /// document itself contributes a plugin — in which case the combined set
     /// is re-validated and the preloaded-set aggregate diagnostics reappear
-    /// alongside any new cross-set ones. Zig-API-only: no wire/ABI/diagnostic
-    /// surface for it.
+    /// alongside any new cross-set ones. Native Zig and the kitchen-sink WASM
+    /// ABI agree on this contract: `sjon_preload_schema` mints the same
+    /// `PreloadedSchema` behind an instance-scoped `u32` handle, this field is
+    /// its `preloadedHandle` option borrow, and `sjon_schema_free` releases it.
+    /// Still no wire-format or diagnostic-code change — a handle is host
+    /// bookkeeping, not Binary IR.
     preloaded: ?*const PreloadedSchema = null,
 
     /// The symbol a *held* position is spelled with: a value the author has
@@ -321,6 +326,44 @@ pub const Hop = struct {
 /// result) and `plugins[i]` aliases `plugin_results[i - preloaded_len].plugin`
 /// only for the document-loaded suffix. `plugin_results` stays document-only,
 /// so `deinit` never frees a preloaded arena.
+/// Outcome of projecting one declared identity onto the current revision.
+/// A `resolved` row carries the address the name resolves to *right now*;
+/// an `ambiguous` row retains the declared name with no address — a name
+/// two author spellings contend for must not resolve to either site.
+pub const IdentityStatus = enum { resolved, ambiguous };
+
+/// One `{registry, symbol}` link in a row's lexical scope prefix chain.
+pub const IdentityScope = struct {
+    /// Canonical cross-ref registry (`<plugin>/<form>`, or a target
+    /// group's synthetic bucket). Arena-owned by `HostResult`.
+    registry: []const u8,
+    /// The parent form's declared name. Arena-owned by `HostResult`.
+    symbol: []const u8,
+};
+
+/// Where a resolved identity sits in the current revision: which root of
+/// `HostResult.tree`, and the §11.2 path from that root down to the form.
+pub const IdentityAddress = struct {
+    root: u32,
+    /// Native `Edit.Step` spelling. The slice is arena-owned; each `.key`
+    /// string inside borrows `HostResult.tree`'s string pool.
+    path: []const Edit.Step,
+};
+
+/// One projected identity row. The key is `(registry, scope, symbol)`
+/// and nothing else — numeric root and AST node index are never part of
+/// it, so the same name keeps its key across edits that move the form.
+pub const IdentityRow = struct {
+    registry: []const u8,
+    /// Outermost-first stable lexical parent identities; empty for
+    /// document scope. Arena-owned by `HostResult`.
+    scope: []const IdentityScope,
+    symbol: []const u8,
+    status: IdentityStatus,
+    /// Null exactly for ambiguous. Borrows from `HostResult.arena`.
+    address: ?IdentityAddress,
+};
+
 pub const HostResult = struct {
     arena: std.heap.ArenaAllocator,
 
@@ -363,6 +406,16 @@ pub const HostResult = struct {
     /// `diagnostics` and no entry here. Stable across re-evaluation —
     /// `forest_index` is the position within `data_forest`.
     evaluated_results: []const EvalResult,
+
+    /// Projected identity rows for this revision: every declared,
+    /// unambiguous `(registry, scope, symbol)` joined to its current
+    /// address, plus ambiguous names retained with `address == null`.
+    /// Deterministic lexical order by registry, scope prefix, then
+    /// symbol. Arena-owned, strings and path slices included — nothing
+    /// here borrows the validator index the rows were projected from.
+    /// Anonymous nodes have no row; an absent key is the caller's
+    /// "not found", and no row is invented for it.
+    identities: []const IdentityRow,
 
     /// Side-table of materialized defaults populated during the
     /// validation phase. One `Entry` per omitted declared key on a
@@ -1578,6 +1631,13 @@ pub fn validateDocument(
     // authored.
     var unlowered_roots: []const Ast.NodeIndex = part.data_forest;
 
+    // Identity rows, projected inside each branch below while the
+    // validation `ForestResult` (and the cross-ref index arena behind
+    // `fr.cross_ref_index`) is still alive — rows deep-copy their
+    // strings and paths into the host arena here, before the branch's
+    // deferred `fr.deinit` can release the index.
+    var identities: []const IdentityRow = &.{};
+
     if (options.lowering_registry) |registry| {
         unlowered_roots = try runLoweringStages(
             gpa,
@@ -1647,6 +1707,11 @@ pub fn validateDocument(
             }
         }
 
+        // Identity projection joins the index's author-written name
+        // attempts to source-tree addresses; lowered-layer sites are
+        // filtered inside (their `tree_idx` names another tree).
+        identities = try projectIdentities(gpa, a, &tree, &fr.cross_ref_index);
+
         // Every layer transfers into `HostResult.lowering_stages`, which
         // owns the trees from here on. Nothing is retained that was not
         // already live: each stage tree was alive through the forest pass
@@ -1699,6 +1764,10 @@ pub fn validateDocument(
                 try diags.append(a, try wrapDiagnostic(a, d, .validation, null));
             }
         }
+
+        // Same projection on the no-lowering path: one tree, one index,
+        // same lifetime rule — copy before `fr.deinit` runs.
+        identities = try projectIdentities(gpa, a, &tree, &fr.cross_ref_index);
     }
 
     for (mat_result.diagnostics) |d| {
@@ -1742,12 +1811,285 @@ pub fn validateDocument(
         .data_forest = part.data_forest,
         .diagnostics = try diags.toOwnedSlice(a),
         .evaluated_results = try eval_results.toOwnedSlice(a),
+        .identities = identities,
         .materialized_defaults = mat_result.materialized,
         .lowering_stages = lowering_stages,
         .lowered_tree = lowered_tree,
         .lowering_provenance = lowering_provenance,
         .lowered_materialized_defaults = lowered_materialized,
     };
+}
+
+// -- Identity projection ------------------------------------------------------
+//
+// `projectIdentities` joins what the validator's cross-ref index recorded
+// (every author-written name attempt, plus the parallel ambiguous-key set
+// marked at duplicate registrations) to where those forms sit in the
+// source tree, through the same `Edit.NodeTable` an editor's address
+// queries use. It runs inside `validateDocument` while the index arena is
+// alive and copies everything it keeps into the host arena, so no row
+// outlives the `ForestResult` it was projected from.
+//
+// Scope chains: a registration's `ScopeId` is either the document (tree)
+// scope — projected as `scope:[]` — or a lexical scope opened by an
+// enclosing form. The lexical encoding is `(tree_idx, opening node
+// index)`; the parent's identity is recovered from the attempts recorded
+// at that node, and the chain continues through the parent's own scope,
+// which by construction names a strictly enclosing opener (spans shrink,
+// so the walk terminates). An opener with no identity of its own ends
+// the chain — anonymous, its descendants have no row; an ambiguous parent
+// prefix propagates ambiguity to every row under it instead of falling
+// back to a position.
+//
+// Coalescing: candidates are sorted by public key, and equal keys merge
+// into one row. Any ambiguity in the group, or two distinct candidate
+// sites under one key (two same-named scopes whose prefixes spell the
+// same `{registry, symbol}`), yields a single ambiguous row — the public
+// key cannot name one form, so it names none.
+
+/// One candidate before coalescing: a registration attempt joined to one
+/// fully resolved scope chain. All strings borrow the validator index or
+/// the source tree; only the final `IdentityRow`s deep-copy.
+const IdentityCandidate = struct {
+    registry: []const u8,
+    /// Empty for document scope. Scratch-arena-owned; strings borrowed.
+    scope: []const IdentityScope,
+    symbol: []const u8,
+    /// This attempt is ambiguous, or an ancestor prefix is.
+    ambiguous: bool,
+    /// The attempt's candidate site, for the address.
+    site: Validator.CrossRefIndex.Site,
+};
+
+/// One resolved scope-prefix chain: outermost-first prefixes plus whether
+/// any link in it is ambiguous.
+const IdentityChain = struct {
+    prefixes: []const IdentityScope,
+    ambiguous: bool,
+};
+
+fn identityCandidateLess(_: void, x: IdentityCandidate, y: IdentityCandidate) bool {
+    switch (std.mem.order(u8, x.registry, y.registry)) {
+        .lt => return true,
+        .gt => return false,
+        .eq => {},
+    }
+    const n = @min(x.scope.len, y.scope.len);
+    for (x.scope[0..n], y.scope[0..n]) |xs, ys| {
+        switch (std.mem.order(u8, xs.registry, ys.registry)) {
+            .lt => return true,
+            .gt => return false,
+            .eq => {},
+        }
+        switch (std.mem.order(u8, xs.symbol, ys.symbol)) {
+            .lt => return true,
+            .gt => return false,
+            .eq => {},
+        }
+    }
+    if (x.scope.len != y.scope.len) return x.scope.len < y.scope.len;
+    return std.mem.order(u8, x.symbol, y.symbol) == .lt;
+}
+
+fn identityCandidateKeyEqual(x: IdentityCandidate, y: IdentityCandidate) bool {
+    if (!std.mem.eql(u8, x.registry, y.registry)) return false;
+    if (!std.mem.eql(u8, x.symbol, y.symbol)) return false;
+    if (x.scope.len != y.scope.len) return false;
+    for (x.scope, y.scope) |xs, ys| {
+        if (!std.mem.eql(u8, xs.registry, ys.registry)) return false;
+        if (!std.mem.eql(u8, xs.symbol, ys.symbol)) return false;
+    }
+    return true;
+}
+
+/// Resolve every stable scope-prefix chain for `scope`, appending to
+/// `out`. Document scope is the single empty chain. A lexical scope's
+/// chains come from the identity attempts at its opening form: each
+/// distinct `(registry, symbol)` the parent declares extends every chain
+/// of the scope the parent itself sits in, so a parent in two registries
+/// yields two prefixes and a multi-level nest stacks outermost-first. An
+/// anonymous opener appends nothing — its descendants get no row.
+///
+/// Allocations land on `t`, the caller's scratch arena over `gpa`; the
+/// strings inside the prefixes borrow the index and tree, which outlive
+/// the projection.
+fn identityScopeChains(
+    t: Allocator,
+    index: *const Validator.CrossRefIndex,
+    attempts: []const Validator.CrossRefIndex.IdentityRegistration,
+    scope: Validator.ScopeId,
+    out: *std.ArrayList(IdentityChain),
+) Error!void {
+    if (!scope.isLexical()) {
+        try out.append(t, .{ .prefixes = &.{}, .ambiguous = false });
+        return;
+    }
+    const raw = @intFromEnum(scope);
+    // `lexical_id` is bits 32-62 — a 31-bit field, with the lexical tag
+    // itself in bit 63 — so the shift needs the mask or every opener
+    // lookup misses by 2^31 (`ScopeId`'s encoding).
+    const opener: Ast.NodeIndex = @enumFromInt(@as(u32, @truncate((raw >> 32) & 0x7FFF_FFFF)));
+
+    for (attempts, 0..) |att, i| {
+        if (att.site.tree_idx != 0) continue;
+        if (att.site.node_idx != opener) continue;
+        // One parent identity per distinct `(registry, symbol)` at the
+        // opener — a form feeding two registries contributes both, while
+        // two same-key spellings on one form are the duplicate
+        // `:name-key` pair whose ambiguity the index already marks.
+        var seen = false;
+        for (attempts[0..i]) |prev| {
+            if (prev.site.tree_idx != 0) continue;
+            if (prev.site.node_idx != opener) continue;
+            if (std.mem.eql(u8, prev.registry, att.registry) and
+                std.mem.eql(u8, prev.symbol, att.symbol))
+            {
+                seen = true;
+                break;
+            }
+        }
+        if (seen) continue;
+
+        const amb = index.identityIsAmbiguous(att.scope, att.registry, att.symbol);
+        var outer: std.ArrayList(IdentityChain) = .empty;
+        try identityScopeChains(t, index, attempts, att.scope, &outer);
+        for (outer.items) |ch| {
+            const joined = try t.alloc(IdentityScope, ch.prefixes.len + 1);
+            @memcpy(joined[0..ch.prefixes.len], ch.prefixes);
+            joined[ch.prefixes.len] = .{ .registry = att.registry, .symbol = att.symbol };
+            try out.append(t, .{ .prefixes = joined, .ambiguous = ch.ambiguous or amb });
+        }
+    }
+}
+
+/// Project the index's author-written identity registrations into rows
+/// owned by the host arena. The private seam both `validateDocument`
+/// branches call while their `ForestResult` is alive.
+///
+/// `gpa` backs the temporary node table, the scratch arena, and the
+/// transient `Edit.Address`es; `a` is the `HostResult` arena and receives
+/// every string and path slice the returned rows keep. Swapping them is
+/// the leak: rows backed by `gpa` would outlive nothing and leak per
+/// validation, and the scratch backed by `a` would live as long as the
+/// result.
+///
+/// Complexity: O(n) over the tree for the node table, O(a² ) over
+/// registration attempts for scope resolution (a = author-written names,
+/// not nodes), O(c log c) over candidate rows for the sort.
+fn projectIdentities(
+    gpa: Allocator,
+    a: Allocator,
+    tree: *const Ast.Tree,
+    index: *const Validator.CrossRefIndex,
+) Error![]const IdentityRow {
+    const attempts = index.identityRegistrations();
+    if (attempts.len == 0) return &.{};
+
+    // One table over the *original* tree — not the narrowed root view a
+    // lowering run validates against — so root indices are the ones a
+    // caller holding `HostResult.tree` addresses by.
+    var table = Edit.nodeTable(gpa, tree) catch |err| switch (err) {
+        error.OutOfMemory => return Error.OutOfMemory,
+        // `nodeTable` only allocates; the remaining `Edit.Error` arms
+        // need an action to decode or a path to walk, neither of which
+        // exists here.
+        else => unreachable,
+    };
+    defer table.deinit();
+
+    // node → row index, built once: `rowOf` is a linear scan and the
+    // projection asks once per resolved row.
+    var row_by_node: std.AutoHashMapUnmanaged(Ast.NodeIndex, u32) = .empty;
+    defer row_by_node.deinit(gpa);
+    try row_by_node.ensureTotalCapacity(gpa, @intCast(table.rows.len));
+    for (table.rows, 0..) |row, i| {
+        row_by_node.putAssumeCapacity(row.node, @intCast(i));
+    }
+
+    // Scratch arena over `gpa` for chains and candidates: released in
+    // one free below, after the rows have copied what they keep.
+    var scratch = std.heap.ArenaAllocator.init(gpa);
+    defer scratch.deinit();
+    const t = scratch.allocator();
+
+    var candidates: std.ArrayList(IdentityCandidate) = .empty;
+    for (attempts) |att| {
+        // Only source-tree sites have addresses in the tree this
+        // projection serves. A lowered layer's `tree_idx` names another
+        // tree whose node indices mean something else — joining it here
+        // would invent an address — and the binary walker's sites never
+        // carry a source node at all.
+        if (att.site.tree_idx != 0) continue;
+        if (!att.site.node_idx.isValid()) continue;
+
+        var chains: std.ArrayList(IdentityChain) = .empty;
+        try identityScopeChains(t, index, attempts, att.scope, &chains);
+        const self_ambiguous = index.identityIsAmbiguous(att.scope, att.registry, att.symbol);
+        for (chains.items) |ch| {
+            try candidates.append(t, .{
+                .registry = att.registry,
+                .scope = ch.prefixes,
+                .symbol = att.symbol,
+                .ambiguous = self_ambiguous or ch.ambiguous,
+                .site = att.site,
+            });
+        }
+    }
+
+    std.mem.sort(IdentityCandidate, candidates.items, {}, identityCandidateLess);
+
+    var rows: std.ArrayList(IdentityRow) = .empty;
+    var i: usize = 0;
+    while (i < candidates.items.len) {
+        var j = i + 1;
+        var any_ambiguous = candidates.items[i].ambiguous;
+        var conflicting_site = false;
+        while (j < candidates.items.len and
+            identityCandidateKeyEqual(candidates.items[i], candidates.items[j])) : (j += 1)
+        {
+            if (candidates.items[j].ambiguous) any_ambiguous = true;
+            if (candidates.items[j].site.node_idx != candidates.items[i].site.node_idx) {
+                conflicting_site = true;
+            }
+        }
+        const first = candidates.items[i];
+        const resolved = !any_ambiguous and !conflicting_site;
+
+        const scope_copy = try a.alloc(IdentityScope, first.scope.len);
+        for (first.scope, scope_copy) |src, *dst| {
+            dst.* = .{
+                .registry = try a.dupe(u8, src.registry),
+                .symbol = try a.dupe(u8, src.symbol),
+            };
+        }
+
+        const address: ?IdentityAddress = if (resolved) addr: {
+            // Every non-kvpair node has a row and a registration site is
+            // a form node, so the lookup cannot miss on an index the
+            // validator actually built.
+            const row_idx = row_by_node.get(first.site.node_idx) orelse unreachable;
+            var edit_addr = table.addressOfRow(gpa, row_idx) catch |err| switch (err) {
+                error.OutOfMemory => return Error.OutOfMemory,
+                else => unreachable,
+            };
+            defer edit_addr.deinit();
+            break :addr .{
+                .root = edit_addr.root,
+                .path = try a.dupe(Edit.Step, edit_addr.steps),
+            };
+        } else null;
+
+        try rows.append(a, .{
+            .registry = try a.dupe(u8, first.registry),
+            .scope = scope_copy,
+            .symbol = try a.dupe(u8, first.symbol),
+            .status = if (resolved) .resolved else .ambiguous,
+            .address = address,
+        });
+        i = j;
+    }
+
+    return rows.toOwnedSlice(a);
 }
 
 /// Build a workspace-scoped schema from the project file's `:plugins`

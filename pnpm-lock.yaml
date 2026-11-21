@@ -49,6 +49,15 @@ importers:
         specifier: ^5.8.0
         version: 5.9.3
 
+  hosts/read:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
+      typescript:
+        specifier: ^5.8.0
+        version: 5.9.3
+
   hosts/schema:
     devDependencies:
       '@types/node':
@@ -73,6 +82,9 @@ importers:
 
   hosts/web:
     dependencies:
+      '@sjon-lang/read':
+        specifier: workspace:*
+        version: link:../read
       '@sjon-lang/schema':
         specifier: workspace:*
         version: link:../schema

@@ -1,7 +1,7 @@
 # SJON design overview
 
 This document describes the current SJON 1.x architecture, including the
-SoA AST and additive APIs introduced through 1.7.1. It is the standing reference for the module layout, the SoA
+SoA AST and additive APIs introduced through 1.8.0. It is the standing reference for the module layout, the SoA
 tree, and the frozen binary wire format.
 
 ## Pipeline
@@ -131,7 +131,7 @@ source-to-IR parsing remains deferred. For decode-once pattern queries, see
 | `Plugin`, `Schema`     | Comptime descriptor types + multi-plugin aggregator.                          |
 | `ManifestLoader`       | Reads a v1 portable manifest (`docs/portable-manifest-v1.md`) into an in-memory `Plugin` after meta-validation. |
 | `MetaSchema`           | The hardcoded bootstrap meta-plugin. Every conforming impl validates user manifests against this baseline. |
-| `Host`                 | Cross-host contract over the schema pipeline: `validateDocument` (inline-manifest one-shot), `evalExpr`, schema/lowering export, and the two-phase `preloadSchema` + `HostOptions.preloaded` — compile an external schema once, then borrow it additively across many document validations instead of prepending it (and rebasing spans) every time. A staged lowering run returns every layer: `HostResult.lowering_stages` is one `LoweringStage` (tree + one-hop provenance + defaults overlay) per layer and owns the lowered trees, `lowered_tree` and its two siblings alias the last of them, and `provenanceChain` / `provenanceChainFrom` walk the hops back to the authored form as `Hop`s that carry their own trees. |
+| `Host`                 | Cross-host contract over the schema pipeline: `validateDocument` (inline-manifest one-shot), `evalExpr`, schema/lowering export, and the two-phase `preloadSchema` + `HostOptions.preloaded` — compile an external schema once, then borrow it additively across many document validations instead of prepending it (and rebasing spans) every time. The same two phases cross the kitchen-sink WASM ABI as `sjon_preload_schema` / `sjon_schema_free`, with `preloadedHandle` naming the borrow. A staged lowering run returns every layer: `HostResult.lowering_stages` is one `LoweringStage` (tree + one-hop provenance + defaults overlay) per layer and owns the lowered trees, `lowered_tree` and its two siblings alias the last of them, and `provenanceChain` / `provenanceChainFrom` walk the hops back to the authored form as `Hop`s that carry their own trees. |
 | `Pattern`, `PatternQuery` | Deterministic Strudel-style pattern types + windowed query producing `(haps …)` / `(diagnostics …)` over a tree or Binary IR. The binary surface has two deliberately distinct contracts, selected by the ENTRY, never by the env: the frozen legacy `queryBinary` / `queryBinaryWithBudget` (what `sjon-binary.wasm` ships today — a `(pure <form>)` leaf silently degrades to `silence`, byte-for-byte behavior preserved) and the eval-capable `queryBinaryWithEnv` / `queryBinaryWithBudgetAndEnv` — a captured leaf becomes an IR view, is dry-run at cycle 0 (static defects surface as the tree path's diagnostics at `[pure]`; malformed wire under the capture is a hard `BinaryError`, typed, even at the dry-run), and is evaluated per cycle under the pattern-local `cycle` / `tick` / `seed`, which shadow same-named outer bindings. `outer_env` chains as the parent of every leaf eval; null env means pattern-locals-only, not legacy semantics. When any expr leaf exists the pattern bytes are copied once into the Result arena over a retained cursor + reused pool index, so the Result outlives both the caller's bytes and the env; the copy (and the pool index) are preflighted with checked arithmetic against `budget.bytes` and refuse with `MemoryBudgetExceeded` before allocating. There is no public `compileBinaryWithEnv`; the compiled node is never exposed. The budget+env one-shot has no tree twin — `queryTreeWithBudget` takes no env — an owner-accepted asymmetry documented on the entry. |
 | `Lowering`, `LoweringGraph` | Host-registered lowering-hook registry + the graph a hook run emits (source forest → lowered forest). `LoweringProvenance` is per layer and describes one hop: its `source_form_idx` indexes the tree that layer ran over, not the document's. Spans and provenance are separate answers: an emitted form inherits its source form's span unless it sets `EmittedForm.source_span` (a container hook lifting a child out of its own subtree), while `source_form_idx` names the container either way. `EmittedValue.carry` relocates a node of the layer's input tree verbatim (tags, spans, comments and re-interned strings, via `Ast.TreeBuilder.cloneNode`); a carry originates no node, is not `:produces`-checked, and is charged per carried node against the lowering budgets. |
 | `EffectiveView`, `MaterializedDefaults` | Read-only effective-value overlay: resolves schema `:default`s (literal or `(expr …)`) over an author tree without mutating it. |
@@ -551,6 +551,56 @@ an editor instead.
   imports — it is instantiated with `{}`, so it has no host surface to
   disagree about — and `zig build audit-lsp-wasm-imports` asserts that.
   The playground is its consumer; see CLAUDE.md's landing-page section.
+
+### Preloaded schema handles
+
+`sjon.wasm` also carries the two-phase schema preload the native
+`Host.preloadSchema` offers, so one manifest parse can serve many document
+validations. Both entries appear in `sjon_describe` as `preload_schema`
+and `schema_free`.
+
+- `sjon_preload_schema(src_ptr, src_len)` takes one UTF-8 JSON array of
+  standalone `(plugin …)` manifest source strings and returns the ordinary
+  `[u32 ok][u32 len][payload]` frame. The payload is
+  `{"handle":N,"hasErrors":bool,"diagnostics":[…],"sourceDiagnostics":[[…]],
+  "aggregateDiagnostics":[…],"loadedPlugins":[…]}`: `diagnostics` is the
+  flattened source reports followed by the aggregate reports,
+  `sourceDiagnostics[i]` stays input-index aligned to manifest source `i`
+  (a malformed source leaves an empty or diagnostic-bearing slice rather
+  than compacting later indices), and `loadedPlugins` names the clean
+  plugins with their form counts. Manifest content errors are a successful
+  `ok=1` report carrying a usable *partial* handle; malformed JSON
+  (`InvalidOptions`), handle exhaustion (`HandleExhausted`), and OOM are
+  the ABI errors, and OOM after minting withdraws the handle again.
+- `sjon_schema_free(handle)` is total and idempotent: zero, unknown, and
+  already-freed IDs are no-ops, so a double free cannot trap. The table is
+  instance-scoped and holds only live entries; the next minted ID is
+  always fresh — a freed ID is never reissued, so a stale numeric ID can
+  never alias a newer schema.
+- `sjon_host_validate_document` and `sjon_host_eval_expr` accept
+  `preloadedHandle` in their options JSON (`null`/absent is the existing
+  behavior). The borrow lasts only for that synchronous call; callers must
+  not free the handle from a resolver or plugin callback still inside it.
+  An unknown or stale numeric ID frames `InvalidSchemaHandle`. The raw ABI
+  carries no owner token, so a foreign ID that collides with a live local
+  ID is indistinguishable here — that is why each wrapper brands handles
+  per instance.
+
+Composition is exactly the native contract: preloaded plugins are additive
+ahead of anything the document declares inline or resolves, one call
+borrows at most one handle, and a second preload mints an independent
+handle rather than replacing or stacking the first — there is no ambient
+current schema. No span is rebased: preload diagnostics are
+manifest-source-local and document diagnostics index the document alone.
+
+Preloading is declarative-only: `:impl "wasm:…"` plugins are not
+instantiated, so a handle makes a form *knowable* but does not make its
+expression function executable — the Web host reports `plugin_func_failed`
+at evaluation. A consumer that needs executable hooks keeps the resolver
+plus pre-flight path. Nothing here moves a wire surface: no
+`Binary.FORMAT_VERSION` bump, no diagnostic-code addition, and no
+conformance-corpus case, because a handle is host lifetime rather than
+document bytes. `sjon-binary.wasm` and `sjon-lsp.wasm` import none of it.
 
 ## Editor integration & lossless round-trip
 

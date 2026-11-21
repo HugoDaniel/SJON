@@ -71,10 +71,11 @@ export async function createStore({ wasmUrl, manifestUrl, pluginWasmUrl, seed })
     // `toBinary` / `fromBinary`), which does no plugin resolution.
 
     // Hydrate from localStorage if available. Binary IR is the
-    // transport: same bytes the Rust / TS hosts would consume, and ~25-
-    // 40% smaller than canonical text for repeating shapes. Falls back
-    // to `seed` on any decode failure so a poisoned localStorage entry
-    // can't brick the demo.
+    // portable transport: the same bytes the Rust / TS hosts would
+    // consume, and its size depends on the span preset and on the
+    // storage encoding (the base64 below), so it is not uniformly
+    // smaller than canonical text. Falls back to `seed` on any decode
+    // failure so a poisoned localStorage entry can't brick the demo.
     let source = hydrate(host) ?? seed;
     /** @type {{code: string, message: string} | null} */
     let lastError = null;

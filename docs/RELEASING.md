@@ -17,20 +17,27 @@ zig build landing-page-assets
 pnpm --filter landing-page run build
 mkdir -p /tmp/sjon-packages
 pnpm --dir hosts/schema pack --pack-destination /tmp/sjon-packages
+pnpm --dir hosts/read pack --pack-destination /tmp/sjon-packages
 pnpm --dir hosts/web pack --pack-destination /tmp/sjon-packages
 pnpm --dir hosts/highlight pack --pack-destination /tmp/sjon-packages
 scripts/check-packed-packages.sh /tmp/sjon-packages "$PWD/zig-out/bin"
 ```
 
 Use an empty tarball directory for each version. `pnpm pack` is required:
-`npm pack` leaves the web package's `workspace:*` dependency unresolved.
+`npm pack` leaves the web package's `workspace:*` dependencies unresolved.
+The four publishable packages are packed and published in dependency order
+`schema → read → web → highlight`; `@sjon-lang/web` depends on both
+`@sjon-lang/schema` and `@sjon-lang/read`, so those two must publish first.
+`scripts/publish-npm.sh` cross-checks that all four agree on the version in
+`src/version.zig` and on their export subpaths before packing.
 The checker installs tarballs into a disposable project outside the workspace,
-imports all public subpaths in plain Node, exercises schema construction,
-WASM validation/evaluation/editing, CodeMirror and Shiki, and checks a strict
-NodeNext TypeScript consumer with `skipLibCheck: false`. The consumer includes
-`esnext.disposable` because the host exposes `Symbol.asyncDispose`.
-It checks Node 20.0 for web/schema and 20.10 for highlight, whose JSON import
-attributes are unavailable in 20.0. It prints tarball versions and SHA-256s.
+imports all public subpaths in plain Node, exercises schema construction, the
+synchronous reader, WASM validation/evaluation/editing, CodeMirror and Shiki,
+and checks a strict NodeNext TypeScript consumer with `skipLibCheck: false`.
+The consumer includes `esnext.disposable` because the host exposes
+`Symbol.asyncDispose`. It checks Node 20.0 for web/schema/read and 20.10 for
+highlight, whose JSON import attributes are unavailable in 20.0. It prints
+tarball versions and SHA-256s.
 The web npm package does not bundle WASM: distribute matching `zig-out/bin`
 artifacts with the source release or build them from that source.
 
@@ -58,7 +65,7 @@ cargo publish --manifest-path hosts/rust/Cargo.toml
 
 Create a crates.io account, verify its email address, and enter a publishing
 API token at the `cargo login` prompt. Verify the uploaded version with
-`cargo info sjon-host@1.7.1`, then build a fresh registry consumer. The crate
+`cargo info sjon-host@1.8.0`, then build a fresh registry consumer. The crate
 requires Rust 1.92 and a matching external `sjon.wasm`; it does not require
 Zig when using a prebuilt artifact. Instructions are in the
 [Rust README](../hosts/rust/README.md).
@@ -71,6 +78,10 @@ From a clean committed candidate:
 scripts/publish-npm.sh          # pack/publish dry run, no registry writes
 scripts/mirror.sh               # local public snapshot and immutable v<version>
 ```
+
+The dry run refuses a dirty tree, verifies that all four packages agree on the
+`src/version.zig` semver and on their export-key sets, and runs every
+`prepack`; it must not write to the registry.
 
 Inspect the public snapshot and build it in an isolated checkout. The mirror
 checks both Markdown and MDX file links; development-only plans are omitted,

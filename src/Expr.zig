@@ -3170,31 +3170,31 @@ pub fn applyMod(_: Allocator, args: []const Value) Error!Value {
     const x = try expectNumber(args[0]);
     const y = try expectNumber(args[1]);
     if (y == 0) return error.DivisionByZero;
-    // Floored for every divisor: the result carries the *divisor's* sign,
-    // matching GLSL `mod()` and Python `%`. `@mod` alone does not give
-    // that — it is floored for a positive divisor but degrades to `@rem`
-    // (the numerator's sign) for a negative one, so `(mod 7 -3)` used to
-    // be 1 where floored is -2. That split is what this corrects.
+    // Floored for every divisor: a nonzero result carries the divisor's
+    // sign, matching GLSL `mod()` and Python `%`.
     //
-    // Written as a correction *on top of* `@mod` rather than as
-    // `x - y * @floor(x / y)` for two reasons, both load-bearing:
+    // Built on `@rem` (C `fmod`, exact for finite operands) plus one
+    // corrective add. That add is the only rounding step, so the result is
+    // the correctly rounded floored remainder, and it cannot overflow: it
+    // fires only for opposite-signed `r` and `y` with `|r| < |y|`, so
+    // `|r + y| <= |y|`.
     //
-    //   * The positive-divisor path is then literally untouched, so every
-    //     value SJON has ever produced for a positive divisor is
-    //     bit-identical. That is the region documents actually use.
-    //   * The closed form loses precision when `x / y` is inexact —
-    //     it gives 0 for `(mod 1e16 3)` where the true answer is 1, and
-    //     the naive `@rem`-plus-correction form returns 1e16 for
-    //     `(mod -1 1e16)`, a result equal to the divisor. `@mod` already
-    //     handles both; correcting it inherits that.
+    // Zig 0.16's `@mod` is not a safe base: it is truncated for a negative
+    // divisor (`@mod(7, -3)` is 1), its positive-divisor correction is
+    // rounding-sensitive at the representability edge (`@mod(-1, 1e16)` is
+    // 0 here), and it turns `(mod -5 +inf)` into NaN. `@rem` plus the add
+    // gives 1e16 for `(mod -1 1e16)` deterministically — the true floored
+    // value is `1e16 - 1`, spacing is 2 above 2^53, and it ties to even
+    // onto 1e16 — and returns inf for `(mod -5 +inf)`.
     //
-    // The guard is `m != 0` so an exact multiple keeps `@mod`'s zero
-    // (and its sign) instead of being pushed to `y`, and the sign
-    // comparison is written out rather than `m > 0` so it stays correct
-    // if the branch is ever reached with a positive divisor.
-    const m = @mod(x, y);
-    if (y < 0 and m != 0 and (m < 0) != (y < 0)) return .{ .number = m + y };
-    return .{ .number = m };
+    // The closed form `x - y * @floor(x / y)` is wrong at the edges: the
+    // product misrounds `(mod 1e16 3)` to 0, an infinite divisor makes a
+    // zero remainder `inf * 0` = NaN, and an overflowing quotient turns an
+    // exact multiple into `-inf` (`(mod 1e308 5e-324)`). `r == 0` instead
+    // keeps `@rem`'s signed zero.
+    const r = @rem(x, y);
+    if (r != 0 and (r < 0) != (y < 0)) return .{ .number = r + y };
+    return .{ .number = r };
 }
 
 // ---------------------------------------------------------------------------

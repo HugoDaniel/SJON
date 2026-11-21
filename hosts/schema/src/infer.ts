@@ -10,7 +10,7 @@
 // structurally identical (and therefore mutually assignable).
 
 import type { EditAction, EditPath } from './edit.ts';
-import type { FormDef, NodeDef, PluginDef } from './shape.ts';
+import type { FormDef, GpuRepr, NodeDef, PluginDef } from './shape.ts';
 import type {
   ParseOptions,
   SafeEditResult,
@@ -20,6 +20,8 @@ import type {
 } from './backend.ts';
 
 // --- Brands (copy of tsTypes.ts BRAND_PRELUDE) -----------------------------
+
+export type { GpuRepr } from './shape.ts';
 
 export type Keyword<S extends string = string> = { readonly $kw: S };
 export type Symbol_<S extends string = string> = { readonly $sym: S };
@@ -33,6 +35,18 @@ export type SjonExpr<TResult = unknown> = { readonly $expr: unknown[] } & {
 export type CrossRef<TargetForm extends string = string, S extends string = string> = Symbol_<S> & {
   readonly __sjonRef?: TargetForm;
 };
+/** A `.repr(tag)`-tagged number. Structurally a `number` whose phantom
+ *  `__sjonRepr` key narrows the representation; the runtime value is an
+ *  ordinary number (the brand is not a wrapper). Structurally identical to
+ *  the exporter's `number & { readonly __sjonRepr?: "<tag>" }` aliases. */
+export type ReprNumber<R extends GpuRepr> = number & {
+  readonly __sjonRepr?: R;
+};
+export type F32 = ReprNumber<'f32'>;
+export type U32 = ReprNumber<'u32'>;
+export type I32 = ReprNumber<'i32'>;
+export type U16 = ReprNumber<'u16'>;
+export type F16 = ReprNumber<'f16'>;
 
 // --- Node interfaces -------------------------------------------------------
 
@@ -71,6 +85,35 @@ export type DefaultedNode<Out, In = Out> = Node<Out, In> & { readonly __default:
 
 export type AnyNode = Node<unknown, unknown>;
 export type ShapeRecord = Record<string, AnyNode>;
+
+/**
+ * The `positional` half of {@link FormOptions}: an untyped positional that
+ * accepts any value (`'any'`), or one existing node whose output type every
+ * child must match. Deliberately not a union of shapes, a flag-set, or a
+ * slot-local form — the manifest expresses those, the extension recipe here
+ * does not need them, and widening this is an API change.
+ */
+export type PositionalInput = AnyNode | 'any';
+
+/**
+ * The object spelling of `s.form`'s third argument. The legacy string
+ * argument remains supported and normalizes to `{ns: <string>}`; `open` and
+ * `positional` ride as options beside it.
+ *
+ * `Open`/`P` default to the closed, no-positional instantiation, which is why
+ * a bare `FormOptions` variable is legal and reads as "either setting" — the
+ * phantom types treat a broadly `boolean` open as open and a broadly
+ * positional option as the untyped `$children?: unknown[]`.
+ */
+export interface FormOptions<
+  NS extends string = string,
+  Open extends boolean = boolean,
+  P extends PositionalInput | undefined = PositionalInput | undefined,
+> {
+  readonly ns?: NS;
+  readonly open?: Open;
+  readonly positional?: P;
+}
 
 /**
  * Distribute a member union into a union of single-member value brands —
@@ -145,12 +188,25 @@ type MemberUnit<S extends string> = S extends `${infer C}${infer Rest}`
  *     back to the untyped low-level `edit.*` builders; runtime edits are
  *     unaffected. This mirrors the engine's own `MAX_KIND_DEPTH = 8` data cap.
  */
-export interface FormFieldNode<NS extends string, Head extends string, Sh extends ShapeRecord>
-  extends Node<FormOut<NS, Head, Sh>, FormIn<NS, Head, Sh>> {
+export interface FormFieldNode<
+  NS extends string,
+  Head extends string,
+  Sh extends ShapeRecord,
+  Open extends boolean = false,
+  P extends PositionalInput | undefined = undefined,
+> extends Node<FormOut<NS, Head, Sh, Open, P>, FormIn<NS, Head, Sh, Open, P>> {
   // Required (not `?`) so the path-resolver can discriminate it reliably — an
   // optional marker is satisfied by absence and matches every node. Phantom:
   // never assigned at runtime (the `leaf` factory casts), like `_out`/`_in`.
-  readonly __formOf: { readonly ns: NS; readonly head: Head; readonly shape: Sh };
+  // `open`/`positional` preserve the inner form's configured surface through
+  // nested slots (`s.formOf(OpenForm)` has an open `FormOut`).
+  readonly __formOf: {
+    readonly ns: NS;
+    readonly head: Head;
+    readonly shape: Sh;
+    readonly open: Open;
+    readonly positional: P;
+  };
 }
 
 /**
@@ -165,17 +221,30 @@ export type VectorNode<E extends AnyNode, Out> = Node<Out, Out> & {
   readonly __element: E;
 };
 
-/** `s.number()` — a `number` leaf with numeric refinements. */
-export interface NumberNode extends Node<number> {
-  min(value: number): NumberNode;
-  max(value: number): NumberNode;
-  gt(value: number): NumberNode;
-  lt(value: number): NumberNode;
-  int(): NumberNode;
+/** `s.number()` — a `number` leaf with numeric refinements. `Out` is the
+ *  numeric representation selected so far: plain `number` until
+ *  `.repr(tag)` brands it, then `ReprNumber<tag>`. Every refinement returns
+ *  `NumberNode<Out>`, so a later `.min()` / `.int()` cannot erase the brand. */
+export interface NumberNode<Out extends number = number> extends Node<Out> {
+  min(value: number): NumberNode<Out>;
+  max(value: number): NumberNode<Out>;
+  gt(value: number): NumberNode<Out>;
+  lt(value: number): NumberNode<Out>;
+  int(): NumberNode<Out>;
   /** Divisibility: the value must be an exact multiple of `divisor`. The
    *  alignment constraint a range and `int()` cannot express between them
    *  ("a byte offset aligned to 256"). The divisor must be positive. */
-  multipleOf(divisor: number): NumberNode;
+  multipleOf(divisor: number): NumberNode<Out>;
+  /** Tag the slot with a GPU representation. The tag set is closed to the
+   *  exporter's five aliases; an unknown tag throws at this call, not at
+   *  serialization time. Emits `:repr (repr-shape :type <tag>)` beside
+   *  `:numeric`. */
+  repr<R extends GpuRepr>(tag: R): NumberNode<ReprNumber<R>>;
+  /** Forbid every unit suffix on this slot. Emits
+   *  `:unit (unit-shape :reject true)` beside `:numeric`; the static type
+   *  stays `Out` (`number`), because rejection is a validation rule, not a
+   *  runtime wrapper. */
+  rejectUnits(): NumberNode<Out>;
 }
 
 /** `s.string()` — a `string` leaf with length/pattern/format refinements. */
@@ -225,25 +294,48 @@ export type OptionalInputKeys<Sh extends ShapeRecord> = {
  * A form's static output type — the Zod optional-key partition over the
  * shape record, plus the literal `$form`/`$ns` tags. Structurally equal
  * to the `<Plugin>_<Form>` interface `tsTypes.ts` emits.
+ *
+ * `Open`/`P` carry the configured surface:
+ *   * `open: true` (or a broadly `boolean` option) adds the exporter's
+ *     `[key: string]: unknown` index signature;
+ *   * `positional: 'any'` adds `$children?: unknown[]`;
+ *   * `positional: <node>` adds `$children?: Array<OutOf<node>>`;
+ *   * the default `false`/`undefined` adds neither.
  */
-export type FormOut<NS extends string, Head extends string, Sh extends ShapeRecord> = Prettify<
+export type FormOut<
+  NS extends string,
+  Head extends string,
+  Sh extends ShapeRecord,
+  Open extends boolean = false,
+  P extends PositionalInput | undefined = undefined,
+> = Prettify<
   { readonly $form: Head; readonly $ns: NS } & {
     readonly [K in RequiredShapeKeys<Sh>]: OutOf<Sh[K]>;
   } & {
     readonly [K in OptionalShapeKeys<Sh>]?: OutOf<Sh[K]>;
-  }
+  } & OpenIndex<Open> &
+    PositionalOut<P>
 >;
 
 /**
  * A form's static input type. Uses the *input* partition, so a defaulted key
  * is optional here (it may be omitted) even though it is required in `FormOut`.
+ * The open index signature and `$children` slot mirror `FormOut`, with the
+ * positional element typed by its input (`InOf<P>`).
  */
-export type FormIn<NS extends string, Head extends string, Sh extends ShapeRecord> = Prettify<
+export type FormIn<
+  NS extends string,
+  Head extends string,
+  Sh extends ShapeRecord,
+  Open extends boolean = false,
+  P extends PositionalInput | undefined = undefined,
+> = Prettify<
   { readonly $form: Head; readonly $ns: NS } & {
     readonly [K in RequiredInputKeys<Sh>]: InOf<Sh[K]>;
   } & {
     readonly [K in OptionalInputKeys<Sh>]?: InOf<Sh[K]>;
-  }
+  } & OpenIndex<Open> &
+    PositionalIn<P>
 >;
 
 /**
@@ -251,13 +343,42 @@ export type FormIn<NS extends string, Head extends string, Sh extends ShapeRecor
  * `$ns` tags are stamped by `create` from the schema, so unlike `FormIn` they
  * are not part of the input. Uses the input partition (defaulted ⇒ optional).
  */
-export type FormInput<Sh extends ShapeRecord> = Prettify<
+export type FormInput<
+  Sh extends ShapeRecord,
+  Open extends boolean = false,
+  P extends PositionalInput | undefined = undefined,
+> = Prettify<
   {
     readonly [K in RequiredInputKeys<Sh>]: InOf<Sh[K]>;
   } & {
     readonly [K in OptionalInputKeys<Sh>]?: InOf<Sh[K]>;
-  }
+  } & OpenIndex<Open> &
+    PositionalIn<P>
 >;
+
+/** The exporter's open-form index signature, present unless openness is
+ *  statically closed. `boolean` (an unconfigured options variable) stays open
+ *  because the runtime option may be `true`. */
+type OpenIndex<Open extends boolean> = [Open] extends [false]
+  ? unknown
+  : { readonly [key: string]: unknown };
+
+/** `$children` for a typed positional is the element's output; `'any'` is
+ *  `unknown[]`; no positional contributes no member. `[P] extends [...]`
+ *  avoids distributing a broad options variable into a union of object
+ *  shapes, so a broadly positional option reads as untyped children. */
+type PositionalOut<P> = [P] extends [undefined]
+  ? unknown
+  : [P] extends [AnyNode]
+    ? { readonly $children?: Array<OutOf<P>> }
+    : { readonly $children?: unknown[] };
+
+/** Input mirror of {@link PositionalOut}: element `InOf<P>`, else `unknown[]`. */
+type PositionalIn<P> = [P] extends [undefined]
+  ? unknown
+  : [P] extends [AnyNode]
+    ? { readonly $children?: Array<InOf<P>> }
+    : { readonly $children?: unknown[] };
 
 /**
  * A fixed-length readonly tuple of `E`, for `s.vector(el, n)`. Mirrors
@@ -288,27 +409,49 @@ export type FixedTuple<E, N extends number> = N extends 1
  * A `(form …)` schema. Carries the phantom output type and the runtime
  * methods that serialize + validate through the registered backend.
  */
-export interface FormNode<NS extends string, Head extends string, Sh extends ShapeRecord> {
-  readonly _out: FormOut<NS, Head, Sh>;
-  readonly _in: FormIn<NS, Head, Sh>;
+export interface FormNode<
+  NS extends string,
+  Head extends string,
+  Sh extends ShapeRecord,
+  Open extends boolean = false,
+  P extends PositionalInput | undefined = undefined,
+> {
+  readonly _out: FormOut<NS, Head, Sh, Open, P>;
+  readonly _in: FormIn<NS, Head, Sh, Open, P>;
   readonly _def: FormDef;
-  describe(description: string): FormNode<NS, Head, Sh>;
+  describe(description: string): FormNode<NS, Head, Sh, Open, P>;
   /**
    * Construct a conformant form value from typed fields: stamps `$form`/`$ns`
-   * from the schema, fills declared defaults for omitted defaulted keys, and
-   * omits absent optionals. Returns the plain typed `FormOut` (not a wrapper),
-   * so a constructed form composes as a field/child of another value.
+   * from the schema, fills declared defaults for omitted defaulted keys, omits
+   * absent optionals, copies undeclared fields on an open form, and maps a
+   * typed positional's `$children`. Returns the plain typed `FormOut` (not a
+   * wrapper), so a constructed form composes as a field/child of another value.
    * Backend-free.
    */
-  create(input: FormInput<Sh>): FormOut<NS, Head, Sh>;
+  create(input: FormInput<Sh, Open, P>): FormOut<NS, Head, Sh, Open, P>;
   /** Construct + serialize to canonical SJON text via `serializeValue`. Backend-free. */
-  toSjon(input: FormInput<Sh>): string;
+  toSjon(input: FormInput<Sh, Open, P>): string;
+  /**
+   * Emit a backend-free starter document: a fresh `(ns/head …)` with every
+   * declared key in declaration order. A declared default is deep-cloned and
+   * serialized; every other key — required or optional — is the held symbol
+   * (`heldSymbol ?? '_'`), so an unfilled key is one hole instead of a value
+   * the slot would have to lie about. No `$children` is invented, and a
+   * compound slot without a default is held as one value rather than expanded.
+   *
+   * Returns source text, deliberately not a `FormOut`: the holes are not
+   * values of their declared slots. Validate the result with the caller-owned
+   * `heldSymbol` run option (`createWasmBackend(host, { heldSymbol })`);
+   * without it the holes are ordinary symbols and report their usual
+   * diagnostics.
+   */
+  skeleton(heldSymbol?: string): string;
   /**
    * Construct + serialize via the engine's own canonical printer
    * (`backend.fromValue`). Equivalent to `toSjon` modulo formatting, but
    * WASM-gated — use `toSjon` for a backend-free path.
    */
-  toCanonicalSjon(input: FormInput<Sh>, options?: ParseOptions): string;
+  toCanonicalSjon(input: FormInput<Sh, Open, P>, options?: ParseOptions): string;
   /** The canonical `(plugin …)` manifest text for this form. */
   manifest(): string;
   /** The exporter's `.d.ts` for this form's schema (needs an `exportSchema` backend). */
@@ -320,14 +463,20 @@ export interface FormNode<NS extends string, Head extends string, Sh extends Sha
    */
   validate(source: string, options?: ParseOptions): ValidateOutcome;
   /** Validate a SJON document and return the typed data (throws on `err`). */
-  parse(source: string, options?: ParseOptions): FormOut<NS, Head, Sh>;
-  safeParse(source: string, options?: ParseOptions): SafeParseResult<FormOut<NS, Head, Sh>>;
-  /** Validate a JS value (round-tripped through SJON) and return it typed. */
-  parseValue(value: FormIn<NS, Head, Sh>, options?: ParseOptions): FormOut<NS, Head, Sh>;
-  safeParseValue(
-    value: FormIn<NS, Head, Sh>,
+  parse(source: string, options?: ParseOptions): FormOut<NS, Head, Sh, Open, P>;
+  safeParse(
+    source: string,
     options?: ParseOptions,
-  ): SafeParseResult<FormOut<NS, Head, Sh>>;
+  ): SafeParseResult<FormOut<NS, Head, Sh, Open, P>>;
+  /** Validate a JS value (round-tripped through SJON) and return it typed. */
+  parseValue(
+    value: FormIn<NS, Head, Sh, Open, P>,
+    options?: ParseOptions,
+  ): FormOut<NS, Head, Sh, Open, P>;
+  safeParseValue(
+    value: FormIn<NS, Head, Sh, Open, P>,
+    options?: ParseOptions,
+  ): SafeParseResult<FormOut<NS, Head, Sh, Open, P>>;
 
   // --- Edit / write-back (plan 03) -----------------------------------------
   // All WASM-gated: the engine is a Zig printer (`.full`, trivia-preserving),
@@ -372,13 +521,13 @@ export interface FormNode<NS extends string, Head extends string, Sh extends Sha
    * top-level key updates (`undefined` ⇒ leave alone). Trivia outside the
    * changed keys survives. Needs `toJson` (to read the source) + `applyEdit`.
    */
-  patch(source: string, partial: Partial<FormInput<Sh>>, options?: ParseOptions): string;
+  patch(source: string, partial: Partial<FormInput<Sh, Open, P>>, options?: ParseOptions): string;
   /** `applyEdit`, returning a {@link SafeEditResult} instead of throwing. */
   safeApplyEdit(source: string, action: EditAction, options?: ParseOptions): SafeEditResult;
   /** `patch`, returning a {@link SafeEditResult} instead of throwing. */
   safePatch(
     source: string,
-    partial: Partial<FormInput<Sh>>,
+    partial: Partial<FormInput<Sh, Open, P>>,
     options?: ParseOptions,
   ): SafeEditResult;
   /**
@@ -386,7 +535,7 @@ export interface FormNode<NS extends string, Head extends string, Sh extends Sha
    * model). Queues edits and folds them over the *original* source on `save()`,
    * so trivia survives. Needs `toJson` (initial value) + `applyEdit`.
    */
-  open(source: string, options?: ParseOptions): FormDocument<NS, Head, Sh>;
+  open(source: string, options?: ParseOptions): FormDocument<NS, Head, Sh, Open, P>;
 }
 
 /**
@@ -396,9 +545,15 @@ export interface FormNode<NS extends string, Head extends string, Sh extends Sha
  * folds the queue over the **original** source, so comments/formatting outside
  * the edited subtrees are preserved.
  */
-export interface FormDocument<NS extends string, Head extends string, Sh extends ShapeRecord> {
+export interface FormDocument<
+  NS extends string,
+  Head extends string,
+  Sh extends ShapeRecord,
+  Open extends boolean = false,
+  P extends PositionalInput | undefined = undefined,
+> {
   /** Current value — eager for top-level edits, re-derived via the engine after a deep edit. */
-  readonly value: FormOut<NS, Head, Sh>;
+  readonly value: FormOut<NS, Head, Sh, Open, P>;
   /** The queued edits, in order. */
   readonly actions: readonly EditAction[];
   /** Set a key, deep-typed. Chainable. */
@@ -419,7 +574,13 @@ export interface FormDocument<NS extends string, Head extends string, Sh extends
   toString(): string;
 }
 
-export type AnyFormNode = FormNode<string, string, ShapeRecord>;
+export type AnyFormNode = FormNode<
+  string,
+  string,
+  ShapeRecord,
+  boolean,
+  PositionalInput | undefined
+>;
 
 /** A `(plugin …)` grouping of forms + explicitly-named value-kinds. */
 export interface PluginNode {

@@ -119,11 +119,11 @@ Every construct lands in one of three buckets:
 | SJON | JSON Schema | TS | Bucket |
 |---|---|---|---|
 | Closed form | `{type:"object", properties, required, additionalProperties:false}` | `interface … { … }` when no group is structurally enforced; `type … = { base } & (arms)` when one is (see *Exclusive groups*) | ENFORCED |
-| Open form | `{… additionalProperties:true}` | `interface … { …; [key: string]: unknown }` | ENFORCED + TS soundness gap (TS lets you assign to `$form`) |
+| Open form (`:open true`; builder `s.form(…, {open:true})`) | `{… additionalProperties:true}` | `interface … { …; [key: string]: unknown }` | ENFORCED + TS soundness gap (TS lets you assign to `$form`) |
 | `$$`-escape on a `$`-prefixed user key | property name doubled (`$foo` → `$$foo`) | quoted property name `"$$foo"` | ENFORCED |
-| Positional `.none` | no `$children` property | no `$children` field | ENFORCED |
-| Positional `.any` | `properties.$children:{type:"array"}` | `$children?: unknown[]` | ENFORCED |
-| Positional `.kind(K)` | `properties.$children:{type:"array", items:<K>}` | `$children?: Array<K>` | ENFORCED |
+| Positional `.none` (builder: omit `positional`) | no `$children` property | no `$children` field | ENFORCED |
+| Positional `.any` (builder `s.form(…, {positional:'any'})`) | `properties.$children:{type:"array"}` | `$children?: unknown[]` | ENFORCED |
+| Positional `.kind(K)` (builder `s.form(…, {positional:K})`, e.g. `s.string()`) | `properties.$children:{type:"array", items:<K>}` | `$children?: Array<K>` | ENFORCED |
 | Positional `.kind(K)` where `K`'s head-set carries counts | the above **plus** `$children.allOf:[{contains:<branch>, minContains, maxContains}, …]`, one entry per bounded head. `contains` is the head's `$ref` for a global and the head-pin (`{properties:{$form:{const:…}}}`) for a slot-local, which has no `$def` to point at — the two count the same children, because `items`' `oneOf` already forces every child to satisfy its own head's branch | `$children?: Array<K>` with a `/** Positional counts (not expressible in TS): … */` comment | ENFORCED (schema) + DOCS-ONLY (TS) |
 | …where the **set** carries `:min-children` / `:max-children` | one more `allOf` entry, last, whose `contains` is `{anyOf:[<branch per member>]}` — "a child whose head is in the set", which is what the validator tallies. `minItems`/`maxItems` would say the same thing here and only here (a head-set slot is closed, so the positional population *is* the set); `contains` is right in both readings and keeps the two claims the same shape | the same doc comment, with an `any of the set: …` clause after the per-head ones | ENFORCED (schema) + DOCS-ONLY (TS) |
 | …where **either** level declares a floor | `$children` joins the form's `required` array. The JSON bridge omits `$children` entirely for a childless form, so a `minContains` living inside the `$children` subschema has nothing to be evaluated against on precisely the document that breaches the floor hardest. A ceiling-only slot adds nothing: an absent array cannot exceed a ceiling, and requiring it would make the export stricter than the validator | — | ENFORCED |
@@ -175,7 +175,7 @@ The TypeScript backend classifies every group into one of three states; the choi
 | `:integer true` | lifts to `type: "integer"` | JSDoc `@sjon-integer true` | ENFORCED (schema) |
 | `(key … :requires [b c])` | `dependentRequired: {"<key>": ["b", "c"]}` — an exact semantic match: 2020-12's `dependentRequired` is "if this property is present, these must be too" | JSDoc `@sjon-requires b, c` (a plain interface cannot express it — it would need a discriminated union over which keys are present) | ENFORCED (schema) + DOCS-ONLY (TS) |
 | `:multiple-of N` | `multipleOf: N` — an exact semantic match, not an annotation: 2020-12's `multipleOf` is "division by this keyword's value results in an integer", the same claim SJON makes | JSDoc `@sjon-multiple-of N` (TS has no divisibility constraint) | ENFORCED (schema) + DOCS-ONLY (TS) |
-| `:repr (repr-shape :type f32…f16)` | base `{type: "number"}` + `x-sjon-gpu-repr: "<tag>"` (the GPU range / integrality is **not** lowered to `minimum`/`maximum`/`type:integer` — generic validators ignore it) | branded alias `F32` … `F16` (from the prelude) | ANNOTATED + DOCS-ONLY (enforced by the SJON validator, not by the exported schema) |
+| `:repr (repr-shape :type f32…f16)`; builder `.repr('<tag>')` | base `{type: "number"}` + `x-sjon-gpu-repr: "<tag>"` (the GPU range / integrality is **not** lowered to `minimum`/`maximum`/`type:integer` — generic validators ignore it) | branded alias `F32` … `F16` (from the prelude) | ANNOTATED + DOCS-ONLY (enforced by the SJON validator, not by the exported schema) |
 | Exact-int bound `>2^53` | `minimum`/`maximum` carries the lossy f64 value; `x-sjon-exact-bound: {min|max: "<digits>"}` carries the full-precision digit string | JSDoc note `[exact-int >2^53]` | ENFORCED (lossy in non-bigint validators) + ANNOTATED |
 | `:string-bounds (string-bounds :min-len M :max-len N :pattern …)` | `minLength`/`maxLength` (codepoint count via `x-sjon-length-unit: "codepoint"`); `pattern` (with `x-sjon-pattern-engine: "deferred-in-sjon-runtime"` because SJON v1 doesn't execute regex) | JSDoc `@minLength`/`@maxLength`/`@pattern` | ENFORCED (schema; regex engine differs) + DOCS-ONLY (TS) |
 | `:format email|uri|uuid` | JSON Schema standard `format` | JSDoc `@format` | ENFORCED (JSON Schema validators decide assertion vs annotation per format) |
@@ -188,7 +188,7 @@ The TypeScript backend classifies every group into one of three states; the choi
 | `:unit (unit-shape :allowed [deg rad])` | `{type: "object", required: ["$num"], properties: {$num: {type: "array", prefixItems: [<magnitude>, <unit-enum>], minItems: 2, maxItems: 2, items: false}}}` | `[number, "deg"] \| [number, "rad"]` | ENFORCED |
 | `:unit (unit-shape :required false)` | unit slot is `{type: "string", minLength: 1}` (any non-empty unit) | `[number, string]` | ENFORCED |
 | Unit + `:numeric` bounds combined | bounds propagate to the magnitude slot inside `prefixItems[0]` | JSDoc `@sjon-unit … @minimum … @maximum …` | ENFORCED + DOCS-ONLY |
-| `:unit (unit-shape :reject true)` | no `$num` tuple at all — lowers to a plain number / `number_bounded` (units are forbidden, so the magnitude stands alone) | `number` (or its branded `:repr` alias) | ENFORCED |
+| `:unit (unit-shape :reject true)`; builder `.rejectUnits()` | no `$num` tuple at all — lowers to a plain number / `number_bounded` (units are forbidden, so the magnitude stands alone) | `number` (or its branded `:repr` alias) | ENFORCED |
 
 ### Cross-refs
 
@@ -269,7 +269,7 @@ Constructs SJON validates but JSON Schema cannot enforce. The exporter still emi
 | Discriminated variants | Source-order constraint (variant keys must follow the discriminant). | `x-sjon-discriminant` |
 | Multi-key exclusive bundles | Atomic bundle presence — JSON Schema's `required` enforces presence but not "partial bundle is an error." Partial bundles fail validation as `oneOf` mismatch, not as a specific partial-bundle diagnostic. | `x-sjon-exclusive-groups` |
 | Numeric bound `>2^53` precision | f64 round-trip loses bits — `minimum`/`maximum` carries the lossy value, non-bigint validators see it as approximate. | `x-sjon-exact-bound: {min|max: "<digits>"}` |
-| GPU representation (`:repr`) | The GPU type's range and integrality — the exporter does **not** lower them to `minimum`/`maximum`/`type:integer`, so a standalone validator accepts an out-of-range or fractional value the SJON validator rejects (`repr_out_of_range`). | `x-sjon-gpu-repr: "<tag>"` |
+| GPU representation (`:repr`; builder `.repr(tag)`) | The GPU type's range and integrality — the exporter does **not** lower them to `minimum`/`maximum`/`type:integer`, so a standalone validator accepts an out-of-range or fractional value the SJON validator rejects (`repr_out_of_range`). | `x-sjon-gpu-repr: "<tag>"` |
 | String length encoding | JSON Schema validators count UTF-16 code units; SJON counts codepoints. Diverges on surrogate pairs. | `x-sjon-length-unit: "codepoint"` |
 | String pattern regex engine | SJON v1 doesn't execute regex; JSON Schema validators run their own engine (usually ECMAScript). | `x-sjon-pattern-engine: "deferred-in-sjon-runtime"` |
 | Custom string formats (`path`, `semver`) | JSON Schema's `format` vocabulary doesn't list these. | `x-sjon-format: "path|semver"` |

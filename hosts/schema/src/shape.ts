@@ -15,6 +15,11 @@
 //
 // Lifetime: pure immutable data, JS-owned. No allocator handle.
 
+/** GPU representation tag carried by `.repr(tag)` and the manifest's
+ *  `:repr (repr-shape :type …)` sibling. Exactly the exporter prelude's five
+ *  aliases; closed here so an unknown tag fails at the builder call site. */
+export type GpuRepr = 'f32' | 'u32' | 'i32' | 'u16' | 'f16';
+
 /** Inclusive/exclusive numeric refinement. Lowers to `(numeric-bounds …)`. */
 export interface NumericBoundsIR {
   readonly min?: number;
@@ -85,7 +90,16 @@ export type ShapeIR =
   | { readonly kind: 'any' }
   | { readonly kind: 'nil' }
   | { readonly kind: 'boolean' }
-  | { readonly kind: 'number'; readonly bounds?: NumericBoundsIR }
+  | {
+      readonly kind: 'number';
+      readonly bounds?: NumericBoundsIR;
+      /** GPU representation tag — a `:repr` sibling of `:numeric`, never a
+       *  member of `NumericBoundsIR`. */
+      readonly repr?: GpuRepr;
+      /** `.rejectUnits()`: forbid every unit suffix. A `:unit` sibling of
+       *  `:numeric`, never a member of `NumericBoundsIR`. */
+      readonly rejectUnits?: boolean;
+    }
   | { readonly kind: 'string'; readonly bounds?: StringBoundsIR }
   | { readonly kind: 'symbol' }
   | { readonly kind: 'symbol_members'; readonly members: readonly string[] }

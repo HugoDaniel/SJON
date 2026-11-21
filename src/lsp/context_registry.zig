@@ -727,12 +727,23 @@ pub const Registry = struct {
     pub fn deinit(self: *Registry) void {
         // Declaration handlers borrow their baseline bundle's preloaded plugin
         // storage. Release every declaration context first so no baseline
-        // arena can die under a still-live borrowing handler.
-        for (self.contexts.items) |context| {
-            if (context.kind == .declaration) destroyContext(self.gpa, context);
+        // arena can die under a still-live borrowing handler. Each destroyed
+        // context leaves `contexts` before its memory is freed: the second
+        // pass walks the surviving list and must never dereference a pointer
+        // the first pass released — freed-but-unmapped storage is not
+        // readable merely to re-test `kind`.
+        var index: usize = 0;
+        while (index < self.contexts.items.len) {
+            const context = self.contexts.items[index];
+            if (context.kind != .declaration) {
+                index += 1;
+                continue;
+            }
+            _ = self.contexts.swapRemove(index);
+            destroyContext(self.gpa, context);
         }
         for (self.contexts.items) |context| {
-            if (context.kind != .declaration) destroyContext(self.gpa, context);
+            destroyContext(self.gpa, context);
         }
         self.contexts.deinit(self.gpa);
         self.contexts_by_id.deinit(self.gpa);
@@ -4084,6 +4095,62 @@ test "declaration contexts: adding and removing a directive moves the document" 
     try testing.expect(ordinary.handler.prepared_schema == null);
     try testing.expectEqual(@as(usize, 2), ordinary.handler.schema.plugins.len);
     try testing.expectEqual(baseline_contexts, registry.contexts.items.len);
+}
+
+test "declaration contexts: teardown reads only live contexts after a rebuild" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+
+    try writePlugin(&fixture, "base.sjon", "base", "base-form");
+    try fixture.write(
+        "sjon-lsp.sjon",
+        "(sjon-lsp :version 1 :bundles [" ++
+            "(bundle :name base :files [\"**/*.sjon\"] :manifests [\"base.sjon\"])" ++
+            "])",
+    );
+    const declared_source =
+        "(plugin :name extra :version \"1.0.0\" (form :name extra-form :open true))\n" ++
+        "(base-form)\n";
+    try fixture.write("doc.sjon", declared_source);
+
+    // The default test allocator serves a Context from bucket slots whose
+    // bytes stay mapped (and keep their old contents) after `free`, which
+    // silently hides any teardown read of a released context: the fault
+    // only armed once growing `Validator.CrossRefIndex` redistributed
+    // sibling allocations across size classes so a released declaration's
+    // bucket page held no other live slot at teardown — DebugAllocator
+    // unmaps such a page. This page-sized allocator gives every
+    // Context-sized allocation its own page, so any teardown reread of a
+    // released context faults deterministically — at any struct size, not
+    // only past the redistribution point.
+    var strict_state: std.heap.DebugAllocator(.{ .page_size = 4 * 1024 }) = .init;
+    const strict = strict_state.allocator();
+
+    var roots = try discovery.initializationRoots(
+        testing.allocator,
+        &.{try fixture.rootUri()},
+        null,
+        null,
+    );
+    defer roots.deinit();
+    var registry = Registry.init(strict, testing.io);
+    errdefer registry.deinit();
+    try registry.configureRoots(roots.items);
+
+    const document_uri = try fixture.fileUri("doc.sjon");
+    const first = try registry.openDocument(document_uri, 1, declared_source);
+    try testing.expectEqual(RouteState.ready, first.state);
+
+    // Replace/rebuild: the same declaration context identity gets a new
+    // preparation and handler, and teardown must then release that
+    // context ahead of its baseline without reading the released pointer
+    // back to decide anything.
+    const rebuilt = try registry.changeDocumentFull(document_uri, 2, declared_source);
+    try testing.expectEqual(RouteState.ready, rebuilt.state);
+    try testing.expectEqualStrings(first.context_id, rebuilt.context_id);
+
+    registry.deinit();
+    try testing.expectEqual(std.heap.Check.ok, strict_state.deinit());
 }
 
 test "declaration contexts: every edit rebuilds preparation and current parse diagnostics" {

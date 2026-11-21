@@ -24,7 +24,7 @@ const common = @import("wasm_common.zig");
 // ---------------------------------------------------------------------------
 
 /// Serialize a `Host.HostResult` as
-/// `{"diagnostics":[…],"loadedPlugins":[…],"materializedDefaults":[…],"evaluatedResults":[…]}`.
+/// `{"diagnostics":[…],"loadedPlugins":[…],"materializedDefaults":[…],"evaluatedResults":[…],"identities":[…]}`.
 /// Each diagnostic carries the host phase tag, original code, semantic
 /// path, and an optional declaration span; each loaded plugin carries
 /// `name`, `version` (always `null` — `:version` metadata is not stored
@@ -33,13 +33,16 @@ const common = @import("wasm_common.zig");
 /// (`literal_default` | `expression_default`), and `value` (JSON-
 /// encoded `Expr.Value` via `appendValue`); each evaluated-result
 /// entry carries `index` (the matching `data_forest` position) and
-/// `value` (JSON-encoded `Expr.Value`). Mirrors the typescript-parity
-/// `HostResult` shape so the Web host can hand the parsed object
-/// straight back to consumers.
+/// `value` (JSON-encoded `Expr.Value`); each identity row carries the
+/// stable key `registry`, `scope` (outermost-first `{registry,symbol}`
+/// prefix objects), `symbol`, `status` (`resolved` | `ambiguous`), and
+/// `address` (`{root,path}` with string/number steps, `null` exactly
+/// for ambiguous). Mirrors the typescript-parity `HostResult` shape so
+/// the Web host can hand the parsed object straight back to consumers.
 ///
-/// The `materializedDefaults` and `evaluatedResults` fields are always
-/// present (empty arrays when the overlay / eval pass produced no
-/// entries) so decoders don't have to special-case their absence.
+/// The `materializedDefaults`, `evaluatedResults`, and `identities`
+/// fields are always present (empty arrays when their passes produced
+/// no entries) so decoders don't have to special-case their absence.
 pub fn writeHostResult(a: Allocator, result: Host.HostResult) Allocator.Error![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     try buf.appendSlice(a, "{\"diagnostics\":[");
@@ -62,8 +65,77 @@ pub fn writeHostResult(a: Allocator, result: Host.HostResult) Allocator.Error![]
         if (i > 0) try buf.append(a, ',');
         try appendEvaluatedResult(&buf, a, entry);
     }
+    try buf.appendSlice(a, "],\"identities\":[");
+    for (result.identities, 0..) |row, i| {
+        if (i > 0) try buf.append(a, ',');
+        try appendIdentityRow(&buf, a, row);
+    }
     try buf.appendSlice(a, "]}");
     return buf.toOwnedSlice(a);
+}
+
+/// One identity row as `{"registry":"…","scope":[…],"symbol":"…",
+/// "status":"resolved"|"ambiguous","address":{…}|null}`. Row order is
+/// the projection's deterministic `(registry, scope, symbol)` order —
+/// this writer never re-sorts.
+fn appendIdentityRow(
+    buf: *std.ArrayList(u8),
+    a: Allocator,
+    row: Host.IdentityRow,
+) Allocator.Error!void {
+    try buf.appendSlice(a, "{\"registry\":");
+    try common.appendJsonString(buf, a, row.registry);
+    try buf.appendSlice(a, ",\"scope\":[");
+    for (row.scope, 0..) |link, i| {
+        if (i > 0) try buf.append(a, ',');
+        try appendIdentityScope(buf, a, link);
+    }
+    try buf.appendSlice(a, "],\"symbol\":");
+    try common.appendJsonString(buf, a, row.symbol);
+    try buf.appendSlice(a, ",\"status\":\"");
+    try buf.appendSlice(a, @tagName(row.status));
+    try buf.appendSlice(a, "\",\"address\":");
+    if (row.address) |addr| {
+        try appendIdentityAddress(buf, a, addr);
+    } else {
+        try buf.appendSlice(a, "null");
+    }
+    try buf.append(a, '}');
+}
+
+/// One lexical-scope prefix as `{"registry":"…","symbol":"…"}` — the
+/// stable parent identity, never a `ScopeId`/AST-offset encoding.
+fn appendIdentityScope(
+    buf: *std.ArrayList(u8),
+    a: Allocator,
+    link: Host.IdentityScope,
+) Allocator.Error!void {
+    try buf.appendSlice(a, "{\"registry\":");
+    try common.appendJsonString(buf, a, link.registry);
+    try buf.appendSlice(a, ",\"symbol\":");
+    try common.appendJsonString(buf, a, link.symbol);
+    try buf.append(a, '}');
+}
+
+/// One resolved address as `{"root":N,"path":[…]}`. Path steps are the
+/// action grammar's two spellings: a string names a keyword value, an
+/// unsigned number names a positional/vector element.
+fn appendIdentityAddress(
+    buf: *std.ArrayList(u8),
+    a: Allocator,
+    addr: Host.IdentityAddress,
+) Allocator.Error!void {
+    try buf.appendSlice(a, "{\"root\":");
+    try common.appendUint(buf, a, addr.root);
+    try buf.appendSlice(a, ",\"path\":[");
+    for (addr.path, 0..) |step, i| {
+        if (i > 0) try buf.append(a, ',');
+        switch (step) {
+            .key => |k| try common.appendJsonString(buf, a, k),
+            .index => |n| try common.appendUint(buf, a, n),
+        }
+    }
+    try buf.appendSlice(a, "]}");
 }
 
 fn appendEvaluatedResult(
@@ -184,6 +256,66 @@ fn appendPluginSummary(
     try buf.appendSlice(a, ",\"version\":null,\"formCount\":");
     try common.appendUint(buf, a, @intCast(p.forms.len));
     try buf.append(a, '}');
+}
+
+// ---------------------------------------------------------------------------
+// Preloaded-schema report writer — used by `sjon_preload_schema`.
+// ---------------------------------------------------------------------------
+
+/// Serialize a preloaded-schema handle report as
+/// `{"handle":N,"hasErrors":b,"diagnostics":[…],"sourceDiagnostics":[[…],…],"aggregateDiagnostics":[…],"loadedPlugins":[…]}`.
+///
+/// Mirrors native `Host.PreloadedSchema` field for field: `diagnostics` is
+/// the flattened compatibility view (every per-source report in input
+/// order, then the aggregate reports), `sourceDiagnostics[i]` is the
+/// input-index-aligned report for source `i` (empty slices included, so a
+/// failed source never compacts later indices), `aggregateDiagnostics`
+/// holds the six schema-internal validators' combined-set reports, and
+/// `loadedPlugins` are the cleanly-loaded plugins via the shared
+/// PluginSummary writer. `handle` is the table-minted `u32` the caller
+/// borrows for later validate/eval calls and releases with
+/// `sjon_schema_free`.
+///
+/// Manifest content problems are part of the report (the usual
+/// HostDiagnostic writers); only handle bookkeeping and OOM are framed
+/// errors on this path.
+pub fn writePreloadedSchemaReport(
+    a: Allocator,
+    handle: u32,
+    schema: *const Host.PreloadedSchema,
+) Allocator.Error![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.appendSlice(a, "{\"handle\":");
+    try common.appendUint(&buf, a, handle);
+    try buf.appendSlice(a, ",\"hasErrors\":");
+    try buf.appendSlice(a, if (schema.hasErrors()) "true" else "false");
+    try buf.appendSlice(a, ",\"diagnostics\":[");
+    for (schema.diagnostics, 0..) |d, i| {
+        if (i > 0) try buf.append(a, ',');
+        try appendHostDiagnostic(&buf, a, d);
+    }
+    try buf.appendSlice(a, "],\"sourceDiagnostics\":[");
+    for (schema.source_diagnostics, 0..) |report, i| {
+        if (i > 0) try buf.append(a, ',');
+        try buf.append(a, '[');
+        for (report, 0..) |d, j| {
+            if (j > 0) try buf.append(a, ',');
+            try appendHostDiagnostic(&buf, a, d);
+        }
+        try buf.append(a, ']');
+    }
+    try buf.appendSlice(a, "],\"aggregateDiagnostics\":[");
+    for (schema.aggregate_diagnostics, 0..) |d, i| {
+        if (i > 0) try buf.append(a, ',');
+        try appendHostDiagnostic(&buf, a, d);
+    }
+    try buf.appendSlice(a, "],\"loadedPlugins\":[");
+    for (schema.plugins, 0..) |p, i| {
+        if (i > 0) try buf.append(a, ',');
+        try appendPluginSummary(&buf, a, p);
+    }
+    try buf.appendSlice(a, "]}");
+    return buf.toOwnedSlice(a);
 }
 
 // ---------------------------------------------------------------------------

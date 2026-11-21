@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { s, edit } from '@sjon-lang/schema';
+import { read, readResult, fields } from '@sjon-lang/read';
 import { SjonEncoder, SjonReader } from '@sjon-lang/web';
 import { SjonHost } from '@sjon-lang/web/SjonHost';
 import * as backend from '@sjon-lang/web/SjonSchemaBackend';
@@ -9,6 +10,20 @@ import { EditorState } from '@codemirror/state';
 import { createHighlighter } from 'shiki';
 const wasm = process.env['SJON_WASM_DIR'];
 assert.ok(wasm);
+
+const [readRoot] = read('(a :k 1)');
+assert.ok(readRoot);
+assert.equal(readRoot.tag, 'form');
+assert.equal(readRoot.span.start, 0);
+assert.equal(readRoot.span.end, 8);
+const readFields = fields(readRoot);
+assert.equal(readFields.pairs.length, 1);
+const count = readFields.get('k');
+assert.equal(count?.tag, 'number');
+assert.equal(count?.value, 1);
+assert.equal(count?.integer, 1n);
+assert.equal(readResult('(a :k 1)').diagnostics.length, 0);
+
 const encoder = await SjonEncoder.load(`${wasm}/sjon.wasm`);
 const reader = await SjonReader.load(`${wasm}/sjon-binary.wasm`);
 assert.equal(reader.evalExprBinary(encoder.toBinary('(+ 1 2)')), 3);

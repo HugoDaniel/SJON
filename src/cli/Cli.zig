@@ -109,10 +109,11 @@ pub const project_subcommands = [_][]const u8{ "info", "verify", "lock", "sync" 
 /// drift guard checks each flag's bare name (sans `--` / `=`) so the
 /// representation can differ per shell.
 pub const common_flags = [_][]const u8{
-    "--format=", "--color=",  "--project-root=", "--no-project",
-    "--target=", "--output=", "--layout=",       "--draft=",
-    "--stdout",  "--force",   "--check",         "--list",
-    "--watch",   "--help",    "--actions=",      "--in-place",
+    "--format=",  "--color=",  "--project-root=", "--no-project",
+    "--against=", "--target=", "--output=",       "--layout=",
+    "--draft=",   "--stdout",  "--force",         "--check",
+    "--list",     "--watch",   "--help",          "--actions=",
+    "--in-place",
 };
 
 /// The tables above, bundled as slices for the `Completions` renderers.
@@ -136,6 +137,9 @@ const usage_text =
     \\                                  poll interval via --interval-ms=N).
     \\  sjon validate FILE              Validate a single SJON document.
     \\  sjon validate -                 Validate from stdin.
+    \\  sjon validate --against MANIFEST DOCUMENT
+    \\                                  Validate DOCUMENT against a local
+    \\                                  manifest instead of a project file.
     \\  sjon eval FILE                  Validate, then print each expression
     \\  sjon eval -                     root's value (stdout is data only;
     \\                                  diagnostics go to stderr).
@@ -198,6 +202,21 @@ const usage_text =
     \\  --no-project                    Disable project-file discovery
     \\                                  entirely; (use-plugin …) refs
     \\                                  fail with unresolved_plugin.
+    \\  --against=MANIFEST              Validate DOCUMENT against MANIFEST
+    \\    or --against MANIFEST         as one composed source: MANIFEST,
+    \\                                  one newline, then DOCUMENT. No
+    \\                                  project discovery runs, so
+    \\                                  (use-plugin …) refs are unresolved
+    \\                                  unless the composed text declares
+    \\                                  them; combining this with
+    \\                                  --project-root or --no-project is a
+    \\                                  usage error. The manifest cannot be
+    \\                                  - (stdin belongs to DOCUMENT).
+    \\                                  Diagnostics' spans index the
+    \\                                  composed UTF-8 bytes, so a
+    \\                                  document span shifts by MANIFEST's
+    \\                                  byte length + 1; the JSON `file`
+    \\                                  stays the DOCUMENT argument.
     \\
     \\Options for fmt:
     \\  --check                         Report which files would change,
@@ -441,6 +460,14 @@ const ValidateOpts = struct {
     format: FormatPolicy = .auto,
     color: ColorPolicy = .auto,
     project_mode: ProjectMode = .auto,
+    /// `sjon validate --against MANIFEST DOCUMENT` — validate the
+    /// document against this local manifest instead of a project file.
+    /// `runValidate` composes `manifest + "\n" + document` once and
+    /// passes null project fields, so the manifest is the one schema
+    /// source. Non-repeatable: one flag names one manifest. Cannot be
+    /// `"-"` (the document alone owns stdin) and cannot be combined with
+    /// `--project-root` / `--no-project` (both rejected at parse time).
+    against: ?[]const u8 = null,
 };
 
 /// `sjon eval FILE|-` — validate, then print each expression root's
@@ -729,6 +756,10 @@ const VerbArgs = struct {
     color: ColorPolicy = .auto,
     project_mode: ProjectMode = .auto,
     positional: ?[]const u8 = null,
+    /// `validate` only (`VerbShape.allow_against`): the manifest named by
+    /// `--against`. One flag names one manifest — repeated use is a
+    /// usage error rather than a second composition layer.
+    against: ?[]const u8 = null,
 };
 
 /// The grammar of one verb, as the differences between seven
@@ -741,6 +772,10 @@ const VerbShape = struct {
     allow_github: bool = false,
     /// Whether `--color=` is accepted (`validate` only).
     allow_color: bool = false,
+    /// Whether `--against=` / `--against MANIFEST` is accepted
+    /// (`validate` only). The flag implies no project discovery, so it is
+    /// mutually exclusive with the project flags.
+    allow_against: bool = false,
     /// Whether the verb takes a positional at all. When false, one is
     /// reported as an extra argument rather than collected.
     allow_positional: bool = true,
@@ -753,12 +788,12 @@ const VerbParse = union(enum) {
     usage: Action,
 };
 
-/// Parse the shared argument loop: `--format=`, optionally `--color=`,
-/// the project flags, an unknown-option guard, and at most one
+/// Parse the shared argument loop: `--format=`, optionally `--color=` and
+/// `--against`, the project flags, an unknown-option guard, and at most one
 /// positional.
 ///
-/// Seven verbs wrote this out, differing only in `VerbShape`'s five
-/// fields and in the message for a missing positional — which stays with
+/// Seven verbs wrote this out, differing only in `VerbShape`'s fields and
+/// in the message for a missing positional — which stays with
 /// the caller, because that message is the one part that genuinely
 /// differs per verb ("eval requires a FILE argument (use - for stdin)"
 /// against "`sjon plugin hash` requires a PATH argument"). Everything
@@ -780,6 +815,46 @@ fn parseVerbArgs(args: []const [:0]const u8, shape: VerbShape) VerbParse {
             } };
             continue;
         }
+        if (shape.allow_against) {
+            // `--against=MANIFEST` and `--against MANIFEST` are one flag:
+            // one manifest, so repetition is ambiguous rather than a
+            // second schema source.
+            if (std.mem.startsWith(u8, arg, "--against=")) {
+                if (out.against != null) return .{ .usage = .{
+                    .usage_error = "--against given more than once",
+                } };
+                const manifest = arg["--against=".len..];
+                if (manifest.len == 0) return .{ .usage = .{
+                    .usage_error = "--against requires a manifest path",
+                } };
+                if (std.mem.eql(u8, manifest, "-")) return .{ .usage = .{
+                    .usage_error = "--against cannot read the manifest from stdin (-)",
+                } };
+                out.against = manifest;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--against")) {
+                if (out.against != null) return .{ .usage = .{
+                    .usage_error = "--against given more than once",
+                } };
+                i += 1;
+                if (i >= args.len) return .{ .usage = .{
+                    .usage_error = "--against requires a manifest path",
+                } };
+                // Refuse to swallow a following flag as the path, the same
+                // way `--project-root` does.
+                if (std.mem.startsWith(u8, args[i], "--") or args[i].len == 0) {
+                    return .{ .usage = .{
+                        .usage_error = "--against requires a manifest path (got a flag instead)",
+                    } };
+                }
+                if (std.mem.eql(u8, args[i], "-")) return .{ .usage = .{
+                    .usage_error = "--against cannot read the manifest from stdin (-)",
+                } };
+                out.against = args[i];
+                continue;
+            }
+        }
         if (shape.allow_project) {
             switch (parseProjectFlag(args, &i, &out.project_mode)) {
                 .handled => continue,
@@ -794,6 +869,18 @@ fn parseVerbArgs(args: []const [:0]const u8, shape: VerbShape) VerbParse {
             return .{ .usage = .{ .usage_error = "extra positional argument" } };
         }
         out.positional = arg;
+    }
+    if (shape.allow_against and out.against != null) {
+        // `--against` *is* the schema source; a project root or an explicit
+        // no-project would be a second, contradictory statement. Rejecting
+        // both orders here keeps the rule in the shared loop.
+        const project_flag_given = switch (out.project_mode) {
+            .auto => false,
+            .explicit, .disabled => true,
+        };
+        if (project_flag_given) return .{ .usage = .{
+            .usage_error = "--against cannot be combined with --project-root or --no-project",
+        } };
     }
     return .{ .ok = out };
 }
@@ -838,7 +925,7 @@ fn parseArgs(allocator: Allocator, args: []const [:0]const u8) Action {
         return .{ .usage_error = "unknown command" };
     }
 
-    const parsed = switch (parseVerbArgs(args, .{ .start = 2, .allow_github = true, .allow_color = true })) {
+    const parsed = switch (parseVerbArgs(args, .{ .start = 2, .allow_github = true, .allow_color = true, .allow_against = true })) {
         .ok => |v| v,
         .usage => |e| return e,
     };
@@ -849,6 +936,7 @@ fn parseArgs(allocator: Allocator, args: []const [:0]const u8) Action {
         .format = parsed.format,
         .color = parsed.color,
         .project_mode = parsed.project_mode,
+        .against = parsed.against,
     } };
 }
 
@@ -1423,6 +1511,17 @@ fn parseExportLoweringGraphArgs(args: []const [:0]const u8) Action {
     } };
 }
 
+/// `sjon validate FILE|-` and `sjon validate --against MANIFEST FILE|-`.
+///
+/// Against mode builds one composed source, `MANIFEST + "\n" + DOCUMENT`,
+/// in this call's arena and hands it to the ordinary
+/// `Host.validateDocument` with `project_root` / `project_file` null.
+/// There is no new engine entry, preload, span rebasing, or second
+/// validation pass: diagnostics index the composed UTF-8 bytes, so a
+/// document-origin span shifts by `len(manifest) + 1`, while the rendered
+/// `file` stays the document argument. The one LF is inserted even when
+/// the manifest already ends in a newline; nothing is trimmed or
+/// normalized.
 fn runValidate(
     gpa: Allocator,
     io: Io,
@@ -1435,32 +1534,70 @@ fn runValidate(
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const project = resolveProjectMode(arena, io, opts) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.ProjectFileNotFound => {
-            // .explicit DIR was passed but DIR/sjon-project.sjon is missing.
-            // Emit the diagnostic code name so machine consumers (and the
-            // diagnostic-coverage audit) can grep for it.
-            const dir = opts.project_mode.explicit;
-            try stderr.print(
-                "sjon: error: project_file_not_found: --project-root {s} has no sjon-project.sjon\n",
-                .{dir},
-            );
-            return Exit.usage;
-        },
-    };
+    // `--against` implies no project discovery: the manifest argument is
+    // the one schema source, so combining it with a project mode was
+    // already rejected at parse time and nothing here may consult one.
+    const project: Project = if (opts.against != null)
+        .{ .root = null, .file = null }
+    else
+        resolveProjectMode(arena, io, opts) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ProjectFileNotFound => {
+                // .explicit DIR was passed but DIR/sjon-project.sjon is missing.
+                // Emit the diagnostic code name so machine consumers (and the
+                // diagnostic-coverage audit) can grep for it.
+                const dir = opts.project_mode.explicit;
+                try stderr.print(
+                    "sjon: error: project_file_not_found: --project-root {s} has no sjon-project.sjon\n",
+                    .{dir},
+                );
+                return Exit.usage;
+            },
+        };
 
-    const source = loadSource(gpa, io, opts.file) catch |err| switch (err) {
-        // OOM is a real failure — propagate so `main`'s wrapper turns it
-        // into the documented exit 3, rather than masquerading as a
-        // usage error the reader is told to fix in their argv.
-        error.OutOfMemory => return error.OutOfMemory,
-        else => |e| {
-            try stderr.print("sjon: cannot read {s}: {s}\n", .{ opts.file, @errorName(e) });
-            return Exit.usage;
-        },
+    // In the plain path the document buffer is the gpa-owned source; in
+    // against mode it is freed once composed into the arena. The optional
+    // tracks which one needs freeing.
+    var owned_source: ?[:0]u8 = null;
+    defer if (owned_source) |s| gpa.free(s);
+
+    const source: [:0]const u8 = if (opts.against) |manifest_path| blk: {
+        // Read the manifest first: a bad manifest path must not first
+        // consume the document's stdin.
+        const manifest = loadSource(gpa, io, manifest_path) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => |e| {
+                try stderr.print("sjon: cannot read {s}: {s}\n", .{ manifest_path, @errorName(e) });
+                return Exit.usage;
+            },
+        };
+        defer gpa.free(manifest);
+        const document = loadSource(gpa, io, opts.file) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => |e| {
+                try stderr.print("sjon: cannot read {s}: {s}\n", .{ opts.file, @errorName(e) });
+                return Exit.usage;
+            },
+        };
+        defer gpa.free(document);
+        const composed = try arena.allocSentinel(u8, manifest.len + 1 + document.len, 0);
+        @memcpy(composed[0..manifest.len], manifest);
+        composed[manifest.len] = '\n';
+        @memcpy(composed[manifest.len + 1 ..], document);
+        break :blk composed;
+    } else blk: {
+        owned_source = loadSource(gpa, io, opts.file) catch |err| switch (err) {
+            // OOM is a real failure — propagate so `main`'s wrapper turns it
+            // into the documented exit 3, rather than masquerading as a
+            // usage error the reader is told to fix in their argv.
+            error.OutOfMemory => return error.OutOfMemory,
+            else => |e| {
+                try stderr.print("sjon: cannot read {s}: {s}\n", .{ opts.file, @errorName(e) });
+                return Exit.usage;
+            },
+        };
+        break :blk owned_source.?;
     };
-    defer gpa.free(source);
 
     const file_label = if (std.mem.eql(u8, opts.file, "-")) "<stdin>" else opts.file;
 

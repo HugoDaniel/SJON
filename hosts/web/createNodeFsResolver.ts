@@ -15,18 +15,20 @@
 // under `phase: 'manifest'` exactly like Zig's `Host.validateDocument`
 // drains its own FilesystemResolver project diagnostics.
 //
-// The SJON-subset parser it uses (`./sjonSubsetParser.ts`, shared with
-// the conformance runner) only handles what the project file
-// (`(project :plugins ["…" …])`) and the manifest `:name` extraction
-// need. Full SJON parsing lives in the WASM artifact for the actual
-// document validation pass — this is intentionally separate so the
+// Both bootstrap reads go through `@sjon-lang/read`'s throwing `read`
+// entry: the resolver is a strict consumer, so a partial tree carrying
+// diagnostics must never be indexed. Raw strings and `#| … |#` block
+// comments are therefore real SJON here — a commented-out `:plugins`
+// entry is trivia, not configuration — while parse errors, a non-form
+// root, and multiple roots still surface as `invalid_manifest`. This is
+// intentionally separate from the WASM document-validation pass so the
 // resolver can index manifests *before* the WASM is loaded.
 
 import { readFileSync } from 'node:fs';
 import { resolve as resolvePath, isAbsolute } from 'node:path';
+import { fields, read } from '@sjon-lang/read';
+import type { FormNode, Node } from '@sjon-lang/read';
 import { errMsg } from './errMsg.ts';
-import { parseNode, RESOLVER_DIALECT, skipTrivia } from './sjonSubsetParser.ts';
-import type { Cursor, FormNode, ParsedNode } from './sjonSubsetParser.ts';
 import type { HostDiagnostic, ResolverFn } from './types.ts';
 
 /**
@@ -148,25 +150,25 @@ function loadProjectFile(
   }
   if (projectForm === null) return; // empty file is fine
 
-  if (projectForm.head !== 'project') {
+  if (projectForm.namespace !== null || projectForm.head !== 'project') {
     diagnostics.push(
       projectDiag(
         'invalid_manifest',
-        `expected (project …) at top level of sjon-project.sjon, got \`${projectForm.head}\``,
+        `expected (project …) at top level of sjon-project.sjon, got \`${qualifiedHead(projectForm)}\``,
       ),
     );
     return;
   }
 
-  for (const child of projectForm.children) {
-    if (child.tag !== 'kvpair' || child.key !== 'plugins') continue;
-    if (child.value.tag !== 'vector') {
+  for (const pair of fields(projectForm).pairs) {
+    if (pair.key !== 'plugins') continue;
+    if (pair.value.tag !== 'vector') {
       diagnostics.push(
         projectDiag('invalid_manifest', '`:plugins` must be a vector of manifest path strings'),
       );
       continue;
     }
-    for (const elem of child.value.elements) {
+    for (const elem of pair.value.elements) {
       indexOneManifest(projectRoot, elem, nameIndex, diagnostics);
     }
   }
@@ -190,7 +192,7 @@ function loadProjectFile(
  * the four hosts. Enforcement of the document's own pins is unaffected —
  * it happens above the resolver, in `SjonHost`.
  */
-function entryManifestPath(elem: ParsedNode, diagnostics: HostDiagnostic[]): string | null {
+function entryManifestPath(elem: Node, diagnostics: HostDiagnostic[]): string | null {
   if (elem.tag === 'string') return elem.value;
   if (elem.tag !== 'form') {
     diagnostics.push(
@@ -201,20 +203,19 @@ function entryManifestPath(elem: ParsedNode, diagnostics: HostDiagnostic[]): str
     );
     return null;
   }
-  if (elem.head !== 'plugin-entry') {
+  if (elem.namespace !== null || elem.head !== 'plugin-entry') {
     diagnostics.push(
       projectDiag(
         'invalid_manifest',
         '`:plugins` entries must be a path string or `(plugin-entry …)`; ' +
-          `got \`(${elem.head} …)\``,
+          `got \`(${qualifiedHead(elem)} …)\``,
       ),
     );
     return null;
   }
   let path = '';
-  for (const child of elem.children) {
-    if (child.tag !== 'kvpair') continue;
-    if (child.key === 'path' && child.value.tag === 'string') path = child.value.value;
+  for (const pair of fields(elem).pairs) {
+    if (pair.key === 'path' && pair.value.tag === 'string') path = pair.value.value;
   }
   if (path === '') {
     diagnostics.push(
@@ -227,7 +228,7 @@ function entryManifestPath(elem: ParsedNode, diagnostics: HostDiagnostic[]): str
 
 function indexOneManifest(
   projectRoot: string,
-  elem: ParsedNode,
+  elem: Node,
   nameIndex: Map<string, ManifestEntry>,
   diagnostics: HostDiagnostic[],
 ): void {
@@ -255,19 +256,19 @@ function indexOneManifest(
     );
     return;
   }
-  if (pluginForm === null || pluginForm.head !== 'plugin') {
+  if (pluginForm === null || pluginForm.namespace !== null || pluginForm.head !== 'plugin') {
     diagnostics.push(
       projectDiag('invalid_manifest', `manifest at \`${manifestPath}\` is not a (plugin …) form`),
     );
     return;
   }
   let name: string | null = null;
-  for (const child of pluginForm.children) {
-    if (child.tag !== 'kvpair' || child.key !== 'name') continue;
-    if (child.value.tag === 'symbol' || child.value.tag === 'string') {
-      name = child.value.value;
-    }
-    break;
+  const namePair = fields(pluginForm).pairs.find((pair) => pair.key === 'name');
+  if (
+    namePair !== undefined &&
+    (namePair.value.tag === 'symbol' || namePair.value.tag === 'string')
+  ) {
+    name = namePair.value.value;
   }
   if (name === null) {
     diagnostics.push(
@@ -304,23 +305,24 @@ function projectDiag(code: string, message: string): HostDiagnostic {
   };
 }
 
+/** Reconstruct the head as written: `namespace/head`, or the bare head. */
+function qualifiedHead(form: FormNode): string {
+  return form.namespace === null ? form.head : `${form.namespace}/${form.head}`;
+}
+
 /**
- * Parse a single top-level form from a manifest / project file. Returns
- * `null` for an empty source (whitespace + comments only); throws on any
- * structural error. Uses the shared subset parser with the resolver
- * dialect (bare `:` stays a `:`-prefixed symbol; no time literals).
+ * Read a single top-level form from a manifest / project file. Returns
+ * `null` for an empty source (whitespace and comments only); throws on any
+ * parse diagnostic, a non-form root, or more than one root.
+ *
+ * Uses throwing `read`, deliberately: a recovered partial tree with
+ * diagnostics must not become resolver configuration. The caller maps the
+ * throw to `invalid_manifest`.
  */
 function parseProjectFile(source: string): FormNode | null {
-  const cursor: Cursor = { src: source, i: 0 };
-  skipTrivia(cursor);
-  if (cursor.i >= cursor.src.length) return null;
-  const node = parseNode(cursor, RESOLVER_DIALECT);
-  if (node.tag !== 'form') {
-    throw new Error('expected a form at top level');
-  }
-  skipTrivia(cursor);
-  if (cursor.i < cursor.src.length) {
-    throw new Error('expected a single top-level form');
-  }
+  const [node, ...extra] = read(source);
+  if (node === undefined) return null;
+  if (extra.length > 0) throw new Error('expected a single top-level form');
+  if (node.tag !== 'form') throw new Error('expected a form at top level');
   return node;
 }

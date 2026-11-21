@@ -44,6 +44,15 @@
 // the `SjonHost` and are released when it's garbage-collected. Hot
 // reload is a v2 concern — re-instantiate the host to pick up new
 // plugin bytes.
+//
+// Preloaded schemas (`host.preload`) are a separate, explicitly-owned
+// resource: each handle is branded in a module-local WeakMap with its
+// owning host and numeric WASM ID, and the host tracks its live handles
+// in a Set. The brand is the safety surface — raw WASM IDs carry no
+// owner token — so a foreign or disposed handle is refused in JS before
+// it can reach WASM. Disposal is idempotent and refused while a host
+// call is in flight (`SchemaInUse`); `Symbol.asyncDispose` frees every
+// live handle before dropping plugin references.
 
 // `node:fs` is loaded on-demand inside `load` so this module can be
 // imported directly in a browser (see the sibling note in
@@ -58,12 +67,22 @@ import type {
   ExportSchemaResult,
   ExportSchemaTarget,
   HostEvalResult,
+  HostDiagnostic,
   HostOptions,
   HostResult,
+  PluginSummary,
+  PreloadedSchemaHandle,
   Reference,
   Resolution,
   ResolverFn,
+  ValidateAgainstOptions,
 } from './types.ts';
+
+// The handle type is part of this module's public surface: consumers import
+// it beside `SjonHost` (`import { type PreloadedSchemaHandle } from
+// '@sjon-lang/web/SjonHost'`), so the package entry name is reachable
+// without deep-importing the internal `types.ts`.
+export type { PreloadedSchemaHandle } from './types.ts';
 
 const HEADER_BYTES = 8;
 const PLUGIN_ABI_VERSION = 2;
@@ -90,6 +109,66 @@ interface HostRef {
 
 type PreflightResult = { ok: true } | { ok: false; code: string; detail: string };
 
+/**
+ * The JS-side ownership record for one preloaded schema handle. Raw WASM
+ * IDs carry no owner token — a foreign ID that collides with a live local
+ * ID is indistinguishable at the ABI — so this brand is the safety
+ * surface: `owner` makes the numeric ID meaningful only for the host that
+ * minted it, and `id: null` marks the one-way disposed transition.
+ */
+interface HandleBrand {
+  readonly owner: SjonHost;
+  id: number | null;
+}
+
+/** Every live handle, keyed by object identity — never by numeric ID. */
+const handleBrand = new WeakMap<PreloadedSchemaHandle, HandleBrand>();
+
+/** The framed `sjon_preload_schema` report, decoded. */
+interface PreloadReport {
+  readonly handle: number;
+  readonly hasErrors: boolean;
+  readonly diagnostics: readonly HostDiagnostic[];
+  readonly sourceDiagnostics: readonly (readonly HostDiagnostic[])[];
+  readonly aggregateDiagnostics: readonly HostDiagnostic[];
+  readonly loadedPlugins: readonly PluginSummary[];
+}
+
+/** The JSON options blob every host export accepts. */
+interface WasmHostOptions {
+  projectRoot: string | null;
+  projectFile: string | null;
+  failurePolicy: 'strict' | 'lenient';
+  heldSymbol: string | null;
+  hasResolver: boolean;
+  preloadedHandle?: number;
+}
+
+/**
+ * A JS-side handle refusal. The name mirrors the ABI's
+ * `InvalidSchemaHandle`, but the call never reaches WASM, so this is a
+ * plain `Error` — `SjonWasmError` is reserved for framed `ok=0` answers.
+ */
+function invalidSchemaHandle(detail: string): Error {
+  const err = new Error(`InvalidSchemaHandle: ${detail}`);
+  err.name = 'InvalidSchemaHandle';
+  return err;
+}
+
+/**
+ * An attempted dispose during a synchronous host call's borrow window.
+ * Freeing there would pull the schema out from under the call that is
+ * still reading it (the ABI borrow has no refcount), so the wrapper
+ * refuses rather than relying on JavaScript's single thread.
+ */
+function schemaInUse(what: string): Error {
+  const err = new Error(
+    `SchemaInUse: refusing to dispose ${what} while an active host call is in flight`,
+  );
+  err.name = 'SchemaInUse';
+  return err;
+}
+
 export interface SjonHostLoadOptions {
   resolver?: ResolverFn | null;
 }
@@ -111,6 +190,10 @@ export class SjonHost {
   readonly encoder: SjonEncoder;
   readonly _resolver: ResolverFn | null;
   readonly _plugins: Map<string, PluginInstance>;
+  /** Handles minted by `preload` and not yet disposed. */
+  readonly _liveHandles: Set<PreloadedSchemaHandle> = new Set();
+  /** Depth of synchronous host exports currently inside WASM. */
+  _activeCalls = 0;
 
   private constructor(
     encoder: SjonEncoder,
@@ -123,14 +206,21 @@ export class SjonHost {
   }
 
   /**
-   * Drop references to plugin instances and the underlying encoder so
-   * the GC can collect the WebAssembly instances. WebAssembly has no
-   * explicit instance-free API — this is honest-lifecycle hygiene
-   * (`await using host = await SjonHost.load(...)`), not a real
-   * resource release. The actual memory reclamation still depends on
-   * GC seeing no remaining references.
+   * Release every live preloaded schema, then drop references to plugin
+   * instances and the underlying encoder so the GC can collect the
+   * WebAssembly instances. Handle disposal is the real release (explicit
+   * `sjon_schema_free`); WebAssembly has no explicit instance-free API, so
+   * the plugin drop is honest-lifecycle hygiene (`await using host =
+   * await SjonHost.load(...)`), not a second resource release.
+   *
+   * Disposing handles first matters: a caller's `await using` block ends
+   * the host's lifetime, and every handle minted under it must die with
+   * it rather than outlive the encoder and silently target freed memory.
+   * Like handle disposal, this refuses while a host call is in flight.
    */
   async [Symbol.asyncDispose](): Promise<void> {
+    if (this._activeCalls > 0) throw schemaInUse('the host');
+    for (const handle of [...this._liveHandles]) this._disposeHandle(handle);
     this._plugins.clear();
   }
 
@@ -180,6 +270,50 @@ export class SjonHost {
     return new SjonHost(encoder, resolver, ref.plugins);
   }
 
+  /**
+   * Preload a schema once so many documents can borrow it without
+   * reparsing the manifest (P3).
+   *
+   * `manifestSources` is one standalone `(plugin …)` manifest or a set of
+   * them; each entry must be a single top-level `(plugin …)` form, the
+   * same domain native `Host.preloadSchema` accepts. A single string is
+   * normalized to a one-entry array. The sources are additive with
+   * document inline declarations — they do not replace them, and a form
+   * name claimed by both surfaces as `ambiguous_form` at validation.
+   *
+   * Always returns the report, including `hasErrors: true` for manifest
+   * content problems: the handle stays usable, and borrowing a partial
+   * handle is the caller's explicit decision (matching native Host). A
+   * second call returns an independent handle; it neither replaces nor
+   * stacks with the first, and there is no ambient schema.
+   *
+   * `dispose()` releases the WASM-side schema and is idempotent. The
+   * handle is only meaningful for this host instance; a foreign or
+   * disposed handle is refused in JavaScript before reaching WASM.
+   */
+  preload(manifestSources: string | readonly string[]): PreloadedSchemaHandle {
+    const sources = typeof manifestSources === 'string' ? [manifestSources] : [...manifestSources];
+    const payload = this.encoder._callBytesN('sjon_preload_schema', [
+      encoder.encode(JSON.stringify(sources)),
+    ]);
+    const report = parseJsonWithBigInt(decoder.decode(payload)) as PreloadReport;
+
+    const brand: HandleBrand = { owner: this, id: report.handle };
+    const handle: PreloadedSchemaHandle = {
+      hasErrors: report.hasErrors,
+      diagnostics: report.diagnostics,
+      sourceDiagnostics: report.sourceDiagnostics,
+      aggregateDiagnostics: report.aggregateDiagnostics,
+      loadedPlugins: report.loadedPlugins,
+      dispose: () => {
+        this._disposeHandle(handle);
+      },
+    };
+    handleBrand.set(handle, brand);
+    this._liveHandles.add(handle);
+    return handle;
+  }
+
   /** Validate `source` through `Host.validateDocument` over WASM. */
   validateDocument(source: string, options: HostOptions): HostResult {
     const projectDiagnostics = options.projectDiagnostics ?? [];
@@ -190,13 +324,49 @@ export class SjonHost {
     );
     const wasmResult = parseJsonWithBigInt(text) as HostResult;
     if (projectDiagnostics.length === 0) return wasmResult;
-    // Spread the WASM result first so any new HostResult fields
-    // (materializedDefaults, future additions) flow through;
-    // then override diagnostics with the project-prefixed list.
+    // Spread the WASM result first so every other HostResult field —
+    // materializedDefaults, evaluatedResults, identities, future
+    // additions — flows through; then override diagnostics with the
+    // project-prefixed list. The identities are the validation pass's
+    // own projection, so this merge never reparses or re-queries.
     return {
       ...wasmResult,
       diagnostics: [...projectDiagnostics, ...wasmResult.diagnostics],
     };
+  }
+
+  /**
+   * Validate `documentSource` against a manifest supplied as a string.
+   *
+   * This is the convenience path: it composes
+   * `manifestSource + "\n" + documentSource` — exactly one inserted LF,
+   * even when the manifest already ends in one, with no trimming,
+   * normalization, or printing — then delegates to `validateDocument`
+   * with `projectRoot` and `projectFile` forced to `null`. There is no
+   * project discovery, so the two arguments are the only schema source.
+   *
+   * Every diagnostic `span` indexes the **composed** UTF-8 bytes: a
+   * document-origin span sits at
+   * `new TextEncoder().encode(manifestSource).byteLength + 1` past its
+   * position in `documentSource`, and no span is rebased. Subtract that
+   * amount to recover a document-relative offset.
+   *
+   * The option type is narrowed to `failurePolicy` and `heldSymbol`;
+   * `projectRoot`, `projectFile`, and `projectDiagnostics` are rejected
+   * at compile time. The call recomposes and reparses on every
+   * invocation — repeated validation of one manifest belongs on
+   * `preload`, which compiles the schema once.
+   */
+  validateAgainst(
+    manifestSource: string,
+    documentSource: string,
+    options: ValidateAgainstOptions = {},
+  ): HostResult {
+    return this.validateDocument(`${manifestSource}\n${documentSource}`, {
+      ...options,
+      projectRoot: null,
+      projectFile: null,
+    });
   }
 
   /**
@@ -283,14 +453,8 @@ export class SjonHost {
     );
   }
 
-  _buildHostOptions(options: HostOptions): {
-    projectRoot: string | null;
-    projectFile: string | null;
-    failurePolicy: 'strict' | 'lenient';
-    heldSymbol: string | null;
-    hasResolver: boolean;
-  } {
-    return {
+  _buildHostOptions(options: HostOptions): WasmHostOptions {
+    const built: WasmHostOptions = {
       projectRoot: options.projectRoot ?? null,
       projectFile: options.projectFile ?? null,
       failurePolicy: options.failurePolicy ?? 'lenient',
@@ -300,6 +464,41 @@ export class SjonHost {
       heldSymbol: options.heldSymbol ?? null,
       hasResolver: this._resolver !== null,
     };
+    if (options.preloaded !== undefined) {
+      // The ABI borrows a bare numeric ID. Resolve the brand here so a
+      // foreign or disposed handle is refused in JS and never reaches WASM
+      // as a number; the export-schema entries also parse this key but
+      // ignore it, as they ignore `heldSymbol`.
+      built.preloadedHandle = this._checkedPreloadedId(options.preloaded);
+    }
+    return built;
+  }
+
+  /** Resolve a handle's numeric ID, refusing foreign/disposed objects. */
+  _checkedPreloadedId(handle: PreloadedSchemaHandle): number {
+    const brand = handleBrand.get(handle);
+    if (brand === undefined) throw invalidSchemaHandle('not a SjonHost.preload handle');
+    if (brand.owner !== this) throw invalidSchemaHandle('the handle belongs to a different host');
+    if (brand.id === null) throw invalidSchemaHandle('the handle was disposed');
+    // The brand and the live set are updated together; this is the
+    // defensive half of the same invariant.
+    if (!this._liveHandles.has(handle)) throw invalidSchemaHandle('the handle is not live');
+    return brand.id;
+  }
+
+  /** Release one live handle; idempotent, and refused mid-call. */
+  _disposeHandle(handle: PreloadedSchemaHandle): void {
+    const brand = handleBrand.get(handle);
+    if (brand === undefined) throw invalidSchemaHandle('not a SjonHost.preload handle');
+    if (brand.owner !== this) throw invalidSchemaHandle('the handle belongs to a different host');
+    if (brand.id === null) return;
+    if (this._activeCalls > 0) throw schemaInUse('a schema handle');
+    const id = brand.id;
+    // Retire the JS side first: even if the ABI free were to trap, this
+    // object can never be used to reach a freed ID again.
+    brand.id = null;
+    this._liveHandles.delete(handle);
+    (this.encoder.exports['sjon_schema_free'] as (h: number) => void)(id);
   }
 
   /**
@@ -308,14 +507,25 @@ export class SjonHost {
    * the encoder's one two-buffer marshaller (`_callBytesTwo`, which owns
    * the empty-source reservation + framed read/free). Throws
    * `SjonWasmError` on an `ok=0` frame.
+   *
+   * The active-call counter is incremented around the whole marshalling
+   * body — including `JSON.stringify` and the framed read — and released
+   * in `finally`, so an error path cannot leave it stuck and make a later
+   * `dispose()` throw `SchemaInUse` for a call that is not in flight.
+   * While it is nonzero a handle (or host) dispose is a borrow violation.
    */
   _invokeHostExport(fnName: string, source: string, wasmOptions: object): string {
-    const payload = this.encoder._callBytesTwo(
-      fnName,
-      encoder.encode(source),
-      encoder.encode(JSON.stringify(wasmOptions)),
-    );
-    return decoder.decode(payload);
+    this._activeCalls += 1;
+    try {
+      const payload = this.encoder._callBytesTwo(
+        fnName,
+        encoder.encode(source),
+        encoder.encode(JSON.stringify(wasmOptions)),
+      );
+      return decoder.decode(payload);
+    } finally {
+      this._activeCalls -= 1;
+    }
   }
 }
 

@@ -5,9 +5,9 @@
 // `(code, path, severity)` diagnostic comparison. This module owns all
 // three so the hosts can never drift apart on them; each host still keeps
 // its own `readExpected` / `readQuerySpec` (different parser substrates — the
-// same reason those two stay host-local: web parses through its SJON-subset
-// parser where numbers are `symbol` nodes, ts-parity through its native parser
-// where they are `number` nodes, so a shared reader would need a lossy adapter).
+// same reason those two stay host-local: web parses through `@sjon-lang/read`'s
+// typed `Node` union, ts-parity through its own native parser's node shape, so
+// a shared reader would have to adapt two node vocabularies anyway).
 //
 // The classification DATA — marker filenames, dispatch precedence, and the
 // wasm-host skip families — is single-sourced in `conformance/classifier.json`

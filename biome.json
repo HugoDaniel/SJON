@@ -8,6 +8,7 @@
   "files": {
     "include": [
       "hosts/schema/**",
+      "hosts/read/**",
       "hosts/highlight/**",
       "hosts/web/**",
       "hosts/typescript-parity/**",

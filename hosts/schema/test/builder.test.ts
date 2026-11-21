@@ -54,6 +54,52 @@ test('gt/lt set the exclusive flags', () => {
   });
 });
 
+test('repr and unit rejection ride beside numeric bounds, immutably', () => {
+  const base = s.number();
+  const refined = base.repr('u32').rejectUnits().min(0).int();
+  // Original untouched — every refinement returns a fresh shape.
+  assert.deepEqual(base._def.shape, { kind: 'number' });
+  assert.deepEqual(refined._def.shape, {
+    kind: 'number',
+    bounds: { min: 0, integer: true },
+    repr: 'u32',
+    rejectUnits: true,
+  });
+});
+
+test('repr accepts exactly the five GPU tags and refuses anything else at the call site', () => {
+  for (const tag of ['f32', 'u32', 'i32', 'u16', 'f16'] as const) {
+    assert.deepEqual(s.number().repr(tag)._def.shape, { kind: 'number', repr: tag });
+  }
+  // The tag set is closed at runtime too: a JS caller passing `u8` must not get
+  // as far as serializing a manifest the loader would refuse.
+  assert.throws(
+    () => (s.number().repr as (tag: string) => unknown)('u8'),
+    /u8.*f32, u32, i32, u16, f16/,
+  );
+});
+
+test('every numeric refinement preserves a selected representation', () => {
+  const repr = s.number().repr('f16').rejectUnits();
+  const variants = [
+    repr.min(0),
+    repr.max(1),
+    repr.gt(0),
+    repr.lt(1),
+    repr.int(),
+    repr.multipleOf(2),
+    repr.optional(),
+    repr.describe('half'),
+  ];
+  for (const node of variants) {
+    assert.equal(node._def.shape.kind, 'number');
+    if (node._def.shape.kind !== 'number') continue;
+    assert.equal(node._def.shape.repr, 'f16');
+    assert.equal(node._def.shape.rejectUnits, true);
+  }
+  assert.deepEqual(repr._def.shape, { kind: 'number', repr: 'f16', rejectUnits: true });
+});
+
 test('string refinements + presets', () => {
   assert.deepEqual(s.string().minLen(3).maxLen(8)._def.shape, {
     kind: 'string',
@@ -187,4 +233,43 @@ test('form def collects keys with namespace defaulting to head', () => {
 
   const ns = s.form('profile', { handle: s.slug() }, 'bounds');
   assert.equal(ns._def.ns, 'bounds');
+});
+
+test('form options: closed, no-positional is the unchanged default', () => {
+  // Both the omitted third argument and the legacy string keep the old FormDef:
+  // no openness, no positional slot. The object form must normalize to the same
+  // IR, not a parallel one.
+  const implied = s.form('profile', { handle: s.slug() });
+  assert.equal(implied._def.ns, 'profile');
+  assert.equal(implied._def.open, false);
+  assert.deepEqual(implied._def.positional, { kind: 'none' });
+
+  const legacy = s.form('profile', { handle: s.slug() }, 'bounds');
+  assert.equal(legacy._def.ns, 'bounds');
+  assert.equal(legacy._def.open, false);
+  assert.deepEqual(legacy._def.positional, { kind: 'none' });
+
+  const explicit = s.form('profile', { handle: s.slug() }, { ns: 'bounds', open: false });
+  assert.equal(explicit._def.ns, 'bounds');
+  assert.equal(explicit._def.open, false);
+  assert.deepEqual(explicit._def.positional, { kind: 'none' });
+});
+
+test('form options: ns/open/positional normalize into the existing FormDef IR', () => {
+  const note = s.form('note', { text: s.string() }, { ns: 'studio', open: true });
+  assert.equal(note._def.ns, 'studio');
+  assert.equal(note._def.open, true);
+  assert.deepEqual(note._def.positional, { kind: 'none' });
+
+  const anyLines = s.form('lines', { title: s.string() }, { positional: 'any' });
+  assert.equal(anyLines._def.open, false);
+  assert.deepEqual(anyLines._def.positional, { kind: 'any' });
+
+  const typedLines = s.form('lines', { title: s.string() }, { positional: s.string() });
+  assert.equal(typedLines._def.open, false);
+  assert.equal(typedLines._def.positional.kind, 'typed');
+  assert.deepEqual(
+    typedLines._def.positional.kind === 'typed' ? typedLines._def.positional.element.shape : null,
+    { kind: 'string' },
+  );
 });

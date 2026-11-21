@@ -3,15 +3,17 @@
 //!   conformance test runner (`expected.sjon` parsing — has to stand
 //!   alone of the WASM artifact under test).
 //!
-//! Same surface as the JS embedded parsers in
-//! `hosts/web/createNodeFsResolver.ts` and
-//! `hosts/web/test/conformance.test.ts`. Handles forms, kvpairs (greedy
-//! `:k v`), vectors, double-quoted strings with `\n`/`\r`/`\t` escapes,
-//! bare symbols (numbers fall under this — they're textually compared),
-//! line comments (`;`). No comments inside nested structures (the
-//! project files we walk don't use them).
+//! This native parser is the pre-WASM bootstrap boundary. The JS hosts now
+//! read project files and fixtures through `@sjon-lang/read`, but the Rust
+//! resolver and conformance runner must stand alone of the WASM artifact
+//! under test, and a TypeScript package cannot cross that runtime boundary.
+//! Handles forms, kvpairs (greedy `:k v`), vectors, double-quoted strings
+//! with `\n`/`\r`/`\t` escapes, bare symbols (numbers fall under this —
+//! they're textually compared), line comments (`;`). No comments inside
+//! nested structures (the project files we walk don't use them).
 //!
-//! The contract, mirroring `hosts/web/sjonSubsetParser.ts`:
+//! The contract, inherited from the JS subset parser this file was written
+//! against (now replaced by `@sjon-lang/read`):
 //!
 //!   A successful parse preserves the structure and the values the
 //!   consumer relies on. Recognised syntax this parser cannot interpret

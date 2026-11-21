@@ -102,6 +102,189 @@ CrossRef<"compute-pipeline">`), since TypeScript has no way to say "one
 namespace". `acyclic` and `provider` are rejected on a group, matching the
 loader rather than emitting a manifest it would refuse.
 
+## Extension vocabularies and starter templates
+
+The builder is for *new* vocabulary: a small plugin authored in TypeScript
+beside a host's hand-authored manifest, plus a starter document for one of its
+forms. It is not a way to move a host's core schema into TypeScript, and it is
+not zod interop (see *What this is not* below).
+
+### Form options: `open` and `positional`
+
+`s.form`'s third argument still takes the legacy namespace string, unchanged.
+It also takes an options object; the string spelling normalizes to `{ns}`.
+
+```ts
+// Legacy spelling: same namespace, same manifest bytes as before.
+const Profile = s.form('profile', { handle: s.slug() }, 'bounds');
+
+// Options object: namespace plus an open form.
+const Note = s.form(
+  'note',
+  { text: s.string() },
+  { ns: 'studio', open: true },
+);
+
+// Untyped positional children.
+const AnyLines = s.form(
+  'lines',
+  { title: s.string() },
+  { ns: 'studio', positional: 'any' },
+);
+
+// One typed positional slot: every child is a string.
+const Lines = s.form(
+  'lines',
+  { title: s.string() },
+  { ns: 'studio', positional: s.string() },
+);
+```
+
+`open: true` emits `:open true`. The inferred value gains
+`[key: string]: unknown`, and `.create` / `.toSjon` keep undeclared own fields
+(declared keys are still materialized and overwrite, and `$form` / `$ns` are
+still stamped). A closed form keeps dropping undeclared fields.
+
+`positional: 'any'` emits `:positional any` and types
+`$children?: unknown[]`. A node emits `:positional <kind>` — a builtin token
+such as `:positional string`, or a hoisted value-kind name when the element is
+refined — and types `$children?: Array<Out>`; `.create` materializes each child
+through the element's shape. Omitting `positional` leaves no `$children` member
+in the type or the manifest, and a smuggled `$children` value is ignored.
+
+The slot is exactly `'any'` or one existing node. A union of shapes, a
+positional flag-set, or a slot-local form is not a `FormOptions` spelling.
+
+### Number representation and unit rejection
+
+```ts
+const Bytes = s.number().repr('u32').rejectUnits().min(0).int();
+```
+
+`.repr(tag)` accepts exactly five GPU tags — `'f32' | 'u32' | 'i32' | 'u16' |
+'f16'` (`s.GpuRepr`) — and emits `:repr (repr-shape :type <tag>)`. The value
+type is branded: `s.F32` … `s.F16`, or `s.ReprNumber<tag>` structurally. The
+brand is a phantom key on an ordinary `number`, not a runtime wrapper. Any
+other tag (`'u8'`) throws at the call site, and every existing number
+refinement preserves the selected tag.
+
+`.rejectUnits()` emits `:unit (unit-shape :reject true)` and leaves the static
+type `number`, because rejection is a validation rule rather than a type
+distinction.
+
+`:numeric`, `:unit` and `:repr` are orthogonal siblings and serialize in that
+order. The validator reports `repr_out_of_range` for a value the chosen tag
+rejects and `unit_forbidden` for a unit-suffixed value. The exporter carries
+`x-sjon-gpu-repr` and does not lower the GPU range (see
+[`docs/SCHEMA_EXPORT.md`](../../docs/SCHEMA_EXPORT.md)). Only `:reject true` is
+exposed: `:unit (unit-shape :required …)` and `:allowed […]` stay hand-authored.
+
+### Starter skeletons
+
+`skeleton(heldSymbol?)` emits ordinary SJON source for one document, with every
+declared key in declaration order:
+
+```ts
+const Starter = s.form(
+  'starter',
+  {
+    name: s.string(),
+    count: s.number().default(2),
+    enabled: s.boolean().optional(),
+  },
+  'studio',
+);
+
+Starter.skeleton();
+// (studio/starter :name _ :count 2 :enabled _)
+```
+
+A declared default is deep-cloned and serialized; every other key — required or
+optional, including a nested form or vector without a default — is the held
+symbol. A compound slot is held as one whole value rather than recursively
+expanded. No `$children` array is invented. The method is backend-free: it
+returns source text, not a typed `FormOut`.
+
+The default spelling is `_`; `skeleton('hole')` uses `hole` instead, and an
+invalid spelling throws through `v.sym`'s own guard at the call site.
+
+### The two-manifest recipe
+
+Author a small extension plugin, compose it beside a hand-written host manifest
+with one `\n` between the sources, and validate document-first:
+
+```ts
+import { SjonHost } from '@sjon-lang/web';
+import { s } from '@sjon-lang/schema';
+
+const Note = s.form(
+  'note',
+  { text: s.string(), bytes: s.number().repr('u32').rejectUnits() },
+  { ns: 'studio', open: true },
+);
+const Lines = s.form(
+  'lines',
+  { title: s.string() },
+  { ns: 'studio', positional: s.string() },
+);
+const Extension = s.plugin('studio', { version: '1.0.0', forms: [Note, Lines] });
+
+// The host's own manifest stays hand-authored.
+const hostManifest = `(plugin :name host :version "1.0.0"
+  (form :name scene
+    (key :name title :type string :optional false)))`;
+
+const document = `(host/scene :title "opening")
+(studio/note :text "hello" :author "ada" :bytes 7)
+(studio/lines :title "row" "a" "b")`;
+
+const host = await SjonHost.load('./zig-out/bin/sjon.wasm');
+const result = host.validateDocument(
+  `${hostManifest}\n${Extension.manifest()}\n${document}`,
+  { projectRoot: null, projectFile: null },
+);
+// result.diagnostics carries no `err` entries.
+```
+
+The same composition is the control surface. Remove `Extension.manifest()` and
+both extension roots report `unknown_form`, so a clean composed run cannot pass
+merely because the extension was never loaded. A non-string child under
+`lines` reports `wrong_underlying`; an undeclared key on closed `lines` reports
+`unknown_key`, while the same key on open `note` is accepted; `:bytes 1.5`
+reports `repr_out_of_range` and `:bytes 7px` reports `unit_forbidden`.
+`hosts/web/test/schema-extension.test.ts` pins every one of those outcomes.
+
+Diagnostics come back in the **composed** source: `validateDocument` indexes
+spans over the whole string it was given, with no rebasing, so a document-origin
+diagnostic sits after the manifest prefix. Subtract the prefix's UTF-8 byte
+length to recover a document-relative offset.
+
+To reuse the schema across many documents, preload the same standalone
+manifests as a set instead of prepending them to every document: native
+`Host.preloadSchema` takes them as a set, and the Web wrapper is
+`host.preload([hostManifest, Extension.manifest()])`. A preloaded handle is an
+optimization, not a prerequisite; the composed `validateDocument` call above is
+the supported no-handle path.
+
+### What this is not
+
+- **No zod-library interop.** There is no `z.fromJSONSchema`, no
+  `json-schema-to-zod`, and no zod-shaped runtime value. `s.infer` is
+  TypeScript inference over this builder; "Zod-style" names the fluent
+  ergonomics only.
+- **Core host schemas stay hand-authored.** The builder is for new extension
+  vocabularies and starter templates, not a TypeScript rewrite of a host's
+  manifest.
+- **Held validation is caller-selected.** Heldness is a run option
+  (`heldSymbol`), never a schema or document setting.
+- **A skeleton used without `heldSymbol` is intentionally invalid while holes
+  remain.** The holes are ordinary symbols and report (`wrong_underlying` for
+  the measured `starter` form), which is the control that keeps a held-clean
+  run from meaning validation was weakened. A held run still reports
+  `unknown_key` on a closed form.
+- Within this extension surface, only the knobs documented above exist; the
+  rest of the manifest grammar stays hand-authored vocabulary.
+
 ## Write-back: `wrap`, and which root an edit starts at
 
 The typed edit methods on a node (`Form.setKey` / `removeKey` /

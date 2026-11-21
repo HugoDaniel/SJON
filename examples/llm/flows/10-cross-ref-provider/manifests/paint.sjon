@@ -3,7 +3,7 @@
 ; half (`paint.wasm`) paired beside it by filename.
 ;
 ; It has to be on disk because `(cross-ref-provider …)` names *code*.
-; The other nine flows inline their `(plugin …)` into the document,
+; The other ten flows inline their `(plugin …)` into the document,
 ; which works for every declarative schema; a provider cannot be
 ; inlined, because there is nowhere in an inline manifest to put a
 ; compiled extractor.
@@ -12,6 +12,18 @@
 ; line a name. That is the whole extractor, deliberately boring, so
 ; what this flow teaches is the *route* (a member set computed from a
 ; string in the document) and not colour-list parsing.
+;
+; Two routes, deliberately side by side. `swatch-name` is the provider
+; route: its member set is whatever `swatches` extracts from each
+; `(palette … :colors "…")` string, so a palette reference can only be
+; checked on a host that can run plugin code. `stock-name` is the
+; identity route: its member set is the `:name` of every
+; `(stock :name …)` declaration, and every host checks it with no code
+; at all. The flow's attempts never instantiate a palette, so their
+; transcripts are identical whether or not the verifying host can
+; execute `paint.wasm` — a palette source on a host without
+; executable-plugin support is reported `cross_ref_provider_unavailable`
+; with its references left unchecked (task.md's last paragraph).
 (plugin :name paint :version "1.0.0"
   (cross-ref-provider :name swatches
     :description "One swatch name per non-empty line of a palette's `:colors`."
@@ -31,7 +43,21 @@
     :underlying symbol
     :cross-ref (cross-ref :target palette :provider swatches :source-key colors))
 
+  ; The identity-route twin: same underlying symbol, but the member set
+  ; is the `:name` of each `(stock …)` declaration. No extractor, no
+  ; source string, and the same answer on every host — the route the
+  ; flow's documents can actually finish on.
+  (form :name stock
+    :description "A swatch of the fixed stock vocabulary, declared by name."
+    (key :name name :type symbol :optional false))
+
+  (value-kind :name stock-name
+    :description "A stock swatch, declared by a `(stock :name …)` form."
+    :underlying symbol
+    :cross-ref (cross-ref :target stock))
+
   (form :name fill
-    :description "Paints a region with one swatch."
+    :description "Paints a region with one swatch: `:swatch` takes a palette-extracted name, `:stock` a declared one."
     (key :name region :type symbol :optional false)
-    (key :name swatch :type swatch-name :optional false)))
+    (key :name swatch :type swatch-name :optional true)
+    (key :name stock :type stock-name :optional true)))

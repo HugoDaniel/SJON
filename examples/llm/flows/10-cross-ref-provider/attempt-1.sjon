@@ -1,8 +1,7 @@
 (use-plugin "paint")
 
-(palette :name warm :colors "ember
-dusk
-clay")
+(stock :name ember)
+(stock :name clay)
 
-(fill :region sky :swatch dusk)
-(fill :region ground :swatch dust)
+(fill :region sky :swatch ember)
+(fill :region ground :stock clay)

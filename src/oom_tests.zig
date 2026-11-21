@@ -1386,6 +1386,58 @@ test "OOM: Host.validateDocument converges over a document with a top-level expr
     return error.OomLoopDidNotConverge;
 }
 
+/// A cross-ref document with one scoped identity — the identity-
+/// projection leg of `Host.validateDocument`. The phrase inside the
+/// named piece forces the projection through its paces: node table,
+/// scope-chain resolution, string deep-copies into the host arena, and
+/// the address copy. Every induced allocation failure must unwind to
+/// `OutOfMemory` with nothing retained from the dying validator index.
+const host_identity_doc: [:0]const u8 =
+    \\(plugin :name music :version "1.0.0"
+    \\  (value-kind :name phrase-name :underlying symbol
+    \\    :cross-ref (cross-ref :target phrase :scope piece))
+    \\  (value-kind :name piece-ref :underlying symbol
+    \\    :cross-ref (cross-ref :target piece :name-key title))
+    \\  (form :name phrase (key :name name :type symbol :optional false))
+    \\  (form :name piece :open true
+    \\    (key :name title :type symbol :optional true)))
+    \\(piece :title p (phrase :name q))
+    \\
+;
+
+test "OOM: Host.validateDocument converges over a scoped identity document" {
+    var fail_index: usize = 0;
+    while (fail_index < MAX_FAIL_INDEX) : (fail_index += 1) {
+        var failing = makeFailing(fail_index);
+        const a = failing.allocator();
+
+        const result = sjon.Host.validateDocument(a, host_identity_doc, .{});
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            var hr = try result;
+            defer hr.deinit();
+            // On the successful allocation the projection produced the
+            // scoped rows — one parent at document scope, one child
+            // under its prefix — with the parent's address live before
+            // `deinit`.
+            try testing.expect(hr.identities.len >= 1);
+            var saw_parent = false;
+            for (hr.identities) |row| {
+                if (std.mem.eql(u8, row.registry, "music/piece") and
+                    std.mem.eql(u8, row.symbol, "p"))
+                {
+                    saw_parent = true;
+                    try testing.expect(row.address != null);
+                }
+            }
+            try testing.expect(saw_parent);
+            return;
+        }
+    }
+    return error.OomLoopDidNotConverge;
+}
+
 // ---------------------------------------------------------------------------
 // 26. PatternQuery.queryTree / queryBinary — compile a parsed (or encoded)
 //     pattern and query a fixed window. The tree / binary buffer are pre-built
@@ -2362,6 +2414,53 @@ test "OOM: both walkers converge building the set-level count messages" {
             }
             try testing.expectEqual(@as(usize, 2), n);
             return;
+        }
+    }
+    return error.OomLoopDidNotConverge;
+}
+
+// ---------------------------------------------------------------------------
+// 36. wasm_schema_handles.Table.put — the P3 handle table's insert under
+//     OOM. `put` takes ownership of the caller's `*Host.PreloadedSchema`
+//     only on success, so every induced failure must return
+//     `error.OutOfMemory` with ownership still on the caller's side (the
+//     test itself deinits + destroys the schema — the leak checker
+//     underneath would flag a `put` that had also kept or freed the
+//     pointer), leave no map entry, and burn no ID. Convergence ends on
+//     a clean put whose live entry the deferred `Table.deinit` releases.
+// ---------------------------------------------------------------------------
+
+test "OOM: wasm_schema_handles.Table.put converges leaving ownership with the caller" {
+    const Table = @import("wasm_schema_handles.zig").Table;
+
+    var fail_index: usize = 0;
+    while (fail_index < MAX_FAIL_INDEX) : (fail_index += 1) {
+        var failing = makeFailing(fail_index);
+        const a = failing.allocator();
+
+        var table: Table = .{};
+        defer table.deinit(testing.allocator);
+
+        // Real owned value, built on the leak-checked allocator so a
+        // `put` that silently took ownership on failure would surface as
+        // a double free at the hand cleanup below.
+        const schema = try testing.allocator.create(sjon.Host.PreloadedSchema);
+        schema.* = try sjon.Host.preloadSchema(testing.allocator, &.{});
+
+        const result = table.put(a, schema);
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+            // No entry, no burned ID — ownership never left the caller.
+            try testing.expectEqual(@as(usize, 0), table.entries.count());
+            try testing.expectEqual(@as(u32, 1), table.next);
+            schema.deinit();
+            testing.allocator.destroy(schema);
+        } else {
+            const id = try result;
+            try testing.expect(id != 0);
+            try testing.expectEqual(@as(usize, 1), table.entries.count());
+            try testing.expect((try table.get(id)) == schema);
+            return; // deferred `table.deinit` frees the live entry
         }
     }
     return error.OomLoopDidNotConverge;

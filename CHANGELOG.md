@@ -6,6 +6,122 @@ enum — are versioned and corpus-gated; nothing changes them silently.
 
 ## Unreleased
 
+## 1.8.0 — 2026-11-21
+
+A consumer-API release for the hosts and their packages. Binary wire stays v5,
+the diagnostic-code enum is unchanged, and the conformance corpus stays at 393
+cases. The new surface is additive: no existing host-result field, edit action,
+or manifest key changed meaning.
+
+### Added
+
+- **`@sjon-lang/read` — a synchronous, dependency-free TypeScript reader.** The
+  fourth publishable package parses SJON into source-order trees with half-open
+  UTF-8 byte spans and engine-order diagnostics, in pure TypeScript with no WASM
+  and no runtime dependencies. `read` throws `ReadError` when an `err`-severity
+  diagnostic fires; `readResult` is total and returns the recovered forest;
+  `fields` gives the greedy key view a host would otherwise re-implement. Its
+  suite includes a test-only oracle that compares structure, spans, diagnostics,
+  and per-root values against the built `sjon.wasm`. `@sjon-lang/web` now parses
+  through this package instead of carrying its own subset parser. Publish order
+  is `schema → read → web → highlight`; `@sjon-lang/web` depends on both
+  `schema` and `read`.
+
+- **Declared identities survive an edit.** `HostResult.identities` carries one
+  row per declared cross-ref identity — `(registry, scope, symbol)` — on every
+  whole-document validation, resolved to the `{ root, path }` address an edit
+  action already takes. Rows are present on every whole-document result (empty
+  when nothing qualifies) and sorted deterministically; a name the pass cannot
+  resolve to exactly one site is `ambiguous` with `address: null` rather than
+  silently following the first-wins diagnostic lookup. Only a direct,
+  author-written, symbol-valued `:name-key` qualifies; provider-extracted,
+  defaulted and held-spelling names are anonymous and get no row. A fragment
+  pass with `defer_cross_refs` records nothing, and only source-tree
+  registrations get addresses. This is an additive whole-document result field,
+  not a wire change: the Web wrapper types and returns it, the Rust wrapper's
+  typed mirror is specified and deferred, and `@sjon-lang/read` stays
+  schema-free.
+
+- **Preloaded schema handles.** `SjonHost.preload(manifestSources)` compiles one
+  schema once and returns an independent handle that `validateDocument` accepts
+  as `preloaded`; the kitchen-sink artifact exposes the same capability as
+  `sjon_preload_schema` / `sjon_schema_free` plus a `preloadedHandle` option.
+  The effective schema is core, then the preloaded sources, then the document's
+  inline manifests, and no span is rebased. Manifest content problems are a
+  successful preload carrying `hasErrors` and diagnostics, and that partial
+  handle stays live and usable; a malformed handle value is `InvalidOptions`,
+  while a stale, unknown, or foreign handle is `InvalidSchemaHandle` at use.
+  Measured against PNGine's 195 KB manifest, a composed validate ran 4.98 ms
+  median and one preloaded handle 0.20 ms over 60 calls after 10 warmups.
+
+- **`SjonHost.validateAgainst` and `sjon validate --against`.**
+  `validateAgainst(manifestSource, documentSource, options?)` composes the
+  manifest and the document and runs the ordinary host pipeline, for callers
+  holding manifest text rather than a project file. Its option type is narrowed
+  to `failurePolicy` and `heldSymbol`: no project discovery runs, and it does
+  not take the `preloaded` handle that `validateDocument` accepts.
+  The CLI verb `sjon validate --against MANIFEST DOCUMENT` uses the same
+  composition (manifest, one newline, then document): no project discovery
+  runs, `(use-plugin …)` refs resolve only if the composed text declares them,
+  and a document diagnostic's span shifts by the manifest's byte length + 1.
+  The manifest cannot be `-`, and the flag cannot be combined with
+  `--project-root` or `--no-project`.
+
+- **`@sjon-lang/schema` authors extension vocabularies.** `s.form` now takes an
+  options object as well as the legacy namespace string: `open: true` emits
+  `:open true` and keeps undeclared own fields, while `positional: 'any'` or one
+  node emits the matching `:positional` token and types `$children`.
+  `s.number().repr(tag)` emits `:repr (repr-shape :type <tag>)` for exactly
+  `f32`, `u32`, `i32`, `u16` and `f16` and brands the value, and
+  `.rejectUnits()` emits `:unit (unit-shape :reject true)`. `FormNode.skeleton()`
+  emits a starter document with every declared default serialized and every
+  other key held as the `_` symbol; it validates when the same `heldSymbol` is
+  passed as the run option, and is intentionally invalid while holes remain
+  otherwise. The exporter carries
+  `x-sjon-gpu-repr`; the validator reports `repr_out_of_range` and
+  `unit_forbidden`.
+
+### Fixed
+
+- **`(mod -1 1e16)` no longer returns 0, and `(mod -5 +inf)` is no longer
+  NaN.** `applyMod` is now built on exact `@rem` plus one corrective add
+  instead of `@mod`, whose rounding is toolchain-dependent and which should
+  not silently diverge in the expression layer (same class as the
+  cross-platform trig pins). The result is the correctly rounded floored
+  remainder on every target: the exact floored value for `(mod -1 1e16)` is
+  `1e16 - 1`, which rounds to `1e16`; an infinite divisor returns `+inf` for a
+  negative numerator and `0` for a zero numerator. Exact multiples, zero
+  numerators and NaN inputs are unchanged.
+
+- **The language server no longer reads freed declaration contexts during
+  teardown.** `Registry.deinit` freed each declaration context while its
+  pointer stayed in `self.contexts.items`, then read `.kind` through those
+  freed pointers in a second pass. The read-after-free existed at every
+  struct size but was masked by `DebugAllocator` keeping freed bucket bytes
+  mapped; growing `Validator.CrossRefIndex` by ~64 bytes
+  moved sibling allocations into different size classes, a released page
+  unmapped, and ten declaration-context tests segfaulted. Teardown now
+  swap-removes each declaration context from the list before destroying it
+  and releases the survivors in one pass. A regression test drives an open,
+  a declaration rebuild, and teardown on a page-sized `DebugAllocator` whose
+  Context buckets hold one slot per page, so any reread of a released
+  context faults deterministically. Ask 33 is corrected: the replace/rebuild
+  lifecycle was innocent.
+
+- **The `10-cross-ref-provider` teaching flow converges again.** The flow is
+  re-authored into a two-route lesson: `:swatch` on the provider route, where
+  the legal values are what the provider extracts rather than any `:name`,
+  and `:stock` on the identity route. `not_cross_ref` now fires on the
+  provider-route miss, and `attempt-1.diagnostics.json` was regenerated
+  because the `.sjon` sources changed.
+
+- **`hosts/typescript-parity` agrees with the engine on four measured parser
+  divergences.** It now rejects a comma as `invalid token`, treats `#| … |#`
+  block comments as non-nested, reports the in-progress path slot (`(a 0x 1)`
+  yields `["a","0"]`), and splits a qualified head only at the first interior
+  `/`. No corpus fixture encoded the old behaviour; the divergence was
+  latent.
+
 ## 1.7.1 — 2026-11-03
 
 A language-server polish release. Nothing on the language side changed:

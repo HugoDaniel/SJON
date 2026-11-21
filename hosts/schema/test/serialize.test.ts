@@ -52,6 +52,74 @@ test('numeric value-kinds carry their numeric-bounds', () => {
   );
 });
 
+test('numeric, unit and repr fragments are siblings in stable order', () => {
+  const m = s
+    .form('gpu', {
+      texel: s.kind('texel', s.number().repr('u32').rejectUnits().min(0).int()),
+    })
+    .manifest();
+  assert.match(
+    m,
+    /\(value-kind :name texel :underlying number :numeric \(numeric-bounds :min 0 :integer true\) :unit \(unit-shape :reject true\) :repr \(repr-shape :type u32\)\)/,
+  );
+  const numeric = m.indexOf(':numeric');
+  const unit = m.indexOf(':unit ');
+  const repr = m.indexOf(':repr ');
+  assert.ok(numeric !== -1 && unit !== -1 && repr !== -1, m);
+  assert.ok(numeric < unit && unit < repr, `expected numeric < unit < repr in:\n${m}`);
+  // Orthogonal siblings — never folded into the numeric-bounds form.
+  assert.doesNotMatch(m, /\(numeric-bounds [^)]*:unit/);
+  assert.doesNotMatch(m, /\(numeric-bounds [^)]*:repr/);
+});
+
+test('bare numbers stay builtins; repr-only and reject-only numbers hoist', () => {
+  const m = s
+    .form('gpu', {
+      bare: s.number(),
+      texel: s.number().repr('f16'),
+      count: s.number().rejectUnits(),
+    })
+    .manifest();
+  assert.match(m, /\(key :name bare :type number :optional false\)/);
+  assert.match(
+    m,
+    /\(value-kind :name num-repr-f16 :underlying number :repr \(repr-shape :type f16\)\)/,
+  );
+  assert.match(m, /\(key :name texel :type num-repr-f16 :optional false\)/);
+  assert.match(
+    m,
+    /\(value-kind :name num-unitless :underlying number :unit \(unit-shape :reject true\)\)/,
+  );
+  assert.match(m, /\(key :name count :type num-unitless :optional false\)/);
+});
+
+test('generated names distinguish plain, unitless, and repr-tagged shapes', () => {
+  const m = s
+    .form('gpu', {
+      a: s.number().min(0),
+      b: s.number().min(0).rejectUnits(),
+      c: s.number().min(0).repr('u32'),
+      d: s.number().min(0).rejectUnits().repr('u32'),
+    })
+    .manifest();
+  assert.match(m, /\(value-kind :name num-min0 :underlying number :numeric/);
+  assert.match(m, /\(value-kind :name num-min0-unitless :underlying number :numeric/);
+  assert.match(m, /\(value-kind :name num-min0-repr-u32 :underlying number :numeric/);
+  assert.match(m, /\(value-kind :name num-min0-unitless-repr-u32 :underlying number :numeric/);
+});
+
+test('equal repr/unit shapes dedupe to one value-kind', () => {
+  const m = s
+    .form('gpu', {
+      a: s.number().repr('u32').rejectUnits(),
+      b: s.number().rejectUnits().repr('u32'),
+    })
+    .manifest();
+  const occurrences = m.match(/\(value-kind :name num-unitless-repr-u32 /g) ?? [];
+  assert.equal(occurrences.length, 1, m);
+  assert.doesNotMatch(m, /value-kind :name num-unitless /);
+});
+
 test('string value-kinds carry format / pattern bounds', () => {
   const m = boundsForm().manifest();
   assert.match(
@@ -192,4 +260,33 @@ test('multi-form plugin emits each form + shared kinds once', () => {
   assert.match(m, /\(form :name node/);
   assert.match(m, /\(form :name edge/);
   assert.match(m, /\(value-kind :name node-ref/);
+});
+
+test('closed/default forms emit neither :open nor :positional', () => {
+  const m = s.form('closed', { title: s.string() }).manifest();
+  assert.doesNotMatch(m, /:open/);
+  assert.doesNotMatch(m, /:positional/);
+});
+
+test('an open form emits :open true only when set', () => {
+  const open = s.form('note', { text: s.string() }, { ns: 'studio', open: true }).manifest();
+  assert.match(open, /\(form :name note :open true\n/);
+  const closed = s.form('note', { text: s.string() }, { ns: 'studio', open: false }).manifest();
+  assert.doesNotMatch(closed, /:open/);
+});
+
+test('positional forms emit :positional any / :positional <kind>', () => {
+  const anyLines = s.form('lines', { title: s.string() }, { positional: 'any' }).manifest();
+  assert.match(anyLines, /\(form :name lines :positional any\n/);
+
+  const typedLines = s.form('lines', { title: s.string() }, { positional: s.string() }).manifest();
+  assert.match(typedLines, /\(form :name lines :positional string\n/);
+
+  // A refined positional element hoists like any other refined leaf, so the
+  // positional token is the generated value-kind name.
+  const counted = s
+    .form('lines', { title: s.string() }, { positional: s.number().min(1) })
+    .manifest();
+  assert.match(counted, /\(value-kind :name num-min1 :underlying number/);
+  assert.match(counted, /\(form :name lines :positional num-min1\n/);
 });

@@ -11,17 +11,17 @@ This is the second WASM-backed host wrapper, after the JS host in
 ## Install
 
 ```sh
-cargo add sjon-host@1.7.1
+cargo add sjon-host@1.8.0
 ```
 
 Requires Rust 1.92 or newer. The crate ships Rust sources and does not bundle
 `sjon.wasm`. Download the matching artifact from the
-[SJON 1.7.1 release](https://github.com/HugoDaniel/SJON/releases/tag/v1.7.1),
+[SJON 1.8.0 release](https://github.com/HugoDaniel/SJON/releases/tag/v1.8.0),
 or build the matching source with Zig 0.16 using `zig build wasm`.
 Pass its path to `SjonHost::load(Path::new("sjon.wasm"), None)`; the
 `Path` type is `std::path::Path`. No Zig toolchain is needed when using a
 prebuilt artifact. See the
-[complete Rust quickstart](https://github.com/HugoDaniel/SJON/blob/v1.7.1/examples/quickstart-rust.rs).
+[complete Rust quickstart](https://github.com/HugoDaniel/SJON/blob/v1.8.0/examples/quickstart-rust.rs).
 
 The registry package excludes repository integration tests, conformance data,
 and fuzz targets. Its build script skips conformance test generation when the
@@ -95,7 +95,7 @@ references / data → load each manifest → resolve each reference →
 schema-aggregate → validate the data forest. The diagnostic stream is
 byte-identical (`(code, path)`) to the Zig CLI, the typescript-parity
 reference on overlapping supported fixtures, and the web host on the
-WASM subset. See the [capability matrix](https://github.com/HugoDaniel/SJON/blob/v1.7.1/docs/INTEGRATION.md#capability-matrix)
+WASM subset. See the [capability matrix](https://github.com/HugoDaniel/SJON/blob/v1.8.0/docs/INTEGRATION.md#capability-matrix)
 and `conformance/classifier.json` for exclusions.
 
 #### With the bundled `FilesystemResolver`
@@ -221,10 +221,74 @@ pre-flight failures collapse to `plugin_abi_mismatch` /
 `plugin_export_missing` / `plugin_import_forbidden` at the
 `(use-plugin …)` span.
 
+### Preloaded schema handles — specified, not yet implemented
+
+The kitchen-sink ABI ships a two-phase schema preload. `sjon_preload_schema`
+takes one UTF-8 JSON array of standalone `(plugin …)` manifest source
+strings and returns a framed report carrying a nonzero, never-reused,
+instance-scoped `u32` handle;
+`sjon_host_validate_document` and `sjon_host_eval_expr` accept
+`preloadedHandle` for one synchronous borrow; `sjon_schema_free` releases it
+and is idempotent. Manifest content problems are a successful report with
+`hasErrors: true` and a usable partial handle; malformed JSON, handle
+exhaustion, and OOM are ABI errors; zero, negative, and non-integral option
+values are `InvalidOptions` at parse, a stale or unknown positive ID frames
+`InvalidSchemaHandle` at use, while a foreign ID that collides with a live
+local ID is indistinguishable to the raw ABI and only the wrapper's
+per-instance owner token can reject it. Preloaded plugins are
+additive and no span is rebased — preload diagnostics stay
+manifest-source-local while document diagnostics index the document alone.
+A second preload is an independent handle, never a replacement or a stack,
+and there is no ambient schema. The domain is declarative only: an
+`:impl "wasm:…"` plugin is not instantiated.
+
+**This crate does not bind that surface yet.** There is no `SchemaHandle`,
+`PreloadedSchema`, `SjonHost::preload_schema`, `SjonHost::free_schema`, or
+`HostOptions::preloaded` here, and `hosts/rust` must not be described as
+mirroring the Web host's handle API until they exist. The reason is the
+toolchain, not a design choice: `cargo`/`rustc` were absent in every
+environment this work was developed in, so no Rust code was written or
+tested, and an untested binding would not be parity. The eventual shape is
+fixed by the same contract as Web: an opaque handle carrying a per-host
+owner token plus the live-ID set, explicit `free_schema`, and reclamation of
+any remaining instance memory when the host is dropped (a handle does not
+implement `Drop` because it does not own the wasmtime `Store`). No Rust
+Binary IR or diagnostic-codec change, and no conformance-corpus obligation,
+is owed by this surface.
+
+### Identity rows — specified, not yet implemented
+
+The kitchen-sink host result carries one additive `identities` array: one row
+per declared, author-written cross-ref identity, sorted by registry, scope
+prefix, then symbol, and always present (empty when none qualify). A row is
+`{ registry, scope: [{ registry, symbol }…], symbol, status, address }`; its
+key is the first three fields and nothing else. `status` is the snake-case tag
+`resolved` or `ambiguous`; a resolved row carries `address: { root, path }`
+using the same root/path an edit action takes (string path steps name keyword
+values, unsigned numbers name positional or vector elements), while an
+ambiguous row's address is `null`. The key does not contain a root, an AST
+index, or a byte offset, so a name keeps its key when a sibling or the root
+moves; the address is positional and must be refreshed by revalidating after
+every edit.
+
+**This crate does not bind that surface yet.** There is no `IdentityRow`,
+`IdentityScope`, `IdentityAddress`, `IdentityStatus`, or
+`HostResult.identities` here, and `hosts/rust` must not be described as
+mirroring the Web host's identity API until they exist. The reason is the
+toolchain, not a design choice: `cargo`/`rustc` were absent in every
+environment this work was developed in, so no Rust code was written or tested,
+and an untested binding would not be parity. The eventual shape is fixed by the
+same contract as Web: a serde-decoded `IdentityScope`, `IdentityAddress`, and
+`IdentityRow`, snake-case `resolved`/`ambiguous`, an `Option<IdentityAddress>`
+that is `None` exactly for an ambiguous row, and `#[serde(default)]
+identities: Vec<IdentityRow>` on the result. No Rust Binary IR or
+diagnostic-codec change, and no conformance-corpus obligation, is owed by this
+surface.
+
 ### Effective config: reading materialized defaults
 
 The same worked example as the web host's
-[README](https://github.com/HugoDaniel/SJON/blob/v1.7.1/hosts/web/README.md) — validate a document that omits defaulted
+[README](https://github.com/HugoDaniel/SJON/blob/v1.8.0/hosts/web/README.md) — validate a document that omits defaulted
 keys, then read the side-table to render the effective config without
 writing into the user's file:
 
@@ -294,7 +358,7 @@ cargo publish --manifest-path hosts/rust/Cargo.toml
 ```
 
 Use your crates.io API token at the `cargo login` prompt. The publication
-is `sjon-host` version 1.7.1; Rust code imports it as `sjon_host`.
+is `sjon-host` version 1.8.0; Rust code imports it as `sjon_host`.
 The dry run builds the extracted package without the repository corpus.
 Run the repository's `zig build verify` separately to retain full host coverage.
 

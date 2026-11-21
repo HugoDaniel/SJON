@@ -45,6 +45,26 @@ export interface ValidateOutcome {
 export interface ValidateBackend {
   /** Validate a full document (manifest text + data) and return diagnostics. */
   validate(source: string): ValidateOutcome;
+  /**
+   * Validate `source` against `manifest`, letting the backend reuse a
+   * compiled form of the manifest. Optional: a backend without it exposes
+   * only {@link validate}, and the builder composes the historical
+   * `manifest + "\n\n" + source` document on its behalf.
+   *
+   * Deliberately not named `validateAgainst`: P1's public
+   * `SjonHost.validateAgainst` always means one-LF composition over
+   * composed-source spans, while this capability may validate `source`
+   * alone under a retained preloaded handle (document-local spans) or
+   * fall back to the builder's two-LF document.
+   */
+  validateWithManifest?(manifest: string, source: string): ValidateOutcome;
+  /**
+   * Release anything retained across calls (the WASM backend's cached
+   * preloaded handles). Optional: a backend with no retained state — the
+   * native TypeScript validator — omits it. Backends that implement it
+   * must be safe to dispose more than once.
+   */
+  dispose?(): void;
   /** Project SJON text to its canonical JSON shape (`{$form,$ns,…}`). WASM-only. */
   toJson?(source: string): unknown;
   /** Render a JS value as SJON text (inverse of `toJson`). WASM-only (`sjon_from_json`). */
@@ -205,6 +225,27 @@ function errSeverity(diagnostics: readonly BackendDiagnostic[]): boolean {
 }
 
 /**
+ * Validate `source` against `manifest` without prescribing how the backend
+ * gets there.
+ *
+ * A backend with {@link ValidateBackend.validateWithManifest} owns the
+ * composition decision: the WASM backend borrows a clean preloaded handle
+ * and validates the document alone, keeping diagnostic spans document-local;
+ * after a manifest it cannot preload cleanly it composes the same document as
+ * the fallback below. A backend without the capability gets that fallback
+ * document byte for byte — `manifest + "\n\n" + source`, two LFs, never P1's
+ * one-LF `SjonHost.validateAgainst` spelling.
+ */
+export function runManifestValidation(
+  manifest: string,
+  source: string,
+  backend: ValidateBackend,
+): ValidateOutcome {
+  if (backend.validateWithManifest) return backend.validateWithManifest(manifest, source);
+  return backend.validate(`${manifest}\n\n${source}`);
+}
+
+/**
  * Stamp `$ns`/`$form` onto a `toJson` projection. The canonical JSON only
  * carries `$ns` when the source form was namespace-qualified
  * (`(ns/head …)`); a bare `(head …)` validates fine but projects without
@@ -237,8 +278,7 @@ export function runParse<T>(
   head: string,
   backend: ValidateBackend,
 ): SafeParseResult<T> {
-  const document = `${manifest}\n\n${source}`;
-  const outcome = backend.validate(document);
+  const outcome = runManifestValidation(manifest, source, backend);
   if (errSeverity(outcome.diagnostics)) {
     return { success: false, error: new SjonValidationError(outcome.diagnostics) };
   }
@@ -265,8 +305,7 @@ export function runParseValue<T>(
     );
   }
   const source = backend.fromValue(value);
-  const document = `${manifest}\n\n${source}`;
-  const outcome = backend.validate(document);
+  const outcome = runManifestValidation(manifest, source, backend);
   if (errSeverity(outcome.diagnostics)) {
     return { success: false, error: new SjonValidationError(outcome.diagnostics) };
   }

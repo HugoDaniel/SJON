@@ -96,6 +96,135 @@ test('toCanonicalSjon throws on a backend without fromValue', () => {
   );
 });
 
+// --- Open forms and positional children ------------------------------------
+
+const OpenNote = s.form('note', { text: s.string() }, { ns: 'studio', open: true });
+const ClosedNote = s.form('note', { text: s.string() }, { ns: 'studio' });
+const Item = s.form('item', { id: s.number(), done: s.boolean().default(false) }, 'kit');
+const ItemList = s.form(
+  'item-list',
+  { title: s.string() },
+  { ns: 'kit', positional: s.formOf(Item) },
+);
+const AnyList = s.form('any-list', { title: s.string() }, { ns: 'kit', positional: 'any' });
+const Plain = s.form('plain', { title: s.string() }, 'kit');
+const Lines = s.form('lines', { title: s.string() }, { ns: 'studio', positional: s.string() });
+const AnyLines = s.form('any-lines', { title: s.string() }, { ns: 'studio', positional: 'any' });
+
+type OpenNoteInput = Parameters<typeof OpenNote.create>[0];
+type ClosedNoteInput = Parameters<typeof ClosedNote.create>[0];
+type PlainInput = Parameters<typeof Plain.create>[0];
+
+test('open create copies undeclared values, stamps tags, and materializes declared keys', () => {
+  const note = OpenNote.create({ text: 'hi', author: 'ada' });
+  assert.deepEqual(note, { $form: 'note', $ns: 'studio', text: 'hi', author: 'ada' });
+  assert.equal(
+    OpenNote.toSjon({ text: 'hi', author: 'ada' }),
+    '(studio/note :text "hi" :author "ada")',
+  );
+
+  // Structural keys are never copied: the schema's tags are authoritative and
+  // a smuggled `$children` is not a positional child of this form.
+  const sneaky = {
+    text: 'hi',
+    $form: 'evil',
+    $ns: 'evil',
+    $children: ['sneak'],
+    author: 'ada',
+  } as unknown as OpenNoteInput;
+  assert.deepEqual(OpenNote.create(sneaky), {
+    $form: 'note',
+    $ns: 'studio',
+    text: 'hi',
+    author: 'ada',
+  });
+
+  // A declared nested form still goes through `materialize` on the open path.
+  const OpenHolder = s.form('holder', { item: s.formOf(Item) }, { ns: 'kit', open: true });
+  const held = OpenHolder.create({
+    item: { $form: 'item', $ns: 'kit', id: 1 },
+    extra: true,
+  } as unknown as Parameters<typeof OpenHolder.create>[0]);
+  assert.deepEqual(held.item, { $form: 'item', $ns: 'kit', id: 1, done: false });
+  assert.equal((held as Record<string, unknown>)['extra'], true);
+});
+
+test('closed create keeps dropping undeclared values', () => {
+  const closed = ClosedNote.create({ text: 'hi', author: 'ada' } as unknown as ClosedNoteInput);
+  assert.deepEqual(closed, { $form: 'note', $ns: 'studio', text: 'hi' });
+  assert.equal('author' in closed, false);
+});
+
+test('typed positional create maps $children through materialize', () => {
+  const list = ItemList.create({
+    title: 'list',
+    $children: [{ $form: 'item', $ns: 'kit', id: 1 }],
+  });
+  assert.deepEqual(list.$children, [{ $form: 'item', $ns: 'kit', id: 1, done: false }]);
+  assert.equal(
+    ItemList.toSjon({
+      title: 'list',
+      $children: [{ $form: 'item', $ns: 'kit', id: 1 }],
+    }),
+    '(kit/item-list :title "list" (kit/item :id 1 :done false))',
+  );
+});
+
+test('any positional create leaves $children untouched', () => {
+  const children = [1, 'two', { $sym: 'three' }];
+  const list = AnyList.create({ title: 'plain', $children: children });
+  assert.equal(
+    list.$children,
+    children,
+    'any-positional children are copied by reference, not mapped',
+  );
+  assert.equal(
+    AnyList.toSjon({ title: 'plain', $children: [1, 'two'] }),
+    '(kit/any-list :title "plain" 1 "two")',
+  );
+});
+
+test('a none-positional form ignores a smuggled $children value', () => {
+  const plain = Plain.create({ title: 'x', $children: ['sneak'] } as unknown as PlainInput);
+  assert.deepEqual(plain, { $form: 'plain', $ns: 'kit', title: 'x' });
+  assert.equal('$children' in plain, false);
+});
+
+// --- Open / positional compile-time probes ---------------------------------
+
+function _extensionProbes(): void {
+  // Open: arbitrary keys are accepted on construction and exposed as unknown.
+  const open = OpenNote.create({ text: 'hi', author: 'ada' });
+  const author: unknown = open['author'];
+  void author;
+
+  // Typed positional: `$children` is present and is exactly string[].
+  const typed = Lines.create({ title: 'row', $children: ['a', 'b'] });
+  const children: string[] | undefined = typed.$children;
+  void children;
+  // @ts-expect-error typed positional children are strings, not numbers
+  Lines.create({ title: 'row', $children: [1] });
+  // @ts-expect-error a typed positional's output children are strings
+  const wrongChildren: number[] | undefined = typed.$children;
+  void wrongChildren;
+
+  // Any positional: `$children` is unknown[].
+  const any = AnyLines.create({ title: 'row', $children: [1, 'a'] });
+  const anyChildren: unknown[] | undefined = any.$children;
+  void anyChildren;
+
+  // Closed: no index signature, no `$children` capability.
+  // @ts-expect-error closed forms reject undeclared keys (excess property check)
+  ClosedNote.create({ text: 'hi', author: 'ada' });
+  // @ts-expect-error a no-positional form has no `$children`
+  ClosedNote.create({ text: 'hi', $children: ['a'] });
+  // @ts-expect-error closed forms expose no arbitrary keys
+  ClosedNote.create({ text: 'hi' })['author'];
+  // @ts-expect-error a no-positional output has no `$children`
+  Plain.create({ title: 'x' }).$children;
+}
+void _extensionProbes;
+
 // --- Compile-time probes ----------------------------------------------------
 
 function _probes(): void {

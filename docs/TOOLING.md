@@ -667,6 +667,76 @@ Both are wrapped on `@sjon-lang/web`'s `SjonEncoder` (`nodeTable`,
 document past ASCII counts differently in UTF-16, so convert at your
 editor's boundary, not before.
 
+## Holding a schema across calls
+
+A host that validates many documents against one manifest should not
+reparse that manifest for each one. The kitchen-sink `sjon.wasm` makes the
+native two-phase preload available over its ABI, so a large, fixed schema
+is compiled once and borrowed by each validate/eval call:
+
+```js
+// 1. Preload: one UTF-8 JSON array of standalone `(plugin …)` sources.
+const sources = new TextEncoder().encode(JSON.stringify([manifestSource]));
+// sjon_preload_schema(src_ptr, src_len) → the ordinary framed report,
+// freed with sjon_free(ptr, 8 + len):
+// {"handle":3,"hasErrors":false,"diagnostics":[],"sourceDiagnostics":[[]],
+//  "aggregateDiagnostics":[],
+//  "loadedPlugins":[{"name":"pngine","version":null,"formCount":75}]}
+
+// 2. Borrow it for one synchronous call: options JSON on
+//    sjon_host_validate_document / sjon_host_eval_expr.
+// {"projectRoot":null,"projectFile":null,"hasResolver":false,
+//  "preloadedHandle":3}
+
+// 3. Release it when the instance is done. Total and idempotent.
+// sjon_schema_free(handle)
+```
+
+The exact ownership rules, all enforced by the ABI and mirrored by the
+Web wrapper:
+
+- **Instance-scoped, nonzero, never reused.** `handle` is a `u32` minted
+  by this WASM instance. Freed IDs are not reissued, so a stale number
+  cannot alias a newer schema. The raw ABI carries no owner token — a
+  foreign ID that happens to collide with a live local ID is
+  indistinguishable there, so a wrapper must brand handles per instance
+  (the Web host does).
+- **A borrow, not a handoff.** The schema stays alive across the call
+  that cites `preloadedHandle`; the caller must not `sjon_schema_free` it
+  from inside a resolver or plugin callback during that call.
+- **A second preload is independent.** It mints a second handle; it never
+  replaces or stacks with the first, and there is no ambient "current
+  schema". To compose manifests, pass them in one preload call.
+- **Partial reports are usable.** Manifest content problems are a
+  successful `ok=1` report with `hasErrors: true` and a live handle;
+  borrowing a partial schema is the caller's decision. `sourceDiagnostics[i]`
+  stays aligned to input source `i` even when that source failed, and
+  `diagnostics` is the flattened source reports followed by the aggregate
+  reports.
+- **Invalid handles are framed errors.** A zero, negative, or non-integral
+  `preloadedHandle` is `InvalidOptions` at option parse; a stale or unknown
+  positive ID fails the call with `InvalidSchemaHandle`; freeing zero, stale,
+  or unknown IDs is a silent no-op. A foreign ID is only rejectable by a
+  wrapper's per-instance owner brand. Handle bookkeeping adds no
+  `Ast.Diagnostic.Code`.
+- **Additive, with no span rebase.** Preloaded plugins compose ahead of
+  the document's inline and resolved declarations, exactly as the native
+  `HostOptions.preloaded` does. Preload diagnostics are
+  manifest-source-local and document diagnostics index the document alone,
+  so there is no manifest prefix to subtract.
+- **Declarative only.** A handle makes a form *knowable*; it does not
+  instantiate an `:impl "wasm:…"` expression function. The Web host
+  reports `plugin_func_failed` when such a form is evaluated. Consumers
+  needing executable hooks keep the resolver plus pre-flight path.
+
+Nothing here changes the wire: no `Binary.FORMAT_VERSION` bump, no new
+diagnostic code, and no conformance-corpus case. The TypeScript parity
+host and the corpus owe nothing, because neither the document bytes nor
+the diagnostic vocabulary moved. `sjon-binary.wasm` and `sjon-lsp.wasm`
+do not carry these exports. This is the same capability the editor
+already gets for free: the playground runs on `sjon-lsp.wasm`, whose
+native `schema_bundle` has always retained its `PreloadedSchema`.
+
 ## The CLI
 
 `zig build` installs `sjon` to `zig-out/bin/`. Every verb reads SJON, writes

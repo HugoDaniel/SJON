@@ -10,6 +10,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const sjon = @import("root.zig");
 const Ast = sjon.Ast;
+const Edit = sjon.Edit;
 const Host = sjon.Host;
 const Lowering = sjon.Lowering;
 const Lowering_test_hooks = sjon.Lowering_test_hooks;
@@ -1367,6 +1368,323 @@ test "writeHostResult JSON: evaluatedResults field is always present" {
 
     const arr = parsed.value.object.get("evaluatedResults").?.array;
     try std.testing.expectEqual(@as(usize, 0), arr.items.len);
+}
+
+// -- identities serialization (P5 Task 3) ------------------------------------
+//
+// The five tests below parse the whole payload with `std.json` and read
+// the `identities` array the way the Web/Rust hosts will: named fields,
+// structural keys, no internal state. Fixtures and the `ScopeWant` key
+// helper are the P5 Task 2 ones further down this file.
+
+/// True when a parsed `scope` JSON value encodes exactly the wanted
+/// outermost-first `{registry, symbol}` prefix chain.
+fn jsonScopePrefixMatches(scope_val: std.json.Value, want: []const ScopeWant) bool {
+    if (scope_val != .array) return false;
+    const items = scope_val.array.items;
+    if (items.len != want.len) return false;
+    for (items, want) |got, w| {
+        if (got != .object) return false;
+        const o = got.object;
+        const reg = o.get("registry") orelse return false;
+        const sym = o.get("symbol") orelse return false;
+        if (reg != .string or !std.mem.eql(u8, reg.string, w.registry)) return false;
+        if (sym != .string or !std.mem.eql(u8, sym.string, w.symbol)) return false;
+    }
+    return true;
+}
+
+/// Find one parsed identity row by its structural key. Null when the
+/// key is absent — the consumer's "not found".
+fn findJsonIdentity(
+    rows: std.json.Value,
+    registry: []const u8,
+    scope: []const ScopeWant,
+    symbol: []const u8,
+) ?std.json.Value {
+    for (rows.array.items) |row| {
+        const o = row.object;
+        const reg = o.get("registry") orelse continue;
+        const sym = o.get("symbol") orelse continue;
+        if (reg != .string or !std.mem.eql(u8, reg.string, registry)) continue;
+        if (sym != .string or !std.mem.eql(u8, sym.string, symbol)) continue;
+        if (!jsonScopePrefixMatches(o.get("scope") orelse continue, scope)) continue;
+        return row;
+    }
+    return null;
+}
+
+test "writeHostResult JSON: identities is always present" {
+    const a = std.testing.allocator;
+    // Schema-free empty document: nothing qualifies, so the field is an
+    // empty array — never absent, which would make "no identities"
+    // indistinguishable from "this host predates identities".
+    var r = try Host.validateDocument(a, "", .{});
+    defer r.deinit();
+
+    const json_text = try wasm_host_json.writeHostResult(a, r);
+    defer a.free(json_text);
+
+    var parsed = try parseMaterializedField(a, json_text);
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.value.object.get("identities") != null);
+    const arr = parsed.value.object.get("identities").?.array;
+    try std.testing.expectEqual(@as(usize, 0), arr.items.len);
+}
+
+test "writeHostResult JSON: resolved identity emits stable key and action address" {
+    const a = std.testing.allocator;
+    // One custom `:name-key id` fixture: a root target, a keyword child,
+    // and a vector element — root path, string step, integer steps.
+    const src: [:0]const u8 = IDENTITY_ID_MANIFEST ++
+        \\(kernel :id flow)
+        \\(wrap :kw (kernel :id kwchild) [9 (kernel :id vecchild)])
+        \\
+    ;
+    var r = try Host.validateDocument(a, src, .{});
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+
+    const json_text = try wasm_host_json.writeHostResult(a, r);
+    defer a.free(json_text);
+
+    var parsed = try parseMaterializedField(a, json_text);
+    defer parsed.deinit();
+
+    const arr = parsed.value.object.get("identities").?.array;
+    try std.testing.expectEqual(@as(usize, 3), arr.items.len);
+
+    const flow_root = try rootIndexByNameValue(&r, "id", "flow");
+    const wrap_root = try rootIndexOf(&r, "wrap");
+
+    // Root target: document scope, empty path.
+    const flow = findJsonIdentity(parsed.value.object.get("identities").?, "probe/kernel", &.{}, "flow").?;
+    {
+        const o = flow.object;
+        try std.testing.expectEqualStrings("probe/kernel", o.get("registry").?.string);
+        try std.testing.expectEqual(@as(usize, 0), o.get("scope").?.array.items.len);
+        try std.testing.expectEqualStrings("resolved", o.get("status").?.string);
+        const addr = o.get("address").?.object;
+        try std.testing.expectEqual(@as(i64, flow_root), addr.get("root").?.integer);
+        try std.testing.expectEqual(@as(usize, 0), addr.get("path").?.array.items.len);
+    }
+
+    // Keyword child: one string path step.
+    const kw = findJsonIdentity(parsed.value.object.get("identities").?, "probe/kernel", &.{}, "kwchild").?;
+    {
+        const addr = kw.object.get("address").?.object;
+        try std.testing.expectEqual(@as(i64, wrap_root), addr.get("root").?.integer);
+        const path = addr.get("path").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), path.len);
+        try std.testing.expect(path[0] == .string);
+        try std.testing.expectEqualStrings("kw", path[0].string);
+    }
+
+    // Vector element: integer path steps only.
+    const vec = findJsonIdentity(parsed.value.object.get("identities").?, "probe/kernel", &.{}, "vecchild").?;
+    {
+        const addr = vec.object.get("address").?.object;
+        try std.testing.expectEqual(@as(i64, wrap_root), addr.get("root").?.integer);
+        const path = addr.get("path").?.array.items;
+        try std.testing.expectEqual(@as(usize, 2), path.len);
+        try std.testing.expect(path[0] == .integer);
+        try std.testing.expectEqual(@as(i64, 0), path[0].integer);
+        try std.testing.expect(path[1] == .integer);
+        try std.testing.expectEqual(@as(i64, 1), path[1].integer);
+    }
+
+    // The row is exactly the five public fields — no internal state
+    // leaks into the wire shape.
+    for ([_][]const u8{ "registry", "scope", "symbol", "status", "address" }) |field| {
+        try std.testing.expect(flow.object.get(field) != null);
+    }
+    try std.testing.expectEqual(@as(usize, 5), flow.object.count());
+    for ([_][]const u8{ "ScopeId", "tree_idx", "node_idx", "name_key" }) |leak| {
+        try std.testing.expect(std.mem.indexOf(u8, json_text, leak) == null);
+    }
+}
+
+test "writeHostResult JSON: ambiguous identity has null address" {
+    const a = std.testing.allocator;
+    // Two-site duplicate: first-wins cross-ref lookup still reports its
+    // pre-existing diagnostic, and the single public row is ambiguous
+    // with a literal null address — no fallback position.
+    const src: [:0]const u8 = IDENTITY_NAME_MANIFEST ++
+        \\(kernel :name flow)
+        \\(kernel :name flow)
+        \\
+    ;
+    var r = try Host.validateDocument(a, src, .{});
+    defer r.deinit();
+
+    const json_text = try wasm_host_json.writeHostResult(a, r);
+    defer a.free(json_text);
+
+    var parsed = try parseMaterializedField(a, json_text);
+    defer parsed.deinit();
+
+    const arr = parsed.value.object.get("identities").?.array;
+    try std.testing.expectEqual(@as(usize, 1), arr.items.len);
+
+    const row = findJsonIdentity(parsed.value.object.get("identities").?, "probe/kernel", &.{}, "flow").?;
+    const o = row.object;
+    try std.testing.expectEqualStrings("probe/kernel", o.get("registry").?.string);
+    try std.testing.expectEqualStrings("ambiguous", o.get("status").?.string);
+    try std.testing.expect(o.get("address") != null);
+    try std.testing.expect(o.get("address").? == .null);
+
+    // The pre-existing duplicate report is intact on the wire.
+    var dup_count: usize = 0;
+    for (parsed.value.object.get("diagnostics").?.array.items) |d| {
+        const code = d.object.get("code").?.string;
+        if (std.mem.eql(u8, code, "duplicate_cross_ref_target")) dup_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), dup_count);
+}
+
+test "writeHostResult JSON: lexical scope is a stable prefix array" {
+    const a = std.testing.allocator;
+    // Nested scopes stack outermost-first as `{registry, symbol}`
+    // objects — never a ScopeId/AST-offset integer encoding.
+    const src: [:0]const u8 = IDENTITY_SCOPE_MANIFEST ++
+        \\(piece :title outer (piece :title inner (phrase :name p0)))
+        \\
+    ;
+    var r = try Host.validateDocument(a, src, .{});
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+
+    const json_text = try wasm_host_json.writeHostResult(a, r);
+    defer a.free(json_text);
+
+    var parsed = try parseMaterializedField(a, json_text);
+    defer parsed.deinit();
+
+    const nested = [_]ScopeWant{
+        .{ .registry = "music/piece", .symbol = "outer" },
+        .{ .registry = "music/piece", .symbol = "inner" },
+    };
+    const outer_scope = [_]ScopeWant{.{ .registry = "music/piece", .symbol = "outer" }};
+    const rows = parsed.value.object.get("identities").?;
+    try std.testing.expectEqual(@as(usize, 3), rows.array.items.len);
+
+    const p0 = findJsonIdentity(rows, "music/phrase", &nested, "p0").?;
+    const scope = p0.object.get("scope").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), scope.len);
+    for (scope, 0..) |link, i| {
+        // Each prefix is an object with exactly the two key fields —
+        // an integer (ScopeId/offset) encoding fails here.
+        try std.testing.expect(link == .object);
+        try std.testing.expectEqual(@as(usize, 2), link.object.count());
+        const reg = link.object.get("registry").?;
+        const sym = link.object.get("symbol").?;
+        try std.testing.expect(reg == .string);
+        try std.testing.expect(sym == .string);
+        try std.testing.expectEqualStrings("music/piece", reg.string);
+        try std.testing.expectEqualStrings(if (i == 0) "outer" else "inner", sym.string);
+    }
+    try std.testing.expect(p0.object.get("address") != null);
+    try std.testing.expect(p0.object.get("address").? != .null);
+
+    // The inner piece itself carries the one-link outer prefix.
+    const inner = findJsonIdentity(rows, "music/piece", &outer_scope, "inner").?;
+    try std.testing.expect(jsonScopePrefixMatches(inner.object.get("scope").?, &outer_scope));
+
+    try std.testing.expect(std.mem.indexOf(u8, json_text, "ScopeId") == null);
+}
+
+test "writeHostResult JSON: identity strings needing escaping round-trip unchanged" {
+    const a = std.testing.allocator;
+
+    // Leg 1 — reachable surface. Symbols draw from a lexer alphabet
+    // (`/ # < > & ?` …) whose bytes are all JSON-safe, so the densest
+    // punctuation a real document can declare still has to survive the
+    // writer byte-for-byte.
+    {
+        const src: [:0]const u8 = IDENTITY_NAME_MANIFEST ++
+            \\(kernel :name a/b#c<d>&e?)
+            \\
+        ;
+        var r = try Host.validateDocument(a, src, .{});
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+
+        const json_text = try wasm_host_json.writeHostResult(a, r);
+        defer a.free(json_text);
+
+        var parsed = try parseMaterializedField(a, json_text);
+        defer parsed.deinit();
+
+        const rows = parsed.value.object.get("identities").?;
+        const row = findJsonIdentity(rows, "probe/kernel", &.{}, "a/b#c<d>&e?").?;
+        try std.testing.expectEqualStrings("a/b#c<d>&e?", row.object.get("symbol").?.string);
+    }
+
+    // Leg 2 — writer-level control. Quotes, backslashes, newlines, and
+    // raw control bytes cannot enter a symbol through the lexer, so the
+    // escaping contract is pinned by feeding the serializer rows that
+    // carry them directly: every value must re-parse to its exact bytes.
+    {
+        const src: [:0]const u8 = IDENTITY_NAME_MANIFEST ++
+            \\(kernel :name clean)
+            \\
+        ;
+        var r = try Host.validateDocument(a, src, .{});
+        defer r.deinit();
+
+        const esc_scope = [_]Host.IdentityScope{
+            .{ .registry = "esc/pl\"ug", .symbol = "sc\\ope\"1" },
+        };
+        const esc_path = [_]Edit.Step{ .{ .key = "k\"ey\\9" }, .{ .index = 3 } };
+        const esc_rows = [_]Host.IdentityRow{
+            .{
+                .registry = "esc/pl\"ug",
+                .scope = &esc_scope,
+                .symbol = "sym\"bol\\two\n",
+                .status = .resolved,
+                .address = .{ .root = 0, .path = &esc_path },
+            },
+            .{
+                .registry = "esc/pl\x01ug",
+                .scope = &.{},
+                .symbol = "ctl",
+                .status = .ambiguous,
+                .address = null,
+            },
+        };
+        var doctored = r;
+        doctored.identities = &esc_rows;
+        const json_text = try wasm_host_json.writeHostResult(a, doctored);
+        defer a.free(json_text);
+
+        // The escapes are really emitted (not raw bytes that happen to
+        // parse): `\"`, `\\`, `\n`, and `\u00XX` all appear.
+        for ([_][]const u8{ "\\\"", "\\\\", "\\n", "\\u0001" }) |esc| {
+            try std.testing.expect(std.mem.indexOf(u8, json_text, esc) != null);
+        }
+
+        var parsed = try parseMaterializedField(a, json_text);
+        defer parsed.deinit();
+
+        const rows = parsed.value.object.get("identities").?;
+        try std.testing.expectEqual(@as(usize, 2), rows.array.items.len);
+
+        const resolved_scope = [_]ScopeWant{.{ .registry = "esc/pl\"ug", .symbol = "sc\\ope\"1" }};
+        const row = findJsonIdentity(rows, "esc/pl\"ug", &resolved_scope, "sym\"bol\\two\n").?;
+        try std.testing.expectEqualStrings("sym\"bol\\two\n", row.object.get("symbol").?.string);
+        const addr = row.object.get("address").?.object;
+        const path = addr.get("path").?.array.items;
+        try std.testing.expectEqual(@as(usize, 2), path.len);
+        try std.testing.expect(path[0] == .string);
+        try std.testing.expectEqualStrings("k\"ey\\9", path[0].string);
+        try std.testing.expect(path[1] == .integer);
+        try std.testing.expectEqual(@as(i64, 3), path[1].integer);
+
+        const ctl = findJsonIdentity(rows, "esc/pl\x01ug", &.{}, "ctl").?;
+        try std.testing.expectEqualStrings("esc/pl\x01ug", ctl.object.get("registry").?.string);
+        try std.testing.expect(ctl.object.get("address").? == .null);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4152,4 +4470,724 @@ test "prepareSchema: explicit references retain applicable project diagnostics" 
         if (std.mem.indexOf(u8, d.message, "missing.sjon") != null) saw_project_error = true;
     }
     try std.testing.expect(saw_project_error);
+}
+
+// ---------------------------------------------------------------------------
+// P5 Task 2: identity projection onto `HostResult.identities`.
+//
+// The contract under test has three legs:
+//   * a resolved row's address must be spendable — `Edit.resolvePath`
+//     walks it back to the very form that carries the row's symbol under
+//     the fixture's declared name key (the differential below);
+//   * ambiguity is a first-class outcome with `address == null` — a
+//     duplicate name, an ambiguous parent prefix, or two sites landing on
+//     one public key never falls back to a first-wins position;
+//   * a row is keyed by `(registry, stable scope prefixes, symbol)` only —
+//     never by root index, AST offset, or `ScopeId` encoding.
+//
+// One cross-ref kind per target form per manifest, deliberately: two
+// kinds over the same target re-register the same name into the same
+// canonical bucket and turn every clean fixture ambiguous.
+// ---------------------------------------------------------------------------
+
+/// `probe/kernel` on a custom `:name-key id`, with an `:acyclic` edge
+/// route (`:next`) and an open `wrap` form so targets can sit at root,
+/// keyword, and vector positions.
+const IDENTITY_ID_MANIFEST: [:0]const u8 =
+    \\(plugin :name probe :version "1.0.0"
+    \\  (value-kind :name kernel-id :underlying symbol
+    \\    :cross-ref (cross-ref :target kernel :name-key id :acyclic true))
+    \\  (form :name kernel
+    \\    (key :name id :type symbol :optional false)
+    \\    (key :name next :type kernel-id :optional true))
+    \\  (form :name wrap :open true))
+    \\
+;
+
+/// `probe/kernel` and `probe/cue` on the default `:name` key, plus a
+/// provider-routed `probe/shader` (which records no identity even when
+/// its extraction never runs).
+const IDENTITY_NAME_MANIFEST: [:0]const u8 =
+    \\(plugin :name probe :version "1.0.0"
+    \\  (value-kind :name kernel-ref :underlying symbol
+    \\    :cross-ref (cross-ref :target kernel))
+    \\  (value-kind :name cue-ref :underlying symbol
+    \\    :cross-ref (cross-ref :target cue))
+    \\  (value-kind :name uniform-name :underlying symbol
+    \\    :cross-ref (cross-ref :target shader :provider lines))
+    \\  (cross-ref-provider :name lines :description "One name per line.")
+    \\  (form :name kernel (key :name name :type symbol :optional true))
+    \\  (form :name cue (key :name name :type symbol :optional false))
+    \\  (form :name shader
+    \\    (key :name name :type symbol :optional false)
+    \\    (key :name src :type string :optional false))
+    \\  (form :name wrap :open true))
+    \\
+;
+
+/// A defaulted `:name` registers for lookup but is not an identity.
+const IDENTITY_DEFAULT_MANIFEST: [:0]const u8 =
+    \\(plugin :name scene :version "1.0.0"
+    \\  (value-kind :name actor-ref :underlying symbol
+    \\    :cross-ref (cross-ref :target actor :name-key name))
+    \\  (form :name actor
+    \\    (key :name name :type symbol :default ada :optional true)))
+    \\
+;
+
+/// Lexical scopes: `music/phrase` names live inside a `music/piece`
+/// scope-opener, and pieces nest (a piece inside a piece composes
+/// prefixes) because `piece-ref` itself declares `:scope piece`. The
+/// piece carries its identity on a custom `:name-key title` and
+/// additionally feeds a target group (`[piece hold]`), so one parent
+/// form can hold two stable identities.
+const IDENTITY_SCOPE_MANIFEST: [:0]const u8 =
+    \\(plugin :name music :version "1.0.0"
+    \\  (value-kind :name phrase-name :underlying symbol
+    \\    :cross-ref (cross-ref :target phrase :scope piece))
+    \\  (value-kind :name piece-ref :underlying symbol
+    \\    :cross-ref (cross-ref :target piece :name-key title :scope piece))
+    \\  (value-kind :name duo-ref :underlying symbol
+    \\    :cross-ref (cross-ref :target [piece hold]))
+    \\  (form :name phrase (key :name name :type symbol :optional false))
+    \\  (form :name piece :open true
+    \\    (key :name title :type symbol :optional true)
+    \\    (key :name name :type symbol :optional true))
+    \\  (form :name hold (key :name name :type symbol :optional false)))
+    \\
+;
+
+/// Lowering fixture: `(carrier …)` lowers away into `(carrier-normal …)`,
+/// so the source tree and the layer tree can each hold a same-shaped
+/// target. Identity addresses must come from the source tree only.
+const IDENTITY_LOWERING_MANIFEST: [:0]const u8 =
+    \\(plugin :name refs :version "1.0.0"
+    \\  (value-kind :name producer-ref :underlying symbol
+    \\    :cross-ref (cross-ref :target carrier-normal))
+    \\  (form :name carrier
+    \\    :lowering (lowering :hook test/identity-v1 :produces [carrier-normal])
+    \\    (key :name name :type symbol))
+    \\  (form :name carrier-normal
+    \\    (key :name name :type symbol)))
+    \\
+;
+
+/// One wanted `{registry, symbol}` entry in a row's scope prefix array.
+const ScopeWant = struct { registry: []const u8, symbol: []const u8 };
+
+fn identityKeyMatches(
+    row: Host.IdentityRow,
+    registry: []const u8,
+    scope: []const ScopeWant,
+    symbol: []const u8,
+) bool {
+    if (!std.mem.eql(u8, row.registry, registry)) return false;
+    if (!std.mem.eql(u8, row.symbol, symbol)) return false;
+    if (row.scope.len != scope.len) return false;
+    for (row.scope, scope) |got, want| {
+        if (!std.mem.eql(u8, got.registry, want.registry)) return false;
+        if (!std.mem.eql(u8, got.symbol, want.symbol)) return false;
+    }
+    return true;
+}
+
+fn findIdentity(
+    rows: []const Host.IdentityRow,
+    registry: []const u8,
+    scope: []const ScopeWant,
+    symbol: []const u8,
+) ?Host.IdentityRow {
+    for (rows) |row| {
+        if (identityKeyMatches(row, registry, scope, symbol)) return row;
+    }
+    return null;
+}
+
+fn expectStepsEqual(want: []const Edit.Step, got: []const Edit.Step) !void {
+    try std.testing.expectEqual(want.len, got.len);
+    for (want, got) |w, g| {
+        switch (w) {
+            .key => |k| {
+                try std.testing.expect(g == .key);
+                try std.testing.expectEqualStrings(k, g.key);
+            },
+            .index => |i| try std.testing.expectEqual(i, g.index),
+        }
+    }
+}
+
+/// The differential: spend a resolved row's address through
+/// `Edit.resolvePath` and require the node it names to be the form that
+/// carries the row's symbol under `name_key`. An address that does not
+/// walk back to the declared name — a sibling, a parent, a wrong-tree
+/// node — fails here.
+fn expectIdentityRoundTrip(
+    r: *const Host.HostResult,
+    row: Host.IdentityRow,
+    name_key: []const u8,
+) !void {
+    const addr = row.address orelse return error.TestExpectedResolvedRow;
+    try std.testing.expect(addr.root < r.tree.root.len);
+    var buf: [Edit.MAX_EDIT_PATH_DEPTH]std.json.Value = undefined;
+    try std.testing.expect(addr.path.len <= buf.len);
+    for (addr.path, 0..) |step, i| buf[i] = step.toJsonValue();
+    const node = try Edit.resolvePath(&r.tree, r.tree.root[addr.root], buf[0..addr.path.len]);
+    try std.testing.expectEqual(Ast.Tag.form, r.tree.tagOf(node));
+    var found = false;
+    for (r.tree.formHeader(node).children) |ch| {
+        if (r.tree.tagOf(ch) != .kvpair) continue;
+        const kv = r.tree.kvpairHeader(ch);
+        if (!std.mem.eql(u8, kv.key, name_key)) continue;
+        found = true;
+        try std.testing.expectEqual(Ast.Tag.symbol, r.tree.tagOf(kv.value));
+        try std.testing.expectEqualStrings(row.symbol, r.tree.symbolText(kv.value));
+    }
+    try std.testing.expect(found);
+}
+
+/// Every resolved row in `r` round-trips under `name_key` — the loop
+/// form of the differential, used by every fixture below.
+fn expectAllIdentitiesRoundTrip(
+    r: *const Host.HostResult,
+    name_key: []const u8,
+) !void {
+    for (r.identities) |row| {
+        if (row.status != .resolved) continue;
+        try expectIdentityRoundTrip(r, row, name_key);
+    }
+}
+
+/// The music fixture declares two name keys: `music/piece` rows are
+/// named through the custom `:title`, every other registry through
+/// `:name` (including the group bucket, whose spec kept the default).
+fn expectMusicRoundTrip(r: *const Host.HostResult) !void {
+    for (r.identities) |row| {
+        if (row.status != .resolved) continue;
+        const key = if (std.mem.eql(u8, row.registry, "music/piece")) "title" else "name";
+        try expectIdentityRoundTrip(r, row, key);
+    }
+}
+
+/// Index of the root form whose head is `head`, failing the test when no
+/// root matches — the fixtures all know their root shapes.
+fn rootIndexOf(r: *const Host.HostResult, head: []const u8) !u32 {
+    for (r.tree.root, 0..) |root, i| {
+        if (r.tree.tagOf(root) != .form) continue;
+        if (std.mem.eql(u8, r.tree.formHeader(root).head, head)) return @intCast(i);
+    }
+    return error.TestRootNotFound;
+}
+
+/// Index of the first root form carrying `value` under kvpair `key` —
+/// for fixtures whose same-headed roots differ only by name (three
+/// `(kernel …)` roots are not distinguishable by head).
+fn rootIndexByNameValue(r: *const Host.HostResult, key: []const u8, value: []const u8) !u32 {
+    for (r.tree.root, 0..) |root, i| {
+        if (r.tree.tagOf(root) != .form) continue;
+        for (r.tree.formHeader(root).children) |ch| {
+            if (r.tree.tagOf(ch) != .kvpair) continue;
+            const kv = r.tree.kvpairHeader(ch);
+            if (!std.mem.eql(u8, kv.key, key)) continue;
+            if (r.tree.tagOf(kv.value) != .symbol) continue;
+            if (std.mem.eql(u8, r.tree.symbolText(kv.value), value)) return @intCast(i);
+        }
+    }
+    return error.TestRootNotFound;
+}
+
+test "Host identities: resolved rows round-trip to the same declared name" {
+    const a = std.testing.allocator;
+    const src: [:0]const u8 = IDENTITY_ID_MANIFEST ++
+        \\(kernel :id flow)
+        \\(wrap :kw (kernel :id kwchild) [9 (kernel :id vecchild)])
+        \\(kernel :id a :next b)
+        \\(kernel :id b)
+        \\
+    ;
+    var r = try Host.validateDocument(a, src, .{});
+    defer r.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+
+    // Five resolved rows, none ambiguous: the root target, the keyword
+    // child, the vector element, and the two acyclic-edge targets.
+    try std.testing.expectEqual(@as(usize, 5), r.identities.len);
+    for (r.identities) |row| {
+        try std.testing.expectEqual(Host.IdentityStatus.resolved, row.status);
+        try std.testing.expect(row.address != null);
+        try std.testing.expectEqual(@as(usize, 0), row.scope.len);
+        try std.testing.expectEqualStrings("probe/kernel", row.registry);
+    }
+
+    // Exact addresses: a root, a keyword child, a vector element. The
+    // vector is wrap's positional child 0 — the kernel form is the `:kw`
+    // pair's value, not a positional — so the vector element's path is
+    // [0, 1].
+    const wrap_root = try rootIndexOf(&r, "wrap");
+    const flow_row = findIdentity(r.identities, "probe/kernel", &.{}, "flow").?;
+    try std.testing.expectEqual(try rootIndexByNameValue(&r, "id", "flow"), flow_row.address.?.root);
+    try expectStepsEqual(&.{}, flow_row.address.?.path);
+
+    const kw_row = findIdentity(r.identities, "probe/kernel", &.{}, "kwchild").?;
+    try std.testing.expectEqual(wrap_root, kw_row.address.?.root);
+    try expectStepsEqual(&.{.{ .key = "kw" }}, kw_row.address.?.path);
+
+    const vec_row = findIdentity(r.identities, "probe/kernel", &.{}, "vecchild").?;
+    try std.testing.expectEqual(wrap_root, vec_row.address.?.root);
+    try expectStepsEqual(&.{ .{ .index = 0 }, .{ .index = 1 } }, vec_row.address.?.path);
+
+    // The claim itself: every resolved address walks back to the form
+    // carrying its symbol under the declared `:name-key id`.
+    try expectAllIdentitiesRoundTrip(&r, "id");
+}
+
+test "Host identities: ambiguous rows have no address and absent names are not found" {
+    const a = std.testing.allocator;
+
+    // Duplicates, anonymous, non-symbol, held, undeclared-key, and
+    // provider-route forms in one document. The `twin` form's two
+    // `:name` pairs are the single-site ambiguity: one registration
+    // attempt whose key the duplicate pair alone makes ambiguous.
+    const src: [:0]const u8 = IDENTITY_NAME_MANIFEST ++
+        \\(kernel :name flow)
+        \\(kernel :name flow)
+        \\(kernel :name twin :name twin2)
+        \\(kernel)
+        \\(kernel :name "quoted")
+        \\(kernel :name 3)
+        \\(wrap :name notatarget)
+        \\(shader :name main :src "u_time")
+        \\
+    ;
+    var r = try Host.validateDocument(a, src, .{});
+    defer r.deinit();
+
+    // Exactly two public rows, both ambiguous with no address — the
+    // two-site duplicate (`flow`) and the single-site duplicate-pair
+    // (`twin`). No resolved duplicate survives and no first-wins
+    // fallback position appears.
+    try std.testing.expectEqual(@as(usize, 2), r.identities.len);
+    const flow = findIdentity(r.identities, "probe/kernel", &.{}, "flow").?;
+    const twin = findIdentity(r.identities, "probe/kernel", &.{}, "twin").?;
+    try std.testing.expectEqual(Host.IdentityStatus.ambiguous, flow.status);
+    try std.testing.expectEqual(Host.IdentityStatus.ambiguous, twin.status);
+    try std.testing.expect(flow.address == null);
+    try std.testing.expect(twin.address == null);
+    for (r.identities) |row| {
+        try std.testing.expectEqual(Host.IdentityStatus.ambiguous, row.status);
+        try std.testing.expect(row.address == null);
+    }
+
+    // An absent name is *not found* — no row, not an error and not an
+    // invented entry.
+    try std.testing.expect(findIdentity(r.identities, "probe/kernel", &.{}, "missing") == null);
+    try std.testing.expect(findIdentity(r.identities, "probe/kernel", &.{}, "twin2") == null);
+
+    // The pre-existing duplicate report is the only cross-ref outcome.
+    var dup_count: usize = 0;
+    for (r.diagnostics) |d| {
+        if (d.code == .duplicate_cross_ref_target) dup_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), dup_count);
+
+    // An absent name is *not found* — no row, not an error and not an
+    // invented entry.
+    try std.testing.expect(findIdentity(r.identities, "probe/kernel", &.{}, "missing") == null);
+
+    // Held spelling: not a name, so no row at all.
+    {
+        const held_src: [:0]const u8 = IDENTITY_NAME_MANIFEST ++
+            \\(kernel :name _)
+            \\
+        ;
+        var hr = try Host.validateDocument(a, held_src, .{ .held_symbol = "_" });
+        defer hr.deinit();
+        try std.testing.expectEqual(@as(usize, 0), hr.identities.len);
+    }
+
+    // Default-only names register for lookup but contribute no row; the
+    // author-written sibling beside one is the control that the defaulted
+    // name really was in play.
+    {
+        const def_src: [:0]const u8 = IDENTITY_DEFAULT_MANIFEST ++
+            \\(actor :name ada2)
+            \\(actor)
+            \\
+        ;
+        var dr = try Host.validateDocument(a, def_src, .{});
+        defer dr.deinit();
+        try std.testing.expectEqual(@as(usize, 1), dr.identities.len);
+        try std.testing.expect(identityKeyMatches(dr.identities[0], "scene/actor", &.{}, "ada2"));
+        try std.testing.expectEqual(Host.IdentityStatus.resolved, dr.identities[0].status);
+        try expectAllIdentitiesRoundTrip(&dr, "name");
+    }
+}
+
+test "Host identities: scope_form uses stable parent prefixes" {
+    const a = std.testing.allocator;
+
+    // Two same-named phrases under differently named piece scopes: the
+    // scope prefix is the parent's stable `{registry, symbol}`, never an
+    // AST offset or ScopeId encoding.
+    {
+        const src: [:0]const u8 = IDENTITY_SCOPE_MANIFEST ++
+            \\(piece :title left (phrase :name p0))
+            \\(piece :title right (phrase :name p0))
+            \\
+        ;
+        var r = try Host.validateDocument(a, src, .{});
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+
+        try std.testing.expectEqual(@as(usize, 4), r.identities.len);
+        const left_scope = [_]ScopeWant{.{ .registry = "music/piece", .symbol = "left" }};
+        const right_scope = [_]ScopeWant{.{ .registry = "music/piece", .symbol = "right" }};
+        const left_row = findIdentity(r.identities, "music/phrase", &left_scope, "p0").?;
+        const right_row = findIdentity(r.identities, "music/phrase", &right_scope, "p0").?;
+        try std.testing.expectEqual(Host.IdentityStatus.resolved, left_row.status);
+        try std.testing.expectEqual(Host.IdentityStatus.resolved, right_row.status);
+        try std.testing.expect(left_row.address != null);
+        try std.testing.expect(right_row.address != null);
+
+        // The custom parent name key (`:title`) drives the prefix, and
+        // the parents themselves resolve at document scope.
+        try std.testing.expect(findIdentity(r.identities, "music/piece", &.{}, "left") != null);
+        try std.testing.expect(findIdentity(r.identities, "music/piece", &.{}, "right") != null);
+
+        try expectMusicRoundTrip(&r);
+    }
+
+    // Nested scopes stack outermost-first.
+    {
+        const src: [:0]const u8 = IDENTITY_SCOPE_MANIFEST ++
+            \\(piece :title outer (piece :title inner (phrase :name p0)))
+            \\
+        ;
+        var r = try Host.validateDocument(a, src, .{});
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+
+        const nested = [_]ScopeWant{
+            .{ .registry = "music/piece", .symbol = "outer" },
+            .{ .registry = "music/piece", .symbol = "inner" },
+        };
+        const p0 = findIdentity(r.identities, "music/phrase", &nested, "p0").?;
+        try std.testing.expectEqual(Host.IdentityStatus.resolved, p0.status);
+        // The inner piece's own row carries the outer prefix.
+        const outer_scope = [_]ScopeWant{.{ .registry = "music/piece", .symbol = "outer" }};
+        try std.testing.expect(findIdentity(r.identities, "music/piece", &outer_scope, "inner") != null);
+        try std.testing.expect(findIdentity(r.identities, "music/piece", &.{}, "outer") != null);
+        try expectMusicRoundTrip(&r);
+    }
+
+    // A parent participating in two registries yields both stable
+    // prefixes without merging them.
+    {
+        const src: [:0]const u8 = IDENTITY_SCOPE_MANIFEST ++
+            \\(piece :title twin :name twin2 (phrase :name p0))
+            \\(hold :name h2)
+            \\
+        ;
+        var r = try Host.validateDocument(a, src, .{});
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+
+        const own_scope = [_]ScopeWant{.{ .registry = "music/piece", .symbol = "twin" }};
+        const group_scope = [_]ScopeWant{.{ .registry = "music/hold music/piece", .symbol = "twin2" }};
+        try std.testing.expect(findIdentity(r.identities, "music/phrase", &own_scope, "p0") != null);
+        try std.testing.expect(findIdentity(r.identities, "music/phrase", &group_scope, "p0") != null);
+        // Both prefixes name the same parent form, so both rows resolve
+        // to the same address — two distinct public keys, not one merged
+        // prefix and not an ambiguity.
+        var p0_rows: usize = 0;
+        for (r.identities) |row| {
+            if (std.mem.eql(u8, row.registry, "music/phrase") and std.mem.eql(u8, row.symbol, "p0")) {
+                p0_rows += 1;
+                try std.testing.expectEqual(Host.IdentityStatus.resolved, row.status);
+                try std.testing.expect(row.address != null);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 2), p0_rows);
+        try expectMusicRoundTrip(&r);
+    }
+
+    // An anonymous scope parent suppresses descendant rows; the
+    // outside-any-scope fallback still projects at document scope.
+    {
+        const src: [:0]const u8 = IDENTITY_SCOPE_MANIFEST ++
+            \\(piece (phrase :name p0))
+            \\(phrase :name top)
+            \\
+        ;
+        var r = try Host.validateDocument(a, src, .{});
+        defer r.deinit();
+
+        try std.testing.expectEqual(@as(usize, 1), r.identities.len);
+        try std.testing.expect(identityKeyMatches(r.identities[0], "music/phrase", &.{}, "top"));
+        try std.testing.expectEqual(Host.IdentityStatus.resolved, r.identities[0].status);
+        try expectMusicRoundTrip(&r);
+    }
+
+    // An ambiguous parent prefix forces descendant rows ambiguous and
+    // never falls back to a position. `p0` sits under both same-named
+    // pieces (two sites, one public key); `p1` under only the first
+    // (one site) — the single-site row is the one a first-wins
+    // fallback would most plausibly wrong.
+    {
+        const src: [:0]const u8 = IDENTITY_SCOPE_MANIFEST ++
+            \\(piece :title left (phrase :name p0) (phrase :name p1))
+            \\(piece :title left (phrase :name p0))
+            \\
+        ;
+        var r = try Host.validateDocument(a, src, .{});
+        defer r.deinit();
+
+        const left_scope = [_]ScopeWant{.{ .registry = "music/piece", .symbol = "left" }};
+        const p0 = findIdentity(r.identities, "music/phrase", &left_scope, "p0").?;
+        try std.testing.expectEqual(Host.IdentityStatus.ambiguous, p0.status);
+        try std.testing.expect(p0.address == null);
+        const p1 = findIdentity(r.identities, "music/phrase", &left_scope, "p1").?;
+        try std.testing.expectEqual(Host.IdentityStatus.ambiguous, p1.status);
+        try std.testing.expect(p1.address == null);
+        const parent = findIdentity(r.identities, "music/piece", &.{}, "left").?;
+        try std.testing.expectEqual(Host.IdentityStatus.ambiguous, parent.status);
+        try std.testing.expect(parent.address == null);
+    }
+}
+
+test "Host identities: multi-root identity excludes root from its key" {
+    const a = std.testing.allocator;
+    const src: [:0]const u8 = IDENTITY_NAME_MANIFEST ++
+        \\(kernel :name flow)
+        \\(cue :name flow)
+        \\
+    ;
+    var r = try Host.validateDocument(a, src, .{});
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+
+    // Equal names in separate registries stay distinct — two resolved
+    // rows, no ambiguity.
+    try std.testing.expectEqual(@as(usize, 2), r.identities.len);
+    const k = findIdentity(r.identities, "probe/kernel", &.{}, "flow").?;
+    const c = findIdentity(r.identities, "probe/cue", &.{}, "flow").?;
+    try std.testing.expectEqual(Host.IdentityStatus.resolved, k.status);
+    try std.testing.expectEqual(Host.IdentityStatus.resolved, c.status);
+
+    // Document scope is `scope:[]` even in a multi-root document, while
+    // the addresses carry the actual root indices — no implicit root
+    // zero in either the key or the address.
+    try std.testing.expectEqual(@as(usize, 0), k.scope.len);
+    try std.testing.expectEqual(@as(usize, 0), c.scope.len);
+    try std.testing.expectEqual(try rootIndexByNameValue(&r, "name", "flow"), k.address.?.root);
+    try std.testing.expectEqual(try rootIndexOf(&r, "cue"), c.address.?.root);
+    try std.testing.expect(k.address.?.root != c.address.?.root);
+    try expectStepsEqual(&.{}, k.address.?.path);
+    try expectStepsEqual(&.{}, c.address.?.path);
+    try expectAllIdentitiesRoundTrip(&r, "name");
+}
+
+test "Host identities: sibling insertion and root move preserve the key and refresh the address" {
+    const a = std.testing.allocator;
+    const src: [:0]const u8 = IDENTITY_NAME_MANIFEST ++
+        \\(wrap [3 (kernel :name flow)])
+        \\(kernel :name mover)
+        \\(kernel :name anchor)
+        \\
+    ;
+    var r0 = try Host.validateDocument(a, src, .{});
+    defer r0.deinit();
+    try std.testing.expectEqual(@as(usize, 0), r0.diagnostics.len);
+
+    const wrap_root = try rootIndexOf(&r0, "wrap");
+    const mover_root0 = try rootIndexByNameValue(&r0, "name", "mover");
+    {
+        const flow = findIdentity(r0.identities, "probe/kernel", &.{}, "flow").?;
+        try std.testing.expectEqual(wrap_root, flow.address.?.root);
+        // The vector is wrap's positional child 0; flow is its element 1.
+        try expectStepsEqual(&.{ .{ .index = 0 }, .{ .index = 1 } }, flow.address.?.path);
+        try expectAllIdentitiesRoundTrip(&r0, "name");
+    }
+
+    // Revision 1 — insert an anonymous vector sibling before the named
+    // target: same key, path shifts one slot right.
+    const rev1_src = try editedSource(a, src,
+        \\{"op":"insert_positional","root":1,"path":[0],"index":1,"value":9}
+    );
+    defer a.free(rev1_src);
+    var r1 = try Host.validateDocument(a, rev1_src, .{});
+    defer r1.deinit();
+    try std.testing.expectEqual(@as(usize, 0), r1.diagnostics.len);
+    {
+        const flow = findIdentity(r1.identities, "probe/kernel", &.{}, "flow").?;
+        try std.testing.expectEqual(Host.IdentityStatus.resolved, flow.status);
+        try std.testing.expectEqual(wrap_root, flow.address.?.root);
+        try expectStepsEqual(&.{ .{ .index = 0 }, .{ .index = 2 } }, flow.address.?.path);
+        try expectAllIdentitiesRoundTrip(&r1, "name");
+        const mover = findIdentity(r1.identities, "probe/kernel", &.{}, "mover").?;
+        try std.testing.expectEqual(mover_root0, mover.address.?.root);
+    }
+
+    // Revision 2 — remove a named root and reinsert it at a new index:
+    // same key, refreshed root. Canonical edit values, no identity
+    // action.
+    const removed = try editedSource(a, rev1_src,
+        \\{"op":"remove_root","index":2}
+    );
+    defer a.free(removed);
+    const rev2_src = try editedSource(a, removed,
+        \\{"op":"insert_root","index":3,"value":{"$form":"kernel","name":{"$sym":"mover"}}}
+    );
+    defer a.free(rev2_src);
+    var r2 = try Host.validateDocument(a, rev2_src, .{});
+    defer r2.deinit();
+    try std.testing.expectEqual(@as(usize, 0), r2.diagnostics.len);
+    {
+        const mover = findIdentity(r2.identities, "probe/kernel", &.{}, "mover").?;
+        try std.testing.expectEqual(Host.IdentityStatus.resolved, mover.status);
+        try std.testing.expectEqual(mover_root0 + 1, mover.address.?.root);
+        try expectStepsEqual(&.{}, mover.address.?.path);
+        const flow = findIdentity(r2.identities, "probe/kernel", &.{}, "flow").?;
+        try std.testing.expectEqual(wrap_root, flow.address.?.root);
+        try expectStepsEqual(&.{ .{ .index = 0 }, .{ .index = 2 } }, flow.address.?.path);
+        try expectAllIdentitiesRoundTrip(&r2, "name");
+    }
+}
+
+/// Apply one JSON edit action to `src` and return the reprinted source
+/// as a sentinel-terminated slice the next `validateDocument` call (or
+/// the next edit) can consume. Caller frees.
+fn editedSource(a: std.mem.Allocator, src: [:0]const u8, action: []const u8) ![:0]const u8 {
+    var bytes = try Edit.applyEditFromJsonString(a, src, action, .{});
+    defer bytes.deinit();
+    return try a.dupeZ(u8, bytes.data);
+}
+
+test "Host identities: rows are deterministic and index-arena independent" {
+    const a = std.testing.allocator;
+    const src: [:0]const u8 = IDENTITY_SCOPE_MANIFEST ++
+        \\(piece :title left (phrase :name p0))
+        \\(piece :title right (phrase :name p0))
+        \\
+    ;
+
+    // Two validations, both results alive at once: the second run's
+    // validator index (and its arena) is already destroyed by the time
+    // these rows are compared, so any borrow that survived it is a
+    // use-after-free the leak-checking allocator and the deep field
+    // comparison below both hunt for.
+    var r1 = try Host.validateDocument(a, src, .{});
+    defer r1.deinit();
+    var r2 = try Host.validateDocument(a, src, .{});
+    defer r2.deinit();
+
+    try std.testing.expectEqual(@as(usize, 4), r1.identities.len);
+    try std.testing.expectEqual(r1.identities.len, r2.identities.len);
+    for (r1.identities, r2.identities) |w, g| {
+        try std.testing.expectEqualStrings(w.registry, g.registry);
+        try std.testing.expectEqual(w.scope.len, g.scope.len);
+        for (w.scope, g.scope) |ws, gs| {
+            try std.testing.expectEqualStrings(ws.registry, gs.registry);
+            try std.testing.expectEqualStrings(ws.symbol, gs.symbol);
+        }
+        try std.testing.expectEqualStrings(w.symbol, g.symbol);
+        try std.testing.expectEqual(w.status, g.status);
+        const wa = w.address orelse {
+            try std.testing.expect(g.address == null);
+            continue;
+        };
+        const ga = g.address orelse return error.TestExpectedAddress;
+        try std.testing.expectEqual(wa.root, ga.root);
+        try expectStepsEqual(wa.path, ga.path);
+    }
+
+    // Deterministic lexical order: registry, then scope prefix, then
+    // symbol — never hash-map iteration order.
+    var i: usize = 1;
+    while (i < r1.identities.len) : (i += 1) {
+        try std.testing.expect(identityRowKeyLess(r1.identities[i - 1], r1.identities[i]));
+    }
+}
+
+fn identityRowKeyLess(x: Host.IdentityRow, y: Host.IdentityRow) bool {
+    switch (std.mem.order(u8, x.registry, y.registry)) {
+        .lt => return true,
+        .gt => return false,
+        .eq => {},
+    }
+    const n = @min(x.scope.len, y.scope.len);
+    for (x.scope[0..n], y.scope[0..n]) |xs, ys| {
+        switch (std.mem.order(u8, xs.registry, ys.registry)) {
+            .lt => return true,
+            .gt => return false,
+            .eq => {},
+        }
+        switch (std.mem.order(u8, xs.symbol, ys.symbol)) {
+            .lt => return true,
+            .gt => return false,
+            .eq => {},
+        }
+    }
+    if (x.scope.len != y.scope.len) return x.scope.len < y.scope.len;
+    return std.mem.order(u8, x.symbol, y.symbol) == .lt;
+}
+
+test "Host identities: lowering never cross-joins a layer tree with the source tree" {
+    const a = std.testing.allocator;
+    var registry: Lowering.LoweringRegistry = .{};
+    defer registry.deinit(a);
+    try registry.register(a, Lowering_test_hooks.test_identity_v1);
+
+    // `(carrier :name later)` lowers away and the hook emits a same-
+    // shaped `(carrier-normal :name later)` in the layer tree; the
+    // unlowered source target sits beside them. Only the source-tree
+    // target may carry an address.
+    const src: [:0]const u8 = IDENTITY_LOWERING_MANIFEST ++
+        \\(carrier-normal :name here)
+        \\(carrier :name later)
+        \\
+    ;
+    var r = try Host.validateDocument(a, src, .{ .lowering_registry = &registry });
+    defer r.deinit();
+
+    // Lowering actually ran, and the pre-existing diagnostics surface is
+    // unchanged: clean in, clean out.
+    try std.testing.expectEqual(@as(usize, 1), r.lowering_stages.len);
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+
+    try std.testing.expectEqual(@as(usize, 1), r.identities.len);
+    const row = r.identities[0];
+    try std.testing.expect(identityKeyMatches(row, "refs/carrier-normal", &.{}, "here"));
+    try std.testing.expectEqual(Host.IdentityStatus.resolved, row.status);
+    try std.testing.expect(row.address != null);
+
+    // The lowered-away source form and the hook-emitted form contribute
+    // no rows, and the surviving address resolves against the source
+    // tree `r.tree`.
+    try std.testing.expect(findIdentity(r.identities, "refs/carrier-normal", &.{}, "later") == null);
+    try expectAllIdentitiesRoundTrip(&r, "name");
+    try std.testing.expectEqual(try rootIndexOf(&r, "carrier-normal"), row.address.?.root);
+    try expectStepsEqual(&.{}, row.address.?.path);
+}
+
+test "Host identities: empty schema and document project an empty identities slice" {
+    const a = std.testing.allocator;
+
+    // Empty document: no schema, no roots, no identities — but a result
+    // that still deinits cleanly.
+    {
+        var r = try Host.validateDocument(a, "", .{});
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 0), r.identities.len);
+    }
+
+    // Declaration-only document: a schema with no data forest and no
+    // cross-refs.
+    {
+        const src: [:0]const u8 = IDENTITY_NAME_MANIFEST;
+        var r = try Host.validateDocument(a, src, .{});
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 0), r.data_forest.len);
+        try std.testing.expectEqual(@as(usize, 0), r.identities.len);
+    }
 }

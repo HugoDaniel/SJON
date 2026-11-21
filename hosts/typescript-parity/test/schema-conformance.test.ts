@@ -16,23 +16,25 @@ import { fileURLToPath } from 'node:url';
 
 import { s } from '@sjon-lang/schema';
 import { nativeBackend } from '../src/SjonSchemaBackend.ts';
-import { Profile } from './conformanceFixtures.ts';
+import { FIXTURES } from './conformanceFixtures.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const tspRoot = path.resolve(here, '..');
-const goldenPath = path.join(here, 'golden', 'bounds.d.ts');
+const goldenDir = path.join(here, 'golden');
 const probePath = path.join(here, 'conformanceTypes.ts');
 
 s.use(nativeBackend());
 
-test('EMIT: builder manifest → exporter .d.ts matches the committed golden', () => {
-  const emitted = Profile.toDts();
-  const golden = readFileSync(goldenPath, 'utf8');
-  assert.equal(
-    emitted,
-    golden,
-    'builder/exporter output drifted from the golden — regenerate test/golden/bounds.d.ts if intended',
-  );
+test('EMIT: builder manifests → exporter .d.ts match the committed goldens', () => {
+  for (const { typeName, form, golden } of FIXTURES) {
+    const emitted = form.toDts();
+    const goldenText = readFileSync(path.join(goldenDir, golden), 'utf8');
+    assert.equal(
+      emitted,
+      goldenText,
+      `${typeName}: builder/exporter output drifted from test/golden/${golden} — regenerate it if intended`,
+    );
+  }
 });
 
 test('TYPE: s.infer<T> ≡ emitted interface (conformanceTypes.ts compiles)', (t) => {

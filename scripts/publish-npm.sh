@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
-# Publish the three publishable npm packages (@sjon-lang/schema, @sjon-lang/web,
-# @sjon-lang/highlight) to the public npm registry.
+# Publish the four publishable npm packages (@sjon-lang/schema,
+# @sjon-lang/read, @sjon-lang/web, @sjon-lang/highlight) to the public npm
+# registry.
 #
 # Uses `pnpm publish`, not `npm publish`, on purpose: @sjon-lang/web depends on
-# @sjon-lang/schema via `"workspace:*"` in its package.json. `npm publish` ships
-# that literal string — an invalid version range for anyone installing
-# outside this workspace. `pnpm publish` rewrites it to the dependency's
-# current version (`1.2.0`) before packing, which is the only one of the
-# two that produces an installable tarball. Verified by hand before this
-# script existed: `npm pack` on hosts/web put `"@sjon-lang/schema": "workspace:*"`
-# into the tarball's package.json; `pnpm pack` put `"1.2.0"`.
+# @sjon-lang/schema and @sjon-lang/read via `"workspace:*"` in its
+# package.json. `npm publish` ships that literal string — an invalid version
+# range for anyone installing outside this workspace. `pnpm publish` rewrites
+# it to the dependency's current version (`1.2.0`) before packing, which is the
+# only one of the two that produces an installable tarball. Verified by hand
+# before this script existed: `npm pack` on hosts/web put
+# `"@sjon-lang/schema": "workspace:*"` into the tarball's package.json;
+# `pnpm pack` put `"1.2.0"`.
 #
-# Order matters for the same reason: @sjon-lang/schema publishes first so that
-# by the time @sjon-lang/web goes out, the version its rewritten dependency
-# names is actually resolvable on the registry.
+# Order matters for the same reason: @sjon-lang/schema and @sjon-lang/read
+# publish first so that by the time @sjon-lang/web goes out, the versions its
+# rewritten dependencies name are actually resolvable on the registry.
 #
 # Each package compiles itself on the way out. `pnpm publish` (and the
 # dry-run) runs the package's `prepack`, which builds dist/ as JavaScript plus
@@ -24,7 +26,7 @@
 #
 # Each package's own package.json is the version truth here (kept in sync
 # with src/version.zig by `zig build audit-format-versions`); this script
-# only cross-checks the three agree with each other before publishing.
+# only cross-checks the four agree with each other before publishing.
 #
 # Usage:
 #   scripts/publish-npm.sh            dry-run every package (no registry writes)
@@ -33,8 +35,8 @@
 #
 # A package already present at its current version on the registry is
 # skipped rather than re-attempted, so a re-run after a partial failure
-# (e.g. @sjon-lang/web rejected after @sjon-lang/schema succeeded) only publishes
-# what is still missing.
+# (e.g. @sjon-lang/web rejected after @sjon-lang/schema and @sjon-lang/read
+# succeeded) only publishes what is still missing.
 
 set -euo pipefail
 
@@ -54,10 +56,20 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Dependency order: @sjon-lang/schema before @sjon-lang/web (which depends on it).
-# @sjon-lang/highlight has no workspace dependency; kept last, not for
-# correctness, just to group it with the others already published.
-PACKAGES=("hosts/schema" "hosts/web" "hosts/highlight")
+# Dependency order: @sjon-lang/schema and @sjon-lang/read before @sjon-lang/web
+# (which depends on both). @sjon-lang/highlight has no workspace dependency;
+# kept last, not for correctness, just to group it with the others already
+# published.
+PACKAGES=("hosts/schema" "hosts/read" "hosts/web" "hosts/highlight")
+
+# Permanent package-contract check (P2 Task 8): @sjon-lang/read is a
+# publishable package and @sjon-lang/web's packed manifest names it. Dropping
+# it from the list must fail here, not ship a web tarball with an unresolvable
+# dependency.
+if [[ " ${PACKAGES[*]} " != *" hosts/read "* ]]; then
+    echo "error: PACKAGES is missing hosts/read; @sjon-lang/web depends on it" >&2
+    exit 1
+fi
 
 # --- The cut is the working tree; refuse to publish over uncommitted work ---
 if [ -n "$(git -C "$PROJECT_DIR" status --porcelain)" ]; then
@@ -125,7 +137,12 @@ for pkg in "${PACKAGES[@]}"; do
     if $PUBLISH; then
         (cd "$PROJECT_DIR/$pkg" && pnpm publish --no-git-checks)
     else
-        (cd "$PROJECT_DIR/$pkg" && pnpm publish --dry-run --no-git-checks)
+        # `--force` bypasses only pnpm's "this version is already on the
+        # registry" guard. A dry run must still exercise every package's
+        # `prepack` on a candidate whose version was published previously,
+        # and `--dry-run` keeps every registry write off. A real publish keeps
+        # the guard (apart from the explicit `npm view` skip above).
+        (cd "$PROJECT_DIR/$pkg" && pnpm publish --dry-run --force --no-git-checks)
     fi
 done
 

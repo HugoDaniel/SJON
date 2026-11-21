@@ -15587,3 +15587,631 @@ test "held: a required key is still required" {
     // …and one character of typing gets it back to silent.
     try expectHeldSilent("(kernel :name _)", schema);
 }
+
+// ---------------------------------------------------------------------------
+// Identity registration metadata (P5): what the cross-ref index records
+// about author-written name attempts, beside — never instead of — the
+// first-wins lookup it already serves.
+//
+// The recording has to distinguish routes the lookup index treats alike:
+// a direct author-written `:name-key` symbol is an identity attempt; an
+// overlay-defaulted or provider-extracted name is not, even though both
+// register for lookup; a held or deferred spelling is not even that. Every
+// test below pairs the exclusion with the control that keeps it honest
+// (the same schema resolving a reference, or the whole-document twin of a
+// fragment), because "records nothing" passes vacuously against a broken
+// schema.
+// ---------------------------------------------------------------------------
+
+/// `(kernel :name …)` target + `(warp :by …)` reference, on the default
+/// `:name` key. `(wrap …)` exists so a target can sit one level down and
+/// prove the walk still descends.
+fn buildIdentityProbePlugin() Plugin.Plugin {
+    return .{
+        .name = "probe",
+        .value_kinds = &.{.{
+            .name = "kernel-ref",
+            .underlying = .symbol,
+            .cross_ref = .{ .targets = &.{"kernel"} },
+        }},
+        .forms = &.{
+            .{ .name = "kernel", .keys = &.{
+                .{ .name = "name", .value_type = .symbol, .optional = false },
+            } },
+            .{ .name = "warp", .keys = &.{
+                .{ .name = "by", .value_type = .{ .named = .{ .name = "kernel-ref" } }, .optional = true },
+            } },
+            .{ .name = "wrap", .open = true },
+        },
+    };
+}
+
+/// The same target, but the cross-ref reads names off a custom
+/// `:name-key id` — the identity row must carry the key that was actually
+/// declared, not the conventional `:name`.
+fn buildIdentityIdPlugin() Plugin.Plugin {
+    return .{
+        .name = "probe",
+        .value_kinds = &.{.{
+            .name = "kernel-ref",
+            .underlying = .symbol,
+            .cross_ref = .{ .targets = &.{"kernel"}, .name_key = "id" },
+        }},
+        .forms = &.{
+            .{ .name = "kernel", .keys = &.{
+                .{ .name = "id", .value_type = .symbol, .optional = false },
+            } },
+            .{ .name = "warp", .keys = &.{
+                .{ .name = "by", .value_type = .{ .named = .{ .name = "kernel-ref" } }, .optional = true },
+            } },
+            .{ .name = "wrap", .open = true },
+        },
+    };
+}
+
+/// Forest twin of `runWithAxes`: the same parse → materializeDefaults →
+/// validate pipeline, but through `validateForestWithOptions` so the caller
+/// can inspect `cross_ref_index` — the identity metadata lives there, and
+/// `validateWithOptions` drops the index on the floor.
+fn runForestWithAxes(
+    a: Allocator,
+    src: [:0]const u8,
+    schema: Schema.Schema,
+    axes: Validator.EffectiveAxes,
+) !struct {
+    tree: Ast.Tree,
+    mat: MaterializedDefaultsMod.Result,
+    arena: std.heap.ArenaAllocator,
+    fr: Validator.ForestResult,
+} {
+    var tree = try Parser.parse(a, src);
+    errdefer tree.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    errdefer arena.deinit();
+
+    var mat = try MaterializedDefaultsMod.materializeDefaults(a, arena.allocator(), &tree, tree.root, schema);
+    errdefer mat.deinit(a);
+
+    const trees = [_]Ast.Tree{tree};
+    const fr = try Validator.validateForestWithOptions(a, &trees, schema, .{
+        .overlay = &mat.materialized,
+        .axes = axes,
+    });
+    return .{ .tree = tree, .mat = mat, .arena = arena, .fr = fr };
+}
+
+test "identity index: author registration records registry scope symbol name-key and site" {
+    const a = testing.allocator;
+    const schema = Schema.Schema.init(&.{buildIdentityIdPlugin()});
+    var tree = try Parser.parse(a,
+        \\(wrap (kernel :id flow))
+    );
+    defer tree.deinit();
+
+    const trees = [_]Ast.Tree{tree};
+    var fr = try Validator.validateForest(a, &trees, schema);
+    defer fr.deinit(a);
+
+    const attempts = fr.cross_ref_index.identityRegistrations();
+    try testing.expectEqual(@as(usize, 1), attempts.len);
+    const reg = attempts[0];
+    try testing.expectEqualStrings("probe/kernel", reg.registry);
+    try testing.expectEqual(Validator.ScopeId.tree(0), reg.scope);
+    try testing.expectEqualStrings("flow", reg.symbol);
+    try testing.expectEqualStrings("id", reg.name_key);
+
+    // The site is the nested `(kernel :id flow)` form itself: form span
+    // over the whole form, name span over the `flow` symbol, node index
+    // pointing at the form.
+    const wrap_hdr = tree.formHeader(tree.root[0]);
+    const kernel_idx = wrap_hdr.children[0];
+    try testing.expectEqual(kernel_idx, reg.site.node_idx);
+    try testing.expectEqual(@as(u32, 0), reg.site.tree_idx);
+    try testing.expectEqual(tree.spanOf(kernel_idx).start, reg.site.form_span.start);
+    try testing.expectEqual(tree.spanOf(kernel_idx).end, reg.site.form_span.end);
+    const kv = tree.kvpairHeader(tree.formHeader(kernel_idx).children[0]);
+    try testing.expectEqual(tree.spanOf(kv.value).start, reg.site.name_span.start);
+    try testing.expectEqual(tree.spanOf(kv.value).end, reg.site.name_span.end);
+    try testing.expectEqual(reg.scope, reg.site.scope);
+    try testing.expect(!reg.site.scope.isLexical());
+
+    // A single author attempt is resolved, not ambiguous.
+    try testing.expect(!fr.cross_ref_index.identityIsAmbiguous(reg.scope, reg.registry, reg.symbol));
+}
+
+test "identity index: duplicate registration marks the name ambiguous without changing first-wins" {
+    const a = testing.allocator;
+    const schema = Schema.Schema.init(&.{buildIdentityProbePlugin()});
+    var tree = try Parser.parse(a,
+        \\(kernel :name flow)
+        \\(kernel :name flow)
+    );
+    defer tree.deinit();
+
+    const trees = [_]Ast.Tree{tree};
+    var fr = try Validator.validateForest(a, &trees, schema);
+    defer fr.deinit(a);
+
+    // Both author attempts recorded, in document order — including the
+    // one the first-wins index refused.
+    const attempts = fr.cross_ref_index.identityRegistrations();
+    try testing.expectEqual(@as(usize, 2), attempts.len);
+    try testing.expectEqualStrings("probe/kernel", attempts[0].registry);
+    try testing.expectEqualStrings("flow", attempts[0].symbol);
+    try testing.expectEqualStrings("flow", attempts[1].symbol);
+    try testing.expect(attempts[0].site.form_span.start < attempts[1].site.form_span.start);
+
+    // The public key is ambiguous…
+    try testing.expect(fr.cross_ref_index.identityIsAmbiguous(.tree(0), "probe/kernel", "flow"));
+    // …and lookup is unchanged: the first site still wins.
+    const site = fr.cross_ref_index.lookup(.tree(0), "probe/kernel", "flow").?;
+    try testing.expectEqual(attempts[0].site.node_idx, site.node_idx);
+    try testing.expectEqual(attempts[0].site.form_span.start, site.form_span.start);
+
+    // Exactly the pre-existing duplicate report: one, anchored on the
+    // second occurrence's `:name` value span.
+    var dup_count: usize = 0;
+    for (fr.results[0].diagnostics) |d| {
+        if (d.code != .duplicate_cross_ref_target) continue;
+        dup_count += 1;
+        const second_kv = tree.kvpairHeader(tree.formHeader(tree.root[1]).children[0]);
+        try testing.expectEqual(tree.spanOf(second_kv.value).start, d.span.start);
+    }
+    try testing.expectEqual(@as(usize, 1), dup_count);
+}
+
+test "identity index: default and author collisions are ambiguous in both orders" {
+    const a = testing.allocator;
+    const schema = Schema.Schema.init(&.{Validator_test_actor});
+
+    // Author first, defaulted second: the author attempt is recorded, and
+    // the default's later registration into the same slot makes the one
+    // public key ambiguous.
+    {
+        var out = try runForestWithAxes(a, "(actor :name ada) (actor)", schema, .{ .name_index = true });
+        defer {
+            out.fr.deinit(a);
+            out.mat.deinit(a);
+            out.arena.deinit();
+            out.tree.deinit();
+        }
+        const attempts = out.fr.cross_ref_index.identityRegistrations();
+        try testing.expectEqual(@as(usize, 1), attempts.len);
+        try testing.expectEqualStrings("scene/actor", attempts[0].registry);
+        try testing.expectEqualStrings("ada", attempts[0].symbol);
+        try testing.expectEqualStrings("name", attempts[0].name_key);
+        try testing.expect(out.fr.cross_ref_index.identityIsAmbiguous(.tree(0), "scene/actor", "ada"));
+        // First-wins lookup unchanged: the author site holds the slot.
+        const site = out.fr.cross_ref_index.lookup(.tree(0), "scene/actor", "ada").?;
+        try testing.expectEqual(attempts[0].site.name_span.start, site.name_span.start);
+    }
+
+    // Defaulted first, author second: the author attempt is still recorded
+    // — a duplicate never stopped the recording — and the key is ambiguous
+    // exactly as in the other order.
+    {
+        var out = try runForestWithAxes(a, "(actor) (actor :name ada)", schema, .{ .name_index = true });
+        defer {
+            out.fr.deinit(a);
+            out.mat.deinit(a);
+            out.arena.deinit();
+            out.tree.deinit();
+        }
+        const attempts = out.fr.cross_ref_index.identityRegistrations();
+        try testing.expectEqual(@as(usize, 1), attempts.len);
+        try testing.expectEqualStrings("ada", attempts[0].symbol);
+        try testing.expect(out.fr.cross_ref_index.identityIsAmbiguous(.tree(0), "scene/actor", "ada"));
+        // First-wins lookup unchanged the other way too: the default's
+        // synthetic span (the first form's head) holds the slot.
+        const site = out.fr.cross_ref_index.lookup(.tree(0), "scene/actor", "ada").?;
+        try testing.expectEqual(tree_head_span_start(&out.tree, 0), site.name_span.start);
+        try testing.expect(attempts[0].site.name_span.start != site.name_span.start);
+    }
+
+    // Default-only duplicates: the duplicate report still fires (existing
+    // behavior) but no registration attempt exists to resolve or refuse.
+    {
+        var out = try runForestWithAxes(a, "(actor) (actor)", schema, .{ .name_index = true });
+        defer {
+            out.fr.deinit(a);
+            out.mat.deinit(a);
+            out.arena.deinit();
+            out.tree.deinit();
+        }
+        try testing.expectEqual(@as(usize, 1), countDiagWithCode(out.fr.results[0].diagnostics, .duplicate_cross_ref_target));
+        try testing.expectEqual(@as(usize, 0), out.fr.cross_ref_index.identityRegistrations().len);
+    }
+}
+
+/// Start offset of the `idx`-th root form's head — where an overlay-default
+/// name lands, since the default registers on the synthetic head span.
+fn tree_head_span_start(tree: *const Ast.Tree, idx: usize) u32 {
+    return tree.formHeader(tree.root[idx]).head_span.start;
+}
+
+test "identity index: duplicate name-key does not inherit the first pair as resolved" {
+    const a = testing.allocator;
+    const schema = Schema.Schema.init(&.{buildIdentityProbePlugin()});
+    var tree = try Parser.parse(a,
+        \\(kernel :name flow :name stream)
+    );
+    defer tree.deinit();
+
+    const trees = [_]Ast.Tree{tree};
+    var fr = try Validator.validateForest(a, &trees, schema);
+    defer fr.deinit(a);
+
+    // Existing behavior preserved: the first pair registers, a differently
+    // named later pair invents no second registry entry, `duplicate_key`
+    // still fires from the form walk, and the index pass adds no duplicate
+    // cross-ref report of its own.
+    try testing.expect(fr.cross_ref_index.contains(.tree(0), "probe/kernel", "flow"));
+    try testing.expect(!fr.cross_ref_index.contains(.tree(0), "probe/kernel", "stream"));
+    try testing.expectEqual(@as(usize, 1), countDiagWithCode(fr.results[0].diagnostics, .duplicate_key));
+    try testing.expectEqual(@as(usize, 0), countDiagWithCode(fr.results[0].diagnostics, .duplicate_cross_ref_target));
+
+    // The first pair's candidate is the one recorded…
+    const attempts = fr.cross_ref_index.identityRegistrations();
+    try testing.expectEqual(@as(usize, 1), attempts.len);
+    try testing.expectEqualStrings("flow", attempts[0].symbol);
+    // …and it is ambiguous: two author spellings contend for one form, so
+    // the registration cannot be inherited as resolved.
+    try testing.expect(fr.cross_ref_index.identityIsAmbiguous(.tree(0), "probe/kernel", "flow"));
+    try testing.expect(!fr.cross_ref_index.identityIsAmbiguous(.tree(0), "probe/kernel", "stream"));
+}
+
+test "identity index: anonymous and non-identity routes record nothing" {
+    const a = testing.allocator;
+    const schema = Schema.Schema.init(&.{buildIdentityProbePlugin()});
+
+    // Missing, string, and number name values: lexically tolerated (their
+    // diagnostics are the form walk's business) and none is an attempt.
+    {
+        var tree = try Parser.parse(a,
+            \\(kernel)
+            \\(kernel :name "flow")
+            \\(kernel :name 3)
+        );
+        defer tree.deinit();
+        const trees = [_]Ast.Tree{tree};
+        var fr = try Validator.validateForest(a, &trees, schema);
+        defer fr.deinit(a);
+        try testing.expectEqual(@as(usize, 0), fr.cross_ref_index.identityRegistrations().len);
+    }
+
+    // A held `_` is not a name.
+    {
+        var tree = try Parser.parse(a, "(kernel :name _)");
+        defer tree.deinit();
+        const trees = [_]Ast.Tree{tree};
+        var fr = try Validator.validateForestWithOptions(a, &trees, schema, .{ .held_symbol = "_" });
+        defer fr.deinit(a);
+        try testing.expectEqual(@as(usize, 0), fr.cross_ref_index.identityRegistrations().len);
+    }
+
+    // A schema with no cross-ref: empty index, empty identity metadata.
+    {
+        const plain: Plugin.Plugin = .{
+            .name = "probe",
+            .forms = &.{.{ .name = "kernel", .keys = &.{
+                .{ .name = "name", .value_type = .symbol, .optional = true },
+            } }},
+        };
+        var tree = try Parser.parse(a, "(kernel :name flow)");
+        defer tree.deinit();
+        const trees = [_]Ast.Tree{tree};
+        var fr = try Validator.validateForest(a, &trees, Schema.Schema.init(&.{plain}));
+        defer fr.deinit(a);
+        try testing.expectEqual(@as(usize, 0), fr.cross_ref_index.identityRegistrations().len);
+    }
+
+    // A unique overlay-defaulted name registers for lookup but records no
+    // attempt: a default is not an author-written identity.
+    {
+        var out = try runForestWithAxes(a, "(actor)", Schema.Schema.init(&.{Validator_test_actor}), .{ .name_index = true });
+        defer {
+            out.fr.deinit(a);
+            out.mat.deinit(a);
+            out.arena.deinit();
+            out.tree.deinit();
+        }
+        try testing.expect(out.fr.cross_ref_index.contains(.tree(0), "scene/actor", "ada"));
+        try testing.expectEqual(@as(usize, 0), out.fr.cross_ref_index.identityRegistrations().len);
+    }
+
+    // Provider-extracted names register and resolve — the control that
+    // keeps this exclusion from passing vacuously against a broken schema —
+    // and still record no attempt.
+    {
+        var table = try ProviderXref.tableOf(a, "u_time\nu_res", .{ .names = &.{ "u_time", "u_res" } });
+        defer table.deinit(a);
+        var tree = try Parser.parse(a,
+            \\(shader :name main :src "u_time\nu_res")
+            \\(bind :uniform u_time)
+        );
+        defer tree.deinit();
+        const trees = [_]Ast.Tree{tree};
+        var fr = try Validator.validateForestWithOptions(a, &trees, ProviderXref.schema, .{ .extractions = &table });
+        defer fr.deinit(a);
+        try testing.expect(fr.cross_ref_index.contains(.tree(0), "glsl/shader", "u_time"));
+        try testing.expectEqual(@as(usize, 0), countDiagWithCode(fr.results[0].diagnostics, .not_cross_ref));
+        try testing.expectEqual(@as(usize, 0), fr.cross_ref_index.identityRegistrations().len);
+    }
+}
+
+test "identity index: lexical scopes keep equal symbols distinct" {
+    const a = testing.allocator;
+    const schema = Schema.Schema.init(&.{buildScopedPiecePlugin()});
+    var tree = try Parser.parse(a,
+        \\(piece (phrase :name p0))
+        \\(piece (phrase :name p0))
+    );
+    defer tree.deinit();
+
+    const trees = [_]Ast.Tree{tree};
+    var fr = try Validator.validateForest(a, &trees, schema);
+    defer fr.deinit(a);
+
+    const attempts = fr.cross_ref_index.identityRegistrations();
+    try testing.expectEqual(@as(usize, 2), attempts.len);
+    try testing.expectEqualStrings("demo/phrase", attempts[0].registry);
+    try testing.expectEqualStrings("p0", attempts[0].symbol);
+    try testing.expectEqualStrings("p0", attempts[1].symbol);
+
+    // Two distinct lexical scopes — equal symbols are not one identity…
+    try testing.expect(attempts[0].scope.isLexical());
+    try testing.expect(attempts[1].scope.isLexical());
+    try testing.expect(attempts[0].scope != attempts[1].scope);
+    // …so neither key is ambiguous and each resolves in its own scope.
+    for (attempts) |reg| {
+        try testing.expect(!fr.cross_ref_index.identityIsAmbiguous(reg.scope, reg.registry, reg.symbol));
+        try testing.expect(fr.cross_ref_index.lookup(reg.scope, "demo/phrase", "p0") != null);
+    }
+}
+
+test "identity index: target groups and independent registries keep their canonical keys" {
+    const a = testing.allocator;
+
+    // `render-pipeline` feeds both the group's synthetic bucket and its
+    // own; `audio/cue` is an independent registry in a second plugin.
+    const audio: Plugin.Plugin = .{
+        .name = "audio",
+        .value_kinds = &.{.{ .name = "cue-ref", .underlying = .symbol, .cross_ref = .{ .targets = &.{"cue"} } }},
+        .forms = &.{.{ .name = "cue", .keys = &.{
+            .{ .name = "name", .value_type = .symbol, .optional = false },
+        } }},
+    };
+    const plugins = [_]Plugin.Plugin{ buildPipelineGroupPlugin(), audio };
+    const schema = Schema.Schema.init(&plugins);
+    var tree = try Parser.parse(a,
+        \\(render-pipeline :name blit)
+        \\(compute-pipeline :name reduce)
+        \\(audio/cue :name blit)
+    );
+    defer tree.deinit();
+
+    const trees = [_]Ast.Tree{tree};
+    var fr = try Validator.validateForest(a, &trees, schema);
+    defer fr.deinit(a);
+
+    const group = "gpu/compute-pipeline gpu/render-pipeline";
+    const attempts = fr.cross_ref_index.identityRegistrations();
+    try testing.expectEqual(@as(usize, 4), attempts.len);
+
+    var group_count: usize = 0;
+    var group_blit: ?Validator.CrossRefIndex.IdentityRegistration = null;
+    var render_own: ?Validator.CrossRefIndex.IdentityRegistration = null;
+    var audio_count: usize = 0;
+    for (attempts) |reg| {
+        if (std.mem.eql(u8, reg.registry, group)) {
+            group_count += 1;
+            if (std.mem.eql(u8, reg.symbol, "blit")) group_blit = reg;
+        } else if (std.mem.eql(u8, reg.registry, "gpu/render-pipeline")) {
+            render_own = reg;
+        } else if (std.mem.eql(u8, reg.registry, "audio/cue")) {
+            audio_count += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), group_count);
+    try testing.expectEqual(@as(usize, 1), audio_count);
+    const own = render_own orelse return error.TestNoRegistration;
+    const gb = group_blit orelse return error.TestNoRegistration;
+
+    // One form participating in two registries yields two registrations
+    // at the same site — the canonical buckets differ, the form does not.
+    try testing.expectEqualStrings("blit", own.symbol);
+    try testing.expectEqualStrings("name", own.name_key);
+    try testing.expectEqual(own.site.node_idx, gb.site.node_idx);
+    try testing.expectEqual(own.site.form_span.start, gb.site.form_span.start);
+
+    // The same symbol in an independent registry is a separate identity;
+    // nothing here is ambiguous.
+    try testing.expect(!fr.cross_ref_index.identityIsAmbiguous(.tree(0), group, "blit"));
+    try testing.expect(!fr.cross_ref_index.identityIsAmbiguous(.tree(0), group, "reduce"));
+    try testing.expect(!fr.cross_ref_index.identityIsAmbiguous(.tree(0), "gpu/render-pipeline", "blit"));
+    try testing.expect(!fr.cross_ref_index.identityIsAmbiguous(.tree(0), "audio/cue", "blit"));
+}
+
+test "identity index: defer_cross_refs records no identity" {
+    const a = testing.allocator;
+    const schema = Schema.Schema.init(&.{buildIdentityProbePlugin()});
+    const src: [:0]const u8 = "(kernel :name t) (kernel :name t)";
+
+    // Whole-document control: the duplicate fires, both attempts exist,
+    // and the key is ambiguous — the fragment twin below is measured
+    // against this, not against nothing.
+    {
+        var tree = try Parser.parse(a, src);
+        defer tree.deinit();
+        const trees = [_]Ast.Tree{tree};
+        var fr = try Validator.validateForest(a, &trees, schema);
+        defer fr.deinit(a);
+        try testing.expectEqual(@as(usize, 1), countDiagWithCode(fr.results[0].diagnostics, .duplicate_cross_ref_target));
+        try testing.expectEqual(@as(usize, 2), fr.cross_ref_index.identityRegistrations().len);
+        try testing.expect(fr.cross_ref_index.identityIsAmbiguous(.tree(0), "probe/kernel", "t"));
+    }
+
+    // Fragment: a fragment cannot adjudicate identity in either direction
+    // — no attempts and no ambiguous keys under deferral.
+    {
+        var tree = try Parser.parse(a, src);
+        defer tree.deinit();
+        const trees = [_]Ast.Tree{tree};
+        var fr = try Validator.validateForestWithOptions(a, &trees, schema, .{ .defer_cross_refs = true });
+        defer fr.deinit(a);
+        try testing.expectEqual(@as(usize, 0), countDiagWithCode(fr.results[0].diagnostics, .duplicate_cross_ref_target));
+        try testing.expectEqual(@as(usize, 0), fr.cross_ref_index.identityRegistrations().len);
+        try testing.expect(!fr.cross_ref_index.identityIsAmbiguous(.tree(0), "probe/kernel", "t"));
+    }
+}
+
+test "identity index: acyclic diagnostics are unchanged" {
+    const a = testing.allocator;
+    const schema = Schema.Schema.init(&.{buildAcyclicPhrasePlugin()});
+
+    // Self-loop control: `cyclic_cross_ref` still fires exactly as before…
+    {
+        var tree = try Parser.parse(a, "(phrase :name p0 :parent p0)");
+        defer tree.deinit();
+        const trees = [_]Ast.Tree{tree};
+        var fr = try Validator.validateForest(a, &trees, schema);
+        defer fr.deinit(a);
+        try testing.expectEqual(@as(usize, 1), countDiagWithCode(fr.results[0].diagnostics, .cyclic_cross_ref));
+        // …while the author registration stays recorded and resolved —
+        // a cycle among names is not an ambiguity of identity.
+        const attempts = fr.cross_ref_index.identityRegistrations();
+        try testing.expectEqual(@as(usize, 1), attempts.len);
+        try testing.expectEqualStrings("p0", attempts[0].symbol);
+        try testing.expect(!fr.cross_ref_index.identityIsAmbiguous(attempts[0].scope, attempts[0].registry, "p0"));
+    }
+
+    // Acyclic control: no cycle, and both names remain queryable.
+    {
+        var tree = try Parser.parse(a,
+            \\(phrase :name p0 :parent p1)
+            \\(phrase :name p1)
+        );
+        defer tree.deinit();
+        const trees = [_]Ast.Tree{tree};
+        var fr = try Validator.validateForest(a, &trees, schema);
+        defer fr.deinit(a);
+        try testing.expectEqual(@as(usize, 0), countDiagWithCode(fr.results[0].diagnostics, .cyclic_cross_ref));
+        const attempts = fr.cross_ref_index.identityRegistrations();
+        try testing.expectEqual(@as(usize, 2), attempts.len);
+    }
+}
+
+/// Sort identity registrations by name-span start. Insertion sort: the
+/// lists are tiny, and it lets the tree/binary parity comparison ignore
+/// the two paths' differing walk orders (the binary path registers at
+/// frame exhaustion, so nested targets can reverse).
+fn sortIdentityRegistrations(
+    regs: []Validator.CrossRefIndex.IdentityRegistration,
+) void {
+    var i: usize = 1;
+    while (i < regs.len) : (i += 1) {
+        const v = regs[i];
+        var j = i;
+        while (j > 0 and regs[j - 1].site.name_span.start > v.site.name_span.start) : (j -= 1) {
+            regs[j] = regs[j - 1];
+        }
+        regs[j] = v;
+    }
+}
+
+test "identity index: tree and binary record the same metadata" {
+    const a = testing.allocator;
+    const schema = Schema.Schema.init(&.{buildIdentityProbePlugin()});
+    const scoped_schema = Schema.Schema.init(&.{buildScopedPiecePlugin()});
+
+    // Unique, duplicate, scoped, held, and deferred inputs — the five
+    // shapes the plan names — through both walkers over the same source.
+    const Case = struct {
+        src: [:0]const u8,
+        schema: Schema.Schema,
+        defer_cross_refs: bool = false,
+        held_symbol: ?[]const u8 = null,
+    };
+    const cases = [_]Case{
+        .{ .src = "(kernel :name flow)", .schema = schema },
+        .{ .src = "(kernel :name flow) (kernel :name flow)", .schema = schema },
+        .{ .src =
+        \\(piece (phrase :name p0))
+        \\(piece (phrase :name p0))
+        , .schema = scoped_schema },
+        .{ .src = "(kernel :name _)", .schema = schema, .held_symbol = "_" },
+        .{ .src = "(kernel :name t) (kernel :name t)", .schema = schema, .defer_cross_refs = true },
+    };
+
+    for (cases) |c| {
+        var tree = try Parser.parse(a, c.src);
+        defer tree.deinit();
+        const bin = try Binary.toBinary(a, tree, .{});
+        defer bin.deinit();
+
+        const trees = [_]Ast.Tree{tree};
+        var fr_tree = try Validator.validateForestWithOptions(a, &trees, c.schema, .{
+            .defer_cross_refs = c.defer_cross_refs,
+            .held_symbol = c.held_symbol,
+        });
+        defer fr_tree.deinit(a);
+
+        const buffers = [_][]const u8{bin.data};
+        var fr_bin = try Validator.validateForestBinaryWithBudget(
+            a,
+            &buffers,
+            c.schema,
+            .{},
+            null,
+            c.defer_cross_refs,
+            c.held_symbol,
+        );
+        defer fr_bin.deinit(a);
+
+        const ta = fr_tree.cross_ref_index.identityRegistrations();
+        const ba = fr_bin.cross_ref_index.identityRegistrations();
+        try testing.expectEqual(ta.len, ba.len);
+
+        // Same set of attempts modulo walk order: sort both by name-span
+        // start, then compare field-for-field.
+        var tcopy: [8]Validator.CrossRefIndex.IdentityRegistration = undefined;
+        var bcopy: [8]Validator.CrossRefIndex.IdentityRegistration = undefined;
+        try testing.expect(ta.len <= tcopy.len);
+        try testing.expect(ba.len <= bcopy.len);
+        @memcpy(tcopy[0..ta.len], ta);
+        @memcpy(bcopy[0..ba.len], ba);
+        sortIdentityRegistrations(tcopy[0..ta.len]);
+        sortIdentityRegistrations(bcopy[0..ba.len]);
+
+        for (tcopy[0..ta.len], bcopy[0..ba.len]) |t, b| {
+            try testing.expectEqualStrings(t.registry, b.registry);
+            try testing.expectEqualStrings(t.symbol, b.symbol);
+            try testing.expectEqualStrings(t.name_key, b.name_key);
+            try testing.expectEqual(t.site.tree_idx, b.site.tree_idx);
+            try testing.expectEqual(t.site.name_span.start, b.site.name_span.start);
+            try testing.expectEqual(t.site.name_span.end, b.site.name_span.end);
+            try testing.expectEqual(t.site.form_span.start, b.site.form_span.start);
+            try testing.expectEqual(t.site.form_span.end, b.site.form_span.end);
+            // Lexical scope ids are path-specific by construction (AST
+            // node index vs binary byte offset), so full equality is only
+            // assertable for tree scopes; lexical scopes must at least
+            // agree on being lexical and on their tree.
+            if (t.scope.isLexical()) {
+                try testing.expect(b.scope.isLexical());
+                try testing.expectEqual(t.scope.treeIdx(), b.scope.treeIdx());
+            } else {
+                try testing.expectEqual(t.scope, b.scope);
+            }
+            // The binary Site contract: no AST node exists there, and no
+            // test may require an address from the binary path.
+            try testing.expectEqual(Ast.NodeIndex.invalid, b.site.node_idx);
+            try testing.expect(t.site.node_idx != Ast.NodeIndex.invalid);
+            // Ambiguity agrees on the recorded key — including the
+            // duplicate case marking it on both paths.
+            try testing.expectEqual(
+                fr_tree.cross_ref_index.identityIsAmbiguous(t.scope, t.registry, t.symbol),
+                fr_bin.cross_ref_index.identityIsAmbiguous(b.scope, b.registry, b.symbol),
+            );
+        }
+    }
+}

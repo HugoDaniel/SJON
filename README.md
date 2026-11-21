@@ -107,8 +107,25 @@ const text = try sjon.print(gpa, tree, .{ .mode = .canonical });
 defer text.deinit();
 ```
 
-**Node / Web (WASM)** — install `npm install @sjon-lang/web@1.7.1`.
-Build matching artifacts from the 1.7.1 source with Zig 0.16 (`zig build
+**Reader (pure TypeScript)** — install `npm install @sjon-lang/read@1.8.0`.
+Synchronous, zero runtime dependencies, no WASM. `read` is the strict entry
+(throws `ReadError` when an `err`-severity diagnostic fires); `readResult` is
+total and returns the recovered forest plus diagnostics for editors. Every
+span is a half-open UTF-8 byte range, never a JS string index.
+
+```js
+import { read, readResult, fields } from "@sjon-lang/read";
+
+const [root] = read("(camera :ortho :zoom 2)");
+const zoom = fields(root).get("zoom"); // greedy pairing: :ortho is a flag
+const { roots, diagnostics } = readResult("(a :k ["); // partial, never throws
+```
+
+See [hosts/read/README.md](hosts/read/README.md) for the tree shape, the
+`fields` view, and the engine oracle's three named exclusions.
+
+**Node / Web (WASM)** — install `npm install @sjon-lang/web@1.8.0`.
+Build matching artifacts from the 1.8.0 source with Zig 0.16 (`zig build
 wasm-all`); the npm package does not bundle WASM. From the source root:
 
 ```js
@@ -123,7 +140,7 @@ const result = reader.validateBinary(binary);
 See [`examples/quickstart-web.mjs`](examples/quickstart-web.mjs) and
 [hosts/web/README.md](hosts/web/README.md).
 
-**Rust** — `cargo add sjon-host@1.7.1`; wraps the matching external
+**Rust** — `cargo add sjon-host@1.8.0`; wraps the matching external
 `sjon.wasm` via `wasmtime` (the crate does not bundle it):
 
 ```rust
@@ -137,17 +154,18 @@ let result = host.validate_document(source, &HostOptions::default())?;
 See [`examples/quickstart-rust.rs`](examples/quickstart-rust.rs) and
 [hosts/rust/README.md](hosts/rust/README.md).
 
-**TypeScript** — `hosts/typescript-parity/` is a hand-ported reference
-for conformance verification, not for production; `@sjon-lang/schema`
-(`hosts/schema/`) is the typed schema builder for TS-first projects.
-See [hosts/schema/README.md](hosts/schema/README.md).
+**TypeScript** — `@sjon-lang/read` is the synchronous reader and
+`@sjon-lang/schema` (`hosts/schema/`) the typed schema builder for TS-first
+projects; `hosts/typescript-parity/` is a hand-ported reference for
+conformance verification, not for production. See
+[hosts/schema/README.md](hosts/schema/README.md).
 
 ## Docs
 
 - [docs/AUTHORING.md](docs/AUTHORING.md) — hands-on tutorial
 - [docs/LANGUAGE.md](docs/LANGUAGE.md) — formal grammar, semantics, JSON bridge
 - [docs/DESIGN.md](docs/DESIGN.md) — module map, SoA tree, binary wire format
-- [docs/INTEGRATION.md](docs/INTEGRATION.md) — embedding from Zig, Node/Web, Rust, TypeScript
+- [docs/INTEGRATION.md](docs/INTEGRATION.md) — embedding from Zig, the pure-TS reader, Node/Web, Rust, TypeScript
 - [docs/BINARY_PATTERNS.md](docs/BINARY_PATTERNS.md) — decode once and query binary patterns
 - [docs/TOOLING.md](docs/TOOLING.md) — editor setup, LSP capabilities, `sjon` CLI
 - [docs/plugin-model-v1.md](docs/plugin-model-v1.md) — the plugin contract
@@ -174,10 +192,12 @@ lands updated in the same change.
 
 Every package in this repo carries the one version declared in
 `src/version.zig`; `zig build audit-format-versions` names any
-manifest that falls out of step. The `@sjon-lang/*` packages carry full
-registry metadata and are published through `scripts/publish-npm.sh`.
+manifest that falls out of step. The four `@sjon-lang/*` packages
+(`schema`, `read`, `web`, `highlight`) carry full registry metadata and are
+published in dependency order `schema → read → web → highlight` through
+`scripts/publish-npm.sh`.
 Use `pnpm pack` for local tarballs: pnpm rewrites the web package's
-`workspace:*` dependency into the matching registry version. Workspace
+`workspace:*` dependencies into the matching registry versions. Workspace
 and path dependencies remain supported. What each release changed
 is in [CHANGELOG.md](CHANGELOG.md). The repeatable candidate and publication
 checks are in [docs/RELEASING.md](docs/RELEASING.md).

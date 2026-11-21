@@ -69,7 +69,9 @@ class KindRegistry {
       case 'form_any':
         return 'form';
       case 'number':
-        if (!shape.bounds) return 'number';
+        // A bare number stays the builtin; any refinement axis — bounds,
+        // `:repr`, or `:unit` — needs a hoisted value-kind.
+        if (!shape.bounds && shape.repr === undefined && !shape.rejectUnits) return 'number';
         return this.register(shape, suggested ?? generatedName(shape), description, explicit);
       case 'string':
         if (!shape.bounds) return 'string';
@@ -149,6 +151,11 @@ class KindRegistry {
     if (this.formsByHead.has(form.head) || this.seededForms.has(form.head)) return;
     this.formsByHead.set(form.head, form);
     this.formOrder.push(form.head);
+    // The positional is part of the form header and must be hoisted *before*
+    // `assemble` snapshots `emitted()`: the inner `(form …)` blocks are
+    // serialized after that snapshot, so a kind registered only from
+    // `serializeForm` would reference an undeclared value-kind.
+    if (form.positional.kind === 'typed') this.typeToken(form.positional.element);
     for (const key of form.keys) this.typeToken(key.def);
   }
 
@@ -222,8 +229,18 @@ function assemble(
 }
 
 function serializeForm(form: FormDef, registry: KindRegistry): string {
-  const head = `(form :name ${atom(form.head)}`;
-  const headLine = form.description ? `${head} :description ${quote(form.description)}` : head;
+  const header: string[] = [`(form :name ${atom(form.head)}`];
+  if (form.description) header.push(`:description ${quote(form.description)}`);
+  // `:open true` only when set: closed forms keep their old bytes, exactly.
+  if (form.open) header.push(':open true');
+  // A typed positional's element is a full node, so it goes through the same
+  // hoisting path a key does; `'any'` stays the builtin token.
+  if (form.positional.kind !== 'none') {
+    const token =
+      form.positional.kind === 'any' ? 'any' : registry.typeToken(form.positional.element);
+    header.push(`:positional ${atom(token)}`);
+  }
+  const headLine = header.join(' ');
   const keyLines = form.keys.map((k) => {
     const type = registry.typeToken(k.def);
     let line = `(key :name ${atom(k.name)} :type ${atom(type)} :optional ${k.def.isOptional ? 'true' : 'false'}`;
@@ -276,8 +293,15 @@ function underlyingOf(shape: ShapeIR): string {
 
 function refinementOf(shape: ShapeIR): string {
   switch (shape.kind) {
-    case 'number':
-      return shape.bounds ? `:numeric ${numericBounds(shape.bounds)}` : '';
+    case 'number': {
+      // Three orthogonal siblings in stable order: `:numeric`, `:unit`,
+      // `:repr`. Unit/repr are never folded into `(numeric-bounds …)`.
+      const parts: string[] = [];
+      if (shape.bounds) parts.push(`:numeric ${numericBounds(shape.bounds)}`);
+      if (shape.rejectUnits) parts.push(':unit (unit-shape :reject true)');
+      if (shape.repr !== undefined) parts.push(`:repr (repr-shape :type ${atom(shape.repr)})`);
+      return parts.join(' ');
+    }
     case 'string':
       return shape.bounds ? `:string-bounds ${stringBounds(shape.bounds)}` : '';
     // `symbol_members` gets `memberAtom`, not `atom`: a digit-leading spelling
@@ -382,7 +406,9 @@ function builtinElementToken(shape: ShapeIR): string {
     case 'form_any':
       return 'form';
     case 'number':
-      if (!shape.bounds) return 'number';
+      // Any number refinement axis makes the element non-inline; falling
+      // through makes the caller lift it to a named kind (the existing error).
+      if (!shape.bounds && shape.repr === undefined && !shape.rejectUnits) return 'number';
       break;
     case 'string':
       if (!shape.bounds) return 'string';
@@ -432,6 +458,8 @@ function quote(text: string): string {
 function generatedName(shape: ShapeIR): string {
   switch (shape.kind) {
     case 'number': {
+      // A new axis appends a distinguishing segment without renaming any
+      // pre-existing shape (`num-min0` keeps its name).
       const b = shape.bounds ?? {};
       const segs = ['num'];
       if (b.min !== undefined) segs.push(`min${slugNum(b.min)}`);
@@ -439,6 +467,8 @@ function generatedName(shape: ShapeIR): string {
       if (b.exclusiveMin) segs.push('xmin');
       if (b.exclusiveMax) segs.push('xmax');
       if (b.integer) segs.push('int');
+      if (shape.rejectUnits) segs.push('unitless');
+      if (shape.repr !== undefined) segs.push(`repr-${shape.repr}`);
       return segs.join('-');
     }
     case 'string': {

@@ -178,6 +178,7 @@ pub fn main(init: std.process.Init) !u8 {
                 .{ .path = "build.zig.zon", .anchor = ".version = " },
                 .{ .path = "package.json", .anchor = "\"version\": " },
                 .{ .path = "hosts/schema/package.json", .anchor = "\"version\": " },
+                .{ .path = "hosts/read/package.json", .anchor = "\"version\": " },
                 .{ .path = "hosts/web/package.json", .anchor = "\"version\": " },
                 .{ .path = "hosts/typescript-parity/package.json", .anchor = "\"version\": " },
                 .{ .path = "hosts/highlight/package.json", .anchor = "\"version\": " },

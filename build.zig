@@ -936,6 +936,27 @@ pub fn build(b: *std.Build) void {
     });
     if (plugin_exec) linkSystemWasmtime(b, root_test_step.root_module);
 
+    // P3 preloaded-schema handle table. Internal to the kitchen-sink
+    // artifact's host surface: nothing re-exports it from `src/root.zig`
+    // (`oom_tests.zig` reaches it by relative import for its OOM sweep),
+    // so its own inline unit tests need this dedicated root. `Host.zig`
+    // is reached by relative import but still requires the
+    // `build_options` named module (plugin-exec flags). `Host.zig` also
+    // reaches `PluginRuntime`, so with executable plugin support this
+    // root needs the same system libwasmtime link as the root test above.
+    const wasm_schema_handles_test = addTestStep(
+        b,
+        test_step,
+        cov_clean,
+        cov_merge,
+        "wasm-schema-handles",
+        "src/wasm_schema_handles.zig",
+        target,
+        optimize,
+        &.{.{ .name = "build_options", .module = build_options_mod }},
+    );
+    if (plugin_exec) linkSystemWasmtime(b, wasm_schema_handles_test.root_module);
+
     // Reference-plugin tests + demo regression test.
     _ = addTestStep(
         b,

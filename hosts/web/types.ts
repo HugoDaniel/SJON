@@ -98,12 +98,69 @@ export interface HostOptions {
    * member, and a string that does not lex as a symbol never matches.
    */
   readonly heldSymbol?: string;
+  /**
+   * One schema retained by `SjonHost.preload`, borrowed for this call.
+   *
+   * The handle must have been minted by the same `SjonHost` instance and
+   * must not have been disposed; a foreign or disposed handle is refused
+   * in JavaScript before it reaches WASM. It composes additively with any
+   * `(plugin …)` / `(use-plugin …)` declarations in the document — there
+   * is no ambient schema and no handle stacking, so one call borrows at
+   * most this one handle.
+   *
+   * The borrow lasts only for the synchronous call. Disposing the handle
+   * (or the host) while one of the host's calls is in flight throws
+   * `SchemaInUse`.
+   */
+  readonly preloaded?: PreloadedSchemaHandle;
 }
+
+/**
+ * Options accepted by `SjonHost.validateAgainst`.
+ *
+ * The project fields are deliberately absent: the call composes the
+ * manifest string it is given and performs no project discovery, so
+ * `projectRoot` / `projectFile` are forced to `null` and
+ * `projectDiagnostics` has no channel into a two-source result.
+ * `failurePolicy` and `heldSymbol` keep their `HostOptions` meaning and
+ * defaults.
+ */
+export type ValidateAgainstOptions = Pick<HostOptions, 'failurePolicy' | 'heldSymbol'>;
 
 export interface PluginSummary {
   readonly name: string;
   readonly version: string | null;
   readonly formCount: number;
+}
+
+/**
+ * One compiled schema retained by `SjonHost.preload`.
+ *
+ * The report members mirror the native `Host.PreloadedSchema` view:
+ * `diagnostics` is the flattened `sourceDiagnostics` (input-index aligned,
+ * one entry per manifest source) followed by `aggregateDiagnostics`.
+ * Manifest content problems are reported here — `hasErrors` does not make
+ * the handle unusable, and borrowing a partial handle is an explicit
+ * caller decision, matching the native Host.
+ *
+ * `dispose()` releases the WASM-side schema. It is idempotent, and every
+ * handle stays live until it is called or the host is closed with
+ * `await using` (`Symbol.asyncDispose` frees every live handle). Using a
+ * handle after disposal — or with a different host — is refused in
+ * JavaScript; the numeric ID is deliberately not public, because raw IDs
+ * carry no owner token across WASM instances.
+ *
+ * Disposal while one of the host's calls is in flight (for example from
+ * inside a resolver callback) throws `SchemaInUse` rather than freeing a
+ * schema the borrow is still reading.
+ */
+export interface PreloadedSchemaHandle {
+  readonly hasErrors: boolean;
+  readonly diagnostics: readonly HostDiagnostic[];
+  readonly sourceDiagnostics: readonly (readonly HostDiagnostic[])[];
+  readonly aggregateDiagnostics: readonly HostDiagnostic[];
+  readonly loadedPlugins: readonly PluginSummary[];
+  dispose(): void;
 }
 
 /**
@@ -130,11 +187,69 @@ export interface EvalResultEntry {
   readonly value: unknown;
 }
 
+/**
+ * One stable lexical parent prefix of an identity: the parent's canonical
+ * cross-ref registry and its author-written symbol. Never a `ScopeId`, an
+ * AST index, or a byte offset — the same pair names the same scope across
+ * revisions.
+ */
+export interface IdentityScope {
+  readonly registry: string;
+  readonly symbol: string;
+}
+
+/**
+ * Where a resolved identity sits in this revision, in the same two fields
+ * an edit action takes: `root` indexes the document's roots left to right,
+ * and `path` is the §11.2 path from that root (`string` names a keyword
+ * value, `number` a positional child or vector element). An address is a
+ * position, not an identity: revalidate after an edit rather than carrying
+ * one across revisions.
+ */
+export interface IdentityAddress {
+  readonly root: number;
+  readonly path: readonly (string | number)[];
+}
+
+/**
+ * The structural key of an identity row: canonical cross-ref registry,
+ * outermost-first stable scope prefixes, and author-written symbol.
+ */
+interface IdentityKey {
+  readonly registry: string;
+  readonly scope: readonly IdentityScope[];
+  readonly symbol: string;
+}
+
+/**
+ * One row projected from the validation pass that already ran.
+ *
+ * The discriminated union on `status` is the safety surface: a consumer
+ * that refuses `'ambiguous'` needs no null-check on the resolved arm, and
+ * an ambiguous row can never carry a stale first-wins address. An absent
+ * `(registry, scope, symbol)` is simply not found — there is no row for
+ * it.
+ */
+export type IdentityRow =
+  | (IdentityKey & {
+      readonly status: 'resolved';
+      readonly address: IdentityAddress;
+    })
+  | (IdentityKey & {
+      readonly status: 'ambiguous';
+      readonly address: null;
+    });
+
 export interface HostResult {
   readonly diagnostics: readonly HostDiagnostic[];
   readonly loadedPlugins: readonly PluginSummary[];
   readonly materializedDefaults: readonly MaterializedDefault[];
   readonly evaluatedResults: readonly EvalResultEntry[];
+  /**
+   * Every declared, author-written identity the validation pass saw —
+   * deterministic lexical order, empty when none qualify, always present.
+   */
+  readonly identities: readonly IdentityRow[];
 }
 
 /**

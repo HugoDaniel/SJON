@@ -902,6 +902,16 @@ pub const CrossRefIndex = struct {
     /// object already threaded to every match and registration site on both
     /// walkers, and the union probe's shallow copy inherits it.
     held_symbol: ?[]const u8 = null,
+    /// Every direct author-written `:name-key` attempt, in walk order,
+    /// including later duplicates the first-wins `by_scope` refused — see
+    /// `identityRegistrations`. Held behind one lazily-allocated pointer
+    /// rather than inline: the overwhelming majority of indices record
+    /// nothing (no cross-refs, or none author-written), and the index is
+    /// copied by value in several places that should not pay for — or
+    /// accidentally depend on the layout of — state they never read.
+    /// Allocated on the index arena at the first recorded attempt, so its
+    /// lifetime is the index arena's, exactly like the inline maps above.
+    identity: ?*IdentityMeta = null,
 
     /// True when `text` is the run's held spelling. Null `held_symbol`
     /// (every caller that has not opted in) answers false for every input.
@@ -915,6 +925,26 @@ pub const CrossRefIndex = struct {
 
     pub const RefTargetMap = std.StringHashMapUnmanaged(RefNameMap);
     pub const RefNameMap = std.StringHashMapUnmanaged(std.ArrayList(Site));
+
+    /// Registry → symbol set: the ambiguity map nested under a scope in
+    /// `IdentityMeta.ambiguous_by_scope`.
+    pub const AmbiguousRegistryMap = std.StringHashMapUnmanaged(AmbiguousNameSet);
+
+    /// The innermost leaf of `IdentityMeta.ambiguous_by_scope`.
+    pub const AmbiguousNameSet = std.StringHashMapUnmanaged(void);
+
+    /// The P5 identity-recording state behind `CrossRefIndex.identity`:
+    /// every author-written attempt (duplicates included) and the
+    /// ambiguous-key set marked at the duplicate point. Arena-owned with
+    /// the index; never consulted by lookup.
+    pub const IdentityMeta = struct {
+        attempts: std.ArrayListUnmanaged(IdentityRegistration) = .empty,
+        /// `(scope → registry → symbol)` keys marked ambiguous at the
+        /// duplicate point — the same collision that emits
+        /// `duplicate_cross_ref_target`, plus a duplicate `:name-key` pair
+        /// inside one form.
+        ambiguous_by_scope: std.AutoHashMapUnmanaged(ScopeId, AmbiguousRegistryMap) = .empty,
+    };
 
     /// Canonical target names whose member set is unknowable in one scope.
     pub const PoisonSet = std.StringHashMapUnmanaged(void);
@@ -939,6 +969,24 @@ pub const CrossRefIndex = struct {
         form_span: Ast.Span,
         name_span: Ast.Span,
         scope: ScopeId,
+    };
+
+    /// One author-written attempt to claim an identity name (P5). Recorded
+    /// whether or not the first-wins index accepted it: a later duplicate
+    /// still appears here, with its candidate site, so a consumer can see
+    /// every `(registry, scope, symbol)` an author actually spelled. Routes
+    /// that are not direct author declarations — overlay defaults, provider
+    /// extractions, held spellings, deferred fragments — record nothing.
+    /// `name_key` is arena-owned; `registry` is an index-arena bucket key;
+    /// `symbol` borrows the source tree/binary exactly like the `NameMap`
+    /// key of the same name.
+    pub const IdentityRegistration = struct {
+        registry: []const u8,
+        scope: ScopeId,
+        symbol: []const u8,
+        name_key: []const u8,
+        /// Candidate site even when a duplicate prevents first-wins insertion.
+        site: Site,
     };
 
     pub fn isEmpty(self: *const CrossRefIndex) bool {
@@ -1078,6 +1126,94 @@ pub const CrossRefIndex = struct {
         const name_gop = try target_gop.value_ptr.getOrPut(a, name);
         if (!name_gop.found_existing) name_gop.value_ptr.* = .empty;
         try name_gop.value_ptr.append(a, site);
+    }
+
+    /// Every direct author-written name attempt recorded for this forest,
+    /// in walk order (pre-order DFS on the tree path; frame-exhaustion
+    /// order on the binary path, so nested targets can order differently
+    /// between the paths). Includes attempts a duplicate refused; excludes
+    /// overlay-defaulted and provider-extracted names, held spellings, and
+    /// every deferred pass. Borrowed from the index arena — callers neither
+    /// deinit it nor retain it past the index's own lifetime.
+    pub fn identityRegistrations(self: *const CrossRefIndex) []const IdentityRegistration {
+        const meta = self.identity orelse return &.{};
+        return meta.attempts.items;
+    }
+
+    /// True when `(scope, registry, symbol)` was marked ambiguous at a
+    /// duplicate registration — two sources contend for the name, so the
+    /// identity must not resolve to either site. Lookup is unaffected:
+    /// first-wins answers stand.
+    pub fn identityIsAmbiguous(
+        self: *const CrossRefIndex,
+        scope: ScopeId,
+        registry: []const u8,
+        symbol: []const u8,
+    ) bool {
+        const meta = self.identity orelse return false;
+        const rm = meta.ambiguous_by_scope.getPtr(scope) orelse return false;
+        const nm = rm.getPtr(registry) orelse return false;
+        return nm.contains(symbol);
+    }
+
+    /// The lazily-created identity metadata block, on the index arena.
+    fn identityMeta(self: *CrossRefIndex, a: Allocator) Allocator.Error!*IdentityMeta {
+        if (self.identity) |meta| return meta;
+        const meta = try a.create(IdentityMeta);
+        meta.* = .{};
+        self.identity = meta;
+        return meta;
+    }
+
+    /// Record one author-written attempt. The two exclusions run first and
+    /// in this order on purpose: a deferred fragment records nothing (a
+    /// fragment cannot adjudicate identity in either direction), and a held
+    /// spelling records nothing (not a name). Recording before those checks
+    /// would make the exclusions pass for the wrong reason.
+    fn recordIdentityAttempt(
+        self: *CrossRefIndex,
+        a: Allocator,
+        scope: ScopeId,
+        registry: []const u8,
+        symbol: []const u8,
+        name_key: []const u8,
+        site: Site,
+    ) Allocator.Error!void {
+        if (self.deferred) return;
+        if (self.isHeldText(symbol)) return;
+        const meta = try self.identityMeta(a);
+        // `name_key` borrows from the schema, which the LSP can swap while
+        // the index is still held — the same reason `markProviderBacked`
+        // dupes its provider string. Registry keys are already index-arena
+        // `collectCrossRefTargets` canonicalisations; symbols follow the
+        // `NameMap` key lifetimes.
+        try meta.attempts.append(a, .{
+            .registry = registry,
+            .scope = scope,
+            .symbol = symbol,
+            .name_key = try a.dupe(u8, name_key),
+            .site = site,
+        });
+    }
+
+    /// Mark `(scope, registry, symbol)` ambiguous. Same exclusions as
+    /// `recordIdentityAttempt`: deferral adjudicates nothing, and a held
+    /// spelling is not a name.
+    fn markAmbiguousIdentity(
+        self: *CrossRefIndex,
+        a: Allocator,
+        scope: ScopeId,
+        registry: []const u8,
+        symbol: []const u8,
+    ) Allocator.Error!void {
+        if (self.deferred) return;
+        if (self.isHeldText(symbol)) return;
+        const meta = try self.identityMeta(a);
+        const scope_gop = try meta.ambiguous_by_scope.getOrPut(a, scope);
+        if (!scope_gop.found_existing) scope_gop.value_ptr.* = .empty;
+        const reg_gop = try scope_gop.value_ptr.getOrPut(a, registry);
+        if (!reg_gop.found_existing) reg_gop.value_ptr.* = .empty;
+        try reg_gop.value_ptr.put(a, symbol, {});
     }
 };
 
@@ -2634,10 +2770,25 @@ fn registerCrossRefInstance(
     // skip when the kvpair is missing, non-symbol, or duplicated. Each
     // of those conditions surfaces elsewhere (missing-required-key /
     // wrong_underlying / duplicate_key) and we don't want to cascade.
+    //
+    // "Duplicated" is now counted rather than merely skipped: the first
+    // pair still registers exactly as before (first-wins), but a second
+    // matching pair marks the registered candidate's identity ambiguous —
+    // two author spellings contend for one form, and neither inherits the
+    // slot as resolved. The scan therefore continues past the first match
+    // instead of returning; registration itself happens once.
+    var saw_name_kvpair = false;
+    var duplicate_name_kvpair = false;
+    var registered_symbol: ?[]const u8 = null;
     for (hdr.children) |ch| {
         if (tree.tagOf(ch) != .kvpair) continue;
         const kv = tree.kvpairHeader(ch);
         if (!std.mem.eql(u8, kv.key, name_key)) continue;
+        if (saw_name_kvpair) {
+            duplicate_name_kvpair = true;
+            continue;
+        }
+        saw_name_kvpair = true;
         if (tree.tagOf(kv.value) != .symbol) return;
 
         const name_text = tree.symbolText(kv.value);
@@ -2655,9 +2806,17 @@ fn registerCrossRefInstance(
             name_text,
             tree.spanOf(kv.value),
             diags,
+            name_key,
         );
-        return;
+        registered_symbol = name_text;
     }
+    if (registered_symbol) |sym| {
+        if (duplicate_name_kvpair) try index.markAmbiguousIdentity(index_a, scope, canonical_target, sym);
+    }
+    // Any seen kvpair — registering or not — ends the identity route here,
+    // exactly as the early `return` did before duplicate counting needed
+    // the whole scan: a defaulted name never stands in for a written one.
+    if (saw_name_kvpair) return;
 
     // Axis A — effective name indexing. The author omitted the
     // `:name-key` kvpair; consult the overlay for the same key. A
@@ -2687,6 +2846,9 @@ fn registerCrossRefInstance(
             text,
             hdr.head_span,
             diags,
+            // A defaulted name registers for lookup but records no
+            // identity attempt: `null` is the whole distinction.
+            null,
         );
     };
 }
@@ -2895,7 +3057,15 @@ fn registerSite(
         // same-named forms inside it may be the only two in the document,
         // or the document may hold a third that decides which is the
         // duplicate. The whole-document pass owns the report.
-        if (!index.deferred) try emitDuplicateCrossRef(tree_a, diags, name_span, canonical_target, name_text);
+        if (!index.deferred) {
+            try emitDuplicateCrossRef(tree_a, diags, name_span, canonical_target, name_text);
+            // The same collision, whichever route the *later* registration
+            // took (author, overlay default, provider extraction), leaves
+            // the public key with two defining sources: mark it ambiguous
+            // so a consumer never resolves the name to the first-wins site.
+            // Lookup itself is untouched — first-wins answers stand.
+            try index.markAmbiguousIdentity(index_a, scope, canonical_target, name_text);
+        }
         return null;
     }
     return gop.value_ptr;
@@ -2915,7 +3085,22 @@ fn registerName(
     name_text: []const u8,
     name_span: Ast.Span,
     diags: *std.ArrayList(Diagnostic),
+    /// The spec's `:name-key` when this call is a direct author-written
+    /// registration — records one `IdentityRegistration` attempt (deferral
+    /// and held-ness are gated inside the recorder). Null for the
+    /// overlay-default route: a defaulted name registers for lookup but is
+    /// not an identity.
+    identity_name_key: ?[]const u8,
 ) Allocator.Error!void {
+    if (identity_name_key) |key| {
+        try index.recordIdentityAttempt(index_a, scope, canonical_target, name_text, key, .{
+            .tree_idx = tree_idx,
+            .node_idx = form_idx,
+            .form_span = tree.spanOf(form_idx),
+            .name_span = name_span,
+            .scope = scope,
+        });
+    }
     const site = try registerSite(index_a, tree_a, index, scope, canonical_target, name_text, name_span, diags) orelse return;
     site.* = .{
         .tree_idx = tree_idx,
@@ -3238,6 +3423,10 @@ const RegCapture = struct {
     /// subsequent matches are ignored (mirrors the Tree path's first-wins
     /// on duplicate `:name` kvpairs).
     saw_name_kvpair: bool = false,
+    /// True when a second `name_key`-matching kvpair followed the first —
+    /// the tree path's duplicate-pair rule, mirrored: the first pair still
+    /// registers, but its identity candidate is marked ambiguous.
+    duplicate_name_kvpair: bool = false,
     /// Provider route's counterpart to `captured_name`.
     captured_source: ?[]const u8 = null,
     captured_source_span: Ast.Span = ZERO_SPAN,
@@ -3405,6 +3594,16 @@ fn buildCrossRefIndexBinary(
                                         cap.scope,
                                         fi.captured_edges.items,
                                         &diags_lists[b],
+                                        reg.spec.name_key,
+                                    );
+                                    // A second matching `:name-key` pair on
+                                    // this form: the registered candidate is
+                                    // ambiguous, mirroring the tree path.
+                                    if (cap.duplicate_name_kvpair) try index.markAmbiguousIdentity(
+                                        index_a,
+                                        cap.scope,
+                                        reg.bucket,
+                                        nt,
                                     );
                                 }
                             }
@@ -3456,7 +3655,13 @@ fn buildCrossRefIndexBinary(
                                 cap.captured_source_span = entry.value.span orelse ZERO_SPAN;
                                 captured_any = true;
                             } else {
-                                if (cap.saw_name_kvpair) continue;
+                                if (cap.saw_name_kvpair) {
+                                    // A second matching pair: counted for
+                                    // the duplicate-pair ambiguity rule,
+                                    // never captured (first-wins).
+                                    if (std.mem.eql(u8, key, reg.spec.name_key)) cap.duplicate_name_kvpair = true;
+                                    continue;
+                                }
                                 if (!std.mem.eql(u8, key, reg.spec.name_key)) continue;
                                 cap.saw_name_kvpair = true;
                                 // Non-symbol `:name-key` value: same
@@ -3733,7 +3938,21 @@ fn registerCrossRefBinary(
     scope: ScopeId,
     captured_edges: []const []const u8,
     diags: *std.ArrayList(Diagnostic),
+    /// The spec's `:name-key`; every binary capture is an author-written
+    /// registration (this walker takes no overlay), so unlike `registerName`
+    /// the parameter is not optional.
+    name_key: []const u8,
 ) Allocator.Error!void {
+    try index.recordIdentityAttempt(index_a, scope, canonical_target, name_text, name_key, .{
+        .tree_idx = tree_idx,
+        // Binary path has no `Ast.NodeIndex` analog. The validator's
+        // hot path uses only `contains`; node_idx is for LSP follow-on
+        // features that already keep the source Tree alongside.
+        .node_idx = .invalid,
+        .form_span = form_span,
+        .name_span = name_span,
+        .scope = scope,
+    });
     const site = try registerSite(index_a, tree_a, index, scope, canonical_target, name_text, name_span, diags) orelse return;
     site.* = .{
         .tree_idx = tree_idx,

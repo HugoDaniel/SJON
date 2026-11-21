@@ -29,6 +29,7 @@ const sjon = @import("root.zig");
 const common = @import("wasm_common.zig");
 const host_json = @import("wasm_host_json.zig");
 const wasm_host_resolver = @import("wasm_host_resolver.zig");
+const wasm_schema_handles = @import("wasm_schema_handles.zig");
 // Force-import so the `env.sjon_host_invoke_plugin` extern declaration
 // reaches the wasm linker even when nothing in `sjon.wasm`'s exports
 // transitively reference the invoker. `Expr.applyFunction` does call it,
@@ -80,7 +81,7 @@ export fn sjon_describe() callconv(.c) ?[*]u8 {
     const text =
         \\{"name":"sjon","version":"
     ++ sjon.version ++
-        \\","exports":["parse","print","validate","eval_expr","query_pattern","to_json","from_json","apply_edit","apply_edits","to_binary","from_binary","validate_binary","eval_expr_binary","host_validate_document","host_eval_expr","export_schema","export_lowering_graph","describe"],"plugins":["core","pattern"]}
+        \\","exports":["parse","print","validate","eval_expr","query_pattern","to_json","from_json","apply_edit","apply_edits","to_binary","from_binary","validate_binary","eval_expr_binary","host_validate_document","host_eval_expr","preload_schema","schema_free","export_schema","export_lowering_graph","describe"],"plugins":["core","pattern"]}
     ;
     return common.frame(wasm_allocator, true, text) catch null;
 }
@@ -198,12 +199,16 @@ export fn sjon_eval_expr_binary(bin_ptr: [*]const u8, bin_len: u32) callconv(.c)
 /// instantiation time (see `src/wasm_host_resolver.zig`).
 ///
 /// `opts_bytes` is JSON `{ projectRoot?, projectFile?, failurePolicy?,
-/// heldSymbol?, hasResolver }`. `hasResolver=true` enables the JS bridge;
-/// `false` behaves like calling `Host.validateDocument` with
-/// `resolver=null` (every reference fails as `unresolved_plugin`).
-/// `heldSymbol` names the spelling of a position the author has
-/// deliberately not filled in yet — the assertion "this document is being
-/// typed", made by whoever invoked the validator.
+/// heldSymbol?, hasResolver, preloadedHandle? }`. `hasResolver=true`
+/// enables the JS bridge; `false` behaves like calling
+/// `Host.validateDocument` with `resolver=null` (every reference fails as
+/// `unresolved_plugin`). `heldSymbol` names the spelling of a position
+/// the author has deliberately not filled in yet — the assertion "this
+/// document is being typed", made by whoever invoked the validator.
+/// `preloadedHandle` (a `sjon_preload_schema` handle from this instance;
+/// `null`/absent is today's behavior) borrows one preloaded schema for
+/// this one call; a stale/unknown/foreign ID frames
+/// `InvalidSchemaHandle`.
 export fn sjon_host_validate_document(
     src_ptr: [*]const u8,
     src_len: u32,
@@ -215,7 +220,8 @@ export fn sjon_host_validate_document(
 
 /// Evaluate a single SJON expression against the host's aggregated
 /// plugin schema. Reuses the same resolver bridge + options shape as
-/// `sjon_host_validate_document`; framed payload is the JSON
+/// `sjon_host_validate_document` — including `preloadedHandle`, which
+/// borrows a preloaded schema the same way; framed payload is the JSON
 /// `{ value, diagnostics, loadedPlugins }` shape produced by
 /// `host_json.writeHostEvalResult`. Plugin expr-funcs (`(double 21)`,
 /// `(count-done items)`, …) dispatch through the resolved schema.
@@ -226,6 +232,58 @@ export fn sjon_host_eval_expr(
     opts_len: u32,
 ) callconv(.c) ?[*]u8 {
     return common.guard(wasm_allocator, runHostEvalExpr(src_ptr[0..src_len], opts_ptr[0..opts_len]));
+}
+
+// -- P3 preloaded-schema handle exports --------------------------------------
+
+/// The instance's preloaded-schema ownership record. Instance-scoped and
+/// single-threaded: one `sjon.wasm` instance is driven only from its own
+/// synchronous export boundary — a wasm instance cannot run two exports
+/// concurrently over its linear memory — so nothing here adds
+/// synchronization, exactly as `wasm_schema_handles.Table`'s single-
+/// instance ownership rule documents. A wasm module global is per-
+/// instance state, so two instantiations of the same artifact own
+/// disjoint tables. Raw ABI IDs carry no owner token: a foreign ID that
+/// collides with a live local ID is indistinguishable at this layer (the
+/// Web/Rust wrappers brand handles per host on top), while a foreign,
+/// stale, or unknown ID with no live local entry resolves as
+/// `InvalidSchemaHandle`. Stale IDs can never alias a newer schema —
+/// `wasm_schema_handles.zig` §"Why a stale handle can never alias a newer
+/// schema" owns that argument (monotonic `next`, remove-before-destroy
+/// `free`, the wraparound exhaustion sentinel).
+var preloaded_schemas: wasm_schema_handles.Table = .{};
+
+/// Preload a schema once from a set of standalone `(plugin …)` manifest
+/// sources (P3). `src` is one UTF-8 JSON **array** of manifest source
+/// strings in a caller-allocated buffer; each entry must be a single
+/// top-level `(plugin …)` form. The framed payload (a normal
+/// `[u32 ok][u32 len][…]` frame, freed with `sjon_free(ptr, 8 + len)`) is
+/// the report written by `host_json.writePreloadedSchemaReport`:
+/// `{"handle":N,"hasErrors":…,"diagnostics":[…],"sourceDiagnostics":[[…]],
+/// "aggregateDiagnostics":[…],"loadedPlugins":[…]}`.
+///
+/// Manifest content problems are *successful* framed responses (`ok=1`)
+/// carrying a usable partial handle plus diagnostics — the native
+/// `Host.preloadSchema` contract, unchanged. `ok=0` is reserved for ABI
+/// failures: `InvalidOptions` (malformed JSON, non-array input, non-string
+/// members), `HandleExhausted`, and OOM (`null`). OOM after the handle is
+/// minted withdraws it again, so no unreachable-but-live schema is left in
+/// linear memory.
+///
+/// The borrow lasts for the synchronous validate/eval call that cites the
+/// handle via the `preloadedHandle` option; raw callers must not free
+/// during that call. Release with `sjon_schema_free`. Declarative
+/// manifests only: `:impl "wasm:…"` plugins are not instantiated here.
+export fn sjon_preload_schema(src_ptr: [*]const u8, src_len: u32) callconv(.c) ?[*]u8 {
+    return common.guard(wasm_allocator, runPreloadSchema(src_ptr[0..src_len]));
+}
+
+/// Release the schema behind `handle`. Total and idempotent: zero,
+/// unknown, and already-freed IDs are no-ops, so a double free is silent
+/// rather than a trap. The next minted handle is a fresh nonzero ID —
+/// freed IDs are never reissued.
+export fn sjon_schema_free(handle: u32) callconv(.c) void {
+    preloaded_schemas.free(wasm_allocator, handle);
 }
 
 /// Export a JSON Schema 2020-12 + TypeScript `.d.ts` (+ optionally an
@@ -519,6 +577,7 @@ fn runHostValidateDocument(src_bytes: []const u8, opts_bytes: []const u8) ![*]u8
         .project_file = opts.project_file,
         .resolver = if (opts.has_resolver) wasm_host_resolver.build() else null,
         .held_symbol = opts.held_symbol,
+        .preloaded = if (opts.preloaded_handle) |h| try preloaded_schemas.get(h) else null,
     };
 
     var result = try Host.validateDocument(wasm_allocator, src, host_options);
@@ -541,12 +600,56 @@ fn runHostEvalExpr(src_bytes: []const u8, opts_bytes: []const u8) ![*]u8 {
         .project_root = opts.project_root,
         .project_file = opts.project_file,
         .resolver = if (opts.has_resolver) wasm_host_resolver.build() else null,
+        .preloaded = if (opts.preloaded_handle) |h| try preloaded_schemas.get(h) else null,
     };
 
     var result = try Host.evalExpr(wasm_allocator, src, host_options);
     defer result.deinit();
 
     const json_text = try host_json.writeHostEvalResult(a, result);
+    return try common.frame(wasm_allocator, true, json_text);
+}
+
+/// The minted handle plus the table-owned schema it names. `runPreloadSchema`
+/// needs both to serialize the report; returning them as a pair keeps the
+/// lookup from being re-derived (and keeps the impossible `get`-after-`put`
+/// miss out of the error surface).
+const MintedHandle = struct {
+    handle: u32,
+    schema: *const Host.PreloadedSchema,
+};
+
+/// Allocate, preload, and insert one schema into the instance table.
+///
+/// Ownership crosses to the table ONLY on the successful return; on any
+/// failure (`Host.preloadSchema` OOM, `Table.put` OOM/`HandleExhausted`)
+/// ownership never left this function and the schema is deinited and
+/// destroyed here — `Table.put`'s documented contract. Keeping the
+/// transfer inside this helper is what lets the caller's `errdefer`
+/// release the handle unconditionally after it: the pre-put failure paths
+/// are already clean by the time `handle` exists.
+fn preloadIntoTable(sources: []const [:0]const u8) !MintedHandle {
+    const schema = try wasm_allocator.create(Host.PreloadedSchema);
+    errdefer wasm_allocator.destroy(schema);
+    schema.* = try Host.preloadSchema(wasm_allocator, sources);
+    errdefer schema.deinit();
+    const handle = try preloaded_schemas.put(wasm_allocator, schema);
+    return .{ .handle = handle, .schema = schema };
+}
+
+fn runPreloadSchema(src_bytes: []const u8) ![*]u8 {
+    var arena = std.heap.ArenaAllocator.init(wasm_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const sources = try parseManifestSources(a, src_bytes);
+    const minted = try preloadIntoTable(sources);
+    // From here the table owns the schema. If the report or the frame
+    // OOMs, withdraw the handle rather than stranding an unreachable
+    // schema in linear memory — nothing on the JS side could ever free it.
+    errdefer preloaded_schemas.free(wasm_allocator, minted.handle);
+
+    const json_text = try host_json.writePreloadedSchemaReport(a, minted.handle, minted.schema);
     return try common.frame(wasm_allocator, true, json_text);
 }
 
@@ -830,12 +933,45 @@ fn parseToJsonOptions(a: std.mem.Allocator, opts_bytes: []const u8) !Json.ToJson
     return opts;
 }
 
+/// Decode `src_bytes` as one UTF-8 JSON array of manifest source strings,
+/// copying each member to sentinel form in the scratch arena (`Parser`
+/// reads `[:0]const u8`, and the sources must outlive nothing —
+/// `Host.preloadSchema` deep-copies what it keeps into its own arenas).
+/// Anything else — malformed JSON, a non-array value, a non-string member
+/// — is `InvalidOptions`, the same refusal the other option surfaces
+/// share; a bad *manifest* is never refused here, it becomes report
+/// diagnostics inside `ok=1`.
+fn parseManifestSources(a: std.mem.Allocator, src_bytes: []const u8) ![]const [:0]const u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, a, src_bytes, .{}) catch
+        return error.InvalidOptions;
+    const arr = switch (parsed.value) {
+        .array => |arr| arr,
+        else => return error.InvalidOptions,
+    };
+    const sources = try a.alloc([:0]const u8, arr.items.len);
+    for (arr.items, 0..) |item, i| {
+        const s = switch (item) {
+            .string => |s| s,
+            else => return error.InvalidOptions,
+        };
+        sources[i] = try toSentinel(a, s);
+    }
+    return sources;
+}
+
 const ParsedHostOptions = struct {
     failure_policy: Host.FailurePolicy = .lenient,
     project_root: ?[]const u8 = null,
     project_file: ?[]const u8 = null,
     has_resolver: bool = false,
     held_symbol: ?[]const u8 = null,
+    /// A live handle from this instance's `sjon_preload_schema` table;
+    /// absent/null is today's no-preloaded-schema behavior. Positive
+    /// integral `u32` IDs only — zero, negatives, floats, and non-numbers
+    /// are `InvalidOptions`; a handle the table does not recognize
+    /// (stale, unknown, or foreign) is `InvalidSchemaHandle` at use, not
+    /// at parse, so the refusal names the actual problem.
+    preloaded_handle: ?u32 = null,
 };
 
 fn parseHostOptions(a: std.mem.Allocator, opts_bytes: []const u8) !ParsedHostOptions {
@@ -876,6 +1012,22 @@ fn parseHostOptions(a: std.mem.Allocator, opts_bytes: []const u8) !ParsedHostOpt
     if (obj.get("heldSymbol")) |v| switch (v) {
         .string => |sym| opts.held_symbol = sym,
         .null => {},
+        else => return error.InvalidOptions,
+    };
+    // `preloadedHandle` borrows one preloaded schema for this call:
+    // `sjon_host_validate_document` and `sjon_host_eval_expr` resolve it
+    // against the instance table (the export-schema entries parse the
+    // shared shape and ignore it, exactly as they ignore `heldSymbol`).
+    // `null` and absent are today's behavior; the value must be a positive
+    // integral `u32` (handles are minted from 1 and never skip the range),
+    // so a float, a string, or zero is an options refusal rather than a
+    // handle error — the ID has not been *used* yet, only misspelled.
+    if (obj.get("preloadedHandle")) |v| switch (v) {
+        .null => {},
+        .integer => |n| {
+            if (n < 1 or n > std.math.maxInt(u32)) return error.InvalidOptions;
+            opts.preloaded_handle = @intCast(n);
+        },
         else => return error.InvalidOptions,
     };
     return opts;

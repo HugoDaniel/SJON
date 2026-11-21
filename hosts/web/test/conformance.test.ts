@@ -24,8 +24,8 @@ import { fileURLToPath } from 'node:url';
 
 import { SjonHost } from '../SjonHost.ts';
 import { createNodeFsResolver } from '../createNodeFsResolver.ts';
-import { CONFORMANCE_DIALECT, parseNode, skipTrivia } from '../sjonSubsetParser.ts';
-import type { Cursor, FormNode, ParsedNode } from '../sjonSubsetParser.ts';
+import { read } from '@sjon-lang/read';
+import type { FormNode, Node } from '@sjon-lang/read';
 import { parseJsonWithBigInt } from '../parseJsonWithBigInt.ts';
 import {
   assertDiagnosticsMatch,
@@ -229,8 +229,8 @@ for (const name of QUERY_CASES) {
     const actualText = host.queryPattern(documentSrc, begin, end, seed);
 
     assert.deepEqual(
-      parseSingleForm(actualText),
-      parseSingleForm(expectedSrc),
+      spanFree(parseSingleForm(actualText)),
+      spanFree(parseSingleForm(expectedSrc)),
       `${name}: query result mismatch.\n  got:  ${actualText.trim()}\n  want: ${expectedSrc.trim()}`,
     );
   });
@@ -262,11 +262,11 @@ for (const name of LEGACY_CASES) {
  * Parse `expected.sjon` into `{code, path}` pairs. Mirrors the readers
  * in `hosts/typescript-parity/test/conformance.test.ts` and
  * `src/conformance_tests.zig`. Path entries can be symbols, decimal-
- * stringified numbers, or strings.
+ * stringified numbers, or strings; the full reader decides which typed
+ * node a path element is.
  *
- * Hand-rolled SJON-subset parse — same surface as the resolver's
- * project-file parser (`hosts/web/createNodeFsResolver.ts`); we only
- * need to walk `(diagnostics (diagnostic :code … :path […]) …)`.
+ * Uses throwing `read` — a fixture with a parse diagnostic must fail the
+ * read, not silently weaken the assertion it belongs to.
  */
 function readExpected(source: string): ExpectedDiagnostic[] {
   // Search every top-level form for the required (diagnostics …) — an
@@ -274,7 +274,7 @@ function readExpected(source: string): ExpectedDiagnostic[] {
   // readExpected and Rust's common::read_expected (same error text), so a
   // values-first fixture routes identically across all three hosts rather
   // than failing only here.
-  const root = parseTopLevelForms(source).find((f) => f.head === 'diagnostics');
+  const root = parseTopLevelForms(source).find((f) => formName(f) === 'diagnostics');
   if (root === undefined) {
     throw new Error('expected.sjon must contain a (diagnostics …) form');
   }
@@ -286,8 +286,8 @@ function readExpected(source: string): ExpectedDiagnostic[] {
     if (child.tag !== 'form') {
       throw new Error(`(diagnostics …) child is not a form: ${child.tag}`);
     }
-    if (child.head !== 'diagnostic') {
-      throw new Error(`unknown form (${child.head} …) inside (diagnostics …)`);
+    if (formName(child) !== 'diagnostic') {
+      throw new Error(`unknown form (${formName(child)} …) inside (diagnostics …)`);
     }
     let code: string | undefined;
     let p: string[] = [];
@@ -307,15 +307,7 @@ function readExpected(source: string): ExpectedDiagnostic[] {
         severity = kv.value.value;
       } else if (kv.key === 'path') {
         if (kv.value.tag !== 'vector') throw new Error(':path must be a vector');
-        p = kv.value.elements.map((e): string => {
-          // Numbers in path slots arrive as `symbol` nodes from
-          // our tiny parser (numbers aren't a separate tag) —
-          // their textual form already matches the validator's
-          // decimal-string `indexStep` output.
-          if (e.tag === 'symbol') return e.value;
-          if (e.tag === 'string') return e.value;
-          throw new Error(`:path element is not a symbol or string: ${e.tag}`);
-        });
+        p = kv.value.elements.map(pathStepText);
       } else {
         throw new Error(`unknown key \`:${kv.key}\` in (diagnostic …)`);
       }
@@ -324,6 +316,29 @@ function readExpected(source: string): ExpectedDiagnostic[] {
     out.push({ code, path: p, severity });
   }
   return out;
+}
+
+/** Reconstruct a form's head as written: `namespace/head`, or the bare head. */
+function formName(form: FormNode): string {
+  return form.namespace === null ? form.head : `${form.namespace}/${form.head}`;
+}
+
+/**
+ * Render one `:path` element. Symbols and strings are their own text;
+ * numbers are decimal, matching the validator's `indexStep` output. The
+ * typed reader is what distinguishes those cases — the old subset parser
+ * returned every atom as a symbol and relied on its spelling.
+ */
+function pathStepText(node: Node): string {
+  switch (node.tag) {
+    case 'symbol':
+    case 'string':
+      return node.value;
+    case 'number':
+      return node.integer !== null ? node.integer.toString() : String(node.value);
+    default:
+      throw new Error(`:path element is not a symbol, string, or number: ${node.tag}`);
+  }
 }
 
 /**
@@ -345,41 +360,85 @@ function loadExpectedValuesJson(caseDir: string): [string, unknown][] {
 }
 
 // ---------------------------------------------------------------------------
-// Tiny SJON-subset parser (same shape as createNodeFsResolver's). We
-// only need to read `(diagnostics (diagnostic :code SYMBOL :path […]))`.
+// `expected.sjon` / `query.sjon` reading through the full reader. We only
+// need to walk `(diagnostics (diagnostic :code SYMBOL :path […] …))` and
+// `(query :window [begin end] :seed N)`, but the text is real SJON: the
+// reader decides which atoms are numbers, strings, times, and keywords.
 // ---------------------------------------------------------------------------
 
 /**
- * Parse every top-level form in `source`. Used for expected.sjon files
+ * Read every top-level form in `source`. Used for expected.sjon files
  * that may carry an optional `(values …)` sibling alongside the required
  * `(diagnostics …)` form.
  */
 function parseTopLevelForms(source: string): FormNode[] {
-  const c: Cursor = { src: source, i: 0 };
-  const out: FormNode[] = [];
-  while (true) {
-    skipTrivia(c);
-    if (c.i >= c.src.length) return out;
-    const node = parseNode(c, CONFORMANCE_DIALECT);
+  return read(source).map((node) => {
     if (node.tag !== 'form') throw new Error('expected.sjon top-level must be a form');
-    out.push(node);
-  }
+    return node;
+  });
 }
 
 function parseSingleForm(source: string): FormNode {
-  const c: Cursor = { src: source, i: 0 };
-  skipTrivia(c);
-  if (c.i >= c.src.length) throw new Error('expected.sjon empty');
-  const node = parseNode(c, CONFORMANCE_DIALECT);
+  const [node, ...extra] = read(source);
+  if (node === undefined) throw new Error('expected.sjon empty');
+  if (extra.length > 0) throw new Error('expected.sjon must be a single form');
   if (node.tag !== 'form') throw new Error('expected.sjon root must be a form');
   return node;
+}
+
+/**
+ * Span-free projection of a parsed tree, for the PatternQuery comparison.
+ * `sjon_query_pattern` returns text and the expected fixture is a different
+ * text, so their UTF-8 spans necessarily differ even when the result is
+ * identical. Every structural and value field survives; only `span`,
+ * `headSpan`, and `keySpan` are dropped.
+ */
+function spanFree(node: Node): unknown {
+  switch (node.tag) {
+    case 'form':
+      return {
+        tag: 'form',
+        head: node.head,
+        namespace: node.namespace,
+        children: node.children.map(spanFree),
+      };
+    case 'kvpair':
+      return { tag: 'kvpair', key: node.key, value: spanFree(node.value) };
+    case 'vector':
+      return { tag: 'vector', elements: node.elements.map(spanFree) };
+    case 'number':
+      return { tag: 'number', value: node.value, unit: node.unit, integer: node.integer };
+    case 'date':
+      return {
+        tag: 'date',
+        year: node.year,
+        month: node.month,
+        day: node.day,
+      };
+    case 'time':
+      return {
+        tag: 'time',
+        hour: node.hour,
+        minute: node.minute,
+        second: node.second,
+        millisecond: node.millisecond,
+      };
+    case 'string':
+    case 'symbol':
+    case 'keyword':
+      return { tag: node.tag, value: node.value };
+    case 'boolean':
+      return { tag: 'boolean', value: node.value };
+    case 'nil':
+      return { tag: 'nil' };
+  }
 }
 
 /** Parse `(query :window [begin end] :seed N)` into numeric ticks + seed. */
 function readQuerySpec(source: string): { begin: number; end: number; seed: number } {
   const form = parseSingleForm(source);
-  if (form.head !== 'query') {
-    throw new Error(`query.sjon root must be (query …), got (${form.head} …)`);
+  if (form.namespace !== null || form.head !== 'query') {
+    throw new Error(`query.sjon root must be (query …), got (${formName(form)} …)`);
   }
   let begin = 0;
   let end = 0;
@@ -400,15 +459,9 @@ function readQuerySpec(source: string): { begin: number; end: number; seed: numb
   return { begin, end, seed };
 }
 
-/** Read a numeric tick / seed from a parsed atom (numbers parse as symbols). */
-function atomNumber(node: ParsedNode): number {
-  if (node.tag !== 'symbol') throw new Error(`expected a numeric atom, got ${node.tag}`);
-  const n = Number(node.value);
-  if (!Number.isFinite(n)) throw new Error(`not a number: ${node.value}`);
-  return n;
+/** Read a numeric tick / seed from a typed numeric node. */
+function atomNumber(node: Node): number {
+  if (node.tag !== 'number') throw new Error(`expected a numeric atom, got ${node.tag}`);
+  if (!Number.isFinite(node.value)) throw new Error(`not a number: ${node.value}`);
+  return node.value;
 }
-
-// The mini-parser (parseNode/parseForm/…) and its Cursor/FormNode/
-// ParsedNode types now live in ../sjonSubsetParser.ts, shared with
-// createNodeFsResolver.ts. This runner drives it with CONFORMANCE_DIALECT
-// (bare `:` → keyword node; `HH:MM:SS` → one symbol).

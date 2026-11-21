@@ -1,0 +1,17 @@
+{
+  // The compile `pnpm pack` and `pnpm publish` run as `prepack`: src/ to
+  // dist/ as JavaScript plus declarations, because Node does not strip types
+  // from a `.ts` file under node_modules, so a published package that points
+  // at its sources cannot be imported. The workspace keeps importing the `.ts`
+  // sources through `exports`; only the packed manifest points at dist/,
+  // through `publishConfig`.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "rewriteRelativeImportExtensions": true,
+    "declaration": true
+  },
+  "include": ["src/**/*"]
+}
